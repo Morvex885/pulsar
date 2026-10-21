@@ -254,12 +254,22 @@ void Controller::on_client_connected(const std::string &client_info) {
 
 void Controller::on_client_disconnected() {
   LOGW("Home Assistant disconnected");
-  if (phase_ != Phase::IDLE) finish_interaction();
+  voice_link_lost();
 }
 
 void Controller::on_voice_subscribed(bool subscribed) {
   LOGI("voice assistant %s", subscribed ? "subscribed" : "unsubscribed");
-  if (!subscribed && phase_ != Phase::IDLE) finish_interaction();
+  if (!subscribed) voice_link_lost();
+}
+
+// No more events come for the current run, and a stop would reach whichever client subscribes
+// next. A dialog still listening or thinking ends now. An answer already playing is fetched over
+// HTTP independently of the API link, so it plays out (still ducked) and its end closes the
+// dialog; a stream that dies with HA ends it through the player instead.
+void Controller::voice_link_lost() {
+  awaiting_run_start_ = run_active_ = stale_run_end_ = false;
+  continue_conversation_ = false;
+  if (phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING) finish_interaction();
 }
 
 void Controller::on_time(uint32_t epoch, const std::string &tz) {

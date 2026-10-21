@@ -66,6 +66,7 @@ class Controller : public ApiHooks {
   void play_tts();
   void tts_finished(bool ok);
   void finish_interaction();
+  void voice_link_lost();
   void abort_dialog(const char *why);
   void arm_watchdog();
   void interrupt_speech();
