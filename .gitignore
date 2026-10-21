@@ -1,0 +1,17 @@
+# Device backups, firmware dumps and Yandex binaries: device-specific / proprietary, never publish.
+/backup/
+/dump/
+# Reverse-engineering workspace (Ghidra projects, decompiler output of proprietary code).
+/re/
+# Upstream reference checkouts (ESPHome linux-voice-assistant, Sendspin).
+/ref/
+
+# Build outputs and fetched dependencies.
+/satellite/build/
+/satellite/third_party/src/
+/ssh/out/
+# CMake's compiler probe through zig may leave a file named "-".
+/satellite/-
+
+# Test recordings / synthesized speech.
+*.wav

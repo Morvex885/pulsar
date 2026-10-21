@@ -1,0 +1,3 @@
+#!/bin/sh
+# $ZIG_CPU is intentionally unquoted: empty or a single -mcpu flag.
+exec "${ZIG:-zig}" cc -target "${ZIG_TARGET:?}" $ZIG_CPU "$@"
