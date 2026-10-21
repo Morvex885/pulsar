@@ -599,7 +599,6 @@ bool SendspinService::start(float volume, bool muted) {
   if (!d.persistence.ensure_dir()) LOGW("sendspin: identity will not persist");
 
   ss::PlayerRoleConfig pc;
-  pc.initial_output_delay_ms = d.cfg.initial_output_delay_ms;
   pc.audio_formats = {
       {ss::SendspinCodecFormat::FLAC, 2, 48000, 16},
       {ss::SendspinCodecFormat::FLAC, 2, 44100, 16},

@@ -661,7 +661,6 @@ void Controller::start_sendspin(const DeviceIdentity &id) {
   auto slash = state_path_.rfind('/');
   cfg.state_dir = (slash == std::string::npos ? std::string(".") : state_path_.substr(0, slash)) + "/sendspin";
   cfg.port = kSendspinPort;
-  cfg.initial_output_delay_ms = model_.sendspin_output_delay_ms;
 
   SendspinService::Hooks h;
   h.on_stream = [this](bool active) {

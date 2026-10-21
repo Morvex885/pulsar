@@ -38,7 +38,6 @@ Model midi() {
   m.error_sound = "ru-RU/vins_error.wav";
   // { "0": 0, "1": 49, "20": 255 }: softvol min_dB -60, so 2.6 dB per level, level 1 at -48.5 dB.
   m.volume_map = {{0, 0}, {1, 49}, {20, 255}};
-  m.sendspin_output_delay_ms = 22;  // quasar.cfg multiroomd latency_ms -22
   return m;
 }
 
@@ -69,7 +68,6 @@ Model lite2() {
   m.mute_input = "gpio-keys";
   m.error_sound = "ru-RU/playback_error.mp3";
   m.volume_map = {{0, 0}, {1, 49}, {20, 255}};  // quasar.cfg: the same map as the Midi
-  m.sendspin_output_delay_ms = 0;  // quasar.cfg multiroomd latency_ms 0
   return m;
 }
 

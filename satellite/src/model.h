@@ -53,14 +53,6 @@ struct Model {
     int level, raw;
   };
   std::vector<VolumePoint> volume_map;
-
-  // Default Sendspin output delay: the firmware's multiroom hint, not an acoustic measurement
-  // (quasar.cfg "multiroomd": {"latency_ms": -N}, i.e. Yandex's multiroom daemon plays N ms early).
-  // snd_pcm_delay() already covers our ring, plug and dmix; this is the hardware path behind it
-  // (TDM FIFO, AED, amplifier). sendspin-cpp schedules a chunk at client_time(server_ts) -
-  // output_delay_ms - fixed_delay_us, so a positive value plays earlier. Used only while no
-  // output_delay blob is persisted, i.e. until Music Assistant/the user sets the delay once.
-  uint16_t sendspin_output_delay_ms = 0;
 };
 
 // The detected model; nullptr on unsupported hardware.
