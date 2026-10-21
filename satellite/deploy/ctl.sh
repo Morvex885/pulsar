@@ -33,8 +33,8 @@ start_supervisor() {
   pidof supervise.sh >/dev/null 2>&1 && return 0
   (trap '' HUP; exec setsid "$D/supervise.sh" </dev/null >/dev/null 2>&1) &
   i=0
-  while [ $i -lt 30 ] && ! pidof supervise.sh >/dev/null 2>&1; do
-    sleep 0.1
+  while [ $i -lt 3 ] && ! pidof supervise.sh >/dev/null 2>&1; do
+    sleep 1
     i=$((i + 1))
   done
 }
@@ -58,8 +58,8 @@ stop_supervisors() {
 
 wait_supervisors_gone() {
   i=0
-  while [ $i -lt 20 ] && pidof supervise.sh >/dev/null 2>&1; do sleep 0.25; i=$((i + 1)); done
-  pidof supervise.sh >/dev/null 2>&1 && { killall -9 supervise.sh 2>/dev/null; sleep 0.2; }
+  while [ $i -lt 5 ] && pidof supervise.sh >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
+  pidof supervise.sh >/dev/null 2>&1 && { killall -9 supervise.sh 2>/dev/null; sleep 1; }
   return 0
 }
 

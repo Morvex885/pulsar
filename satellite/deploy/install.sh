@@ -237,21 +237,31 @@ install_one() { # serial
 # (a binary that crashes and is restarted in between would otherwise look healthy). On failure,
 # offer to put the previous binary back.
 health_check() { # serial binary_changed marker
-  local s=$1 changed=$2 mark=$3 log ans n bad=0 round
+  local s=$1 changed=$2 mark=$3 log full ans n bad=0 unknown=0 round
   for round in 1 2; do
     if [ $round = 1 ]; then sleep 10; else sleep 20; fi
+    # The log may have been copy-truncated by supervise.sh meanwhile: the older half is in .1.
+    full=$(sh_ "$s" "cat /tmp/cucumber-satellite.log.1 /tmp/cucumber-satellite.log 2>/dev/null | tail -n 1500" || true)
     log=$(sh_ "$s" "tail -n 600 /tmp/cucumber-satellite.log" || true)
-    if [[ $log != *"$mark"* ]]; then
-      log="(install marker not found in the log: rotated?)"
-      bad=1
-    else
-      log=${log#*"$mark"}
-      n=$(grep -c '^=== start' <<<"$log" || true)
-      if ! sh_ "$s" "pidof cucumber-satellite >/dev/null" || [ "$n" != 1 ] \
-        || [[ $log == *"=== CRASH"* || $log == *"=== exit"* || $log == *"=== supervise"* ]]; then bad=1; fi
+    if [[ $log == *"$mark"* ]]; then :; elif [[ $full == *"$mark"* ]]; then log=$full; else log=; fi
+    if [ -z "$log" ]; then
+      log="(install marker not found in the log, even in .1)"
+      unknown=1
+      break
     fi
-    [ $bad = 0 ] || break
+    # The old daemon's exit (and the restart) land after the marker: judge only what follows the
+    # first `=== start` after it, which is the new daemon's.
+    log=${log#*"$mark"}
+    if [[ $log != *"=== start"* ]]; then bad=1; log="(no start after the install marker)$log"; break; fi
+    log="=== start${log#*"=== start"}"
+    n=$(grep -c '^=== start' <<<"$log" || true)
+    if ! sh_ "$s" "pidof cucumber-satellite >/dev/null" || [ "$n" != 1 ] \
+      || [[ $log == *"=== CRASH"* || $log == *"=== exit"* || $log == *"=== supervise"* ]]; then bad=1; break; fi
   done
+  if [ $unknown = 1 ]; then
+    echo "$s: health check UNKNOWN: $log; not rolling back automatically" >&2
+    return 1
+  fi
   if [ $bad = 0 ]; then
     echo "$s: health check ok"
     return 0
