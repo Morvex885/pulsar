@@ -17,8 +17,12 @@
 namespace cs {
 
 struct Settings {
+  // Volume on the stock curve (Model::volume_map), state.conf volume2=. volume= keeps the same raw
+  // level on the curve of earlier builds, so a binary rolled back by supervise.sh plays as loud.
   float volume = 0.5f;
-  int volume_curve = 2;        // curve volume was saved under: 2 = stock map (Model::volume_map), 1 = legacy
+  bool has_volume = false;       // volume2= was present
+  float volume_legacy = -1;      // volume=; < 0: absent
+  bool legacy_on_stock = false;  // volume_curve=2: one interim build wrote volume= on the stock curve
   bool muted = false;          // media mute
   bool mic_muted = false;      // software microphone mute
   bool clock_on = true;

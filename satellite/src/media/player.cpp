@@ -676,13 +676,18 @@ void Player::on_state(StateCb cb) {
 namespace {
 constexpr const char *kMasterCtl = "Master Playback Volume";
 
-// The curve before the stock map (alsamixer's "mapped volume" over a -60..0 dB control):
-// dB = 60 * log10(0.1 + 0.9 v). Kept only to migrate saved volumes.
+// The curve of builds before the stock map (alsamixer's "mapped volume" over a -60..0 dB
+// control): dB = 60 * log10(0.1 + 0.9 v). state.conf keeps volume= on it for those builds.
 int legacy_raw(float v) {
   if (v <= 0.0f) return 0;
   double db = 60.0 * std::log10(0.1 + 0.9 * std::min(1.0f, v));
   int raw = int(std::lround((db + 60.0) / 60.0 * 255.0));
   return std::max(0, std::min(255, raw));
+}
+
+float legacy_volume(int raw) {
+  double db = -60.0 + 60.0 * raw / 255.0;
+  return float(std::max(0.0, (std::pow(10.0, db / 60.0) - 0.1) / 0.9));
 }
 
 bool find_master(snd_ctl_t *ctl) {
@@ -723,6 +728,8 @@ float Mixer::from_raw(int raw) const {
 }
 
 float Mixer::from_legacy(float v) const { return from_raw(legacy_raw(v)); }
+
+float Mixer::to_legacy(float v) const { return legacy_volume(to_raw(v)); }
 
 bool Mixer::open() {
   snd_ctl_t *ctl = nullptr;

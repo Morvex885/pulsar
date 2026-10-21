@@ -60,9 +60,10 @@ class Mixer {
   void set_volume(float);  // 0..1
   bool muted() const;
   void set_muted(bool);
-  // A volume saved by builds before the stock curve (state.conf without volume_curve=2) -> the
-  // volume giving the same raw level now (levels below the lowest stock step rise to it).
+  // Volume on the curve of builds before the stock map (state.conf volume=) <-> the volume giving
+  // the same raw level now (legacy levels below the lowest stock step rise to it).
   float from_legacy(float v) const;
+  float to_legacy(float v) const;
 
  private:
   int to_raw(float v) const;

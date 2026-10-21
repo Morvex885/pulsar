@@ -46,14 +46,16 @@ bool Settings::load(const std::string &path) {
   std::ifstream f(path);
   if (!f) return false;
   std::string line;
-  volume_curve = 1;  // files from before the key existed
   while (std::getline(f, line)) {
     auto eq = line.find('=');
     if (eq == std::string::npos) continue;
     std::string k = line.substr(0, eq), v = line.substr(eq + 1);
     float fv = strtof(v.c_str(), nullptr);
-    if (k == "volume") volume = fv;
-    else if (k == "volume_curve") volume_curve = int(fv);
+    if (k == "volume2") {
+      volume = fv;
+      has_volume = true;
+    } else if (k == "volume") volume_legacy = fv;
+    else if (k == "volume_curve") legacy_on_stock = v == "2";
     else if (k == "muted") muted = v == "1";
     else if (k == "mic_muted") mic_muted = v == "1";
     else if (k == "clock_on") clock_on = v == "1";
@@ -78,7 +80,7 @@ void Settings::save(const std::string &path) const {
       LOGW("cannot write %s", tmp.c_str());
       return;
     }
-    f << "volume=" << volume << "\nvolume_curve=" << volume_curve << "\nmuted=" << muted << "\nmic_muted=" << mic_muted
+    f << "volume2=" << volume << "\nvolume=" << volume_legacy << "\nmuted=" << muted << "\nmic_muted=" << mic_muted
       << "\nclock_on=" << clock_on << "\nclock_brightness=" << clock_brightness << "\nlight_on=" << light.on
       << "\nlight_brightness=" << light.brightness << "\nlight_r=" << light.r << "\nlight_g=" << light.g
       << "\nlight_b=" << light.b << "\nlight_effect=" << light.effect << "\nwake_word=" << wake_word
@@ -106,7 +108,7 @@ Controller::~Controller() = default;
 std::string Controller::model_dir(const std::string &id) const { return kModels + id; }
 
 bool Controller::start() {
-  const bool have_state = st_.load(state_path_);
+  st_.load(state_path_);
   if (!st_.tz.empty()) {  // clock shows local time before HA connects
     setenv("TZ", st_.tz.c_str(), 1);
     tzset();
@@ -146,17 +148,17 @@ bool Controller::start() {
                        st_.light.brightness, st_.light.effect);
 
   if (!mixer_.open()) LOGW("mixer unavailable");
-  // First run: keep the volume the speaker already had, but never start loud: on the Lite 2 the
-  // softvol control is at 0 dB (100 %) after boot until the Yandex stack sets it. 0.3 is stock
-  // level 6 of 20 (Alice's "3").
-  if (!have_state) {
-    st_.volume = std::min(mixer_.volume(), 0.3f);
-  } else if (st_.volume_curve < 2) {  // keep the speaker as loud as the saved volume made it
-    const float legacy = st_.volume;
-    st_.volume = mixer_.from_legacy(legacy);
-    st_.volume_curve = 2;
-    LOGI("volume %.3f on the legacy curve -> %.3f on the stock curve", legacy, st_.volume);
+  if (st_.has_volume) {
+    // volume2= is authoritative
+  } else if (st_.volume_legacy >= 0) {  // written by an earlier build: keep the speaker as loud
+    st_.volume = st_.legacy_on_stock ? std::min(1.0f, st_.volume_legacy) : mixer_.from_legacy(st_.volume_legacy);
+    LOGI("volume %.3f from an earlier build -> %.3f", st_.volume_legacy, st_.volume);
     persist();
+  } else {
+    // No volume saved: keep the one the speaker already had, but never start loud: on the Lite 2
+    // the softvol control is at 0 dB (100 %) after boot until the Yandex stack sets it. 0.3 is
+    // stock level 6 of 20 (Alice's "3").
+    st_.volume = std::min(mixer_.volume(), 0.3f);
   }
   mixer_.set_volume(st_.volume);
   mixer_.set_muted(st_.muted);
@@ -236,7 +238,10 @@ bool Controller::start() {
   return true;
 }
 
-void Controller::persist() { st_.save(state_path_); }
+void Controller::persist() {
+  st_.volume_legacy = mixer_.to_legacy(st_.volume);
+  st_.save(state_path_);
+}
 
 // ---------------- HA connection ----------------
 
