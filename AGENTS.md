@@ -162,7 +162,9 @@ through the 32-bit `libquasar_gstreamer.so`, Sendspin playback, LED animations b
 - State persisted in `state.conf` (key=value); add new keys with safe defaults.
 - Comments explain device facts and constraints, not what the code does.
 - ESPHome API: up to 4 clients after a valid hello; states go to all subscribers, the voice
-  pipeline to the latest voice subscriber (`on_voice_subscribed(false/true)` on hand-over).
+  pipeline to the most recent client still subscribed to it: when that one unsubscribes or
+  disconnects, the previous subscriber gets it back (`on_voice_subscribed(false)` then `(true)` on
+  every hand-over), so a probe never leaves HA without the pipeline.
 - `Player::play` done callback: called exactly once per `play()` on the Loop; `true` only if every
   url played to its end; `stop()` or a replacing `play()` delivers `false` for the superseded list
   (queued by that call, so it runs after the caller returns). Callers must check that the dialog /

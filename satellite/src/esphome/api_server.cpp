@@ -272,7 +272,8 @@ struct ApiServer::Impl {
     bool closed = false;
     bool hello = false;
     bool states = false;
-    bool voice = false;
+    bool voice = false;         // owns the voice pipeline
+    uint64_t voice_wanted = 0;  // order of its SubscribeVoiceAssistant(true), 0 = not subscribed
     bool close_after_flush = false;  // also: ignore further input
     int64_t connected_at = 0;
     int64_t last_rx = 0;
@@ -309,6 +310,7 @@ struct ApiServer::Impl {
   std::unique_ptr<MdnsResponder> mdns;
   uint64_t tick_timer = 0;
   bool audio_overflowed = false;  // mic audio stopped for this run (backlog)
+  uint64_t voice_seq = 0;         // orders voice subscriptions (Client::voice_wanted)
   // Without a key Noise sessions run on the all-zeros key: ESPHome's way to let HA provision a
   // key without sending it in the clear (protects against sniffing only).
   Psk psk{};
@@ -371,6 +373,29 @@ struct ApiServer::Impl {
     for (const auto &c : clients)
       if (c->hello && c->voice) return c;
     return nullptr;
+  }
+
+  // The voice pipeline belongs to the client that subscribed most recently among those still
+  // subscribed: HA reconnecting after a Wi-Fi drop takes it from its dead socket at once, and a
+  // probe or second HA that subscribes and goes away hands it back to the one before it.
+  // Hooks see false before true on every hand-over.
+  void update_voice_owner() {
+    ClientPtr want;
+    for (const auto &c : clients)
+      if (c->hello && c->voice_wanted && (!want || c->voice_wanted > want->voice_wanted)) want = c;
+    ClientPtr cur = voice_client();
+    if (cur == want) return;
+    if (cur) {
+      cur->voice = false;
+      if (want) LOGI("api: voice assistant moves from %s to %s", cur->peer.c_str(), want->peer.c_str());
+      hooks.on_voice_subscribed(false);
+    }
+    // The hook may have closed clients: only hand over to one that is still subscribed.
+    if (want && !want->closed && want->voice_wanted && !voice_client()) {
+      if (!cur) LOGI("api: voice assistant served by %s", want->peer.c_str());
+      want->voice = true;
+      hooks.on_voice_subscribed(true);
+    }
   }
   // ---------------------------------------------------------------- transport
 
@@ -553,7 +578,11 @@ struct ApiServer::Impl {
     LOGI("api: %s %s (%s)", c->peer.c_str(), c->hello ? "disconnected" : "dropped", why);
     if (c->log_level) update_log_sink();
     if (!c->hello) return;
-    if (c->voice) hooks.on_voice_subscribed(false);
+    if (c->voice) {
+      c->voice = false;
+      hooks.on_voice_subscribed(false);
+    }
+    update_voice_owner();
     if (!ready()) hooks.on_client_disconnected();
   }
 
@@ -589,16 +618,17 @@ struct ApiServer::Impl {
     }
   }
 
-  // A client completing hello at the cap replaces the established client heard from least
-  // recently, never the voice client: a reconnecting HA whose old socket has not timed out yet
-  // gets in, and the old one goes.
+  // A client completing hello at the cap replaces an established client: preferably one without
+  // interest in the voice pipeline, never its owner, otherwise the one heard from least recently
+  // (a reconnecting HA whose old socket has not timed out yet gets in, and the old one goes).
   void make_room() {
     ClientPtr victim;
     size_t established = 0;
+    auto rank = [](const ClientPtr &c) { return c->voice ? 2 : c->voice_wanted ? 1 : 0; };
     for (const auto &c : clients) {
       if (!c->hello) continue;
       established++;
-      if (!victim || (victim->voice && !c->voice) || (victim->voice == c->voice && c->last_rx < victim->last_rx))
+      if (!victim || rank(c) < rank(victim) || (rank(c) == rank(victim) && c->last_rx < victim->last_rx))
         victim = c;
     }
     if (established >= kMaxClients) close_client(victim, "replaced by a new connection");
@@ -1065,22 +1095,8 @@ struct ApiServer::Impl {
           if (f.num == 2) flags = f.u32();
         }
         LOGI("api: %s voice assistant %s (flags=%u)", c->peer.c_str(), sub ? "subscribed" : "unsubscribed", flags);
-        if (sub == c->voice) break;
-        if (!sub) {
-          c->voice = false;
-          hooks.on_voice_subscribed(false);
-          break;
-        }
-        // One pipeline owner. Unlike ESPHome (first subscriber keeps it), the latest one wins:
-        // after a Wi-Fi drop HA resubscribes on a new socket while the dead one is still open.
-        if (ClientPtr prev = voice_client()) {
-          LOGW("api: voice assistant moves from %s to %s", prev->peer.c_str(), c->peer.c_str());
-          prev->voice = false;
-          hooks.on_voice_subscribed(false);
-          if (c->closed) break;
-        }
-        c->voice = true;
-        hooks.on_voice_subscribed(true);
+        c->voice_wanted = sub ? ++voice_seq : 0;
+        update_voice_owner();
         break;
       }
       case VA_RESPONSE: {

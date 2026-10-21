@@ -109,8 +109,9 @@ class ApiHooks {
   virtual void on_client_connected(const std::string &client_info) = 0;
   // The last client that completed hello disconnected.
   virtual void on_client_disconnected() = 0;
-  // The voice pipeline owner (SubscribeVoiceAssistantRequest) appeared/went away. When another
-  // client takes over the subscription, false is reported before true.
+  // The voice pipeline owner appeared/went away. The owner is the most recent client still
+  // subscribed (SubscribeVoiceAssistantRequest); when ownership moves between clients (a newer
+  // subscriber, or the owner leaving while an older subscriber remains), false precedes true.
   virtual void on_voice_subscribed(bool subscribed) = 0;
   virtual void on_voice_event(VaEvent type, const std::map<std::string, std::string> &data) = 0;
   virtual void on_announce(const AnnounceRequest &req) = 0;
