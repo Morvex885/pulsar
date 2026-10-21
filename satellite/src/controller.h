@@ -103,6 +103,12 @@ class Controller : public ApiHooks {
   bool hw_mic_muted_ = false;
   bool error_shown_ = false;
   uint64_t watchdog_ = 0;  // loop timer ending a LISTENING/PROCESSING phase HA never advances
+  // Pipeline events carry no run id. HA ends a run it replaces (barge-in: our new start cancels
+  // the old run) with a RUN_END sent before the new run's RUN_START, so until RUN_START every
+  // event belongs to the replaced run.
+  bool awaiting_run_start_ = false;  // this dialog's start request has no RUN_START yet
+  bool run_active_ = false;          // some run is between RUN_START and RUN_END
+  bool stale_run_end_ = false;       // the RUN_END of a replaced run is still due
   std::string tts_url_;
   bool tts_played_ = false;
   bool continue_conversation_ = false;

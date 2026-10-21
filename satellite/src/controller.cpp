@@ -298,6 +298,8 @@ void Controller::start_pipeline(const std::string &phrase, bool earcon) {
   LOGI("starting voice pipeline (wake='%s')", phrase.c_str());
   phase_ = Phase::LISTENING;
   dialog_++;
+  stale_run_end_ = run_active_;
+  awaiting_run_start_ = true;
   listen_started_ms_ = Loop::now_ms();
   loop_.add_timer(kCommandAfterWakeMs + 100, [this] { update_commands(); });
   tts_url_.clear();
@@ -323,6 +325,21 @@ void Controller::on_voice_event(VaEvent type, const std::map<std::string, std::s
   };
   // Numbers: VaEvent (1 run-start, 2 run-end, 3/4 stt, 5/6 intent, 7/8 tts, 11/12 vad, 0 error).
   if (type != VaEvent::INTENT_PROGRESS) LOGI("voice event %u", (unsigned)type);
+  if (type == VaEvent::RUN_START) {
+    run_active_ = true;
+    awaiting_run_start_ = false;
+  } else if (awaiting_run_start_) {
+    if (type != VaEvent::RUN_END || stale_run_end_) {
+      if (type == VaEvent::RUN_END) stale_run_end_ = run_active_ = false;
+      LOGD("voice event %u: from the replaced run, ignored", (unsigned)type);
+      return;
+    }
+    // A RUN_END with no run to replace: HA ended our request without running it (it intercepts
+    // the wake word while an automation waits for one).
+    awaiting_run_start_ = false;
+  } else if (type == VaEvent::RUN_END) {
+    run_active_ = false;
+  }
   switch (type) {
     case VaEvent::RUN_START:
       tts_url_ = get("url");
@@ -412,7 +429,9 @@ void Controller::abort_dialog(const char *why) {
 }
 
 void Controller::on_voice_start_failed() {
-  if (phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING) abort_dialog("Home Assistant refused to start it");
+  if (phase_ != Phase::LISTENING && phase_ != Phase::PROCESSING) return;
+  awaiting_run_start_ = false;  // no run follows
+  abort_dialog("Home Assistant refused to start it");
 }
 
 void Controller::on_voice_audio_overflow() {  // the server has already asked HA to stop
