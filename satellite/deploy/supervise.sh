@@ -79,7 +79,8 @@ while [ -f "$D/enabled" ]; do
       mv -f "$BIN" "$BIN.bad"
       if cp -p "$BIN.prev" "$BIN.tmp" && mv "$BIN.tmp" "$BIN"; then
         swapped=1 fails=0 backoff=$BACKOFF_MIN
-        say "$CRASHES short crashes in a row, rolled back to .prev (bad binary kept as .bad)"
+        note=; [ -f "$D/api_key" ] && note="; api_key is set: the previous binary may not support API encryption, so Home Assistant (which holds the key) may be unable to connect - remove the key in HA or re-add the device"
+        say "$CRASHES short crashes in a row, rolled back to .prev (bad binary kept as .bad)$note"
         continue
       fi
       mv -f "$BIN.bad" "$BIN"
