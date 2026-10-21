@@ -316,7 +316,9 @@ void Controller::start_pipeline(const std::string &phrase, bool earcon) {
   continue_conversation_ = false;
   update_duck();
   if (earcon) player_.play(Channel::ANNOUNCE, {kSndWake});
+  const uint64_t dialog = dialog_;
   api_->voice_request_start(phrase);
+  if (dialog != dialog_) return;  // sending failed and closed the voice client, which ended the dialog
   mic_.set_streaming(true);
   arm_watchdog();
   update_ui();
