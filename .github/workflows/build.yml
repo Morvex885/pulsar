@@ -1,0 +1,69 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    # Job names "build (aarch64)" / "build (armhf)" are required status checks of the main ruleset.
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, armhf]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # `git describe` is the version reported to Home Assistant
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1 # 0.13 builds armhf C++ binaries that crash before main
+      - run: sudo apt-get update -q && sudo apt-get install -yq ninja-build
+      - uses: actions/cache@v6
+        with:
+          path: satellite/third_party/src
+          key: third-party-${{ hashFiles('satellite/third_party/fetch.sh', 'satellite/third_party/sysroot.sh') }}
+      - name: daemon + tools
+        working-directory: satellite
+        run: |
+          tools=$(for t in tools/*.cpp; do t=${t#tools/}; printf 'build/%s/tools/%s ' "${{ matrix.arch }}" "${t%.cpp}"; done)
+          make ARCH=${{ matrix.arch }} -j"$(nproc)" binary $tools
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pulsar-${{ matrix.arch }}
+          path: |
+            satellite/build/${{ matrix.arch }}/pulsar
+            satellite/build/${{ matrix.arch }}/pulsar.debug
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+      - name: GitHub release with both binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for a in aarch64 armhf; do
+            cp pulsar-$a/pulsar pulsar-$a.bin
+            cp pulsar-$a/pulsar.debug pulsar-$a.debug
+          done
+          sha256sum pulsar-*.bin > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes \
+            pulsar-*.bin pulsar-*.debug SHA256SUMS

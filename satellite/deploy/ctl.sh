@@ -1,7 +1,7 @@
 #!/bin/sh
-# cucumber-satellite control: enable | disable | restart | reload | status | log | api-key
-#   enable  - stop the Yandex stack, run cucumber-satellite now and on every boot
-#   disable - stop cucumber-satellite, start the Yandex stack again (also after reboot)
+# pulsar control: enable | disable | restart | reload | status | log | api-key
+#   enable  - stop the Yandex stack, run pulsar now and on every boot
+#   disable - stop pulsar, start the Yandex stack again (also after reboot)
 #   reload  - restart the supervisor and the daemon (after supervise.sh was replaced); never starts
 #             the Yandex stack
 #   api-key [base64|clear] - ESPHome Noise key ($D/api_key, base64 of 32 bytes, mode 0600): no
@@ -9,22 +9,22 @@
 #             recent Home Assistant (mid-2026+) provisions a key automatically over the API on first
 #             connect; setting or clearing a different key by hand makes HA ask to re-authenticate.
 #             A corrupt file makes the daemon fail closed, hence the validation below.
-D=${CS_DIR:-/data/cucumber-satellite}
-Q=${CS_Q:-/system/vendor/quasar/q}
+D=${PULSAR_DIR:-/data/pulsar}
+Q=${PULSAR_Q:-/system/vendor/quasar/q}
 
 # SIGTERM, wait up to 10 s for the process to go, then SIGKILL. Returns 1 if it is still there.
 stop_daemon() {
-  pidof cucumber-satellite >/dev/null 2>&1 || return 0
-  killall cucumber-satellite 2>/dev/null
+  pidof pulsar >/dev/null 2>&1 || return 0
+  killall pulsar 2>/dev/null
   i=0
-  while [ $i -lt 10 ] && pidof cucumber-satellite >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
-  if pidof cucumber-satellite >/dev/null 2>&1; then
+  while [ $i -lt 10 ] && pidof pulsar >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
+  if pidof pulsar >/dev/null 2>&1; then
     echo "did not exit in 10 s, killing"
-    killall -9 cucumber-satellite 2>/dev/null
+    killall -9 pulsar 2>/dev/null
     i=0
-    while [ $i -lt 5 ] && pidof cucumber-satellite >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
+    while [ $i -lt 5 ] && pidof pulsar >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
   fi
-  ! pidof cucumber-satellite >/dev/null 2>&1
+  ! pidof pulsar >/dev/null 2>&1
 }
 
 # Starts supervise.sh unless one runs; waits until it does. Ignores SIGHUP: when called through
@@ -76,8 +76,8 @@ valid_key() { # 44 base64 chars (32 bytes + one '='), and 32 bytes when a decode
 
 case "$1" in
   enable)
-    if [ ! -x "$D/cucumber-satellite" ] || [ ! -x "$D/supervise.sh" ]; then
-      echo "$D/cucumber-satellite or supervise.sh missing or not executable, nothing changed" >&2
+    if [ ! -x "$D/pulsar" ] || [ ! -x "$D/supervise.sh" ]; then
+      echo "$D/pulsar or supervise.sh missing or not executable, nothing changed" >&2
       exit 1
     fi
     touch "$D/enabled"
@@ -89,7 +89,7 @@ case "$1" in
     rm -f "$D/enabled"
     stop_supervisors
     if ! stop_daemon; then
-      echo "cucumber-satellite is still running, Yandex stack not started" >&2
+      echo "pulsar is still running, Yandex stack not started" >&2
       exit 1
     fi
     wait_supervisors_gone
@@ -100,13 +100,13 @@ case "$1" in
     if stop_daemon; then
       restarted
     else
-      echo "cucumber-satellite did not exit" >&2
+      echo "pulsar did not exit" >&2
       exit 1
     fi
     ;;
   reload)
     stop_supervisors
-    stop_daemon || { echo "cucumber-satellite did not exit" >&2; exit 1; }
+    stop_daemon || { echo "pulsar did not exit" >&2; exit 1; }
     wait_supervisors_gone
     if [ -f "$D/enabled" ] && [ -x "$D/supervise.sh" ]; then
       start_supervisor
@@ -116,12 +116,12 @@ case "$1" in
     fi
     ;;
   status)
-    [ -f "$D/enabled" ] && echo "mode: cucumber-satellite" || echo "mode: yandex"
-    echo "cucumber-satellite pid: $(pidof cucumber-satellite)"
+    [ -f "$D/enabled" ] && echo "mode: pulsar" || echo "mode: yandex"
+    echo "pulsar pid: $(pidof pulsar)"
     echo "quasar pid: $(pidof quasar_launcher2 maind)"
     ;;
   log)
-    tail -n "${2:-50}" /tmp/cucumber-satellite.log
+    tail -n "${2:-50}" /tmp/pulsar.log
     ;;
   api-key)
     case "${2-}" in
@@ -131,7 +131,7 @@ case "$1" in
       clear)
         rm -f "$D/api_key"
         echo "api key removed"
-        stop_daemon || { echo "cucumber-satellite did not exit" >&2; exit 1; }
+        stop_daemon || { echo "pulsar did not exit" >&2; exit 1; }
         restarted
         ;;
       *)
@@ -139,7 +139,7 @@ case "$1" in
         (umask 077; printf '%s' "$2" > "$D/api_key.tmp") && chmod 600 "$D/api_key.tmp" && mv "$D/api_key.tmp" "$D/api_key" \
           || { rm -f "$D/api_key.tmp"; echo "cannot write $D/api_key" >&2; exit 1; }
         echo "api key set"
-        stop_daemon || { echo "cucumber-satellite did not exit" >&2; exit 1; }
+        stop_daemon || { echo "pulsar did not exit" >&2; exit 1; }
         restarted
         ;;
     esac

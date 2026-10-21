@@ -1,12 +1,12 @@
 #!/bin/sh
 # Boot hook (called from /data/quasar/rootkeeper.sh, which onboot.sh starts in background).
-# If /data/cucumber-satellite/enabled exists: stop the Yandex stack started by onboot.sh and run
-# cucumber-satellite under a restart loop. adbd and dropbear are never touched.
-D=/data/cucumber-satellite
+# If /data/pulsar/enabled exists: stop the Yandex stack started by onboot.sh and run
+# pulsar under a restart loop. adbd and dropbear are never touched.
+D=/data/pulsar
 [ -f "$D/enabled" ] || exit 0
 # Never stop the Yandex stack when there is nothing to replace it with.
-[ -x "$D/cucumber-satellite" ] && [ -x "$D/supervise.sh" ] || exit 0
-pidof cucumber-satellite >/dev/null 2>&1 && exit 0
+[ -x "$D/pulsar" ] && [ -x "$D/supervise.sh" ] || exit 0
+pidof pulsar >/dev/null 2>&1 && exit 0
 pidof supervise.sh >/dev/null 2>&1 && exit 0  # never two supervisors
 # Supported models only (see src/model.cpp); anything else keeps the Yandex stack.
 tr '\0' '\n' </proc/device-tree/compatible | grep -qxE 'yandex,(cucumber|plum)' || exit 0

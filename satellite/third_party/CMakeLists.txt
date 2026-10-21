@@ -1,4 +1,4 @@
-# Builds sendspin-cpp and its dependencies as static libraries for cucumber-satellite.
+# Builds sendspin-cpp and its dependencies as static libraries for pulsar.
 # Sources come from third_party/src/ (populated by fetch.sh); nothing is downloaded here.
 # Driven by the top-level Makefile; see the "third_party" rule there.
 cmake_minimum_required(VERSION 3.16)

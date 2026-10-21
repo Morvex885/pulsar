@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guide for coding agents working on cucumber-satellite. User-facing docs: `README.md` (Russian).
+Guide for coding agents working on pulsar. User-facing docs: `README.md` (Russian).
 
 ## What this is
 
@@ -34,7 +34,7 @@ logs), `re/` (Ghidra projects and decompiled Yandex code), `ref/` (upstream chec
 ## Build
 
 ```sh
-make -C satellite -j"$(nproc)"                       # both: build/{aarch64,armhf}/cucumber-satellite
+make -C satellite -j"$(nproc)"                       # both: build/{aarch64,armhf}/pulsar
 make -C satellite ARCH=armhf                          # one architecture
 make -C satellite ARCH=armhf build/armhf/tools/ww_offline   # any tool in satellite/tools/
 ssh/build.sh                                         # → ssh/out/{aarch64,armhf}/{dropbearmulti,sftp-server}
@@ -45,13 +45,28 @@ armhf C++ release builds crash before `main`), make, git, curl, cmake ≥ 3.16, 
 first build fetches pinned dependencies into `satellite/third_party/src/` and builds an ALSA
 sysroot per architecture into `satellite/build/<arch>/sysroot/` (Midi: versioned like the
 firmware's alsa-lib; Lite 2: unversioned, exporting only `snd_*`, otherwise the daemon would import
-zig's compiler-rt helpers from libasound). Outputs per arch: `cucumber-satellite` (stripped, the
-one deployed) and `cucumber-satellite.debug` (unstripped, line tables) for `addr2line -f -e` on the
+zig's compiler-rt helpers from libasound). Outputs per arch: `pulsar` (stripped, the
+one deployed) and `pulsar.debug` (unstripped, line tables) for `addr2line -f -e` on the
 crash report `main.cpp` writes to the log (non-PIE: addresses are absolute; armhf reports pc/lr only:
 glibc's `backtrace()` there runs libgcc_s's unwinder into the binary's static zig personality
 routine and segfaults). The version is
 `git describe --always --dirty` (`--version`, HA DeviceInfo and the "Version" entity). There is no host test
 suite; verification happens on the device.
+
+CI (`.github/workflows/build.yml`) builds the daemon and every tool for both architectures on each
+pull request and push to `main`; the binaries are attached to the run as artifacts. Pushing a tag
+`v*` additionally publishes a GitHub release with both stripped binaries, their `.debug` files and
+`SHA256SUMS`.
+
+## Branches
+
+`main` is the only long-lived branch and is protected by a repository ruleset: no direct pushes,
+force pushes or deletion; changes land through a pull request with green `build (aarch64)` and
+`build (armhf)` checks, squash or rebase only (linear history). Work on a short-lived branch
+(`feat/…`, `fix/…`, `docs/…`), open a PR, merge; the branch is deleted on merge. Release tags `v*`
+cannot be moved or deleted. Nothing personal goes into the repository: no real IPs, MACs, serials,
+Wi-Fi names, tokens, device logs or names/e-mails in commits (`192.168.1.50` is the documentation
+placeholder).
 
 ## Deploy
 
@@ -68,16 +83,16 @@ clock, inputs, earcons), then a `Model` in `src/model.cpp` and an `ARCH_OF` entr
 Manual binary update (e.g. over ssh):
 
 ```sh
-scp satellite/build/<arch>/cucumber-satellite root@<ip>:/data/cucumber-satellite/cucumber-satellite.new
-ssh root@<ip> 'cd /data/cucumber-satellite && cp cucumber-satellite cucumber-satellite.prev &&
-  mv cucumber-satellite.new cucumber-satellite && ./ctl.sh restart'
+scp satellite/build/<arch>/pulsar root@<ip>:/data/pulsar/pulsar.new
+ssh root@<ip> 'cd /data/pulsar && cp pulsar pulsar.prev &&
+  mv pulsar.new pulsar && ./ctl.sh restart'
 ```
 
-Device layout: `/data/cucumber-satellite/{cucumber-satellite,.prev,.bad,boot.sh,supervise.sh,
+Device layout: `/data/pulsar/{pulsar,.prev,.bad,boot.sh,supervise.sh,
 ctl.sh,state.conf,api_key,enabled,sendspin/}`. `api_key`: ESPHome Noise PSK (base64 of 32 bytes,
 0600), written by HA's auto-provisioning or `ctl.sh api-key`; absent = plaintext (Noise with the
 all-zeros key is then accepted so HA can provision); corrupt = API fails closed. `.bad`: binary
-replaced by the crash-loop rollback. Log: `/tmp/cucumber-satellite.log` (`ctl.sh log N`; rotated
+replaced by the crash-loop rollback. Log: `/tmp/pulsar.log` (`ctl.sh log N`; rotated
 at 1 MB by `supervise.sh`, one `.1` kept). Boot chain:
 `onboot.sh` (firmware) → `/data/quasar/rootkeeper.sh` → `boot.sh` → waits for quasar, `q stop` →
 `supervise.sh` restart loop while `enabled` exists. `ctl.sh reload` restarts the supervisor itself

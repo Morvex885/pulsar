@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Finds rooted Yandex Stations on the local network and installs or updates cucumber-satellite.
+# Finds rooted Yandex Stations on the local network and installs or updates pulsar.
 #
 #   satellite/deploy/install.sh [--list] [--scan] [--ssh] [--no-enable] [--yes] [ip[:port] ...]
 #
 # Without addresses: finds Yandex Stations via mDNS (avahi-browse) or, with --scan or without
 # avahi, by scanning the /24 of every default-route interface for adb (port 5555); connects,
 # identifies the model and offers the supported, rooted stations found. Per station:
-# - copies the daemon + scripts to /data/cucumber-satellite (scripts via .new + mv; when the binary
+# - copies the daemon + scripts to /data/pulsar (scripts via .new + mv; when the binary
 #   differs from the installed one, the installed one is kept as .prev; an identical one is not
 #   copied and leaves .prev alone);
 # - --ssh also installs dropbear (static build from ssh/build.sh) to /data/dropbear;
@@ -22,9 +22,9 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 SAT=$ROOT/satellite
-D=/data/cucumber-satellite
+D=/data/pulsar
 RK=/data/quasar/rootkeeper.sh
-HOOK_SAT='[ -x /data/cucumber-satellite/boot.sh ] && /data/cucumber-satellite/boot.sh </dev/null >/dev/null 2>&1 &'
+HOOK_SAT='[ -x /data/pulsar/boot.sh ] && /data/pulsar/boot.sh </dev/null >/dev/null 2>&1 &'
 HOOK_SSH='[ -x /data/dropbear/start.sh ] && /data/dropbear/start.sh </dev/null >/dev/null 2>&1 &'
 
 # Devicetree codename -> name / userland ABI (build/<arch>/). Only models listed in ARCH_OF get
@@ -129,8 +129,8 @@ probe() { # serial connected_by_us
     [ "$ours" = 1 ] && adb disconnect "$s" >/dev/null 2>&1
     return 0
   fi
-  if sh_ "$s" "pidof cucumber-satellite >/dev/null"; then state="satellite running"
-  elif sh_ "$s" "[ -x $D/cucumber-satellite ]"; then state="satellite installed, not running"
+  if sh_ "$s" "pidof pulsar >/dev/null"; then state="satellite running"
+  elif sh_ "$s" "[ -x $D/pulsar ]"; then state="satellite installed, not running"
   else state="stock Yandex"; fi
   FOUND+=("$s")
   ARCH_FOR[$s]=${ARCH_OF[$code]}
@@ -140,20 +140,20 @@ probe() { # serial connected_by_us
 # errexit does not apply inside a function called from `||`: every step checks its own status.
 install_one() { # serial
   local s=$1 want got have hooks tmp f changed=1 sup_changed=1 sup_have action mark
-  local bin=$SAT/build/${ARCH_FOR[$s]}/cucumber-satellite ssh_out=$ROOT/ssh/out/${ARCH_FOR[$s]}
+  local bin=$SAT/build/${ARCH_FOR[$s]}/pulsar ssh_out=$ROOT/ssh/out/${ARCH_FOR[$s]}
   [ -s "$bin" ] || { echo "$s: $bin missing" >&2; return 1; }
   echo "== $s: daemon (${ARCH_FOR[$s]})"
   sh_ "$s" "mkdir -p $D" || return 1
   want=$(sha256sum "$bin" | cut -d' ' -f1)
-  have=$(sh_ "$s" "[ -f $D/cucumber-satellite ] && sha256sum $D/cucumber-satellite" | cut -d' ' -f1 || true)
+  have=$(sh_ "$s" "[ -f $D/pulsar ] && sha256sum $D/pulsar" | cut -d' ' -f1 || true)
   if [ "$want" = "$have" ]; then
     echo "binary identical to the installed one, not copied (.prev kept)"
     changed=0
   else
-    adb -s "$s" push "$bin" "$D/cucumber-satellite.new" >/dev/null || return 1
-    got=$(sh_ "$s" "sha256sum $D/cucumber-satellite.new" | cut -d' ' -f1)
+    adb -s "$s" push "$bin" "$D/pulsar.new" >/dev/null || return 1
+    got=$(sh_ "$s" "sha256sum $D/pulsar.new" | cut -d' ' -f1)
     if [ "$want" != "$got" ]; then
-      sh_ "$s" "rm -f $D/cucumber-satellite.new" || true
+      sh_ "$s" "rm -f $D/pulsar.new" || true
       echo "$s: push corrupted (sha256 mismatch), nothing changed" >&2
       return 1
     fi
@@ -166,9 +166,9 @@ install_one() { # serial
   sh_ "$s" "cd $D && chmod 755 boot.sh.new supervise.sh.new ctl.sh.new &&
      mv boot.sh.new boot.sh && mv supervise.sh.new supervise.sh && mv ctl.sh.new ctl.sh" || return 1
   if [ $changed = 1 ]; then
-    sh_ "$s" "cd $D && chmod 755 cucumber-satellite.new &&
-       { [ ! -f cucumber-satellite ] || cp -p cucumber-satellite cucumber-satellite.prev; } &&
-       mv cucumber-satellite.new cucumber-satellite && sync" || return 1
+    sh_ "$s" "cd $D && chmod 755 pulsar.new &&
+       { [ ! -f pulsar ] || cp -p pulsar pulsar.prev; } &&
+       mv pulsar.new pulsar && sync" || return 1
   else
     sh_ "$s" "sync" || true
   fi
@@ -192,7 +192,7 @@ install_one() { # serial
     printf '#!/bin/sh\n' >"$tmp/rk"
   fi
   hooks=
-  grep -qF "/data/cucumber-satellite/boot.sh" "$tmp/rk" || hooks=$HOOK_SAT
+  grep -qF "/data/pulsar/boot.sh" "$tmp/rk" || hooks=$HOOK_SAT
   if [ $SSH = 1 ] && ! grep -qF "/data/dropbear/start.sh" "$tmp/rk"; then
     hooks=$(printf '%s\n%s' "$HOOK_SSH" "$hooks")
   fi
@@ -221,10 +221,10 @@ install_one() { # serial
     echo "== $s: start"
     # Marker in the log: the health check looks only at what happens after it.
     mark="=== install-marker $$ $(date +%s)"
-    sh_ "$s" "echo '$mark' >> /tmp/cucumber-satellite.log" || true
+    sh_ "$s" "echo '$mark' >> /tmp/pulsar.log" || true
     action=restart
     [ $sup_changed = 0 ] || action=reload
-    sh_ "$s" "if [ -f $D/enabled ] && { pidof supervise.sh || pidof cucumber-satellite; } >/dev/null; then $D/ctl.sh $action; else $D/ctl.sh enable; fi"
+    sh_ "$s" "if [ -f $D/enabled ] && { pidof supervise.sh || pidof pulsar; } >/dev/null; then $D/ctl.sh $action; else $D/ctl.sh enable; fi"
     echo
     health_check "$s" "$changed" "$mark" || return 1
     sh_ "$s" "$D/ctl.sh status; $D/ctl.sh log 5"
@@ -241,8 +241,8 @@ health_check() { # serial binary_changed marker
   for round in 1 2; do
     if [ $round = 1 ]; then sleep 10; else sleep 20; fi
     # The log may have been copy-truncated by supervise.sh meanwhile: the older half is in .1.
-    full=$(sh_ "$s" "cat /tmp/cucumber-satellite.log.1 /tmp/cucumber-satellite.log 2>/dev/null | tail -n 1500" || true)
-    log=$(sh_ "$s" "tail -n 600 /tmp/cucumber-satellite.log" || true)
+    full=$(sh_ "$s" "cat /tmp/pulsar.log.1 /tmp/pulsar.log 2>/dev/null | tail -n 1500" || true)
+    log=$(sh_ "$s" "tail -n 600 /tmp/pulsar.log" || true)
     if [[ $log == *"$mark"* ]]; then :; elif [[ $full == *"$mark"* ]]; then log=$full; else log=; fi
     if [ -z "$log" ]; then
       log="(install marker not found in the log, even in .1)"
@@ -255,7 +255,7 @@ health_check() { # serial binary_changed marker
     if [[ $log != *"=== start"* ]]; then bad=1; log="(no start after the install marker)$log"; break; fi
     log="=== start${log#*"=== start"}"
     n=$(grep -c '^=== start' <<<"$log" || true)
-    if ! sh_ "$s" "pidof cucumber-satellite >/dev/null" || [ "$n" != 1 ] \
+    if ! sh_ "$s" "pidof pulsar >/dev/null" || [ "$n" != 1 ] \
       || [[ $log == *"=== CRASH"* || $log == *"=== exit"* || $log == *"=== supervise"* ]]; then bad=1; break; fi
   done
   if [ $unknown = 1 ]; then
@@ -268,13 +268,13 @@ health_check() { # serial binary_changed marker
   fi
   echo "$s: health check FAILED, log:" >&2
   printf '%s\n' "$log" | tail -n 15 >&2
-  if [ "$changed" = 1 ] && sh_ "$s" "[ -f $D/cucumber-satellite.prev ]"; then
+  if [ "$changed" = 1 ] && sh_ "$s" "[ -f $D/pulsar.prev ]"; then
     ans=y
     [ $YES = 1 ] || read -r -p "roll back to the previous binary? [Y/n] " ans </dev/tty
     if [[ ${ans:-y} != [nN]* ]]; then
-      sh_ "$s" "cd $D && cp -p cucumber-satellite.prev cucumber-satellite.rb && mv cucumber-satellite cucumber-satellite.bad &&
-        mv cucumber-satellite.rb cucumber-satellite && sync && ./ctl.sh restart" || true
-      echo "$s: rolled back (bad binary kept as $D/cucumber-satellite.bad)" >&2
+      sh_ "$s" "cd $D && cp -p pulsar.prev pulsar.rb && mv pulsar pulsar.bad &&
+        mv pulsar.rb pulsar && sync && ./ctl.sh restart" || true
+      echo "$s: rolled back (bad binary kept as $D/pulsar.bad)" >&2
     fi
   fi
   return 1
