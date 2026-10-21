@@ -564,27 +564,40 @@ void Controller::on_timer_event(const TimerInfo &t) {
 }
 
 // The clock shows the running timer that ends first, else the paused one with the least time
-// left. Clock::set_timer counts down on its own, so a paused value is re-set on every tick.
+// left. The clock counts a running one down by itself, so it is set only when the choice or the
+// timer's data changes, and looked at again when the shown one runs out.
 void Controller::show_timers() {
   const int64_t now = Loop::now_ms();
-  int64_t best = -1;
-  bool best_active = false;
+  const std::string *best_id = nullptr;
+  const HaTimer *best = nullptr;
+  int64_t best_left = 0;
   for (const auto &[id, tm] : timers_) {
     const int64_t left = tm.active ? tm.end_ms - now : int64_t(tm.seconds_left) * 1000;
     if (left <= 0) continue;  // ran out locally; HA's FINISHED follows
-    if (best < 0 || (tm.active && !best_active) || (tm.active == best_active && left < best)) {
-      best = left;
-      best_active = tm.active;
+    if (!best || (tm.active && !best->active) || (tm.active == best->active && left < best_left)) {
+      best_id = &id;
+      best = &tm;
+      best_left = left;
     }
   }
-  if (best < 0) {
-    clock_.set_timer(0);
-    if (timer_tick_) loop_.cancel_timer(timer_tick_);
-    timer_tick_ = 0;
+  if (timer_tick_) loop_.cancel_timer(timer_tick_);
+  timer_tick_ = 0;
+  if (!best) {
+    if (!shown_timer_.empty()) clock_.set_timer(0, true);
+    shown_timer_.clear();
     return;
   }
-  clock_.set_timer(uint32_t((best + 999) / 1000));
-  if (!timer_tick_) timer_tick_ = loop_.add_timer(500, [this] { show_timers(); }, 500);
+  const bool same = *best_id == shown_timer_ && best->active == shown_.active &&
+                    (best->active ? best->end_ms == shown_.end_ms : best->seconds_left == shown_.seconds_left);
+  if (!same) {
+    clock_.set_timer(best_left, best->active);
+    shown_timer_ = *best_id;
+    shown_ = *best;
+  }
+  if (best->active) timer_tick_ = loop_.add_timer(best_left, [this] {
+    timer_tick_ = 0;
+    show_timers();
+  });
 }
 
 // The ring gives the ANNOUNCE channel to speech (TTS answer, HA announcement) and resumes after it.

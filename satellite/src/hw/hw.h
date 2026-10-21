@@ -55,8 +55,9 @@ class Clock {
   void set_enabled(bool on);
   void set_brightness(float b);  // 0..1 user scale (multiplied by ambient auto-dimming)
   void set_ambient_lux(float lux);
-  // Show a countdown mm:ss (or h:mm) instead of time while seconds_left > 0; 0 clears.
-  void set_timer(uint32_t seconds_left);
+  // Show a countdown mm:ss (or h:mm) instead of time while ms_left > 0; <= 0 clears. running:
+  // counts down on its own from ms_left; otherwise ms_left stays shown (paused timer).
+  void set_timer(int64_t ms_left, bool running);
   // Show a number 0..100 briefly (volume feedback).
   void flash_number(int value);
   // Show a pairing code (digits) until clear_code(), overriding everything else, even when the

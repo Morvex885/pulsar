@@ -122,9 +122,9 @@ int main(int argc, char **argv) {
          leds.show_volume(0.5f);
        }},
       {"clock flash_number 42", [&] { clock.flash_number(42); }},
-      {"clock set_timer 125", [&] { clock.set_timer(125); }},
+      {"clock set_timer 125 s", [&] { clock.set_timer(125000, true); }},
       {"clock timer cleared, brightness 1.0 lux 0", [&] {
-         clock.set_timer(0);
+         clock.set_timer(0, true);
          clock.set_brightness(1.0f);
          clock.set_ambient_lux(0);
        }},

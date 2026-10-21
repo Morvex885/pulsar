@@ -138,7 +138,9 @@ class Controller : public ApiHooks {
     uint32_t seconds_left;  // while paused
   };
   std::map<std::string, HaTimer> timers_;  // HA timers by TimerInfo::id
-  uint64_t timer_tick_ = 0;                // clock refresh while a timer is shown
+  std::string shown_timer_;                // id on the clock, "" = none
+  HaTimer shown_{};                        // its data when it was put there
+  uint64_t timer_tick_ = 0;                // looks again when the shown running timer runs out
   // light sensor publishing
   float last_lux_published_ = -1;
   int64_t last_lux_ms_ = 0;

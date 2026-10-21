@@ -89,7 +89,8 @@ struct Clock::Impl {
   float user_bri = 1.f;
   float lux = -1.f;  // <0: unknown, no auto-dimming
   AmbientDimmer dimmer;
-  int64_t timer_end = 0;  // monotonic ms; 0 = no timer
+  int64_t timer_end = 0;     // monotonic ms of a running countdown; 0 = none
+  int64_t timer_paused = 0;  // ms left of a paused countdown; 0 = none
   int64_t flash_until = 0;
   int flash_value = 0;
   std::string code;  // pairing code digits shown instead of anything else (empty = none)
@@ -200,8 +201,8 @@ struct Clock::Impl {
         n /= 10;
       } while (n && pos >= 0);
       if (v < 0 && pos >= 0) g[pos] = kMinus;
-    } else if (timer_end) {
-      int64_t left = std::max<int64_t>(0, (timer_end - now + 999) / 1000);
+    } else if (timer_end || timer_paused) {
+      int64_t left = std::max<int64_t>(0, ((timer_end ? timer_end - now : timer_paused) + 999) / 1000);
       if (left >= 3600) {  // h:mm (hours >= 10 show as hh:mm)
         two(g, int(std::min<int64_t>(left / 3600, 99)), true);
         two(g + 2, int(left / 60 % 60), false);
@@ -304,8 +305,9 @@ void Clock::set_ambient_lux(float lux) {
   impl_->refresh();
 }
 
-void Clock::set_timer(uint32_t seconds_left) {
-  impl_->timer_end = seconds_left ? Loop::now_ms() + int64_t(seconds_left) * 1000 : 0;
+void Clock::set_timer(int64_t ms_left, bool running) {
+  impl_->timer_end = ms_left > 0 && running ? Loop::now_ms() + ms_left : 0;
+  impl_->timer_paused = ms_left > 0 && !running ? ms_left : 0;
   impl_->refresh();
 }
 
