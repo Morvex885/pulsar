@@ -157,6 +157,32 @@ ESPHome-устройство `yandex-midi-xxxxxx` или `yandex-lite2-xxxxxx`. 
 «Шифрование API»). В настройках
 устройства выберите конвейер Assist и активационную фразу.
 
+### Обновление со старой версии (cucumber-satellite)
+
+Раньше демон назывался `cucumber-satellite` и жил в `/data/cucumber-satellite`. `install.sh` сам
+переносит такую установку в `/data/pulsar`:
+
+1. останавливает старый демон (стек Яндекса при этом не запускается);
+2. копирует `state.conf` (настройки), `api_key` (ключ шифрования HA — переподключать колонку в HA
+   не нужно) и `sendspin/` (сопряжение с Music Assistant);
+3. заменяет в `/data/quasar/rootkeeper.sh` только старую строку автозапуска (с резервной копией
+   `rootkeeper.sh.bak-<время>`);
+4. запускает новый демон и, если проверка здоровья прошла, переименовывает старый каталог в
+   `/data/cucumber-satellite.migrated-<время>`. Если проверка не прошла, старая установка
+   возвращается как была.
+
+Вручную вернуться к старой версии:
+
+```sh
+/data/pulsar/ctl.sh disable        # остановить новый демон (запустится стек Яндекса)
+rm /data/pulsar/enabled
+mv /data/cucumber-satellite.migrated-<время> /data/cucumber-satellite
+cp /data/quasar/rootkeeper.sh.bak-<время> /data/quasar/rootkeeper.sh   # копия от миграции
+/data/cucumber-satellite/ctl.sh enable
+```
+
+Когда всё работает, каталог `/data/cucumber-satellite.migrated-<время>` можно удалить.
+
 ### Music Assistant
 
 Music Assistant с поддержкой Sendspin находит колонку сам: плеер «Яндекс Станция Миди» или
