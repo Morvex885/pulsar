@@ -47,7 +47,9 @@ sysroot per architecture into `satellite/build/<arch>/sysroot/` (Midi: versioned
 firmware's alsa-lib; Lite 2: unversioned, exporting only `snd_*`, otherwise the daemon would import
 zig's compiler-rt helpers from libasound). Outputs per arch: `cucumber-satellite` (stripped, the
 one deployed) and `cucumber-satellite.debug` (unstripped, line tables) for `addr2line -f -e` on the
-crash report `main.cpp` writes to the log (non-PIE: addresses are absolute). The version is
+crash report `main.cpp` writes to the log (non-PIE: addresses are absolute; armhf reports pc/lr only:
+glibc's `backtrace()` there runs libgcc_s's unwinder into the binary's static zig personality
+routine and segfaults). The version is
 `git describe --always --dirty` (`--version`, HA DeviceInfo and the "Version" entity). There is no host test
 suite; verification happens on the device.
 

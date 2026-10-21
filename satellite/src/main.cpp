@@ -61,7 +61,10 @@ void put_hex(const char *label, uintptr_t v) {
 
 // glibc's backtrace() retries dlopen(libgcc_s) on every call while the library is missing, and a
 // crash inside malloc/the loader leaves their locks held: only call it when the startup warm-up
-// proved the unwinder loads.
+// proved the unwinder loads. Never on armhf (the flag stays false): libgcc_s's ARM EHABI unwinder
+// calls the personality routine of each frame's .ARM.exidx entry, for our C++ frames the binary's
+// static __gxx_personality_v0 (zig's libc++abi), which unwinds with zig's static libunwind on
+// libgcc's incompatible context and segfaults (__unw_set_reg reading address 0x7).
 bool g_backtrace_ok = false;
 
 void crash_handler(int sig, siginfo_t *si, void *uc_) {
@@ -104,20 +107,24 @@ void crash_handler(int sig, siginfo_t *si, void *uc_) {
 }
 
 void install_crash_handler() {
-  // Own stack: a stack overflow must still produce a report. The backtrace unwinder loads
-  // libgcc_s lazily (not async-signal-safe): do it once now and remember whether it worked.
+  // Own stack: a stack overflow must still produce a report.
   static char altstack[64 * 1024];
   stack_t ss{};
   ss.ss_sp = altstack;
   ss.ss_size = sizeof altstack;
   sigaltstack(&ss, nullptr);
-  void *warm[4];
-  g_backtrace_ok = backtrace(warm, 4) >= 3;
+  // Handler before the warm-up: a fault in the warm-up itself is reported too (without backtrace()).
   struct sigaction sa{};
   sa.sa_sigaction = crash_handler;
   sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND | SA_NODEFER;
   sigemptyset(&sa.sa_mask);
   for (int s : {SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL}) sigaction(s, &sa, nullptr);
+#if !defined(__arm__)
+  // The backtrace unwinder loads libgcc_s lazily (not async-signal-safe): do it once now and
+  // remember whether it worked.
+  void *warm[4];
+  g_backtrace_ok = backtrace(warm, 4) >= 3;
+#endif
 }
 
 }  // namespace
