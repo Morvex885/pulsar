@@ -25,10 +25,11 @@ const std::string kSndTimer = std::string(kSounds) + "common/timer.wav";
 constexpr float kDuckGain = 0.15f;
 constexpr int64_t kTimerRingMaxMs = 15 * 60 * 1000;
 // Longest wait for the next pipeline event before the dialog is given up locally. HA's voice
-// command segmenter ends speech capture after at most 15 s of audio; conversation agents (LLMs
-// with tool calls) can think for tens of seconds, streamed ones report INTENT_PROGRESS meanwhile.
+// command segmenter ends speech capture after at most 15 s of audio. Between INTENT_START and
+// INTENT_END nothing arrives (ESPHome forwards INTENT_PROGRESS only once, when TTS streaming
+// starts), and conversation agents (LLMs with tool calls) may think for a minute or more.
 constexpr int64_t kListenTimeoutMs = 30'000;
-constexpr int64_t kProcessTimeoutMs = 60'000;
+constexpr int64_t kProcessTimeoutMs = 120'000;
 constexpr uint16_t kSendspinPort = 8928;
 
 std::string read_line(const char *path) {
