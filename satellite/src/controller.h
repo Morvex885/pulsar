@@ -83,6 +83,7 @@ class Controller : public ApiHooks {
   void update_ui();
   void update_detection();
   void update_duck();
+  void apply_gains();
   void set_volume(float v, bool feedback);
   void set_muted(bool m);
   void start_sendspin(const DeviceIdentity &id);

@@ -228,6 +228,7 @@ bool Controller::start() {
   update_detection();
 
   start_sendspin(id);
+  apply_gains();  // a saved mute
   if (!api_->start()) {
     LOGE("ESPHome API server failed to start");
     return false;
@@ -625,8 +626,16 @@ void Controller::update_duck() {
   const bool want = phase_ != Phase::IDLE || announcing_ || timer_ringing_ || closing_earcon_;
   if (want == ducked_) return;
   ducked_ = want;
-  player_.set_channel_gain(Channel::MUSIC, want ? kDuckGain : 1.0f);
-  if (sendspin_) sendspin_->set_duck_gain(want ? kDuckGain : 1.0f);
+  apply_gains();
+}
+
+// Mute: softvol raw 0 is the bottom of its dB range (-60 dB on the Midi), still audible, so mute
+// also zeroes the software gains of both playback channels and Sendspin.
+void Controller::apply_gains() {
+  const float music = st_.muted ? 0.0f : ducked_ ? kDuckGain : 1.0f;
+  player_.set_channel_gain(Channel::MUSIC, music);
+  player_.set_channel_gain(Channel::ANNOUNCE, st_.muted ? 0.0f : 1.0f);
+  if (sendspin_) sendspin_->set_duck_gain(music);
 }
 
 void Controller::start_sendspin(const DeviceIdentity &id) {
@@ -668,6 +677,7 @@ void Controller::start_sendspin(const DeviceIdentity &id) {
 void Controller::set_muted(bool m) {
   st_.muted = m;
   mixer_.set_muted(m);
+  apply_gains();
   if (sendspin_) sendspin_->report_volume(st_.volume, st_.muted);
   publish_media();
   persist();
@@ -679,6 +689,7 @@ void Controller::set_volume(float v, bool feedback) {
   if (st_.muted && feedback) {
     st_.muted = false;
     mixer_.set_muted(false);
+    apply_gains();
   }
   if (feedback) {
     leds_.show_volume(st_.volume);
