@@ -109,6 +109,7 @@ class Controller : public ApiHooks {
   bool awaiting_run_start_ = false;  // this dialog's start request has no RUN_START yet
   bool run_active_ = false;          // some run is between RUN_START and RUN_END
   bool stale_run_end_ = false;       // the RUN_END of a replaced run is still due
+  bool stop_sent_ = false;           // voice_request_stop already sent for this dialog's run
   std::string tts_url_;
   bool tts_played_ = false;
   bool continue_conversation_ = false;

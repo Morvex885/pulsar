@@ -172,7 +172,6 @@ bool Controller::start() {
       LOGI("hardware mic mute: %d", m);
       api_->publish_binary_sensor(BinarySensorId::HW_MIC_MUTE, m);
       if (m && phase_ == Phase::LISTENING) {
-        api_->voice_request_stop();
         finish_interaction();
       }
       update_detection();
@@ -185,7 +184,6 @@ bool Controller::start() {
         if (sendspin_pairing_prompt_ && sendspin_) return sendspin_->confirm_pairing_window();
         if (timer_ringing_) return stop_timer_ring();
         if (phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING) {
-          api_->voice_request_stop();
           interrupt_speech();  // an announcement playing over the dialog goes with it
           play_closing_earcon(kSndCancel);
           return finish_interaction();
@@ -300,6 +298,7 @@ void Controller::start_pipeline(const std::string &phrase, bool earcon) {
   dialog_++;
   stale_run_end_ = run_active_;
   awaiting_run_start_ = true;
+  stop_sent_ = false;
   listen_started_ms_ = Loop::now_ms();
   loop_.add_timer(kCommandAfterWakeMs + 100, [this] { update_commands(); });
   tts_url_.clear();
@@ -340,6 +339,10 @@ void Controller::on_voice_event(VaEvent type, const std::map<std::string, std::s
   } else if (type == VaEvent::RUN_END) {
     run_active_ = false;
   }
+  if (phase_ == Phase::IDLE) {  // the run of a dialog that already ended; it is being stopped
+    LOGD("voice event %u: dialog already ended, ignored", (unsigned)type);
+    return;
+  }
   switch (type) {
     case VaEvent::RUN_START:
       tts_url_ = get("url");
@@ -353,7 +356,6 @@ void Controller::on_voice_event(VaEvent type, const std::map<std::string, std::s
       break;
     case VaEvent::INTENT_START:
       if (phase_ == Phase::LISTENING) stop_streaming();
-      phase_ = Phase::PROCESSING;
       update_ui();
       break;
     case VaEvent::INTENT_PROGRESS:
@@ -405,10 +407,18 @@ void Controller::tts_finished(bool ok) {
 }
 
 void Controller::finish_interaction() {
+  // The dialog may end before its run does (answer cut short, cancel, timeout): stop the run so
+  // HA does not go on generating; whatever it still sends is dropped while idle.
+  if ((run_active_ || awaiting_run_start_) && !stop_sent_) {
+    api_->voice_request_stop();
+    stop_sent_ = true;
+  }
+  awaiting_run_start_ = false;
   mic_.set_streaming(false);
   phase_ = Phase::IDLE;
   dialog_++;
   tts_played_ = false;
+  tts_url_.clear();
   continue_conversation_ = false;
   update_duck();
   arm_watchdog();
@@ -434,8 +444,10 @@ void Controller::on_voice_start_failed() {
   abort_dialog("Home Assistant refused to start it");
 }
 
-void Controller::on_voice_audio_overflow() {  // the server has already asked HA to stop
-  if (phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING) abort_dialog("network too slow for the microphone audio");
+void Controller::on_voice_audio_overflow() {
+  if (phase_ != Phase::LISTENING && phase_ != Phase::PROCESSING) return;
+  stop_sent_ = true;  // by the server itself
+  abort_dialog("network too slow for the microphone audio");
 }
 
 // Without it a run HA never ends (lost connection state, a hung agent) would leave the ring
@@ -446,7 +458,6 @@ void Controller::arm_watchdog() {
   if (phase_ != Phase::LISTENING && phase_ != Phase::PROCESSING) return;
   watchdog_ = loop_.add_timer(phase_ == Phase::LISTENING ? kListenTimeoutMs : kProcessTimeoutMs, [this] {
     watchdog_ = 0;
-    api_->voice_request_stop();
     abort_dialog("no progress from Home Assistant, giving up");
   });
 }
@@ -754,7 +765,6 @@ void Controller::on_switch(SwitchId id, bool state) {
   if (id == SwitchId::MIC_MUTE) {
     st_.mic_muted = state;
     if (state && phase_ == Phase::LISTENING) {
-      api_->voice_request_stop();
       finish_interaction();
     }
     update_detection();
@@ -829,7 +839,6 @@ void Controller::on_command(const std::string &word) {
   bool after_wake = phase_ == Phase::LISTENING && Loop::now_ms() - listen_started_ms_ < kCommandAfterWakeMs;
   LOGI("voice command '%s'%s", word.c_str(), after_wake ? " (after wake word, HA pipeline cancelled)" : "");
   if (after_wake) {
-    api_->voice_request_stop();
     finish_interaction();
   }
   switch (c) {
