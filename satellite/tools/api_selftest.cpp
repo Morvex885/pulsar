@@ -1,7 +1,7 @@
 // Self-test harness for the ESPHome API server: runs ApiServer with logging hooks so a real
 // client (aioesphomeapi / Home Assistant) can be pointed at it.
 //
-// Usage: api_selftest [port=16053] [name=cucumber-selftest] [run_seconds=120] [key_file]
+// Usage: api_selftest [port=16053] [name=pulsar-selftest] [run_seconds=120] [key_file]
 //
 // key_file: Noise key file as in the daemon's state dir (api_key, base64 of 32 bytes); without it
 // the server is plaintext-only and encryption unsupported. A key set from the client
@@ -146,7 +146,7 @@ std::string read_mac() {
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   uint16_t port = uint16_t(argc > 1 ? atoi(argv[1]) : 16053);
-  std::string name = argc > 2 ? argv[2] : "cucumber-selftest";
+  std::string name = argc > 2 ? argv[2] : "pulsar-selftest";
   int run_s = argc > 3 ? atoi(argv[3]) : 120;
 
   Loop loop;

@@ -1,22 +1,22 @@
 #!/bin/sh
-# Keeps cucumber-satellite running while /data/cucumber-satellite/enabled exists.
-# Log: /tmp/cucumber-satellite.log (tmpfs, rotated at 1 MB, one .1 kept).
+# Keeps pulsar running while /data/pulsar/enabled exists.
+# Log: /tmp/pulsar.log (tmpfs, rotated at 1 MB, one .1 kept).
 #
 # Exit status of the daemon: 0 = deliberate exit (SIGTERM from ctl.sh restart, the "Restart" button
 # in Home Assistant): restart after 1 s, neither counted nor forgiven as a crash unless it ran
 # < MINUP seconds. Anything else (non-zero, killed by a signal, e.g. 139 = SIGSEGV) is a crash.
 # A "short crash" is one after a run of < LONG seconds. CRASHES consecutive short crashes: swap in
-# cucumber-satellite.prev (the bad binary is kept as .bad) and try again; if that crash-loops too,
+# pulsar.prev (the bad binary is kept as .bad) and try again; if that crash-loops too,
 # remove `enabled` and give the speaker back to the Yandex stack (same as `ctl.sh disable`).
 # Only a run of >= LONG seconds resets the count. Restart delay after a crash: 3 s, doubling up
 # to 30 s.
-# CS_DIR, CS_LOG, CS_Q override the device paths (local dry runs).
-D=${CS_DIR:-/data/cucumber-satellite}
-LOG=${CS_LOG:-/tmp/cucumber-satellite.log}
-Q=${CS_Q:-/system/vendor/quasar/q}
-BIN=$D/cucumber-satellite
+# PULSAR_DIR, PULSAR_LOG, PULSAR_Q override the device paths (local dry runs).
+D=${PULSAR_DIR:-/data/pulsar}
+LOG=${PULSAR_LOG:-/tmp/pulsar.log}
+Q=${PULSAR_Q:-/system/vendor/quasar/q}
+BIN=$D/pulsar
 MAXLOG=1000000
-LONG=${CS_LONG:-300}
+LONG=${PULSAR_LONG:-300}
 CRASHES=5
 MINUP=5
 BACKOFF_MIN=3

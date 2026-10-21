@@ -42,10 +42,10 @@ jobs:
           make ARCH=${{ matrix.arch }} -j"$(nproc)" binary $tools
       - uses: actions/upload-artifact@v7
         with:
-          name: cucumber-satellite-${{ matrix.arch }}
+          name: pulsar-${{ matrix.arch }}
           path: |
-            satellite/build/${{ matrix.arch }}/cucumber-satellite
-            satellite/build/${{ matrix.arch }}/cucumber-satellite.debug
+            satellite/build/${{ matrix.arch }}/pulsar
+            satellite/build/${{ matrix.arch }}/pulsar.debug
           if-no-files-found: error
 
   release:
@@ -61,9 +61,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           for a in aarch64 armhf; do
-            cp cucumber-satellite-$a/cucumber-satellite cucumber-satellite-$a.bin
-            cp cucumber-satellite-$a/cucumber-satellite.debug cucumber-satellite-$a.debug
+            cp pulsar-$a/pulsar pulsar-$a.bin
+            cp pulsar-$a/pulsar.debug pulsar-$a.debug
           done
-          sha256sum cucumber-satellite-*.bin > SHA256SUMS
+          sha256sum pulsar-*.bin > SHA256SUMS
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes \
-            cucumber-satellite-*.bin cucumber-satellite-*.debug SHA256SUMS
+            pulsar-*.bin pulsar-*.debug SHA256SUMS

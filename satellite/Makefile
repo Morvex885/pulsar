@@ -1,7 +1,7 @@
 # Cross-build for Yandex Stations with zig: one binary per userland ABI.
 #   ARCH=aarch64  Station Midi    (aarch64, glibc 2.36)
 #   ARCH=armhf    Station Lite 2  (32-bit ARM hard-float, glibc 2.30)
-# `make` builds both; `make ARCH=armhf` one of them. Output: build/<arch>/cucumber-satellite.
+# `make` builds both; `make ARCH=armhf` one of them. Output: build/<arch>/pulsar.
 #
 # The Sendspin player links sendspin-cpp and its dependencies statically. They are fetched once
 # (pinned commits/tags, see third_party/fetch.sh) into third_party/src/ and built per ARCH with
@@ -67,7 +67,7 @@ SS_LIBS  := $(SS_BUILD)/sendspin/libsendspin.a \
             $(SS_BUILD)/sendspin/libnoise_c.a
 
 # The deployed binary is stripped (the Lite 2 has ~80 MB of /data for the binary, its .prev and the
-# upload); the unstripped link, with line tables, is kept as build/<arch>/cucumber-satellite.debug
+# upload); the unstripped link, with line tables, is kept as build/<arch>/pulsar.debug
 # for `addr2line -f -e` on the crash report that main.cpp writes to the log.
 # -Wno-date-time: the build date is reported to Home Assistant as compilation_time.
 CXXFLAGS := -std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-date-time -Isrc -I$(SYSROOT)/include \
@@ -78,23 +78,23 @@ SRCS := $(shell find src -name '*.cpp')
 OBJS := $(patsubst src/%.cpp,$(BUILD)/%.o,$(SRCS))
 DEPS := $(OBJS:.o=.d)
 
-# Reported by `cucumber-satellite --version` and Home Assistant. Only main.o and controller.o see it;
+# Reported by `pulsar --version` and Home Assistant. Only main.o and controller.o see it;
 # the stamp changes (and they rebuild) only when the version string does.
 VERSION := $(shell git describe --always --dirty 2>/dev/null || echo unknown)
 VERSION_STAMP := $(BUILD)/version.stamp
-$(BUILD)/main.o $(BUILD)/controller.o: CXXFLAGS += -DCS_VERSION='"$(VERSION)"'
+$(BUILD)/main.o $(BUILD)/controller.o: CXXFLAGS += -DPULSAR_VERSION='"$(VERSION)"'
 $(BUILD)/main.o $(BUILD)/controller.o: $(VERSION_STAMP)
 
 $(VERSION_STAMP): FORCE
 	@mkdir -p $(BUILD)
 	@echo '$(VERSION)' | cmp -s - $@ || echo '$(VERSION)' > $@
 
-binary: $(BUILD)/cucumber-satellite
+binary: $(BUILD)/pulsar
 
-$(BUILD)/cucumber-satellite.debug: $(OBJS) $(SS_STAMP)
+$(BUILD)/pulsar.debug: $(OBJS) $(SS_STAMP)
 	$(CXX) $(OBJS) -o $@ $(LDFLAGS)
 
-$(BUILD)/cucumber-satellite: $(BUILD)/cucumber-satellite.debug
+$(BUILD)/pulsar: $(BUILD)/pulsar.debug
 	$(ZIG) objcopy --strip-all $< $@
 
 $(BUILD)/%.o: src/%.cpp | $(SS_STAMP) $(SYSROOT_STAMP)

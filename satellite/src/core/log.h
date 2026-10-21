@@ -1,4 +1,4 @@
-// Minimal stderr logging with level filter (CS_LOG_LEVEL env: 0=debug..3=error), an optional
+// Minimal stderr logging with level filter (PULSAR_LOG_LEVEL env: 0=debug..3=error), an optional
 // sink queue for streaming log lines to API clients, and collapsing of identical repeats.
 #pragma once
 
@@ -14,7 +14,7 @@ int log_level();
 void log_write(int level, const char *file, int line, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 
 // Lines at or above min_level (0..3; 4 = off) are queued for log_take(), independently of
-// CS_LOG_LEVEL. notify runs on whichever thread logged, under the log lock, when the queue
+// PULSAR_LOG_LEVEL. notify runs on whichever thread logged, under the log lock, when the queue
 // becomes non-empty; it must only hand off (e.g. Loop::post) and must not log itself.
 struct LogLine {
   int level;

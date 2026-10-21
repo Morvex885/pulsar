@@ -128,7 +128,7 @@ bool Controller::start() {
   id.model = model_.model_name;
   id.board = model_.codename;
   id.manufacturer = "Yandex";
-  id.project_version = CS_VERSION;
+  id.project_version = PULSAR_VERSION;
 
   ApiConfig cfg;
   cfg.wake_words = {{"alisa", "Алиса", {"ru"}}, {"yandex", "Яндекс", {"ru"}}};

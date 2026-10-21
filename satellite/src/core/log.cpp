@@ -79,7 +79,7 @@ void flush_repeats_locked() {
 
 int log_level() {
   static int lvl = [] {
-    const char *e = getenv("CS_LOG_LEVEL");
+    const char *e = getenv("PULSAR_LOG_LEVEL");
     return e ? atoi(e) : 1;
   }();
   return lvl;

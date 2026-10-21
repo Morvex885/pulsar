@@ -1,4 +1,4 @@
-# cucumber-satellite
+# pulsar
 
 Яндекс Станция Миди (кодовое имя `cucumber`) и Яндекс Станция Лайт 2 (`plum`) как локальный
 голосовой спутник и умная колонка для [Home Assistant](https://www.home-assistant.io/) — без облака
@@ -106,10 +106,10 @@ make -C satellite -j"$(nproc)"                       # zig 0.14.1 в PATH
 make -C satellite -j"$(nproc)" ZIG=~/opt/zig/zig     # или явно
 ```
 
-Makefile отказывается работать с zig старше 0.14. Результат: `satellite/build/<arch>/cucumber-satellite`
-(без отладочной информации — его и ставит установщик) и рядом `cucumber-satellite.debug` с
+Makefile отказывается работать с zig старше 0.14. Результат: `satellite/build/<arch>/pulsar`
+(без отладочной информации — его и ставит установщик) и рядом `pulsar.debug` с
 символами для разбора отчётов о падениях. Версия берётся из `git describe` и видна в
-`cucumber-satellite --version` и в HA (сущность «Version»).
+`pulsar --version` и в HA (сущность «Version»).
 
 При первой сборке скачиваются и собираются зависимости (sendspin-cpp и его библиотеки,
 заголовки alsa-lib), все версии зафиксированы. Собираются обе версии: `satellite/build/aarch64/`
@@ -139,7 +139,7 @@ root-доступом пронумерованы. Остальные (други
 
 Если программа не собрана, скрипт сначала собирает её. Затем на каждую выбранную колонку он:
 
-1. копирует демон и служебные скрипты в `/data/cucumber-satellite`; если бинарник изменился,
+1. копирует демон и служебные скрипты в `/data/pulsar`; если бинарник изменился,
    прежний сохраняется как `.prev` (тот же бинарник не копируется и `.prev` не трогает);
 2. добавляет строку автозапуска в `/data/quasar/rootkeeper.sh`, сохранив резервную копию
    `rootkeeper.sh.bak-<время>`;
@@ -168,8 +168,8 @@ MA. Синхронное воспроизведение в группах с д�
 По умолчанию колонка принимает Sendspin-подключения без сопряжения. Чтобы требовать сопряжение:
 
 ```sh
-adb shell 'echo 0 > /data/cucumber-satellite/sendspin/unpaired_access'
-adb shell /data/cucumber-satellite/ctl.sh restart
+adb shell 'echo 0 > /data/pulsar/sendspin/unpaired_access'
+adb shell /data/pulsar/ctl.sh restart
 ```
 
 После этого при запросе сопряжения на часах появляется «----»: нажмите кнопку действия, и колонка
@@ -189,14 +189,14 @@ satellite/deploy/install.sh --ssh            # дополнительно соб
 На колонке (`adb shell` или ssh):
 
 ```sh
-/data/cucumber-satellite/ctl.sh status    # кто сейчас работает: демон или стек Яндекса
-/data/cucumber-satellite/ctl.sh log 100   # журнал (/tmp/cucumber-satellite.log)
-/data/cucumber-satellite/ctl.sh restart
-/data/cucumber-satellite/ctl.sh reload    # перезапустить и надзорный скрипт (после обновления supervise.sh)
-/data/cucumber-satellite/ctl.sh api-key   # ключ шифрования API: показать / задать / clear
-/data/cucumber-satellite/ctl.sh disable   # вернуть стек Яндекса, в том числе после перезагрузки
-/data/cucumber-satellite/ctl.sh enable
-/data/cucumber-satellite/cucumber-satellite --version
+/data/pulsar/ctl.sh status    # кто сейчас работает: демон или стек Яндекса
+/data/pulsar/ctl.sh log 100   # журнал (/tmp/pulsar.log)
+/data/pulsar/ctl.sh restart
+/data/pulsar/ctl.sh reload    # перезапустить и надзорный скрипт (после обновления supervise.sh)
+/data/pulsar/ctl.sh api-key   # ключ шифрования API: показать / задать / clear
+/data/pulsar/ctl.sh disable   # вернуть стек Яндекса, в том числе после перезагрузки
+/data/pulsar/ctl.sh enable
+/data/pulsar/pulsar --version
 ```
 
 Журнал лежит в `/tmp` (обнуляется при перезагрузке), ротируется при 1 МБ; одинаковые подряд строки
@@ -207,19 +207,19 @@ satellite/deploy/install.sh --ssh            # дополнительно соб
 бинарник сохраняется как `.bad`); если падает и он — колонка возвращается стеку Яндекса, как после
 `ctl.sh disable`. Перезапуск кнопкой «Restart» в HA или через `ctl.sh restart` падением не считается.
 При падении в журнал пишется отчёт с адресами; разобрать его можно на компьютере:
-`addr2line -f -e satellite/build/<arch>/cucumber-satellite.debug <адреса>`.
+`addr2line -f -e satellite/build/<arch>/pulsar.debug <адреса>`.
 
 Откат на предыдущую версию вручную:
 
 ```sh
-cd /data/cucumber-satellite && mv cucumber-satellite.prev cucumber-satellite && ./ctl.sh restart
+cd /data/pulsar && mv pulsar.prev pulsar && ./ctl.sh restart
 ```
 
-Полное удаление: `ctl.sh disable`, затем удалить `/data/cucumber-satellite` и строку
-`/data/cucumber-satellite/boot.sh` из `/data/quasar/rootkeeper.sh`.
+Полное удаление: `ctl.sh disable`, затем удалить `/data/pulsar` и строку
+`/data/pulsar/boot.sh` из `/data/quasar/rootkeeper.sh`.
 
 Настройки (громкость, свет, часы, активационная фраза, часовой пояс) хранятся в
-`/data/cucumber-satellite/state.conf`. Громкость записывается дважды: `volume2=` по шкале
+`/data/pulsar/state.conf`. Громкость записывается дважды: `volume2=` по шкале
 штатной прошивки и `volume=` — та же громкость для прежних версий демона, так что после отката на
 `.prev` колонка играет так же громко.
 
@@ -227,12 +227,12 @@ cd /data/cucumber-satellite && mv cucumber-satellite.prev cucumber-satellite && 
 
 Колонка поддерживает шифрование ESPHome API (Noise), как обычные ESPHome-устройства. Пока ключа
 нет, API работает без шифрования, и свежий Home Assistant при подключении сам создаёт ключ и
-записывает его на колонку (`/data/cucumber-satellite/api_key`); дальше соединение шифруется.
+записывает его на колонку (`/data/pulsar/api_key`); дальше соединение шифруется.
 Задать ключ вручную (base64 от 32 байт, как в ESPHome) или убрать его:
 
 ```sh
-/data/cucumber-satellite/ctl.sh api-key <base64>   # затем ввести тот же ключ в HA
-/data/cucumber-satellite/ctl.sh api-key clear
+/data/pulsar/ctl.sh api-key <base64>   # затем ввести тот же ключ в HA
+/data/pulsar/ctl.sh api-key clear
 ```
 
 После смены или удаления ключа вручную HA попросит переавторизовать устройство. **Внимание:**

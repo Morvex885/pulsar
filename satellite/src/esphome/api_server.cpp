@@ -27,7 +27,7 @@ namespace {
 constexpr uint32_t kApiMajor = 1;
 constexpr uint32_t kApiMinor = 15;
 constexpr const char *kEsphomeVersion = "2026.9.0";
-constexpr const char *kProjectName = "cucumber.satellite";
+constexpr const char *kProjectName = "pulsar.satellite";
 
 // Message ids (ref/api.proto `option (id)`).
 enum Msg : uint32_t {
@@ -967,7 +967,7 @@ struct ApiServer::Impl {
         pb::Writer w;
         w.u32(1, kApiMajor);
         w.u32(2, kApiMinor);
-        w.str(3, std::string("cucumber-satellite ") + id.project_version, true);
+        w.str(3, std::string("pulsar ") + id.project_version, true);
         w.str(4, id.name, true);
         if (!c->hello) make_room();
         send_msg(c, HELLO_RESP, w);

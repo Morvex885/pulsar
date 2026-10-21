@@ -1,5 +1,5 @@
-// cucumber-satellite: Home Assistant voice satellite for Yandex Stations (Midi, Lite 2).
-// usage: cucumber-satellite [--version | state_file]
+// pulsar: Home Assistant voice satellite for Yandex Stations (Midi, Lite 2).
+// usage: pulsar [--version | state_file]
 #include <execinfo.h>
 #include <signal.h>
 #include <sys/signalfd.h>
@@ -15,8 +15,8 @@
 #include "core/log.h"
 #include "core/loop.h"
 
-#ifndef CS_VERSION
-#define CS_VERSION "unknown"
+#ifndef PULSAR_VERSION
+#define PULSAR_VERSION "unknown"
 #endif
 
 namespace {
@@ -36,7 +36,7 @@ void arm_teardown_watchdog(int status) {
 }
 
 // Crash report straight to stderr (the log file): everything here is async-signal-safe. The binary
-// is stripped; resolve the addresses with `addr2line -f -e build/<arch>/cucumber-satellite.debug`
+// is stripped; resolve the addresses with `addr2line -f -e build/<arch>/pulsar.debug`
 // (non-PIE: addresses are absolute).
 void put(const char *s) {
   if (write(2, s, strlen(s)) < 0) {}
@@ -124,10 +124,10 @@ void install_crash_handler() {
 
 int main(int argc, char **argv) {
   if (argc > 1 && !strcmp(argv[1], "--version")) {
-    printf("cucumber-satellite %s\n", CS_VERSION);
+    printf("pulsar %s\n", PULSAR_VERSION);
     return 0;
   }
-  const char *state = argc > 1 ? argv[1] : "/data/cucumber-satellite/state.conf";
+  const char *state = argc > 1 ? argv[1] : "/data/pulsar/state.conf";
   signal(SIGPIPE, SIG_IGN);
   install_crash_handler();
   const cs::Model *model = cs::detect_model();
@@ -153,7 +153,7 @@ int main(int argc, char **argv) {
     arm_teardown_watchdog(1);
     return 1;
   }
-  LOGI("cucumber-satellite %s running on %s (%s)", CS_VERSION, model->model_name.c_str(),
+  LOGI("pulsar %s running on %s (%s)", PULSAR_VERSION, model->model_name.c_str(),
        model->codename.c_str());
   loop.run();
   arm_teardown_watchdog(0);
