@@ -167,7 +167,13 @@ through the 32-bit `libquasar_gstreamer.so`, Sendspin playback, LED animations b
   url played to its end; `stop()` or a replacing `play()` delivers `false` for the superseded list
   (queued by that call, so it runs after the caller returns). Callers must check that the dialog /
   announcement they belong to is still current (`dialog_`, `announce_seq_` in the controller).
-- Voice phases LISTENING/PROCESSING are bounded by a watchdog (30 s / 60 s without a pipeline
-  event); any new path into those phases must go through `start_pipeline`.
-- Volume: `Mixer` maps 0..1 to the stock curve in `Model::volume_map`; `state.conf`
-  `volume_curve=2` marks volumes saved on that curve (older ones are migrated once).
+- Voice phases LISTENING/PROCESSING are bounded by a watchdog (30 s / 120 s without a pipeline
+  event; ESPHome forwards INTENT_PROGRESS only once, so nothing arrives while the agent thinks);
+  any new path into those phases must go through `start_pipeline`.
+- Pipeline events carry no run id. Until the dialog's RUN_START every event belongs to the run it
+  replaced (HA sends that run's RUN_END first) and is dropped; events while IDLE are dropped;
+  `finish_interaction` sends `voice_request_stop` when the dialog's run is still active.
+- Volume: `Mixer` maps 0..1 to the stock curve in `Model::volume_map`. `state.conf` has
+  `volume2=` (stock curve, authoritative) and `volume=` (same raw level on the pre-curve mapping, for
+  binaries rolled back to `.prev`); without `volume2=`, `volume=` is converted once. Mute writes
+  softvol raw 0 (still -60 dB, not silence) and also zeroes the channel and Sendspin gains.
