@@ -96,57 +96,67 @@ ESPHome Dashboard; голосовой конвейер обслуживает п
 - Проверено на прошивках `0.351.1.6.4197281754.20260528.142` (Миди) и
   `0.369.1.46.4778258659.20261013.133` (Лайт 2).
 
-**Компьютер для сборки (Linux):**
-
-- [zig 0.14.1](https://ziglang.org/download/) — кросс-компилятор (Миди: aarch64/glibc 2.36,
-  Лайт 2: 32-битный armhf/glibc 2.30). zig 0.13 не подходит: собранные им 32-битные программы
-  падают при запуске. Другой zig можно указать как `ZIG=/путь/к/zig`;
-- `make`, `git`, `curl`, `cmake` ≥ 3.16, `ninja`, `patch`
-  (cmake и ninja можно поставить через `uv tool install cmake ninja`);
-- `adb` из Android platform-tools.
+**Компьютер:** Windows, macOS или Linux в той же сети, что и колонка. Ставить ничего не нужно:
+установщик сам скачает `adb`, если его нет (см. «Установка»). Сборка из исходников — только Linux
+или WSL2, см. «Сборка из исходников».
 
 **Home Assistant** 2025.x или новее с интеграцией ESPHome и настроенным конвейером Assist
 (STT/TTS с поддержкой русского).
 
-## Сборка
-
-```sh
-make -C satellite -j"$(nproc)"                       # zig 0.14.1 в PATH
-make -C satellite -j"$(nproc)" ZIG=~/opt/zig/zig     # или явно
-```
-
-Makefile отказывается работать с zig старше 0.14. Результат: `satellite/build/<arch>/pulsar`
-(без отладочной информации — его и ставит установщик) и рядом `pulsar.debug` с
-символами для разбора отчётов о падениях. Версия берётся из `git describe` и видна в
-`pulsar --version` и в HA (сущность «Version»).
-
-При первой сборке скачиваются и собираются зависимости (sendspin-cpp и его библиотеки,
-заголовки alsa-lib), все версии зафиксированы. Собираются обе версии: `satellite/build/aarch64/`
-(Миди) и `satellite/build/armhf/` (Лайт 2); установщик сам выбирает нужную.
-
-Каждый pull request и каждый push в `main` собираются в GitHub Actions (обе архитектуры);
-готовые бинарники лежат в артефактах сборки, а для версий (теги `v*`) — в Releases.
-
 ## Установка
 
+Скачайте архив для своего компьютера из
+[последнего релиза](https://github.com/Morvex885/pulsar/releases/latest), распакуйте и запустите
+`pulsar-install`.
+
+| Компьютер | Архив |
+|---|---|
+| Windows | `pulsar-windows-amd64.zip` |
+| macOS (Apple Silicon) | `pulsar-macos-arm64.tar.gz` |
+| macOS (Intel) | `pulsar-macos-amd64.tar.gz` |
+| Linux x86-64 | `pulsar-linux-amd64.tar.gz` |
+| Linux ARM64 (например, Raspberry Pi) | `pulsar-linux-arm64.tar.gz` |
+
+Linux и macOS (подставьте имя своего архива):
+
 ```sh
-satellite/deploy/install.sh                 # найти колонки в сети и выбрать, куда ставить
-satellite/deploy/install.sh 192.168.1.50    # или сразу по адресу
-satellite/deploy/install.sh --list          # только показать найденное
-ZIG=~/opt/zig/zig satellite/deploy/install.sh   # если zig 0.14.1 не первый в PATH
+curl -fLO https://github.com/Morvex885/pulsar/releases/latest/download/pulsar-linux-amd64.tar.gz
+tar -xzf pulsar-linux-amd64.tar.gz && cd pulsar
+./pulsar-install                 # найти колонки в сети и выбрать, куда ставить
+./pulsar-install 192.168.1.50    # или сразу по адресу
+./pulsar-install --list          # только показать найденное
 ```
 
-Без адреса скрипт находит Станции через mDNS (`avahi-browse`). Штатные Станции объявляют себя
-как `_yandexio._tcp`, а уже переведённые — как ESPHome-устройства `yandex-*`. Затем скрипт
-подключается к ним по adb, определяет модель и показывает список. Поддерживаемые колонки с
-root-доступом пронумерованы. Остальные (другие модели, adb без root) перечислены с причиной
-пропуска.
+Windows (PowerShell или командная строка):
 
-Если `avahi-browse` нет или колонка не находится, `--scan` ищет открытый adb (порт 5555) по всей
-подсети /24. Тогда другие Android-устройства в сети могут показать запрос «Разрешить отладку?» —
-его можно отклонить.
+```bat
+curl.exe -fLO https://github.com/Morvex885/pulsar/releases/latest/download/pulsar-windows-amd64.zip
+tar -xf pulsar-windows-amd64.zip
+cd pulsar
+.\pulsar-install.exe
+```
 
-Если программа не собрана, скрипт сначала собирает её. Затем на каждую выбранную колонку он:
+Можно и распаковать архив в Проводнике и запустить `pulsar-install.exe` двойным щелчком (см.
+«Windows и macOS»).
+
+В архиве уже собраны программы для обеих моделей колонок и dropbear, рядом лежат служебные
+скрипты. В каждом релизе также есть отдельные бинарники `pulsar-<arch>.bin`, файлы
+`pulsar-<arch>.debug` и `SHA256SUMS`.
+
+Установщику нужен `adb`. Если его нет в `PATH`, при первом запуске установщик скачивает Android
+SDK Platform-Tools с dl.google.com (условия Google) в каталог `platform-tools` рядом с собой. Для
+Linux ARM64 Google их не собирает — поставьте `adb` сами (`sudo apt install adb`).
+
+Без адреса установщик находит Станции через mDNS. Штатные Станции объявляют себя как
+`_yandexio._tcp`, а уже переведённые — как ESPHome-устройства `yandex-*`. Затем он подключается к
+ним по adb, определяет модель и показывает список. Поддерживаемые колонки с root-доступом
+пронумерованы. Остальные (другие модели, adb без root) перечислены с причиной пропуска.
+
+Если колонка не находится, `--scan` ищет открытый adb (порт 5555) по всей подсети /24. Тогда
+другие Android-устройства в сети могут показать запрос «Разрешить отладку?» — его можно отклонить.
+
+В копии репозитория установщик сначала собирает программу (см. «Сборка из исходников»). Затем на
+каждую выбранную колонку он:
 
 1. копирует демон и служебные скрипты в `/data/pulsar`; если бинарник изменился,
    прежний сохраняется как `.prev` (тот же бинарник не копируется и `.prev` не трогает);
@@ -164,46 +174,6 @@ ESPHome-устройство `yandex-midi-xxxxxx` или `yandex-lite2-xxxxxx`. 
 интеграцию ESPHome вручную с IP колонки и портом `6053`; ключ шифрования HA создаст сам (см.
 «Шифрование API»). В настройках
 устройства выберите конвейер Assist и активационную фразу.
-
-### Обновление со старой версии (cucumber-satellite)
-
-Раньше демон назывался `cucumber-satellite` и жил в `/data/cucumber-satellite`. `install.sh` сам
-переносит такую установку в `/data/pulsar`:
-
-1. останавливает старый демон (стек Яндекса при этом не запускается);
-2. копирует `state.conf` (настройки), `api_key` (ключ шифрования HA — переподключать колонку в HA
-   не нужно) и `sendspin/` (сопряжение с Music Assistant); старый бинарник остаётся как
-   `/data/pulsar/pulsar.prev`;
-3. заменяет в `/data/quasar/rootkeeper.sh` только старую строку автозапуска на новую (резервная
-   копия — `rootkeeper.sh.bak-<ГГГГММДДччммсс>`);
-4. запускает новый демон и, если проверка здоровья прошла, переименовывает старый каталог в
-   `/data/cucumber-satellite.migrated-<ГГГГММДДччммсс>` (та же метка времени). Если миграция или
-   проверка не удались, старая установка (строка автозапуска, `enabled`, запущенный демон)
-   восстанавливается автоматически, без вопроса об откате.
-
-Вручную вернуться к старой версии:
-
-```sh
-rm /data/pulsar/enabled && /data/pulsar/ctl.sh reload   # остановить pulsar; стек Яндекса не запускается
-mv /data/cucumber-satellite.migrated-<метка> /data/cucumber-satellite
-```
-
-Затем в `/data/quasar/rootkeeper.sh` замените строку автозапуска pulsar
-
-```sh
-[ -x /data/pulsar/boot.sh ] && /data/pulsar/boot.sh </dev/null >/dev/null 2>&1 &
-```
-
-обратно на старую
-
-```sh
-[ -x /data/cucumber-satellite/boot.sh ] && /data/cucumber-satellite/boot.sh </dev/null >/dev/null 2>&1 &
-```
-
-(можно и вернуть весь файл из `rootkeeper.sh.bak-<метка>`, но тогда пропадут изменения, сделанные в
-нём после миграции) и включите старый демон: `/data/cucumber-satellite/ctl.sh enable`.
-
-Когда всё работает, каталог `/data/cucumber-satellite.migrated-<метка>` можно удалить.
 
 ### Music Assistant
 
@@ -228,11 +198,67 @@ adb shell /data/pulsar/ctl.sh restart
 ### SSH (необязательно)
 
 ```sh
-satellite/deploy/install.sh --ssh            # дополнительно соберёт и поставит dropbear
+./pulsar-install --ssh            # дополнительно поставит dropbear
 ```
 
 Устанавливает dropbear в `/data/dropbear` на порт 22. **Вход под root с пустым паролем** (`-B`).
 Ставьте только в доверенной сети или поменяйте флаги в `ssh/start.sh`.
+
+## Windows и macOS
+
+> Установщик для Windows и macOS пока не проверен на реальных компьютерах. Если что-то не
+> работает, напишите в issues.
+
+### Windows
+
+- `pulsar-install.exe` — консольная программа. Если запустить её двойным щелчком, окно в конце
+  ждёт Enter, чтобы можно было прочитать вывод.
+- Архив, скачанный браузером и распакованный в Проводнике, может вызвать SmartScreen: «Система
+  Windows защитила ваш компьютер» → «Подробнее» → «Выполнить в любом случае». У архива, скачанного
+  через `curl.exe` и распакованного `tar`, как в «Установке», такой пометки нет.
+- Если `adb` уже есть в `PATH` (например, из Android Studio), используется он.
+- Подключение колонки по USB не описано: используйте adb по сети.
+
+### macOS
+
+- Скачивайте архив через `curl`, как в «Установке». Для архива, уже скачанного браузером:
+  `xattr -dr com.apple.quarantine pulsar`.
+- Если поиск ничего не находит или adb пишет «No route to host», разрешите терминалу доступ к
+  локальной сети: «Системные настройки» → «Конфиденциальность и безопасность» → «Локальная сеть».
+- Сборка демона на macOS не поддерживается — используйте архив.
+
+## Сборка из исходников
+
+Демон собирается на Linux или WSL2; установщику из копии репозитория нужен ещё
+[Go](https://go.dev/dl/) 1.27+:
+
+- [zig 0.14.1](https://ziglang.org/download/) — кросс-компилятор (Миди: aarch64/glibc 2.36,
+  Лайт 2: 32-битный armhf/glibc 2.30). zig 0.13 не подходит: собранные им 32-битные программы
+  падают при запуске. Другой zig можно указать как `ZIG=/путь/к/zig`;
+- `make`, `git`, `curl`, `cmake` ≥ 3.16, `ninja`, `patch`
+  (cmake и ninja можно поставить через `uv tool install cmake ninja`);
+- `adb` из Android platform-tools.
+
+```sh
+make -C satellite -j"$(nproc)"                       # zig 0.14.1 в PATH
+make -C satellite -j"$(nproc)" ZIG=~/opt/zig/zig     # или явно
+go -C installer run . 192.168.1.50                  # установщик из копии репозитория; сам вызывает make
+```
+
+Makefile отказывается работать с zig старше 0.14. Результат: `satellite/build/<arch>/pulsar`
+(без отладочной информации — его и ставит установщик) и рядом `pulsar.debug` с
+символами для разбора отчётов о падениях. Версия берётся из `git describe` и видна в
+`pulsar --version` и в HA (сущность «Version»).
+
+При первой сборке скачиваются и собираются зависимости (sendspin-cpp и его библиотеки,
+заголовки alsa-lib), все версии зафиксированы. Собираются обе версии: `satellite/build/aarch64/`
+(Миди) и `satellite/build/armhf/` (Лайт 2); установщик сам выбирает нужную. С `--ssh` установщик
+дополнительно собирает dropbear (`ssh/build.sh`).
+
+Каждый pull request и каждый push в `main` собираются в GitHub Actions (обе архитектуры);
+готовые бинарники лежат в артефактах сборки, а для версий (теги `v*`) — в Releases: архивы
+`pulsar-<ОС>-<arch>` для установки, бинарники обеих архитектур, `.debug`-файлы и `SHA256SUMS`
+(архивы собирает `satellite/deploy/dist.sh`).
 
 ## Управление
 
@@ -257,7 +283,7 @@ satellite/deploy/install.sh --ssh            # дополнительно соб
 бинарник сохраняется как `.bad`); если падает и он — колонка возвращается стеку Яндекса, как после
 `ctl.sh disable`. Перезапуск кнопкой «Restart» в HA или через `ctl.sh restart` падением не считается.
 При падении в журнал пишется отчёт с адресами; разобрать его можно на компьютере:
-`addr2line -f -e satellite/build/<arch>/pulsar.debug <адреса>`.
+`addr2line -f -e satellite/build/<arch>/pulsar.debug <адреса>` (или `pulsar-<arch>.debug` из релиза).
 
 Откат на предыдущую версию вручную:
 
@@ -327,9 +353,10 @@ satellite/
   src/hw/         кольцо/логотип (framebuffer), часы, кнопки, датчик освещённости
   src/model.*     описание железа каждой модели, определение модели по devicetree
   src/controller.*  логика спутника и сущностей HA
-  deploy/         install.sh (на компьютере), boot.sh / supervise.sh / ctl.sh (на колонке)
+  deploy/         boot.sh / supervise.sh / ctl.sh (на колонке), dist.sh (архивы релиза)
   tools/          диагностические утилиты (зонд железа, офлайн-тест спотера, тест API)
   third_party/    закреплённые версии зависимостей и тулчейн zig для CMake
+installer/        установщик pulsar-install (Go): поиск колонок, adb, установка, миграция
 ssh/              сборка и запуск dropbear
 ```
 
@@ -337,4 +364,6 @@ ssh/              сборка и запуск dropbear
 
 [MIT](LICENSE). Сторонние библиотеки, которые скачиваются при сборке, распространяются под своими
 лицензиями: sendspin-cpp, ArduinoJson, noise-c, IXWebSocket, micro-flac, micro-opus, alsa-lib,
-dropbear, OpenSSH.
+dropbear, OpenSSH. Установщик написан на Go (стандартная библиотека и `golang.org/x/net`,
+лицензия BSD). `adb` в архивы не входит: установщик скачивает Android SDK Platform-Tools с сайта
+Google, они распространяются на условиях Google.

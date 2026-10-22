@@ -48,22 +48,81 @@ jobs:
             satellite/build/${{ matrix.arch }}/pulsar.debug
           if-no-files-found: error
 
+  ssh:
+    # dropbear + sftp-server for the release archives (pulsar-install --ssh); tags only.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+      - run: ssh/build.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ssh
+          path: |
+            ssh/out/aarch64/
+            ssh/out/armhf/
+          if-no-files-found: error
+
+  installer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27'
+          cache-dependency-path: installer/go.sum
+      - name: vet + test
+        working-directory: installer
+        run: |
+          go vet ./... && GOOS=windows go vet ./... && GOOS=darwin go vet ./...
+          go test ./...
+      - name: cross-build
+        working-directory: installer
+        run: |
+          for t in windows/amd64 darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            os=${t%/*} arch=${t#*/} ext=
+            [ "$os" = windows ] && ext=.exe
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags='-s -w' -o "dist/$os-$arch/pulsar-install$ext" .
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer
+          path: installer/dist/
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, ssh, installer]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
-      - name: GitHub release with both binaries
+        with:
+          path: artifacts
+      - name: 'GitHub release: archives per host OS, both binaries, debug files'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Artifact roots: satellite/build/<arch>/ and ssh/out/.
           for a in aarch64 armhf; do
-            cp pulsar-$a/pulsar pulsar-$a.bin
-            cp pulsar-$a/pulsar.debug pulsar-$a.debug
+            mkdir -p satellite/build/$a ssh/out/$a
+            cp artifacts/pulsar-$a/pulsar satellite/build/$a/pulsar
+            cp artifacts/ssh/$a/dropbearmulti artifacts/ssh/$a/sftp-server ssh/out/$a/
+            cp artifacts/pulsar-$a/pulsar pulsar-$a.bin
+            cp artifacts/pulsar-$a/pulsar.debug pulsar-$a.debug
           done
-          sha256sum pulsar-*.bin > SHA256SUMS
+          # Constant names: README links releases/latest/download/pulsar-<os>-<arch>.<ext>.
+          satellite/deploy/dist.sh pulsar-windows-amd64.zip artifacts/installer/windows-amd64/pulsar-install.exe
+          for t in macos-arm64:darwin-arm64 macos-amd64:darwin-amd64 linux-amd64:linux-amd64 linux-arm64:linux-arm64; do
+            satellite/deploy/dist.sh "pulsar-${t%%:*}.tar.gz" "artifacts/installer/${t#*:}/pulsar-install"
+          done
+          sha256sum pulsar-*.bin pulsar-*.zip pulsar-*.tar.gz > SHA256SUMS
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes \
-            pulsar-*.bin pulsar-*.debug SHA256SUMS
+            pulsar-*.bin pulsar-*.debug pulsar-*.zip pulsar-*.tar.gz SHA256SUMS

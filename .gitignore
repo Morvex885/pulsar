@@ -10,6 +10,9 @@
 /satellite/build/
 /satellite/third_party/src/
 /ssh/out/
+/installer/dist/
+# adb downloaded by pulsar-install when it runs from a checkout.
+/platform-tools/
 # CMake's compiler probe through zig may leave a file named "-".
 /satellite/-
 

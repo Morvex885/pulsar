@@ -23,7 +23,8 @@ at runtime; they are never copied into the repo.
 | `satellite/src/sendspin/` | Sendspin player on top of sendspin-cpp, own ALSA sink on the `speakers` dmix |
 | `satellite/src/hw/` | LED ring / logo (framebuffers behind ledfb triggers), clock (sysfs segments), input (touch keys, `SW_MUTE_DEVICE`), light sensor (`ltr308als01`) |
 | `satellite/src/controller.*` | all satellite logic: voice pipeline state machine, entities, local commands, persistence |
-| `satellite/deploy/` | `install.sh` (host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
+| `satellite/deploy/` | `dist.sh` (release archives, host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
+| `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install, health check |
 | `satellite/tools/` | probes: `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest` |
 | `satellite/third_party/` | `fetch.sh` (pinned deps), `sysroot.sh` (alsa-lib link sysroot), CMake glue, zig toolchain wrappers |
 | `ssh/` | `build.sh` (static dropbear + sftp-server), `start.sh` (device side) |
@@ -38,10 +39,13 @@ make -C satellite -j"$(nproc)"                       # both: build/{aarch64,armh
 make -C satellite ARCH=armhf                          # one architecture
 make -C satellite ARCH=armhf build/armhf/tools/ww_offline   # any tool in satellite/tools/
 ssh/build.sh                                         # → ssh/out/{aarch64,armhf}/{dropbearmulti,sftp-server}
+go -C installer test ./...                           # installer unit tests
+go -C installer run . [args]                         # installer from a checkout (builds the daemon first)
 ```
 
 Host tools: **zig 0.14.1** (`ZIG=/path/to/zig` if not in PATH; the Makefile rejects ≤ 0.13, whose
-armhf C++ release builds crash before `main`), make, git, curl, cmake ≥ 3.16, ninja, patch. The
+armhf C++ release builds crash before `main`), make, git, curl, cmake ≥ 3.16, ninja, patch; Go 1.27+
+(installer). The
 first build fetches pinned dependencies into `satellite/third_party/src/` and builds an ALSA
 sysroot per architecture into `satellite/build/<arch>/sysroot/` (Midi: versioned like the
 firmware's alsa-lib; Lite 2: unversioned, exporting only `snd_*`, otherwise the daemon would import
@@ -50,13 +54,19 @@ one deployed) and `pulsar.debug` (unstripped, line tables) for `addr2line -f -e`
 crash report `main.cpp` writes to the log (non-PIE: addresses are absolute; armhf reports pc/lr only:
 glibc's `backtrace()` there runs libgcc_s's unwinder into the binary's static zig personality
 routine and segfaults). The version is
-`git describe --always --dirty` (`--version`, HA DeviceInfo and the "Version" entity). There is no host test
-suite; verification happens on the device.
+`git describe --always --dirty` (`--version`, HA DeviceInfo and the "Version" entity). Host-side
+tests exist only for the installer (`go -C installer test ./...`); the daemon is verified on the
+device.
 
 CI (`.github/workflows/build.yml`) builds the daemon and every tool for both architectures on each
-pull request and push to `main`; the binaries are attached to the run as artifacts. Pushing a tag
-`v*` additionally publishes a GitHub release with both stripped binaries, their `.debug` files and
-`SHA256SUMS`.
+pull request and push to `main`; the binaries are attached to the run as artifacts. Job `installer`
+vets the installer for linux/windows/darwin, runs its tests and cross-builds it for windows/amd64,
+darwin/{arm64,amd64} and linux/{amd64,arm64}. Pushing a tag `v*` additionally builds dropbear (job
+`ssh`, `ssh/build.sh`) and publishes a GitHub release with one archive per host OS,
+`pulsar-{windows-amd64.zip,macos-{arm64,amd64}.tar.gz,linux-{amd64,arm64}.tar.gz}` (assembled by
+`satellite/deploy/dist.sh`: `pulsar-install`, both daemon binaries, dropbear and the device
+scripts in the repo layout), plus `pulsar-<arch>.bin`, `pulsar-<arch>.debug` and `SHA256SUMS`.
+Asset names are constant: README links `releases/latest/download/...`.
 
 ## Branches
 
@@ -71,14 +81,15 @@ placeholder).
 ## Deploy
 
 ```sh
-satellite/deploy/install.sh --list         # discover stations (mDNS; --scan = adb port scan of the /24) + model probe
-satellite/deploy/install.sh <ip>[:port]    # build if needed, copy binary (+ .prev), add boot hook, restart
+go -C installer run . --list         # discover stations (mDNS; --scan = adb port scan of the /24) + model probe
+go -C installer run . <ip>[:port]    # build if needed, copy binary (+ .prev), add boot hook, restart
 ```
 
 Models are identified by `/proc/device-tree/compatible` (`yandex,<codename>`) both by the daemon
-(`detect_model()`, exits on unknown hardware) and by `install.sh` (`ARCH_OF`: codename → binary).
-Adding a model: hardware study first (ALSA capture layout, VQE preset, spotter channels, LEDs,
-clock, inputs, earcons), then a `Model` in `src/model.cpp` and an `ARCH_OF` entry.
+(`detect_model()`, exits on unknown hardware) and by the installer (`archOf()`: codename → binary,
+`modelName()`, in `installer/probe.go`). Adding a model: hardware study first (ALSA capture
+layout, VQE preset, spotter channels, LEDs, clock, inputs, earcons), then a `Model` in
+`src/model.cpp` and `archOf()` / `modelName()` entries.
 
 Manual binary update (e.g. over ssh):
 
@@ -96,23 +107,13 @@ replaced by the crash-loop rollback. Log: `/tmp/pulsar.log` (`ctl.sh log N`; rot
 at 1 MB by `supervise.sh`, one `.1` kept). Boot chain:
 `onboot.sh` (firmware) → `/data/quasar/rootkeeper.sh` → `boot.sh` → waits for quasar, `q stop` →
 `supervise.sh` restart loop while `enabled` exists. `ctl.sh reload` restarts the supervisor itself
-(needed after replacing `supervise.sh`; `install.sh` does it when the script changed).
-
-Migration of pre-rename installs (`/data/cucumber-satellite`, binary `cucumber-satellite`):
-`install.sh` stops the old instance without starting the Yandex stack, copies `state.conf`,
-`api_key` (keeps HA's Noise pairing) and `sendspin/` (MA pairing) into `/data/pulsar` (old binary
-→ `pulsar.prev`), replaces only the old hook line in `rootkeeper.sh` in place (backup
-`rootkeeper.sh.bak-<YYYYMMDDHHMMSS>`), and after the health check passes renames the old dir to
-`/data/cucumber-satellite.migrated-<same ts>` (manual rollback, safe to delete). On failure it
-restores the old hook, `enabled` and supervisor automatically (no rollback prompt). Manual
-rollback: `rm /data/pulsar/enabled && ctl.sh reload` (stops without starting the Yandex stack),
-rename the dir back, swap the hook line back, old `ctl.sh enable`.
+(needed after replacing `supervise.sh`; the installer does it when the script changed).
 
 Supervisor contract (`supervise.sh` header has the details): daemon exit 0 = deliberate restart
 (SIGTERM from `ctl.sh`, the HA "Restart" button via `on_restart`), restarted after 1 s and not
 counted as a crash. Anything else is a crash; backoff 3 s doubling to 30 s; 5 consecutive crashes
 each after < 300 s of uptime → swap in `.prev` (bad one kept as `.bad`); if that crash-loops too →
-remove `enabled` and start the Yandex stack. `install.sh` additionally checks the log after a
+remove `enabled` and start the Yandex stack. The installer additionally checks the log after a
 marker ~10 s post-restart and offers to restore `.prev`. A pre-Noise binary rolled back onto a
 device whose HA already holds a key cannot talk to HA until the key is removed there.
 
@@ -124,7 +125,7 @@ device whose HA already holds a key cannot talk to HA until the key is removed t
 - Do not modify the rootfs (`/system`, `/etc`); everything persistent lives in `/data`.
 - Several devices may share one adb server: always pass `adb -s <serial>`.
 - `adb shell` on this firmware is a pty: output has `\r`, is not binary-safe (use push/pull) and
-  the exit status is always 0 (see `sh_()` in `install.sh`).
+  the exit status is always 0 (see `sh()` in `installer/adb.go`).
 - Before replacing the binary, keep the working one as `.prev` (the automatic rollback relies on
   it). Manual escape: `.prev` or `ctl.sh disable` (starts the Yandex stack).
 - Do not open ESPHome API connections to a device that Home Assistant is using; test against a
@@ -210,3 +211,8 @@ through the 32-bit `libquasar_gstreamer.so`, Sendspin playback, LED animations b
   flash > timer > temporary layer (`clock_show_text`/`clock_show_face` actions) > Text «Clock text» /
   Select «Clock face» > time. Only the scroll speed is persisted (`clock_scroll_ms=`). Moving
   content uses its own one-shot frame timer; the 5 s full segment rewrite counts 250 ms ticks only.
+- `installer/` (Go) is the only host-side installer. Device commands are busybox-sh strings sent
+  through `sh()` (adb shell plus `__rc=` marker; one command ≤ 4 KB on these firmwares).
+  The host side uses only the Go stdlib and `golang.org/x/net`, no host tools except adb (plus
+  make / `ssh/build.sh` in a checkout). The rootkeeper edit (`planRootkeeper`) is covered by
+  `rootkeeper_test.go`; keep it pure.

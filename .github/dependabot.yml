@@ -7,3 +7,7 @@ updates:
     groups:
       actions:
         patterns: ['*']
+  - package-ecosystem: gomod
+    directory: /installer
+    schedule:
+      interval: monthly
