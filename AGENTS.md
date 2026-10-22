@@ -11,7 +11,8 @@ glibc 2.30, 237 MB RAM). It exposes the speaker to Home Assistant over the ESPHo
 its Zigbee radio runs pulsar's own firmware (`radio/`): a deCONZ-protocol network coordinator for
 Zigbee2MQTT / ZHA (port 6638) or a router in another network (e.g. Zigbee2MQTT). Wake word, command
 spotting and echo cancellation use the firmware's own proprietary libraries, loaded with `dlopen`
-at runtime; they are never copied into the repo.
+at runtime; they are never copied into the repo. Stations on one LAN arbitrate the wake word over
+UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 
 ## Layout
 
@@ -27,6 +28,7 @@ at runtime; they are never copied into the repo.
 | `satellite/src/update/` | HA "Firmware" update entity backend: HTTPS on the firmware's OpenSSL (`https.*`, dlopen), GitHub release check / download / verify / swap (`updater.*`) |
 | `satellite/src/hw/` | LED ring / logo (framebuffers behind ledfb triggers), clock (sysfs segments), input (touch keys, `SW_MUTE_DEVICE`), light sensor (`ltr308als01`) |
 | `satellite/src/controller.*` | all satellite logic: voice pipeline state machine, entities, local commands, persistence |
+| `satellite/src/arbiter.*` | `WakeArbiter`: wake word claims between stations (UDP broadcast :6054, 250 ms window), best claim answers |
 | `satellite/deploy/` | `dist.sh` (release archives, host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
 | `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install, health check |
 | `satellite/tools/` | probes: `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `update_probe` (HTTPS client, release check, install into a scratch dir), `zigbee_probe` (Zigbee coordinator, either firmware, + deCONZ server on another port, without the daemon; `flash <image>` writes a radio image) |
@@ -362,6 +364,22 @@ through the 32-bit `libquasar_gstreamer.so`, Sendspin playback, LED animations b
   `volume2=` (stock curve, authoritative) and `volume=` (same raw level on the pre-curve mapping, for
   binaries rolled back to `.prev`); without `volume2=`, `volume=` is converted once. Mute writes
   softvol raw 0 (still -60 dB, not silence) and also zeroes the channel and Sendspin gains.
+- Wake arbitration (switch "Nearest station answers", `state.conf` `nearest_answers=`, default 1):
+  `AudioFrontend` reports the wake level as the mean of the 8 loudest of the last 47 `VQE_OMNI`
+  frames (post-AEC, no AGC; `VQE_OMNI_WITH_GAIN` loses the distance), rounded to 0.1 dB so both
+  sides compare the same numbers. A claim is one ASCII datagram `pulsar-wake/1 <name> <wake>
+  <busy> <level>`, sent 3× 40 ms apart to `255.255.255.255:6054`; the decision comes 250 ms later
+  over claims of the same wake word received up to 500 ms before ours. A claim older than the
+  250 ms window wins outright (its station already decided and answers); otherwise busy (speaking,
+  announcing, ringing) beats idle, then the higher level, then the larger station name. While
+  arbitrating the ring shows LISTENING, mic audio is buffered and sent after `voice_request_start`,
+  a command word is held; a losing station blocks voice commands for 2.5 s (cleared by its next
+  wake word or dialog). Stations without a voice subscriber do not claim (the wake word shows the
+  usual not-subscribed error). HA's `duplicate_wake_up_detected` error (first phrase per 2 s wins
+  across satellites) is handled silently: no error ring or sound. Not yet verified on stations:
+  level difference near/far (expected ≥ 6 dB at 0.5 m vs 3 m; otherwise switch the level source to
+  `RAW_MAIN_MIC_SYNC`), Midi vs Lite 2 level offset, broadcast delivery through the firmware's
+  iptables and the access point.
 - Clock layers (`Clock::Impl::refresh`): pairing code (ignores the "Clock display" switch) > volume
   flash > timer > temporary layer (`clock_show_text`/`clock_show_face` actions) > Text «Clock text» /
   Select «Clock face» > time. Only the scroll speed is persisted (`clock_scroll_ms=`). Moving

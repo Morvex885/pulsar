@@ -92,6 +92,7 @@ bool Settings::load(const std::string &path) {
     else if (k == "wake_word") wake_word = v;
     else if (k == "tz") tz = v;
     else if (k == "auto_update") auto_update = v == "1";
+    else if (k == "nearest_answers") nearest_answers = v == "1";
     else if (k == "update_attempt") update_attempt = v;
     else if (k == "zigbee_role") zigbee_role = ZigbeeService::parse_mode(v);
     else if (k == "zigbee_flash_failed") zigbee_flash_failed = uint32_t(strtoul(v.c_str(), nullptr, 16));
@@ -114,7 +115,7 @@ void Settings::save(const std::string &path) const {
       << "\nlight_b=" << light.b << "\nlight_effect=" << light.effect << "\nwake_word=" << wake_word
       << "\ntz=" << tz << "\nauto_update=" << auto_update << "\nupdate_attempt=" << update_attempt
       << "\nzigbee_role=" << ZigbeeService::role(zigbee_role).name << "\nzigbee_flash_failed=" << std::hex
-      << zigbee_flash_failed << std::dec << "\n";
+      << zigbee_flash_failed << std::dec << "\nnearest_answers=" << nearest_answers << "\n";
   }
   rename(tmp.c_str(), path.c_str());
 }
@@ -132,6 +133,7 @@ Controller::Controller(Loop &loop, const Model &model, const std::string &state_
       clock_(loop, model),
       input_(loop, model),
       light_(loop),
+      arbiter_(loop),
       updater_(loop, kUpdateRepo, PULSAR_VERSION) {}
 
 Controller::~Controller() = default;
@@ -172,6 +174,7 @@ bool Controller::start() {
   if (!model_.zigbee_tty.empty())
     for (const auto &r : ZigbeeService::kRoles) cfg.zigbee_modes.push_back(r.label);
   api_ = std::make_unique<ApiServer>(loop_, id, cfg, *this);
+  arbiter_ok_ = arbiter_.start(id.name);
 
   // Hardware first: UI feedback should work even if HA is not connected.
   if (!leds_.open()) LOGW("LEDs unavailable");
@@ -218,6 +221,7 @@ bool Controller::start() {
   if (input_.open()) {
     hw_mic_muted_ = input_.hw_muted();
     input_.on_mute([this](bool m) {
+      if (m) cancel_arbitration();
       hw_mic_muted_ = m;
       LOGI("hardware mic mute: %d", m);
       api_->publish_binary_sensor(BinarySensorId::HW_MIC_MUTE, m);
@@ -266,10 +270,13 @@ bool Controller::start() {
     });
   }
 
-  mic_.on_wake([this](const std::string &phrase) { on_wake(phrase); });
+  mic_.on_wake([this](const std::string &phrase, float level_db) { on_wake(phrase, level_db); });
   mic_.on_command([this](const std::string &word) { on_command(word); });
   mic_.on_audio([this](const int16_t *pcm, size_t n) {
-    if (phase_ == Phase::LISTENING) api_->voice_send_audio(pcm, n);
+    if (phase_ == Phase::LISTENING)
+      api_->voice_send_audio(pcm, n);
+    else if (arbitrating_)  // the request goes on with what was said right after the wake word
+      arb_audio_.insert(arb_audio_.end(), pcm, pcm + n);
   });
   if (!mic_.start(model_dir(st_.wake_word), kCommandModel)) LOGE("microphone front-end failed to start");
   update_detection();
@@ -302,6 +309,7 @@ void Controller::on_client_connected(const std::string &client_info) {
   api_->publish_switch(SwitchId::MIC_MUTE, st_.mic_muted);
   api_->publish_switch(SwitchId::CLOCK, st_.clock_on);
   api_->publish_switch(SwitchId::AUTO_UPDATE, st_.auto_update);
+  api_->publish_switch(SwitchId::NEAREST_ANSWERS, st_.nearest_answers);
   publish_update();
   api_->publish_binary_sensor(BinarySensorId::HW_MIC_MUTE, hw_mic_muted_);
   api_->publish_number(NumberId::CLOCK_BRIGHTNESS, st_.clock_brightness * 100.f);
@@ -352,15 +360,78 @@ void Controller::on_time(uint32_t epoch, const std::string &tz) {
 
 void Controller::update_detection() { mic_.set_detection(!st_.mic_muted && !hw_mic_muted_); }
 
-void Controller::on_wake(const std::string &phrase) {
+void Controller::on_wake(const std::string &phrase, float level_db) {
   if (st_.mic_muted || hw_mic_muted_) return;
-  if (timer_ringing_) return stop_timer_ring();  // the wake word works as a stop word while ringing
-  if (phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING) return;
-  if (phase_ == Phase::SPEAKING || announcing_) interrupt_speech();  // barge-in: cut the answer short
-  start_pipeline(phrase, true);
+  LOGI("wake word '%s', level %.1f dB", phrase.c_str(), level_db);
+  if (timer_ringing_) {  // the wake word works as a stop word while ringing
+    // A ringing station takes the turn so that its neighbours do not start a dialog.
+    cancel_arbitration();
+    if (arbitration_on()) arbiter_.claim(st_.wake_word, level_db, true, nullptr);
+    return stop_timer_ring();
+  }
+  if (phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING || arbitrating_) return;
+  // Without the HA pipeline this station could win and stay silent: it does not take part.
+  if (!arbitration_on() || !api_->voice_subscribed()) return answer_wake(phrase, {});
+  arbitrating_ = true;
+  commands_blocked_until_ms_ = 0;  // a station that lost the previous wake word may win this one
+  arb_phrase_ = phrase;
+  arb_level_ = level_db;
+  arb_audio_.clear();
+  arb_command_.clear();
+  mic_.set_streaming(true);
+  update_commands();
+  update_ui();
+  arbiter_.claim(st_.wake_word, level_db, phase_ == Phase::SPEAKING || announcing_,
+                 [this](bool won, const WakeArbiter::Claim &best, size_t peers) { arbitration_done(won, best, peers); });
 }
 
-void Controller::start_pipeline(const std::string &phrase, bool earcon) {
+void Controller::answer_wake(const std::string &phrase, std::vector<int16_t> preroll) {
+  if (timer_ringing_) return stop_timer_ring();
+  if (phase_ == Phase::LISTENING || phase_ == Phase::PROCESSING) return;
+  if (phase_ == Phase::SPEAKING || announcing_) interrupt_speech();  // barge-in: cut the answer short
+  start_pipeline(phrase, true, std::move(preroll));
+}
+
+void Controller::arbitration_done(bool won, const WakeArbiter::Claim &best, size_t peers) {
+  arbitrating_ = false;
+  std::vector<int16_t> audio = std::move(arb_audio_);
+  std::string command = std::move(arb_command_);
+  arb_audio_.clear();
+  arb_command_.clear();
+  if (!won) {
+    mic_.set_streaming(false);
+    LOGI("wake word: %s answers (%s%.1f dB, ours %.1f dB)", best.station.c_str(), best.busy ? "busy, " : "",
+         best.level_db, arb_level_);
+    // The command spotter of a playing station would still act on "Алиса, громче".
+    commands_blocked_until_ms_ = Loop::now_ms() + kCommandAfterWakeMs;
+    update_commands();
+    update_ui();
+    return;
+  }
+  LOGI("wake word: this station answers (%zu other station(s) heard it)", peers);
+  if (!command.empty()) {  // "Алиса, громче": handled locally, as right after the wake word
+    mic_.set_streaming(false);
+    update_commands();
+    update_ui();
+    return on_command(command);
+  }
+  // Capture keeps streaming into the new dialog: switching it off here could drop the chunk
+  // between the preroll and live audio.
+  answer_wake(arb_phrase_, std::move(audio));
+  if (phase_ != Phase::LISTENING) mic_.set_streaming(false);  // no dialog started (e.g. HA gone)
+}
+
+void Controller::cancel_arbitration() {
+  if (!arbitrating_) return;
+  arbiter_.cancel();
+  arbitrating_ = false;
+  arb_audio_.clear();
+  arb_command_.clear();
+  if (phase_ != Phase::LISTENING) mic_.set_streaming(false);
+}
+
+void Controller::start_pipeline(const std::string &phrase, bool earcon, std::vector<int16_t> preroll) {
+  cancel_arbitration();  // the button, a continued conversation or HA's start_conversation win
   if (!api_->voice_subscribed()) {
     LOGW("wake ignored: Home Assistant voice assistant not subscribed");
     leds_.set_ui_state(UiState::ERROR);
@@ -368,6 +439,7 @@ void Controller::start_pipeline(const std::string &phrase, bool earcon) {
     return;
   }
   LOGI("starting voice pipeline (wake='%s')", phrase.c_str());
+  commands_blocked_until_ms_ = 0;
   phase_ = Phase::LISTENING;
   dialog_++;
   stale_run_end_ = run_active_;
@@ -383,13 +455,17 @@ void Controller::start_pipeline(const std::string &phrase, bool earcon) {
   const uint64_t dialog = dialog_;
   api_->voice_request_start(phrase);
   if (dialog != dialog_) return;  // sending failed and closed the voice client, which ended the dialog
+  // HA drops audio queued before the start and queues what follows it on the same connection.
+  for (size_t i = 0; i < preroll.size() && dialog == dialog_; i += 512)
+    api_->voice_send_audio(preroll.data() + i, std::min<size_t>(512, preroll.size() - i));
+  if (dialog != dialog_) return;  // the audio backlog overflowed and aborted the dialog
   mic_.set_streaming(true);
   arm_watchdog();
   update_ui();
 }
 
 void Controller::stop_streaming() {
-  mic_.set_streaming(false);
+  mic_.set_streaming(arbitrating_);  // a wake word heard meanwhile keeps its audio
   if (phase_ == Phase::LISTENING) phase_ = Phase::PROCESSING;
 }
 
@@ -445,6 +521,12 @@ void Controller::on_voice_event(VaEvent type, const std::map<std::string, std::s
       play_tts();
       break;
     case VaEvent::ERROR:
+      // HA accepts one wake word phrase per 2 s across satellites: another one answers.
+      if (get("code") == "duplicate_wake_up_detected") {
+        LOGI("pipeline: another satellite answers this wake word (HA duplicate wake-up)");
+        stop_streaming();
+        break;
+      }
       LOGW("pipeline error: %s %s", get("code").c_str(), get("message").c_str());
       stop_streaming();
       error_shown_ = true;
@@ -490,7 +572,7 @@ void Controller::finish_interaction() {
     stop_sent_ = true;
   }
   awaiting_run_start_ = false;
-  mic_.set_streaming(false);
+  mic_.set_streaming(arbitrating_);
   phase_ = Phase::IDLE;
   dialog_++;
   tts_played_ = false;
@@ -900,6 +982,7 @@ void Controller::on_restart() {
 void Controller::on_switch(SwitchId id, bool state) {
   if (id == SwitchId::MIC_MUTE) {
     st_.mic_muted = state;
+    if (state) cancel_arbitration();
     if (state && phase_ == Phase::LISTENING) {
       finish_interaction();
     }
@@ -910,6 +993,8 @@ void Controller::on_switch(SwitchId id, bool state) {
     clock_.set_enabled(state);
   } else if (id == SwitchId::AUTO_UPDATE) {
     st_.auto_update = state;
+  } else if (id == SwitchId::NEAREST_ANSWERS) {
+    st_.nearest_answers = state;
   }
   api_->publish_switch(id, state);
   persist();
@@ -1119,7 +1204,8 @@ void Controller::on_active_wake_words(const std::vector<std::string> &ids) {
 void Controller::update_commands() {
   bool playing = player_.state(Channel::MUSIC) == PlayState::PLAYING || (sendspin_ && sendspin_->streaming()) ||
                  announcing_ || timer_ringing_ || phase_ == Phase::SPEAKING;
-  bool after_wake = phase_ == Phase::LISTENING && Loop::now_ms() - listen_started_ms_ < kCommandAfterWakeMs;
+  bool after_wake =
+      (phase_ == Phase::LISTENING && Loop::now_ms() - listen_started_ms_ < kCommandAfterWakeMs) || arbitrating_;
   mic_.set_commands(!st_.mic_muted && !hw_mic_muted_ && (playing || after_wake));
 }
 
@@ -1147,6 +1233,15 @@ void Controller::on_command(const std::string &word) {
   else if (word == "дальше" || word == "следующий") c = NEXT;
   else if (word == "назад") c = PREV;
   if (c == NONE) return;  // TV navigation, "включи свет" etc. are left to Home Assistant
+  if (Loop::now_ms() < commands_blocked_until_ms_) {
+    LOGI("voice command '%s' ignored: another station answers this wake word", word.c_str());
+    return;
+  }
+  if (arbitrating_) {
+    arb_command_ = word;
+    LOGI("voice command '%s' held until the wake arbitration ends", word.c_str());
+    return;
+  }
   bool after_wake = phase_ == Phase::LISTENING && Loop::now_ms() - listen_started_ms_ < kCommandAfterWakeMs;
   LOGI("voice command '%s'%s", word.c_str(), after_wake ? " (after wake word, HA pipeline cancelled)" : "");
   if (after_wake) {
@@ -1202,6 +1297,7 @@ void Controller::update_ui() {
     case Phase::IDLE:
       break;
   }
+  if (arbitrating_) return leds_.set_ui_state(UiState::LISTENING);
   if (announcing_) return leds_.set_ui_state(UiState::SPEAKING);
   leds_.set_ui_state((st_.mic_muted || hw_mic_muted_) ? UiState::MUTED : UiState::IDLE);
 }

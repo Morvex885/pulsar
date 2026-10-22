@@ -4,6 +4,7 @@
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
@@ -35,6 +36,23 @@ constexpr int kSpotterToVqe[6] = {VQE_OMNI_WITH_GAIN, RAW_MAIN_MIC_SYNC, VQE_OMN
 // Spotter events (event_id_to_str). Hits are confirmations; 0/4/7/9 mean "need more data / finished".
 enum : int { EV_CONFIRM_1ST = 2, EV_CONFIRM_2ND = 5 };
 constexpr unsigned kEventsStopMask = (1u << 0) | (1u << 4) | (1u << 7) | (1u << 9);
+
+// Wake word level window: 1.5 s of 32 ms VQE frames (512 samples @ 16 kHz on both models), long
+// enough to cover the phrase when the spotter confirms; the loudest frames are the phrase itself.
+constexpr size_t kLevelChunks = 47;
+constexpr size_t kLevelTop = 8;
+
+// Rounded to 0.1 dB: stations compare levels received as "%.1f" text, so ours must be the same
+// number the peers see, or ties could resolve differently on each side.
+float wake_level_db(const std::array<float, kLevelChunks> &h) {
+  std::array<float, kLevelChunks> s = h;
+  std::partial_sort(s.begin(), s.begin() + kLevelTop, s.end(), std::greater<float>());
+  float sum = 0;
+  for (size_t i = 0; i < kLevelTop; i++) sum += s[i];
+  float db = 10.f * std::log10(sum / kLevelTop + 1e-10f);
+  db = std::clamp(db, -100.f, 0.f);
+  return std::round(db * 10.f) / 10.f;
+}
 
 using P = void *;
 
@@ -348,6 +366,8 @@ void AudioFrontend::run() {
 
   std::vector<int16_t> in(chunk_samples);
   std::vector<float> mics(period * nmic), spk(period * nspk);
+  std::array<float, kLevelChunks> level_hist{};  // mean square per VQE frame
+  size_t level_pos = 0;
 
   while (running_) {
     {
@@ -374,6 +394,18 @@ void AudioFrontend::run() {
     }
     if (!e.vqe_check(e.vqe_process(e.vqe, mics.data(), mics.size(), spk.data(), spk.size()), "VQE process")) continue;
 
+    // VQE_OMNI is cleaned of the station's own playback but has no AGC, so it keeps the distance to
+    // the talker; VQE_OMNI_WITH_GAIN, which the spotter hears, normalizes it away.
+    {
+      const float *d = nullptr;
+      size_t n = 0;
+      if (e.vqe_check(e.vqe_out(e.vqe, VQE_OMNI, 0, &d, &n), "VQE output") && n) {
+        double sq = 0;
+        for (size_t i = 0; i < n; i++) sq += (double)d[i] * d[i];
+        level_hist[level_pos++ % kLevelChunks] = (float)(sq / n);
+      }
+    }
+
     if (stream_.load() && audio_cb_) {
       const float *d = nullptr;
       size_t n = 0;
@@ -390,10 +422,14 @@ void AudioFrontend::run() {
     }
 
     if (detect_.load()) {
-      for (auto &phrase : e.feed(e.wake))
-        loop_.post([this, phrase] {
-          if (wake_cb_) wake_cb_(phrase);
-        });
+      auto phrases = e.feed(e.wake);
+      if (!phrases.empty()) {
+        float level = wake_level_db(level_hist);
+        for (auto &phrase : phrases)
+          loop_.post([this, phrase, level] {
+            if (wake_cb_) wake_cb_(phrase, level);
+          });
+      }
     }
     if (commands_.load()) {
       for (auto &phrase : e.feed(e.cmd))

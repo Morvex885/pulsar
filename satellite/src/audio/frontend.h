@@ -23,7 +23,9 @@ namespace cs {
 
 class AudioFrontend {
  public:
-  using WakeCb = std::function<void(const std::string &phrase)>;
+  // level_db: wake word level in dBFS on VQE_OMNI (after echo cancellation, before AGC), rounded to
+  // 0.1 dB; -100 = no data.
+  using WakeCb = std::function<void(const std::string &phrase, float level_db)>;
   using CommandCb = std::function<void(const std::string &word)>;
   using AudioCb = std::function<void(const int16_t *pcm, size_t samples)>;  // 16 kHz mono
 

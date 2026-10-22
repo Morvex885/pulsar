@@ -124,6 +124,7 @@ enum Key : uint32_t {
   K_BUTTON_ZIGBEE_JOIN = 22,
   K_BUTTON_ZIGBEE_LEAVE = 23,
   K_TEXT_ZIGBEE = 24,
+  K_SW_NEAREST_ANSWERS = 25,
 };
 
 // aioesphomeapi VoiceAssistantFeature bits.
@@ -356,7 +357,7 @@ struct ApiServer::Impl {
   MediaState media_state = MediaState::IDLE;
   float media_volume = 0;
   bool media_muted = false;
-  BoolState sw_mic_mute, sw_clock, sw_auto_update, bs_hw_mute;
+  BoolState sw_mic_mute, sw_clock, sw_auto_update, sw_nearest_answers, bs_hw_mute;
   UpdateState update;
   bool update_has = false;
   FloatState lux, clock_bri, clock_scroll;
@@ -1329,6 +1330,13 @@ struct ApiServer::Impl {
     }
     {
       pb::Writer w;
+      entity_head(w, "nearest_station_answers", K_SW_NEAREST_ANSWERS, "Nearest station answers");
+      w.str(5, "mdi:speaker-multiple");
+      w.u32(8, ENTITY_CATEGORY_CONFIG);
+      send_msg(c, LIST_SWITCH, w);
+    }
+    {
+      pb::Writer w;
       entity_head(w, "firmware", K_UPDATE, "Firmware");
       w.u32(7, ENTITY_CATEGORY_CONFIG);
       w.str(8, "firmware");
@@ -1537,6 +1545,7 @@ struct ApiServer::Impl {
     send_switch(K_SW_MIC_MUTE, sw_mic_mute, c);
     send_switch(K_SW_CLOCK, sw_clock, c);
     send_switch(K_SW_AUTO_UPDATE, sw_auto_update, c);
+    send_switch(K_SW_NEAREST_ANSWERS, sw_nearest_answers, c);
     send_update(c);
     send_binary(K_BS_HW_MIC_MUTE, bs_hw_mute, c);
     send_float(SENSOR_STATE, K_SENSOR_LUX, lux, c);
@@ -1639,6 +1648,8 @@ struct ApiServer::Impl {
       hooks.on_switch(SwitchId::CLOCK, state);
     else if (key == K_SW_AUTO_UPDATE)
       hooks.on_switch(SwitchId::AUTO_UPDATE, state);
+    else if (key == K_SW_NEAREST_ANSWERS)
+      hooks.on_switch(SwitchId::NEAREST_ANSWERS, state);
   }
 
   void on_number_cmd(pb::Reader &r) {
@@ -1874,16 +1885,18 @@ void ApiServer::publish_media(MediaState st, float volume, bool muted) {
 }
 
 void ApiServer::publish_switch(SwitchId id, bool state) {
-  BoolState &s = id == SwitchId::CLOCK         ? impl_->sw_clock
-                 : id == SwitchId::AUTO_UPDATE ? impl_->sw_auto_update
-                                               : impl_->sw_mic_mute;
-  s.has = true;
-  s.v = state;
-  if (impl_->states_on())
-    impl_->send_switch(id == SwitchId::CLOCK         ? K_SW_CLOCK
-                       : id == SwitchId::AUTO_UPDATE ? K_SW_AUTO_UPDATE
-                                                     : K_SW_MIC_MUTE,
-                       s);
+  BoolState *s = nullptr;
+  uint32_t key = 0;
+  switch (id) {
+    case SwitchId::MIC_MUTE: s = &impl_->sw_mic_mute; key = K_SW_MIC_MUTE; break;
+    case SwitchId::CLOCK: s = &impl_->sw_clock; key = K_SW_CLOCK; break;
+    case SwitchId::AUTO_UPDATE: s = &impl_->sw_auto_update; key = K_SW_AUTO_UPDATE; break;
+    case SwitchId::NEAREST_ANSWERS: s = &impl_->sw_nearest_answers; key = K_SW_NEAREST_ANSWERS; break;
+  }
+  if (!s) return;
+  s->has = true;
+  s->v = state;
+  if (impl_->states_on()) impl_->send_switch(key, *s);
 }
 
 void ApiServer::publish_binary_sensor(BinarySensorId, bool state) {

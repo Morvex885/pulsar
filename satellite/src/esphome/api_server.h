@@ -96,7 +96,7 @@ struct LightState {
 };
 
 // Auxiliary entities. Keys are stable and owned by the server.
-enum class SwitchId : uint32_t { MIC_MUTE = 1, CLOCK = 2, AUTO_UPDATE = 3 };
+enum class SwitchId : uint32_t { MIC_MUTE = 1, CLOCK = 2, AUTO_UPDATE = 3, NEAREST_ANSWERS = 4 };
 enum class SensorId : uint32_t { ILLUMINANCE = 1 };
 enum class BinarySensorId : uint32_t { HW_MIC_MUTE = 1 };
 enum class NumberId : uint32_t { CLOCK_BRIGHTNESS = 1, CLOCK_SCROLL = 2 };  // 0..100 %; 100..2000 ms

@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 
+#include "arbiter.h"
 #include "audio/frontend.h"
 #include "core/loop.h"
 #include "esphome/api_server.h"
@@ -34,6 +35,7 @@ struct Settings {
   std::string wake_word = "alisa";
   std::string tz = "MSK-3";    // POSIX TZ (default matches what the Yandex firmware showed); updated from HA
   bool auto_update = false;    // install new releases without asking
+  bool nearest_answers = true; // wake arbitration with other pulsar stations
   // Release being installed. Still set after a restart into another version: that release was
   // rolled back by supervise.sh (crash loop), automatic updates skip it.
   std::string update_attempt;
@@ -77,12 +79,16 @@ class Controller : public ApiHooks {
  private:
   enum class Phase { IDLE, LISTENING, PROCESSING, SPEAKING };
 
-  void on_wake(const std::string &phrase);
+  void on_wake(const std::string &phrase, float level_db);
+  void answer_wake(const std::string &phrase, std::vector<int16_t> preroll);
+  void arbitration_done(bool won, const WakeArbiter::Claim &best, size_t peers);
+  void cancel_arbitration();
+  bool arbitration_on() const { return st_.nearest_answers && arbiter_ok_; }
   void on_command(const std::string &word);
   void update_commands();
   void music_pause();
   void music_resume();
-  void start_pipeline(const std::string &phrase, bool earcon);
+  void start_pipeline(const std::string &phrase, bool earcon, std::vector<int16_t> preroll = {});
   void stop_streaming();
   void play_tts();
   void tts_finished(bool ok);
@@ -126,11 +132,21 @@ class Controller : public ApiHooks {
   Clock clock_;
   Input input_;
   LightSensor light_;
+  WakeArbiter arbiter_;
 
   Phase phase_ = Phase::IDLE;
   int64_t listen_started_ms_ = 0;  // start of the current LISTENING phase (commands window)
   bool hw_mic_muted_ = false;
   bool error_shown_ = false;
+  // Wake arbitration: the window between our claim and the decision. Microphone audio and a
+  // command word heard in it are held until the decision.
+  bool arbiter_ok_ = false;
+  bool arbitrating_ = false;
+  std::string arb_phrase_;
+  float arb_level_ = -100;
+  std::vector<int16_t> arb_audio_;
+  std::string arb_command_;
+  int64_t commands_blocked_until_ms_ = 0;  // another station answers the wake word just heard
   uint64_t watchdog_ = 0;  // loop timer ending a LISTENING/PROCESSING phase HA never advances
   // Pipeline events carry no run id. HA ends a run it replaces (barge-in: our new start cancels
   // the old run) with a RUN_END sent before the new run's RUN_START, so until RUN_START every
