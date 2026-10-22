@@ -53,6 +53,11 @@ struct Model {
     int level, raw;
   };
   std::vector<VolumePoint> volume_map;
+
+  // Zigbee radio: Telink co-processor on a UART; its reset and boot lines are GPIO value files
+  // (active low, 1 = asserted) exported by the kernel's zb_control driver. zigbee_tty empty: none.
+  std::string zigbee_tty;
+  std::string zigbee_reset, zigbee_boot;
 };
 
 // The detected model; nullptr on unsupported hardware.

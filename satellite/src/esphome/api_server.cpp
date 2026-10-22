@@ -120,6 +120,10 @@ enum Key : uint32_t {
   K_ACTION_CLOCK_FACE = 18,
   K_UPDATE = 19,
   K_SW_AUTO_UPDATE = 20,
+  K_SELECT_ZIGBEE_MODE = 21,
+  K_BUTTON_ZIGBEE_JOIN = 22,
+  K_BUTTON_ZIGBEE_LEAVE = 23,
+  K_TEXT_ZIGBEE = 24,
 };
 
 // aioesphomeapi VoiceAssistantFeature bits.
@@ -356,7 +360,7 @@ struct ApiServer::Impl {
   UpdateState update;
   bool update_has = false;
   FloatState lux, clock_bri, clock_scroll;
-  StrState clock_text, clock_face;
+  StrState clock_text, clock_face, zigbee_mode, zigbee_status;
   LightState light;
   // Diagnostics, refreshed by diag_timer.
   FloatState rssi;
@@ -1105,6 +1109,12 @@ struct ApiServer::Impl {
         uint32_t key = 0;
         while (r.next(f))
           if (f.num == 1) key = f.u32();
+        if (key == K_BUTTON_ZIGBEE_JOIN || key == K_BUTTON_ZIGBEE_LEAVE) {
+          if (cfg.zigbee_modes.empty()) break;
+          LOGI("api: Zigbee button %u pressed by %s", unsigned(key), c->peer.c_str());
+          hooks.on_button(key == K_BUTTON_ZIGBEE_JOIN ? ButtonId::ZIGBEE_JOIN : ButtonId::ZIGBEE_LEAVE);
+          break;
+        }
         if (key != K_BUTTON_RESTART) break;
         LOGW("api: restart requested by %s", c->peer.c_str());
         hooks.on_restart();
@@ -1429,6 +1439,26 @@ struct ApiServer::Impl {
       for (const auto &o : cfg.clock_faces) w.str(6, o, true);
       send_msg(c, LIST_SELECT, w);
     }
+    if (!cfg.zigbee_modes.empty()) {
+      {
+        pb::Writer w;
+        entity_head(w, "zigbee_role", K_SELECT_ZIGBEE_MODE, "Zigbee role");
+        w.str(5, "mdi:zigbee");
+        for (const auto &o : cfg.zigbee_modes) w.str(6, o, true);
+        w.u32(8, ENTITY_CATEGORY_CONFIG);
+        send_msg(c, LIST_SELECT, w);
+      }
+      auto button = [&](const char *oid, uint32_t key, const char *name, const char *icon) {
+        pb::Writer w;
+        entity_head(w, oid, key, name);
+        w.str(5, icon);
+        w.u32(7, ENTITY_CATEGORY_CONFIG);
+        send_msg(c, LIST_BUTTON, w);
+      };
+      button("zigbee_join", K_BUTTON_ZIGBEE_JOIN, "Zigbee join network", "mdi:link-variant");
+      button("zigbee_leave", K_BUTTON_ZIGBEE_LEAVE, "Zigbee leave network", "mdi:link-variant-off");
+      text("zigbee", K_TEXT_ZIGBEE, "Zigbee", "mdi:zigbee");
+    }
     // User-defined actions (HA registers esphome.<device>_<name>; every argument is required).
     auto action = [&](const char *name, uint32_t key, const char *arg) {
       pb::Writer w, a, s;
@@ -1520,6 +1550,10 @@ struct ApiServer::Impl {
     send_float(NUMBER_STATE, K_NUMBER_CLOCK_SCROLL, clock_scroll, c);
     send_str(TEXT_STATE, K_TEXT_CLOCK, clock_text.v, clock_text.has, c);
     send_str(SELECT_STATE, K_SELECT_CLOCK_FACE, clock_face.v, clock_face.has, c);
+    if (!cfg.zigbee_modes.empty()) {
+      send_str(SELECT_STATE, K_SELECT_ZIGBEE_MODE, zigbee_mode.v, zigbee_mode.has, c);
+      send_str(TEXT_SENSOR_STATE, K_TEXT_ZIGBEE, zigbee_status.v, zigbee_status.has, c);
+    }
   }
 
   void send_update(const ClientPtr &to = nullptr) {
@@ -1651,6 +1685,12 @@ struct ApiServer::Impl {
     while (r.next(f)) {
       if (f.num == 1) key = f.u32();
       if (f.num == 2) s = f.str();
+    }
+    if (key == K_SELECT_ZIGBEE_MODE) {
+      for (const auto &o : cfg.zigbee_modes)
+        if (o == s) return hooks.on_select(SelectId::ZIGBEE_MODE, s);
+      LOGW("api: unknown Zigbee role '%s'", s.c_str());
+      return;
     }
     if (key != K_SELECT_CLOCK_FACE) return;
     if (!is_clock_face(s)) {
@@ -1871,9 +1911,16 @@ void ApiServer::publish_text(TextId, const std::string &state) {
   if (impl_->states_on()) impl_->send_str(TEXT_STATE, K_TEXT_CLOCK, state, true);
 }
 
-void ApiServer::publish_select(SelectId, const std::string &state) {
-  impl_->clock_face = {true, state};
-  if (impl_->states_on()) impl_->send_str(SELECT_STATE, K_SELECT_CLOCK_FACE, state, true);
+void ApiServer::publish_select(SelectId id, const std::string &state) {
+  const bool zb = id == SelectId::ZIGBEE_MODE;
+  (zb ? impl_->zigbee_mode : impl_->clock_face) = {true, state};
+  if (impl_->states_on()) impl_->send_str(SELECT_STATE, zb ? K_SELECT_ZIGBEE_MODE : K_SELECT_CLOCK_FACE, state, true);
+}
+
+void ApiServer::publish_text_sensor(TextSensorId, const std::string &state) {
+  impl_->zigbee_status = {true, state};
+  if (impl_->states_on() && !impl_->cfg.zigbee_modes.empty())
+    impl_->send_str(TEXT_SENSOR_STATE, K_TEXT_ZIGBEE, state, true);
 }
 
 void ApiServer::publish_light(const LightState &st) {

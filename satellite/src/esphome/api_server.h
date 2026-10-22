@@ -101,7 +101,9 @@ enum class SensorId : uint32_t { ILLUMINANCE = 1 };
 enum class BinarySensorId : uint32_t { HW_MIC_MUTE = 1 };
 enum class NumberId : uint32_t { CLOCK_BRIGHTNESS = 1, CLOCK_SCROLL = 2 };  // 0..100 %; 100..2000 ms
 enum class TextId : uint32_t { CLOCK_TEXT = 1 };
-enum class SelectId : uint32_t { CLOCK_FACE = 1 };
+enum class SelectId : uint32_t { CLOCK_FACE = 1, ZIGBEE_MODE = 2 };
+enum class ButtonId : uint32_t { ZIGBEE_JOIN = 1, ZIGBEE_LEAVE = 2 };
+enum class TextSensorId : uint32_t { ZIGBEE = 1 };
 enum class ActionId : uint32_t { CLOCK_SHOW_TEXT = 1, CLOCK_SHOW_FACE = 2 };  // args (text|face, seconds)
 enum class EventId : uint32_t { BUTTON = 1 };             // event types: "action", "action_long", "volume_up", "volume_down"
 
@@ -154,6 +156,7 @@ class ApiHooks {
   virtual void on_restart() {}
   // Update entity: install the offered release or check for one now.
   virtual void on_update(UpdateCommand cmd) {}
+  virtual void on_button(ButtonId id) {}
 };
 
 struct ApiConfig {
@@ -162,6 +165,8 @@ struct ApiConfig {
   std::vector<std::string> active_wake_words;     // initially active ids
   std::vector<std::string> light_effects;         // ring light effects, besides "None"
   std::vector<std::string> clock_faces;           // Select «Clock face» options, "None" first
+  // Select «Zigbee role» options; empty: no Zigbee entities (no radio).
+  std::vector<std::string> zigbee_modes;
   // File holding the Noise encryption key (base64 of 32 bytes, as in ESPHome's api: encryption:
   // key). Missing/empty file: plaintext (and all-zeros-key provisioning). HA may set or rotate it
   // with NoiseEncryptionSetKeyRequest. Empty path: encryption unsupported.
@@ -195,6 +200,7 @@ class ApiServer {
   void publish_number(NumberId id, float value);
   void publish_text(TextId id, const std::string &state);
   void publish_select(SelectId id, const std::string &state);
+  void publish_text_sensor(TextSensorId id, const std::string &state);
   void publish_light(const LightState &st);
   void fire_event(EventId id, const std::string &event_type);
   void publish_update(const UpdateState &st);

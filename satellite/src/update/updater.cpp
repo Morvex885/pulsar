@@ -212,7 +212,7 @@ void Updater::check(std::function<void(const std::string &err, const Release &r)
 void Updater::install(const Release &r, const std::string &binary, std::function<void(float)> progress,
                       std::function<void(const std::string &err, bool fatal)> done) {
   if (busy_) return;
-  start([this, r, binary, progress = std::move(progress), done = std::move(done)] {
+  start([this, r, binary, progress = std::move(progress), done = std::move(done), extras = extras_] {
     std::string err;
     bool fatal = false;
     const std::string asset = std::string("pulsar-") + arch() + ".bin";
@@ -258,13 +258,54 @@ void Updater::install(const Release &r, const std::string &binary, std::function
         fatal = true;
         return;
       }
+      // Extras are downloaded and checked first and replaced only together with the binary: a new
+      // radio image next to the old daemon would be written with the old daemon's protocol.
+      std::vector<std::string> extras_staged;  // x.path + ".new", parallel to `extras`
+      auto drop_staged = [&] {
+        unlink(staged.c_str());
+        for (const std::string &s : extras_staged)
+          if (!s.empty()) unlink(s.c_str());
+      };
+      for (const Extra &x : extras) {
+        extras_staged.emplace_back();
+        const std::string url = r.sums_url.substr(0, r.sums_url.rfind('/') + 1) + x.name;
+        HttpsResponse extra = https_get(url, {user_agent_}, kMaxBinary, {}, &cancel_);
+        if (extra.status == 404) continue;  // a release without it
+        if (extra.status != 200) {
+          drop_staged();
+          err = x.name + ": " + (extra.status ? "HTTP " + std::to_string(extra.status) : extra.error);
+          return;
+        }
+        want = expected_sha(sums.body, x.name);
+        if (want.empty() || sha256_hex(extra.body) != want) {
+          drop_staged();
+          err = want.empty() ? "SHA256SUMS lists no " + x.name : x.name + ": checksum mismatch";
+          fatal = true;
+          return;
+        }
+        if (!write_file(x.path + ".new", extra.body, 0644)) {
+          drop_staged();
+          err = "cannot write " + x.path + ".new: " + strerror(errno);
+          return;
+        }
+        extras_staged.back() = x.path + ".new";
+      }
       // The running binary becomes .prev: supervise.sh restores it if the new one crash-loops.
       std::string cur;
       if (!read_file(binary, cur) || !write_file(dir + "/pulsar.prev.tmp", cur, 0755) ||
           rename((dir + "/pulsar.prev.tmp").c_str(), (dir + "/pulsar.prev").c_str()) != 0) {
-        unlink(staged.c_str());
+        drop_staged();
         err = "cannot keep the current binary as .prev: " + std::string(strerror(errno));
         return;
+      }
+      for (size_t i = 0; i < extras.size(); i++) {
+        if (extras_staged[i].empty()) continue;
+        if (rename(extras_staged[i].c_str(), extras[i].path.c_str()) != 0) {
+          drop_staged();
+          err = "cannot replace " + extras[i].path + ": " + strerror(errno);
+          return;
+        }
+        extras_staged[i].clear();
       }
       if (rename(staged.c_str(), binary.c_str()) != 0) {
         unlink(staged.c_str());

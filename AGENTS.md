@@ -7,7 +7,9 @@ Guide for coding agents working on pulsar. User-facing docs: `README.md` (Russia
 A native C++ daemon replacing the Yandex stack (`maind` / `quasar_launcher2`) on rooted Yandex
 Stations: Midi (`cucumber`: aarch64, glibc 2.36, 1 GB RAM) and Lite 2 (`plum`: 32-bit armhf,
 glibc 2.30, 237 MB RAM). It exposes the speaker to Home Assistant over the ESPHome Native API
-(port 6053; plaintext until a Noise key is provisioned, then Noise) and to Music Assistant as a Sendspin player (port 8928). Wake word, command
+(port 6053; plaintext until a Noise key is provisioned, then Noise) and to Music Assistant as a Sendspin player (port 8928); on the Midi
+its Zigbee radio runs pulsar's own firmware (`radio/`): a deCONZ-protocol network coordinator for
+Zigbee2MQTT / ZHA (port 6638) or a router in another network (e.g. Zigbee2MQTT). Wake word, command
 spotting and echo cancellation use the firmware's own proprietary libraries, loaded with `dlopen`
 at runtime; they are never copied into the repo.
 
@@ -21,14 +23,16 @@ at runtime; they are never copied into the repo.
 | `satellite/src/audio/frontend.*` | capture thread (ALSA → FIFO) + processing thread: Yandex VQE → wake + command spotters → 16 kHz stream |
 | `satellite/src/media/player.*` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`), channels MUSIC / ANNOUNCE; `Mixer` = ALSA "Master Playback Volume" (softvol of the `speakers` PCM) |
 | `satellite/src/sendspin/` | Sendspin player on top of sendspin-cpp, own ALSA sink on the `speakers` dmix |
+| `satellite/src/zigbee/` | Midi Zigbee radio: zbhci link to the Telink chip (`telink_link.*`), coordinator on pulsar's firmware + ZDO to the coordinator itself (`coordinator.*`), deCONZ-protocol TCP server for Zigbee2MQTT / ZHA (`deconz_server.*`), router control (`router.*`), `.ybl` parsing + XMODEM upload through the radio's bootloader (`flasher.*`), role / firmware orchestration (`service.*`), byte order helpers (`bytes.h`) |
 | `satellite/src/update/` | HA "Firmware" update entity backend: HTTPS on the firmware's OpenSSL (`https.*`, dlopen), GitHub release check / download / verify / swap (`updater.*`) |
 | `satellite/src/hw/` | LED ring / logo (framebuffers behind ledfb triggers), clock (sysfs segments), input (touch keys, `SW_MUTE_DEVICE`), light sensor (`ltr308als01`) |
 | `satellite/src/controller.*` | all satellite logic: voice pipeline state machine, entities, local commands, persistence |
 | `satellite/deploy/` | `dist.sh` (release archives, host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
 | `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install, health check |
-| `satellite/tools/` | probes: `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `update_probe` (HTTPS client, release check, install into a scratch dir) |
+| `satellite/tools/` | probes: `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `update_probe` (HTTPS client, release check, install into a scratch dir), `zigbee_probe` (Zigbee coordinator, either firmware, + deCONZ server on another port, without the daemon; `flash <image>` writes a radio image) |
 | `satellite/third_party/` | `fetch.sh` (pinned deps), `sysroot.sh` (alsa-lib link sysroot), CMake glue, zig toolchain wrappers |
 | `ssh/` | `build.sh` (static dropbear + sftp-server), `start.sh` (device side) |
+| `radio/` | Zigbee firmware for the Midi radio on the Telink Zigbee SDK: `build.sh` (pinned SDK + toolchain, `sdk.patch`), `Makefile`, `coordinator/` and `router/` (apps), `ybl.c` (host tool: binary → `.ybl`) |
 
 Git-ignored and never to be published: `backup/` (full device backups), `dump/` (firmware binaries,
 logs), `re/` (Ghidra projects and decompiled Yandex code), `ref/` (upstream checkouts).
@@ -40,6 +44,7 @@ make -C satellite -j"$(nproc)"                       # both: build/{aarch64,armh
 make -C satellite ARCH=armhf                          # one architecture
 make -C satellite ARCH=armhf build/armhf/tools/ww_offline   # any tool in satellite/tools/
 ssh/build.sh                                         # → ssh/out/{aarch64,armhf}/{dropbearmulti,sftp-server}
+radio/build.sh                                       # → radio/out/zigbee-{coordinator,router}.ybl (needs libc6:i386, unzip)
 go -C installer test ./...                           # installer unit tests
 go -C installer run . [args]                         # installer from a checkout (builds the daemon first)
 ```
@@ -59,16 +64,20 @@ routine and segfaults). The version is
 tests exist only for the installer (`go -C installer test ./...`); the daemon is verified on the
 device.
 
-CI (`.github/workflows/build.yml`) builds the daemon and every tool for both architectures on each
-pull request and push to `main`; the binaries are attached to the run as artifacts. Job `installer`
+CI (`.github/workflows/build.yml`) builds the daemon and every tool for both architectures and the
+radio firmware images (job `radio`) on each pull request and push to `main`; the binaries are
+attached to the run as artifacts. Job `installer`
 vets the installer for linux/windows/darwin, runs its tests and cross-builds it for windows/amd64,
 darwin/{arm64,amd64} and linux/{amd64,arm64}. Pushing a tag `v*` additionally builds dropbear (job
 `ssh`, `ssh/build.sh`) and publishes a GitHub release with one archive per host OS,
 `pulsar-{windows-amd64.zip,macos-{arm64,amd64}.tar.gz,linux-{amd64,arm64}.tar.gz}` (assembled by
-`satellite/deploy/dist.sh`: `pulsar-install`, both daemon binaries, dropbear and the device
-scripts in the repo layout), plus `pulsar-<arch>.bin`, `pulsar-<arch>.debug` and `SHA256SUMS`.
+`satellite/deploy/dist.sh`: `pulsar-install`, both daemon binaries, `radio/out/zigbee-*.ybl`,
+dropbear and the device scripts in the repo layout), plus `pulsar-<arch>.bin`, `pulsar-<arch>.debug`,
+`zigbee-coordinator.ybl`, `zigbee-router.ybl` and `SHA256SUMS`.
 Asset names are constant: README links `releases/latest/download/...`, and the daemon's updater
-downloads `releases/download/<tag>/pulsar-<arch>.bin` and `SHA256SUMS` (keep both names). Only
+downloads `releases/download/<tag>/pulsar-<arch>.bin`, `zigbee-coordinator.ybl` and
+`zigbee-router.ybl` (Midi; each skipped when the release has none) and `SHA256SUMS` (keep the
+names). Only
 stable releases are offered (`releases/latest`); the tag must equal the binary's
 `git describe` (the build job checks out the tag, so it does).
 
@@ -104,7 +113,7 @@ ssh root@<ip> 'cd /data/pulsar && cp pulsar pulsar.prev &&
 ```
 
 Device layout: `/data/pulsar/{pulsar,.prev,.bad,boot.sh,supervise.sh,
-ctl.sh,state.conf,api_key,enabled,sendspin/}`. `api_key`: ESPHome Noise PSK (base64 of 32 bytes,
+ctl.sh,state.conf,api_key,enabled,sendspin/,zigbee-coordinator.ybl,zigbee-router.ybl}`. `api_key`: ESPHome Noise PSK (base64 of 32 bytes,
 0600), written by HA's auto-provisioning or `ctl.sh api-key`; absent = plaintext (Noise with the
 all-zeros key is then accepted so HA can provision); corrupt = API fails closed. `.bad`: binary
 replaced by the crash-loop rollback. Log: `/tmp/pulsar.log` (`ctl.sh log N`; rotated
@@ -170,6 +179,136 @@ From `/system/vendor/quasar/libyandex_evil.so`:
 - `YandexVqeC_Config_GetOutputChannelCount` takes `(cfg, type, int *out)`; the other `Config_Get*`
   getters return the value directly.
 
+## Zigbee radio (Midi, `src/zigbee/`)
+
+Telink B91 (RISC-V) on `/dev/ttyS2`, 115200 8N1, no flow control. It came with Yandex's
+`gateway.ybl` (`/system/vendor/quasar/zigbee/`; plain Telink image + zlib CRC-32 trailer, header
+version at 0x02, manufacturer 0x140A, image type 0x0580) and the network Yandex formed (channel
+12). Reset / boot lines: the kernel's `zb_control` driver exports them as
+`/sys/devices/platform/zigbee/zb-{reset,boot}/value` (GPIOZ_11 / GPIOZ_9, active low, 1 =
+asserted); `/etc/init.d/S30zigbee` of other firmware builds uses raw GPIO numbers that on this
+kernel belong to other pins (475 = GPIOX_0, Wi-Fi SDIO): never drive pins by number. After a reset
+the application sends 0x8907 within ~0.3 s.
+
+- Framing (stock Telink zbhci, all three firmwares): `0x55 | type BE16 | len BE16 | xor(type, len,
+  payload) | payload | 0xAA`. One frame per DMA buffer: every frame is ACKed with 0x8000
+  `[type BE16][status][0]` (2 = unknown type) and the next may only follow the ACK.
+- Yandex's gateway firmware cannot read or set the network key, PAN ID or extended PAN ID, passes
+  APS frames for endpoint 1 only and consumes ZDO responses; pulsar drove it as a ZHA coordinator
+  until its own firmware existed (git history: `src/zigbee/coordinator.cpp` before 3251a71).
+  pulsar no longer runs it; `ctl.sh disable` hands the radio back to maind, which writes
+  `gateway.ybl` again (its own update path, done when the 0x0900 version differs).
+
+### Roles and radio firmware
+
+State `zigbee_role=off|pulsar-coordinator|router` (HA select "Zigbee role": "Off", "Coordinator",
+"Router"; `ZigbeeService::kRoles`). Default and anything else is off, including `coordinator`
+(the Yandex gateway role pulsar had before): pulsar does not touch the radio, so an install never
+writes it without a choice in HA. Choosing another role persists it and restarts the daemon.
+`ZigbeeService` opens the link and asks for 0x0900 before building the role object (the deCONZ
+server listens only then); a firmware other than the role's image
+(`/data/pulsar/zigbee-{coordinator,router}.ybl`, which installs and updates bring), or a radio
+silent for 10 s (interrupted upload), gets the role's image, as maind does for the gateway. At most
+two uploads per start; an image the radio did not take is stored as
+`zigbee_flash_failed=<version hex>` and not written on later starts (the role then keeps an older
+build of its firmware if the radio has one) until the role changes or another image version
+arrives. While an upload runs (~25 s; the 5 s shutdown watchdog would cut it), the HA Restart
+button and update installs are refused; an upload cut short anyway (`ctl.sh restart`, power) leaves
+a silent radio, written again on the next start. Updates stage the images next to the binary and
+replace them together with it.
+
+- `.ybl`: Telink image whose size field (0x18) is the length without the trailer, then zlib CRC-32
+  LE. Header version at 0x02; `version >> 24` tells the family: gateway 0x15, pulsar router 0x50,
+  pulsar coordinator 0x51. All three answer 0x0900 → 0x8900 `[version BE32][manufacturer
+  BE16][image type BE16][size BE32]`.
+- Bootloader ("Yandex Bootloader v1.0.02", resident at 0–0x7FFF; the app is linked at 0x20008000):
+  boot=1, reset=1, 100 ms, reset=0, 100 ms, boot=0, then `\n` → menu ending in `BL > `; `1` =
+  XMODEM upload (128-byte blocks, CRC-16 on 'C', checksum on NAK, last block padded 0x1A then 0x00,
+  EOT), `2` = run the app. This is maind's own update path (`ncpmgr`). The flasher refuses a
+  non-tty path.
+- pulsar firmware (`radio/`, Telink Zigbee SDK @ pinned commit, Apache-2.0): `common/` has the
+  board configuration and flash map shared by `router/` and `coordinator/`, and the 0x0900 /
+  0x8907 / ACK pieces (`pulsar_hci.c`). UART0 PB2/PB3, `IMAGE_OFFSET` 0x8000, flash protection off
+  (the bootloader must be able to write the next image), all other GPIOs left as inputs. Each
+  relocates its NV inside the gateway's OTA staging area (0x77000..0xE5FFF) so every network
+  survives every switch: router 0xC0000 (factory-reset counter 0xD6000, install code 0xD7000),
+  coordinator 0xA8000 (0xBE000, 0xBF000); the gateway's NV is at 0xE6000, MAC/IEEE at 0xFF000 is
+  shared. `sdk.patch` makes those addresses and the UART buffer size overridable, BDB's 180 s
+  network-wide permit join after forming / joining optional (`BDB_NO_AUTO_PERMIT_JOIN`, both
+  images: joining is the coordinator host's decision), and gives groupcasts for groups without a
+  member endpoint to the host (`APS_GROUP_HOST_FALLBACK`, coordinator). `build.sh` fetches the SDK
+  again when `sdk.patch` changes. Every frame gets exactly one 0x8000 ACK: `zbhciCmdHandler` ACKs
+  the router's stock commands (and `hci_uart.c` parse errors), the apps their own. Neither steers
+  or forms on its own, nor has the quick-power-cycle factory reset (pulsar resets the radio at
+  every start).
+- Router zbhci: 0x0002 = network steering (join), 0x0005 = leave (broadcast Leave) + erase its
+  network, 0x0045 → 0x8045 network info (24 bytes, channel last); 0x8906 joined (0x8045 layout
+  without the channel); 0x8920 `[event][status]`: 1 started (status 0 = on a network), 2
+  commissioning failed (BDB status, 3 = no network), 3 left.
+
+### Coordinator
+
+`radio/coordinator/coordinator.c` (frame layouts in its header) is an NCP: the chip runs the stack
+and the trust center, the host chooses the network and gets every APS frame. Commands 0x0Axx /
+0x8Axx with little-endian fields. 0x0A00 → 0x8A00 state `[state][BDB status][channel][PAN][ext
+PAN][IEEE][NWK][update id][key][key seq][frame counter]` (also on every change; the host asks
+every 30 s for the frame counter hosts back up); 0x0A01 forms with the host's channel, PAN ID, ext
+PAN, key, IEEE, frame counter and update id (only without a network: 0x0A02 erases first; a state
+follows the ACK at once, forming or refused); 0x0A03 local permit join; 0x0A04 adds / replaces /
+removes (`[ep][0xFF]`) an endpoint (up to 8, 32 clusters); 0x0A05 channel change (broadcast
+Mgmt_NWK_Update_req, local switch after 10 s); 0x0A06 energy scan (`rf_startEDScan` per channel,
+the radio leaves the network channel meanwhile, the MAC's current channel is kept); 0x0A10 APS data
+request with a 1-byte handle (group / NWK / IEEE destination, source endpoint 0 or a registered
+one, APS tx options) → exactly one 0x8A10 `[handle][status]`; 0x8A11 every APS indication of a
+registered endpoint, every groupcast and every ZDO frame (the stack's ZDO handler is teed, so it
+still answers requests itself); 0x8A20 events (device joined / left, joining permitted) for the
+log.
+
+Stack facts (prebuilt `libzb_coordinator.a`, checked with the toolchain's objdump):
+- formation takes the NIB's PAN ID (`NWK_NIB().panId`, 0xFFFF = random; it moves past a PAN ID it
+  hears on the channel; `TL_ZB_ASSOCJOIN_PERMIT_PANID` is ignored);
+- `bdb_networkFormationStart` returns the BDB state (FORMATION when started);
+- `zb_preConfigNwkKey` also marks the key pre-configured (`ss_ib.preConfiguredKeyType` NWKKEY),
+  after which the trust center never transports it and joining devices associate over and over:
+  the key goes in with `ss_zdoNwkKeyConfigure` + `ss_zdoUseKey` instead;
+- BDB's default `tcRequireKeyExchange` would drop Zigbee 1.2 devices that never update their link
+  key (cleared after every BDB init);
+- an erase (`zb_resetDevice2FN`) restarts the APS counter and regenerates the factory IEEE; NV
+  restores the frame counter + 1024 at boot; the IEEE chosen by the host lives in NV_MODULE_APP
+  item 0x40 and is applied after `zb_init`;
+- `af_dataCnfHandler` confirms only to endpoint 0 and registered endpoints; `rf_setChannel` also
+  writes `g_mac_pib->phyChannelCur`, which the stack saves to NV.
+
+`ZigbeeCoordinator` (`coordinator.*`) wraps it; ZDO addressed to the coordinator itself is answered
+on the host (`local_zdo`: addresses, node / simple descriptors, active endpoints, permit join,
+energy scan). `DeconzServer` poses as ConBee III firmware 0x26780900, protocol 0x0106 (zigpy-deconz
+then scans energy with ZDO to the coordinator and skips update_neighbor, watchdog TTL, source
+routes). It accepts no TCP client until the radio reported its network and drops the client when
+the radio restarts (outside a formation): a host told "no network" forms one, which erases the
+radio. A new network is formed (erase, then form) only after the host wrote parameters the radio
+does not have (PAN ID, extended PAN ID, key, MAC address) and switched the network state; the
+network to form is fixed before the erase, so parameters the host did not write keep their
+values. deCONZ endpoint slots live in the server (zigbee-herdsman writes endpoint 0xF2 into slot 1:
+the ZLL endpoint 2 is then removed). deCONZ tx option 0x02 (NWK security) is dropped: APS bit
+0x02 would disable NWK security. zigbee-herdsman sends NWK_addr_req with NWK mode but an IEEE
+address (payload 6 bytes longer than declared): sent as a broadcast.
+
+Verified on a Midi (firmware 0.351): router image written (~20 s), joined a Zigbee2MQTT network in
+~4 s and interviewed there, left (Z2M dropped it); new router builds written automatically at start
+kept the node in its network (same NWK address). Coordinator with zigpy-deconz: formation and
+`write_network_info` with chosen PAN ID / ext PAN / key / channel / IEEE / frame counter / update
+id read back, network and IEEE kept over radio restarts and re-flashing, coordinator interview,
+energy scan, permit join; with zigbee-herdsman 11.1 (Zigbee2MQTT's stack, deconz adapter over TCP
+to the daemon): first start forms its configured network, coordinator backup written, later starts
+resume without re-forming, permit join, an Aqara WXKG11LM button (Zigbee 1.2 end device) joined,
+was interviewed and reported presses, also after the daemon updated the coordinator image. The
+button left once ~15 s after its first join (BDB's `tcNodeJoinTimeout` is 15 s;
+`ss_ib.tcPolicy.updateTCLKrequired` may still be enforced) and rejoined for good; not yet
+explained. Off-device: XMODEM upload against an emulated bootloader (byte-identical). Not yet
+verified: groupcasts in either direction, channel change, routers joining through other routers,
+larger networks, routing load, migration from another adapter (per-device TC link keys are not
+carried over).
+
 ## Model notes
 
 | | Midi (`cucumber`) | Lite 2 (`plum`) |
@@ -188,6 +327,7 @@ From `/system/vendor/quasar/libyandex_evil.so`:
 | alsa-lib | 1.2.10, versioned | 1.2.1.2, unversioned |
 | Earcons | `common/spotter_*.mp3`, `timer.wav`, `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` |
 | Boot hook | `onboot.sh` → `/data/quasar/rootkeeper.sh` | same (line 67); `q stop` available |
+| Zigbee | Telink B91 on `/dev/ttyS2`, reset/boot via `zb_control` (see Zigbee radio) | none |
 
 Lite 2 measurements: echo test (speech played through `speakers`, raw capture → `ww_offline`):
 speaker reference ch 6 gives ~25–30 dB lower VQE output than ch 4 and no false "алиса" hit from the

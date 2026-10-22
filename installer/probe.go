@@ -28,7 +28,14 @@ func archOf(code string) string {
 	return ""
 }
 
-type station struct{ serial, arch string }
+// hasZigbee: the model has the Zigbee radio the daemon can run as a router (radio/), so the router
+// firmware image is installed next to the daemon.
+func hasZigbee(code string) bool { return code == "cucumber" }
+
+type station struct {
+	serial, arch string
+	zigbee       bool
+}
 
 // found: installable stations, in the order printed by probe.
 var found []station
@@ -80,6 +87,6 @@ func probe(s string, ours bool) {
 	} else {
 		state = "stock Yandex"
 	}
-	found = append(found, station{s, archOf(code)})
+	found = append(found, station{s, archOf(code), hasZigbee(code)})
 	fmt.Printf("  [%d] %s: %s — %s\n", len(found), s, name, state)
 }

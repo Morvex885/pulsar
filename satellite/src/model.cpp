@@ -38,6 +38,12 @@ Model midi() {
   m.error_sound = "ru-RU/vins_error.wav";
   // { "0": 0, "1": 49, "20": 255 }: softvol min_dB -60, so 2.6 dB per level, level 1 at -48.5 dB.
   m.volume_map = {{0, 0}, {1, 49}, {20, 255}};
+  // Telink B91 with Yandex's gateway firmware (quasar.cfg zigbee.tty.port). Reset and boot are
+  // GPIOZ_11 / GPIOZ_9 (devicetree node "zigbee", driver zb_control); maind drives them through
+  // these files when quasar.cfg zigbee.zbControl is set, as it is on this firmware.
+  m.zigbee_tty = "/dev/ttyS2";
+  m.zigbee_reset = "/sys/devices/platform/zigbee/zb-reset/value";
+  m.zigbee_boot = "/sys/devices/platform/zigbee/zb-boot/value";
   return m;
 }
 

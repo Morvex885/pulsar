@@ -1,8 +1,9 @@
 #!/bin/sh
-# Assembles the release archive for one host OS: pulsar-install, both daemon builds, dropbear and
-# the device scripts in the repository layout (pulsar-install finds them next to itself).
+# Assembles the release archive for one host OS: pulsar-install, both daemon builds, the Midi
+# radio's firmware images, dropbear and the device scripts in the repository layout (pulsar-install
+# finds them next to itself).
 # Usage: satellite/deploy/dist.sh <out.zip|out.tar.gz> <pulsar-install binary>
-#   (needs: make -C satellite; ssh/build.sh; the installer built for the target OS)
+#   (needs: make -C satellite; radio/build.sh; ssh/build.sh; the installer built for the target OS)
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 [ $# = 2 ] || { echo "usage: $0 <out.zip|out.tar.gz> <pulsar-install binary>" >&2; exit 1; }
@@ -14,7 +15,7 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 P=$STAGE/pulsar
 put() { # repo-relative path, mode
-  [ -s "$ROOT/$1" ] || { echo "missing $1 (make -C satellite; ssh/build.sh)" >&2; exit 1; }
+  [ -s "$ROOT/$1" ] || { echo "missing $1 (make -C satellite; radio/build.sh; ssh/build.sh)" >&2; exit 1; }
   mkdir -p "$P/$(dirname "$1")"
   cp "$ROOT/$1" "$P/$1"
   # CI artifacts lose permission bits.
@@ -25,6 +26,8 @@ for a in aarch64 armhf; do
   put ssh/out/$a/dropbearmulti 755
   put ssh/out/$a/sftp-server 755
 done
+put radio/out/zigbee-router.ybl 644
+put radio/out/zigbee-coordinator.ybl 644
 for f in boot.sh supervise.sh ctl.sh; do put satellite/deploy/$f 755; done
 put ssh/start.sh 755
 put README.md 644

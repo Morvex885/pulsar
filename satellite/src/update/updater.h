@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "core/loop.h"
 
@@ -48,6 +49,10 @@ class Updater {
                std::function<void(const std::string &err, bool fatal)> done);
 
   static const char *arch();  // asset suffix of this build: aarch64 / armhf
+  // Other release assets installed with the binary, e.g. the radio's firmware images: `name` from
+  // the same release, checked against SHA256SUMS, written to `path`. Releases without one are
+  // installed without it.
+  void add_extra_asset(std::string name, std::string path) { extras_.push_back({std::move(name), std::move(path)}); }
 
  private:
   void start(std::function<void()> job);
@@ -55,6 +60,10 @@ class Updater {
 
   Loop &loop_;
   std::string repo_, user_agent_;
+  struct Extra {
+    std::string name, path;
+  };
+  std::vector<Extra> extras_;  // set before the first install()
   std::thread worker_;
   std::atomic<bool> cancel_{false};
   bool busy_ = false;

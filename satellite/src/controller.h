@@ -14,6 +14,7 @@
 #include "model.h"
 #include "sendspin/sendspin_service.h"
 #include "update/updater.h"
+#include "zigbee/service.h"
 
 namespace cs {
 
@@ -36,6 +37,11 @@ struct Settings {
   // Release being installed. Still set after a restart into another version: that release was
   // rolled back by supervise.sh (crash loop), automatic updates skip it.
   std::string update_attempt;
+  // zigbee_role=off | pulsar-coordinator | router (ZigbeeService::kRoles)
+  ZigbeeService::Mode zigbee_role = ZigbeeService::Mode::OFF;
+  // zigbee_flash_failed=<hex>: radio image version given up on (the radio did not take it); not
+  // written again until the role changes or another image version is installed.
+  uint32_t zigbee_flash_failed = 0;
   bool load(const std::string &path);
   void save(const std::string &path) const;
 };
@@ -56,6 +62,7 @@ class Controller : public ApiHooks {
   void on_active_wake_words(const std::vector<std::string> &ids) override;
   void on_media_command(const MediaCommandRequest &cmd) override;
   void on_switch(SwitchId id, bool state) override;
+  void on_button(ButtonId id) override;
   void on_light(const LightState &st) override;
   void on_number(NumberId id, float value) override;
   void on_text(TextId id, const std::string &value) override;
@@ -97,6 +104,7 @@ class Controller : public ApiHooks {
   void set_volume(float v, bool feedback);
   void set_muted(bool m);
   void start_sendspin(const DeviceIdentity &id);
+  void start_zigbee(const DeviceIdentity &id);
   void publish_media();
   void persist();
   void check_update();
@@ -169,6 +177,9 @@ class Controller : public ApiHooks {
   bool update_installing_ = false;
   float update_progress_ = 0;
   uint64_t update_retry_ = 0;  // waits for idle before an automatic install
+  // Zigbee radio (Midi): coordinator for ZHA or router in another network.
+  std::unique_ptr<ZigbeeService> zigbee_;
+  std::string zigbee_status_;  // last status line published
   // Sendspin (Music Assistant) player; declared last so it stops (and stops calling back into
   // the members above) first.
   bool sendspin_pairing_prompt_ = false;

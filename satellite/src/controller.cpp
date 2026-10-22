@@ -35,6 +35,9 @@ constexpr int64_t kTimerRingMaxMs = 15 * 60 * 1000;
 constexpr int64_t kListenTimeoutMs = 30'000;
 constexpr int64_t kProcessTimeoutMs = 120'000;
 constexpr uint16_t kSendspinPort = 8928;
+// deCONZ-protocol Zigbee coordinator (ZHA socket:// / Zigbee2MQTT tcp://); 6638 is the port
+// network Zigbee coordinators conventionally use.
+constexpr uint16_t kZigbeePort = 6638;
 // Updates: releases of this repository on GitHub. The first check waits for the network after
 // boot; an automatic install waits until the speaker is idle (it restarts the daemon).
 constexpr const char *kUpdateRepo = "Morvex885/pulsar";
@@ -90,6 +93,8 @@ bool Settings::load(const std::string &path) {
     else if (k == "tz") tz = v;
     else if (k == "auto_update") auto_update = v == "1";
     else if (k == "update_attempt") update_attempt = v;
+    else if (k == "zigbee_role") zigbee_role = ZigbeeService::parse_mode(v);
+    else if (k == "zigbee_flash_failed") zigbee_flash_failed = uint32_t(strtoul(v.c_str(), nullptr, 16));
   }
   return true;
 }
@@ -107,7 +112,9 @@ void Settings::save(const std::string &path) const {
       << "\nclock_scroll_ms=" << clock_scroll_ms << "\nlight_on=" << light.on
       << "\nlight_brightness=" << light.brightness << "\nlight_r=" << light.r << "\nlight_g=" << light.g
       << "\nlight_b=" << light.b << "\nlight_effect=" << light.effect << "\nwake_word=" << wake_word
-      << "\ntz=" << tz << "\nauto_update=" << auto_update << "\nupdate_attempt=" << update_attempt << "\n";
+      << "\ntz=" << tz << "\nauto_update=" << auto_update << "\nupdate_attempt=" << update_attempt
+      << "\nzigbee_role=" << ZigbeeService::role(zigbee_role).name << "\nzigbee_flash_failed=" << std::hex
+      << zigbee_flash_failed << std::dec << "\n";
   }
   rename(tmp.c_str(), path.c_str());
 }
@@ -162,6 +169,8 @@ bool Controller::start() {
   cfg.clock_faces.insert(cfg.clock_faces.end(), Clock::face_names().begin(), Clock::face_names().end());
   const auto slash = state_path_.rfind('/');
   cfg.key_path = (slash == std::string::npos ? std::string(".") : state_path_.substr(0, slash)) + "/api_key";
+  if (!model_.zigbee_tty.empty())
+    for (const auto &r : ZigbeeService::kRoles) cfg.zigbee_modes.push_back(r.label);
   api_ = std::make_unique<ApiServer>(loop_, id, cfg, *this);
 
   // Hardware first: UI feedback should work even if HA is not connected.
@@ -274,6 +283,7 @@ bool Controller::start() {
   if (sendspin_ && api_->mdns())
     api_->mdns()->add_service("_sendspin._tcp", id.name, kSendspinPort,
                               {"path=/sendspin", "name=" + id.friendly_name});
+  start_zigbee(id);
   update_ui();
   return true;
 }
@@ -298,6 +308,10 @@ void Controller::on_client_connected(const std::string &client_info) {
   api_->publish_number(NumberId::CLOCK_SCROLL, float(st_.clock_scroll_ms));
   api_->publish_text(TextId::CLOCK_TEXT, clock_text_);
   api_->publish_select(SelectId::CLOCK_FACE, clock_face_);
+  if (zigbee_) {
+    api_->publish_select(SelectId::ZIGBEE_MODE, ZigbeeService::role(st_.zigbee_role).label);
+    api_->publish_text_sensor(TextSensorId::ZIGBEE, zigbee_->status());
+  }
   api_->publish_light(st_.light);
   if (last_lux_published_ >= 0) api_->publish_sensor(SensorId::ILLUMINANCE, last_lux_published_);
 }
@@ -729,6 +743,38 @@ void Controller::start_sendspin(const DeviceIdentity &id) {
   }
 }
 
+void Controller::start_zigbee(const DeviceIdentity &id) {
+  if (model_.zigbee_tty.empty()) return;
+  const auto slash = state_path_.rfind('/');
+  const std::string dir = slash == std::string::npos ? std::string(".") : state_path_.substr(0, slash);
+  ZigbeeService::Config cfg;
+  cfg.lines = {model_.zigbee_tty, model_.zigbee_reset, model_.zigbee_boot};
+  cfg.coordinator_image = dir + "/zigbee-coordinator.ybl";
+  cfg.router_image = dir + "/zigbee-router.ybl";
+  updater_.add_extra_asset("zigbee-coordinator.ybl", cfg.coordinator_image);
+  updater_.add_extra_asset("zigbee-router.ybl", cfg.router_image);
+  cfg.deconz_port = kZigbeePort;
+  cfg.failed_version = st_.zigbee_flash_failed;
+  cfg.outcome = [this](uint32_t failed) {
+    if (failed == st_.zigbee_flash_failed) return;
+    st_.zigbee_flash_failed = failed;
+    persist();
+  };
+  const auto mode = st_.zigbee_role;
+  zigbee_ = std::make_unique<ZigbeeService>(loop_, std::move(cfg), mode, [this] {
+    const std::string s = zigbee_->status();
+    if (s == zigbee_status_) return;
+    zigbee_status_ = s;
+    LOGI("zigbee: %s", s.c_str());
+    api_->publish_text_sensor(TextSensorId::ZIGBEE, s);
+  });
+  zigbee_->start();
+  // ZHA discovers the coordinator (radio_type selects zigpy-deconz, serial_number is its unique id).
+  if (mode == ZigbeeService::Mode::COORDINATOR && api_->mdns())
+    api_->mdns()->add_service("_zigbee-coordinator._tcp", id.name, kZigbeePort,
+                              {"radio_type=deconz", "serial_number=" + id.name, "name=" + id.friendly_name});
+}
+
 void Controller::set_muted(bool m) {
   st_.muted = m;
   mixer_.set_muted(m);
@@ -841,6 +887,12 @@ void Controller::on_media_command(const MediaCommandRequest &cmd) {
 // ---------------- entities ----------------
 
 void Controller::on_restart() {
+  // A restart cuts the upload short (the shutdown watchdog does not wait ~25 s); the radio would
+  // be written again on the next start, but stays without Zigbee meanwhile.
+  if (zigbee_ && zigbee_->flashing()) {
+    LOGW("restart requested from Home Assistant: refused while the Zigbee radio is being written");
+    return;
+  }
   LOGW("restart requested from Home Assistant");
   loop_.stop();
 }
@@ -895,7 +947,8 @@ void Controller::check_update() {
 // Restarting cuts off whatever plays: automatic installs wait for silence.
 bool Controller::idle_for_update() const {
   return phase_ == Phase::IDLE && !announcing_ && !timer_ringing_ &&
-         player_.state(Channel::MUSIC) != PlayState::PLAYING && !(sendspin_ && sendspin_->streaming());
+         player_.state(Channel::MUSIC) != PlayState::PLAYING && !(sendspin_ && sendspin_->streaming()) &&
+         !(zigbee_ && zigbee_->flashing());
 }
 
 void Controller::maybe_auto_update() {
@@ -920,6 +973,10 @@ void Controller::maybe_auto_update() {
 
 void Controller::install_update(const char *why) {
   if (updater_.busy() || update_installing_) return;
+  if (zigbee_ && zigbee_->flashing()) {  // the install ends with a restart
+    LOGW("update: not while the Zigbee radio is being written");
+    return;
+  }
   char exe[512];
   ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
   if (n <= 0) {
@@ -998,6 +1055,22 @@ void Controller::on_text(TextId id, const std::string &value) {
 }
 
 void Controller::on_select(SelectId id, const std::string &option) {
+  if (id == SelectId::ZIGBEE_MODE) {
+    if (!zigbee_) return;
+    auto role = st_.zigbee_role;
+    for (const auto &r : ZigbeeService::kRoles)
+      if (option == r.label) role = r.mode;
+    if (role == st_.zigbee_role) return api_->publish_select(id, ZigbeeService::role(role).label);
+    // The role starts with the daemon, which writes the radio firmware it needs; the
+    // coordinator's mDNS advertisement is only made in that role.
+    LOGW("zigbee: role %s chosen, restarting", ZigbeeService::role(role).name);
+    st_.zigbee_role = role;
+    st_.zigbee_flash_failed = 0;
+    persist();
+    api_->publish_select(id, ZigbeeService::role(role).label);
+    loop_.stop();
+    return;
+  }
   clock_face_ = option;
   clock_.set_face(clock_face_index(option));
   api_->publish_select(id, option);
@@ -1005,6 +1078,16 @@ void Controller::on_select(SelectId id, const std::string &option) {
     clock_text_.clear();
     api_->publish_text(TextId::CLOCK_TEXT, clock_text_);
   }
+}
+
+void Controller::on_button(ButtonId id) {
+  if (!zigbee_) return;
+  if (zigbee_->mode() != ZigbeeService::Mode::ROUTER) {
+    LOGW("zigbee: join/leave only apply to the router role");
+    return;
+  }
+  if (id == ButtonId::ZIGBEE_JOIN) zigbee_->join();
+  else zigbee_->leave();
 }
 
 void Controller::on_action(ActionId id, const std::string &value, int32_t seconds) {

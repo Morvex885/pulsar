@@ -139,6 +139,10 @@ struct TestHooks : ApiHooks {
 
   void on_voice_start_failed() override { printf("HOOK voice_start_failed\n"); }
   void on_voice_audio_overflow() override { printf("HOOK voice_audio_overflow\n"); }
+  void on_button(ButtonId id) override {
+    printf("HOOK button %u\n", unsigned(id));
+    srv->publish_text_sensor(TextSensorId::ZIGBEE, id == ButtonId::ZIGBEE_JOIN ? "router: joining" : "router: not in a network");
+  }
   void on_restart() override {
     printf("HOOK restart\n");
     loop.stop();
@@ -172,6 +176,7 @@ int main(int argc, char **argv) {
   cfg.active_wake_words = {"alisa"};
   cfg.light_effects = {"Rainbow", "Pulse"};
   cfg.clock_faces = {"None", "Smiley"};
+  cfg.zigbee_modes = {"Coordinator", "Router"};
   if (argc > 4) cfg.key_path = argv[4];
   ApiServer srv(loop, id, cfg, hooks);
   hooks.srv = &srv;
@@ -189,6 +194,8 @@ int main(int argc, char **argv) {
   srv.publish_number(NumberId::CLOCK_SCROLL, 400);
   srv.publish_text(TextId::CLOCK_TEXT, "");
   srv.publish_select(SelectId::CLOCK_FACE, "None");
+  srv.publish_select(SelectId::ZIGBEE_MODE, "Coordinator");
+  srv.publish_text_sensor(TextSensorId::ZIGBEE, "coordinator: PAN 0x1234, channel 15");
   if (!srv.start()) return 1;
 
   float lux = 100;

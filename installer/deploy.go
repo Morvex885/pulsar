@@ -67,7 +67,7 @@ func installOne(st station) bool {
 		return false
 	}
 	ts := time.Now().Format("20060102150405")
-	changed, supChanged, ok := deployFiles(s, bin, ts, st.arch)
+	changed, supChanged, ok := deployFiles(s, bin, ts, st.arch, st.zigbee)
 	if !ok {
 		return false
 	}
@@ -93,9 +93,10 @@ func installOne(st station) bool {
 	return true
 }
 
-// deployFiles copies the daemon, scripts, dropbear (--ssh) and boot hooks. changed: the binary was
-// replaced; supChanged: supervise.sh differs from the installed one.
-func deployFiles(s, bin, ts, arch string) (changed, supChanged, ok bool) {
+// deployFiles copies the daemon, scripts, the radio's firmware images (zigbee), dropbear (--ssh)
+// and boot hooks. changed: the binary was replaced; supChanged: supervise.sh differs from the
+// installed one.
+func deployFiles(s, bin, ts, arch string, zigbee bool) (changed, supChanged, ok bool) {
 	changed, supChanged = true, true
 	sshOut := filepath.Join(root, "ssh", "out", arch)
 	deploy := filepath.Join(root, "satellite", "deploy")
@@ -144,6 +145,10 @@ func deployFiles(s, bin, ts, arch string) (changed, supChanged, ok bool) {
 		_ = shTo(os.Stdout, s, "sync")
 	}
 
+	if zigbee && (!deployRadioImage(s, "zigbee-coordinator.ybl") || !deployRadioImage(s, "zigbee-router.ybl")) {
+		return
+	}
+
 	if opts.ssh {
 		fmt.Printf("== %s: dropbear\n", s)
 		if shTo(os.Stdout, s, "mkdir -p /data/dropbear") != nil ||
@@ -168,6 +173,32 @@ func deployFiles(s, bin, ts, arch string) (changed, supChanged, ok bool) {
 		_ = shTo(os.Stdout, s, "pidof dropbear >/dev/null || /data/dropbear/start.sh </dev/null >/dev/null 2>&1 &")
 	}
 	return changed, supChanged, true
+}
+
+// deployRadioImage copies one of pulsar's radio firmware images, read by the daemon only when the
+// Zigbee role that needs it is chosen. A checkout without radio/build.sh output keeps the installed
+// one.
+func deployRadioImage(s, name string) bool {
+	img := filepath.Join(root, "radio", "out", name)
+	if fi, err := os.Stat(img); err != nil || fi.Size() == 0 {
+		fmt.Println("radio/out/" + name + " missing (radio/build.sh), not copied")
+		return true
+	}
+	want := sha256File(img)
+	have, _ := sh(s, "[ -f "+dataDir+"/"+name+" ] && sha256sum "+dataDir+"/"+name)
+	if firstField(have) == want {
+		return true
+	}
+	if push(s, img, dataDir+"/"+name+".new") != nil {
+		return false
+	}
+	got, _ := sh(s, "sha256sum "+dataDir+"/"+name+".new")
+	if firstField(got) != want {
+		_ = shTo(os.Stdout, s, "rm -f "+dataDir+"/"+name+".new")
+		fmt.Fprintf(os.Stderr, "%s: push corrupted (sha256 mismatch), %s not replaced\n", s, name)
+		return false
+	}
+	return shTo(os.Stdout, s, "cd "+dataDir+" && mv "+name+".new "+name+" && sync") == nil
 }
 
 // bootHooks adds the hook lines to rootkeeper.sh (planRootkeeper), keeping a backup.

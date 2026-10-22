@@ -1,0 +1,83 @@
+--- a/proj/drivers/drv_nv_cfg.h
++++ b/proj/drivers/drv_nv_cfg.h
+@@ -190,7 +190,9 @@ extern u32 g_u32CfgFlashAddr;
+ //1M Flash: 0xFE000  - 0x1000 = 0xFD000
+ //2M Flash: 0x1FE000 - 0x1000 = 0x1FD000
+ //4M Flash: 0x3FE000 - 0x1000 = 0x3FD000
++#ifndef CFG_PRE_INSTALL_CODE
+ #define CFG_PRE_INSTALL_CODE            (FACTORY_CFG_BASE_ADD - 0x1000)
++#endif
+ 
+ /* 1 byte for factory reset.
+  * If not 0xFF, means the device is doing factory reset(erase NV).
+@@ -200,7 +202,9 @@ extern u32 g_u32CfgFlashAddr;
+ //1M Flash: 0xFE000  - 0x2000 = 0xFC000
+ //2M Flash: 0x1FE000 - 0x2000 = 0x1FC000
+ //4M Flash: 0x3FE000 - 0x2000 = 0x3FC000
++#ifndef CFG_FACTORY_RST_CNT
+ #define CFG_FACTORY_RST_CNT             (FACTORY_CFG_BASE_ADD - 0x2000)
++#endif
+ 
+ /************************************************************************
+  * Flash address of NV module.
+@@ -208,7 +212,9 @@ extern u32 g_u32CfgFlashAddr;
+ //1M Flash: 0xFE000  - 0x18000 = 0xE6000
+ //2M Flash: 0x1FE000 - 0x18000 = 0x1E6000
+ //4M Flash: 0x3FE000 - 0x18000 = 0x3E6000
++#ifndef NV_BASE_ADDRESS_ZB
+ #define NV_BASE_ADDRESS_ZB              (FACTORY_CFG_BASE_ADD - 0x18000)
++#endif
+ //1M Flash: 0xFE000  - 0x1A000 = 0xE4000
+ //2M Flash: 0x1FE000 - 0x1A000 = 0x1E4000
+ //4M Flash: 0x3FE000 - 0x1A000 = 0x3E4000
+--- a/stack/hci/uart/hci_uart.c
++++ b/stack/hci/uart/hci_uart.c
+@@ -28,8 +28,12 @@
+ #include "zb_task_queue.h"
+ #include "hci.h"
+ 
++#ifndef UART_TX_BUF_SIZE
+ #define UART_TX_BUF_SIZE        128
++#endif
++#ifndef UART_RX_BUF_SIZE
+ #define UART_RX_BUF_SIZE        128
++#endif
+ 
+ 
+ //begin
+--- a/stack/zigbee/aps/aps_group.c
++++ b/stack/zigbee/aps/aps_group.c
+@@ -110,6 +110,10 @@ _CODE_APS_ aps_group_tbl_ent_t *aps_group_search_by_addr(u16 group_addr)
+     return NULL;
+ }
+ 
++#if APS_GROUP_HOST_FALLBACK
++u8 *aps_groupHostFallbackEp(u8 *epNum);
++#endif
++
+ _CODE_APS_ u8 *aps_group_ep_info_get(u16 group_addr, u8 *epNum)
+ {
+     aps_group_tbl_ent_t *ent = aps_group_search_by_addr(group_addr);
+@@ -118,7 +122,11 @@ _CODE_APS_ u8 *aps_group_ep_info_get(u16 group_addr, u8 *epNum)
+         return (&ent->endpoints[0]);
+     }
+ 
++#if APS_GROUP_HOST_FALLBACK
++    return aps_groupHostFallbackEp(epNum);
++#else
+     return NULL;
++#endif
+ }
+ 
+ _CODE_APS_ u8 *aps_group_ep_find(aps_group_tbl_ent_t *entry, u8 endpoint)
+--- a/stack/zigbee/bdb/bdb.c
++++ b/stack/zigbee/bdb/bdb.c
+@@ -919,7 +919,7 @@ _CODE_BDB_ static void bdb_mgmtPermitJoiningTrig(void *arg)
+ #endif
+ 
+ #if (!ZIGBEE_DIRECT_ENABLE)
+-#if (ZB_COORDINATOR_ROLE || ZB_ROUTER_ROLE)
++#if (ZB_COORDINATOR_ROLE || ZB_ROUTER_ROLE) && !defined(BDB_NO_AUTO_PERMIT_JOIN)
+     /* Enable permit join for more than bdbcMinCommissioningTime seconds */
+     u8 sn = 0;
+     zb_mgmtPermitJoinReq(0xfffc, BDBC_MIN_COMMISSIONING_TIME, 0x01, &sn, NULL);

@@ -48,6 +48,32 @@ jobs:
             satellite/build/${{ matrix.arch }}/pulsar.debug
           if-no-files-found: error
 
+  radio:
+    # Zigbee firmware (router, coordinator) for the Midi's radio (Telink B91), installed next to the daemon.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+      - name: i386 C library (the Telink toolchain is 32-bit x86)
+        run: sudo dpkg --add-architecture i386 && sudo apt-get update -q && sudo apt-get install -yq libc6:i386
+      - uses: actions/cache@v6
+        with:
+          path: |
+            radio/src
+            radio/toolchain
+          key: radio-${{ hashFiles('radio/build.sh', 'radio/sdk.patch') }}
+      - run: radio/build.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: radio
+          path: |
+            radio/out/zigbee-router.ybl
+            radio/out/zigbee-coordinator.ybl
+          if-no-files-found: error
+
   ssh:
     # dropbear + sftp-server for the release archives (pulsar-install --ssh); tags only.
     if: startsWith(github.ref, 'refs/tags/v')
@@ -97,7 +123,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, ssh, installer]
+    needs: [build, ssh, radio, installer]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -110,7 +136,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Artifact roots: satellite/build/<arch>/ and ssh/out/.
+          # Artifact roots: satellite/build/<arch>/, ssh/out/ and radio/out/.
+          mkdir -p radio/out
+          cp artifacts/radio/zigbee-*.ybl radio/out/
+          # Constant names: the daemon's updater downloads releases/download/<tag>/zigbee-*.ybl.
+          cp artifacts/radio/zigbee-*.ybl .
           for a in aarch64 armhf; do
             mkdir -p satellite/build/$a ssh/out/$a
             cp artifacts/pulsar-$a/pulsar satellite/build/$a/pulsar
@@ -123,6 +153,6 @@ jobs:
           for t in macos-arm64:darwin-arm64 macos-amd64:darwin-amd64 linux-amd64:linux-amd64 linux-arm64:linux-arm64; do
             satellite/deploy/dist.sh "pulsar-${t%%:*}.tar.gz" "artifacts/installer/${t#*:}/pulsar-install"
           done
-          sha256sum pulsar-*.bin pulsar-*.zip pulsar-*.tar.gz > SHA256SUMS
+          sha256sum pulsar-*.bin zigbee-*.ybl pulsar-*.zip pulsar-*.tar.gz > SHA256SUMS
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes \
-            pulsar-*.bin pulsar-*.debug pulsar-*.zip pulsar-*.tar.gz SHA256SUMS
+            pulsar-*.bin pulsar-*.debug zigbee-*.ybl pulsar-*.zip pulsar-*.tar.gz SHA256SUMS
