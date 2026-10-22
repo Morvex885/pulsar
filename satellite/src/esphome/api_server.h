@@ -172,6 +172,12 @@ struct ApiConfig {
   std::vector<std::string> music_styles;          // Select «Music visualization» options
   std::vector<std::string> case_colors;           // Select «Case color» options, "None" first
   std::vector<std::string> clock_music_styles;    // Select «Clock music» options
+  // The model has a clock panel (Clock::open() succeeded). False: no clock switch/number/text/
+  // select entities and no clock_show_* actions are sent (they would be permanently dead in HA).
+  bool has_clock = true;
+  // The model has an ambient light sensor (LightSensor::open() succeeded). False: no illuminance
+  // entity and no lux states are sent.
+  bool has_lux = true;
   // Select «Zigbee role» options; empty: no Zigbee entities (no radio).
   std::vector<std::string> zigbee_modes;
   // File holding the Noise encryption key (base64 of 32 bytes, as in ESPHome's api: encryption:

@@ -134,7 +134,7 @@ class Input {
   using MuteCb = std::function<void(bool hw_muted)>;
   Input(Loop &loop, const Model &model);
   ~Input();
-  bool open();  // evdev: Model::keys_input (touch keys), Model::mute_input (mic mute switch)
+  bool open();  // evdev: Model::keys_input (touch keys), Model::mute_input or Model::mute_gpio (mic mute)
   bool hw_muted() const;
   void on_button(ButtonCb cb);
   void on_mute(MuteCb cb);

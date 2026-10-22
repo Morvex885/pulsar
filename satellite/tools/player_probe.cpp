@@ -49,7 +49,7 @@ int main(int argc, char **argv) {
   }
 
   Player player(loop);
-  if (!player.init()) {
+  if (!player.init(model->playback_pcm)) {
     printf("player init failed\n");
     return 1;
   }

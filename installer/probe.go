@@ -13,6 +13,8 @@ func modelName(code string) string {
 		return "Yandex Station Midi"
 	case "plum":
 		return "Yandex Station Lite 2"
+	case "station-mini2":
+		return "Yandex Station Mini 2"
 	}
 	return ""
 }
@@ -22,7 +24,7 @@ func archOf(code string) string {
 	switch code {
 	case "cucumber":
 		return "aarch64"
-	case "plum":
+	case "plum", "station-mini2":
 		return "armhf"
 	}
 	return ""

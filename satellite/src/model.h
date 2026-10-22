@@ -9,7 +9,7 @@
 namespace cs {
 
 struct Model {
-  std::string codename;       // devicetree codename: "cucumber", "plum"
+  std::string codename;       // devicetree codename: "cucumber", "plum", "station-mini2"
   std::string host_prefix;    // ESPHome node name prefix, the MAC suffix is appended
   std::string friendly_name;  // shown in Home Assistant / Music Assistant
   std::string model_name;
@@ -43,8 +43,21 @@ struct Model {
   // false: dimming via the per-segment brightness value itself.
   bool clock_chip_current = true;
 
+  // Playback PCM of /etc/asound.conf (dmix + the softvol "Master Playback Volume" that Mixer
+  // drives): "speakers" on the Midi and the Lite 2, "default" on the Mini 2.
+  std::string playback_pcm = "speakers";
+
   std::string keys_input, mute_input;  // evdev device names
-  std::string error_sound;             // relative to /system/vendor/quasar/sounds/
+  // Mic mute on a plain GPIO instead of an evdev switch (Mini 2): global GPIO number, 0 = none.
+  // The button is momentary, but the mic circuit latches the mute and holds the line grounded, so
+  // value 0 = muted. Polled from sysfs, as maind does (its MuteButtonsImpl).
+  int mute_gpio = 0;
+  // Earcons, relative to the same directory. The Mini 2 firmware has no MP3 decoder in its
+  // GStreamer and ships all of these as .opus, so each model names its own files.
+  std::string error_sound;
+  std::string wake_sound = "common/spotter_start.mp3";
+  std::string cancel_sound = "common/spotter_cancel.mp3";
+  std::string timer_sound = "common/timer.wav";
 
   // Stock volume curve: platform level -> raw value (0..255) of the softvol "Master Playback
   // Volume" on the speakers PCM, piecewise linear between the points; the first point is level 0
@@ -54,6 +67,10 @@ struct Model {
     int level, raw;
   };
   std::vector<VolumePoint> volume_map;
+  // The stock firmware never sets this curve's raw values between 0 and its lowest step (the
+  // second point): any audible level jumps straight to that step. False for a plain line from
+  // level 0 to the top (Mini 2, whose set_volume.sh takes the percentage directly).
+  bool volume_min_step = true;
 
   // Zigbee radio: Telink co-processor on a UART; its reset and boot lines are GPIO value files
   // (active low, 1 = asserted) exported by the kernel's zb_control driver. zigbee_tty empty: none.

@@ -517,15 +517,15 @@ bool Clock::open() {
   int found = 0;
   for (int dig = 0; dig < kDigits; dig++)
     for (int s = 0; s < kSegs; s++) {
-      std::string name = d.seg_name(dig, s);
-      d.seg_fd[dig][s] = d.open_led(name);
+      d.seg_fd[dig][s] = d.open_led(d.seg_name(dig, s));
       if (d.seg_fd[dig][s] >= 0) found++;
-      else LOGW("clock: missing segment %s", name.c_str());
     }
   if (!found) {
-    LOGE("clock: no clock segments found");
+    // The whole panel is absent (Mini 2: its clock chip does not probe): one line, not one per LED.
+    LOGE("clock: no clock segments under %s", d.model.clock_dir.c_str());
     return false;
   }
+  if (found < kDigits * kSegs) LOGW("clock: %d of %d segments missing", kDigits * kSegs - found, kDigits * kSegs);
   for (const auto &name : d.model.clock_colon) {
     int fd = d.open_led(name);
     if (fd >= 0) d.colon_fd.push_back(fd);
