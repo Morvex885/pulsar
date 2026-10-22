@@ -13,6 +13,7 @@
 #include "media/player.h"
 #include "model.h"
 #include "sendspin/sendspin_service.h"
+#include "update/updater.h"
 
 namespace cs {
 
@@ -31,6 +32,10 @@ struct Settings {
   LightState light;            // user ring light
   std::string wake_word = "alisa";
   std::string tz = "MSK-3";    // POSIX TZ (default matches what the Yandex firmware showed); updated from HA
+  bool auto_update = false;    // install new releases without asking
+  // Release being installed. Still set after a restart into another version: that release was
+  // rolled back by supervise.sh (crash loop), automatic updates skip it.
+  std::string update_attempt;
   bool load(const std::string &path);
   void save(const std::string &path) const;
 };
@@ -60,6 +65,7 @@ class Controller : public ApiHooks {
   void on_restart() override;
   void on_voice_start_failed() override;
   void on_voice_audio_overflow() override;
+  void on_update(UpdateCommand cmd) override;
 
  private:
   enum class Phase { IDLE, LISTENING, PROCESSING, SPEAKING };
@@ -93,6 +99,11 @@ class Controller : public ApiHooks {
   void start_sendspin(const DeviceIdentity &id);
   void publish_media();
   void persist();
+  void check_update();
+  void install_update(const char *why);
+  void maybe_auto_update();
+  bool idle_for_update() const;
+  void publish_update();
   std::string model_dir(const std::string &id) const;
 
   Loop &loop_;
@@ -151,6 +162,13 @@ class Controller : public ApiHooks {
   // Clock text / face entity states; not persisted (the clock shows the time after a restart).
   std::string clock_text_;
   std::string clock_face_ = "None";
+  // updates
+  Updater updater_;
+  Release release_;            // latest release found; version "" = none known
+  std::string update_error_;
+  bool update_installing_ = false;
+  float update_progress_ = 0;
+  uint64_t update_retry_ = 0;  // waits for idle before an automatic install
   // Sendspin (Music Assistant) player; declared last so it stops (and stops calling back into
   // the members above) first.
   bool sendspin_pairing_prompt_ = false;

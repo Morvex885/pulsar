@@ -79,8 +79,9 @@ OBJS := $(patsubst src/%.cpp,$(BUILD)/%.o,$(SRCS))
 DEPS := $(OBJS:.o=.d)
 
 # Reported by `pulsar --version` and Home Assistant. Only main.o and controller.o see it;
-# the stamp changes (and they rebuild) only when the version string does.
-VERSION := $(shell git describe --always --dirty 2>/dev/null || echo unknown)
+# the stamp changes (and they rebuild) only when the version string does. --tags: a release
+# tagged without -a must still describe as its tag (the updater checks `--version` against it).
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
 VERSION_STAMP := $(BUILD)/version.stamp
 $(BUILD)/main.o $(BUILD)/controller.o: CXXFLAGS += -DPULSAR_VERSION='"$(VERSION)"'
 $(BUILD)/main.o $(BUILD)/controller.o: $(VERSION_STAMP)

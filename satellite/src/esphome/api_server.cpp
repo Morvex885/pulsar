@@ -84,6 +84,9 @@ enum Msg : uint32_t {
   LIST_EVENT = 107,
   EVENT_RESP = 108,
   VA_TIMER_EVENT_RESP = 115,
+  LIST_UPDATE = 116,
+  UPDATE_STATE = 117,
+  UPDATE_CMD = 118,
   VA_ANNOUNCE_REQ = 119,
   VA_ANNOUNCE_FINISHED = 120,
   VA_CONFIG_REQ = 121,
@@ -115,6 +118,8 @@ enum Key : uint32_t {
   K_NUMBER_CLOCK_SCROLL = 16,
   K_ACTION_CLOCK_TEXT = 17,
   K_ACTION_CLOCK_FACE = 18,
+  K_UPDATE = 19,
+  K_SW_AUTO_UPDATE = 20,
 };
 
 // aioesphomeapi VoiceAssistantFeature bits.
@@ -347,7 +352,9 @@ struct ApiServer::Impl {
   MediaState media_state = MediaState::IDLE;
   float media_volume = 0;
   bool media_muted = false;
-  BoolState sw_mic_mute, sw_clock, bs_hw_mute;
+  BoolState sw_mic_mute, sw_clock, sw_auto_update, bs_hw_mute;
+  UpdateState update;
+  bool update_has = false;
   FloatState lux, clock_bri, clock_scroll;
   StrState clock_text, clock_face;
   LightState light;
@@ -1106,6 +1113,15 @@ struct ApiServer::Impl {
       case SWITCH_CMD:
         on_switch_cmd(r);
         break;
+      case UPDATE_CMD: {
+        uint32_t key = 0, cmd = 0;
+        while (r.next(f)) {
+          if (f.num == 1) key = f.u32();
+          if (f.num == 2) cmd = f.u32();
+        }
+        if (key == K_UPDATE && cmd <= uint32_t(UpdateCommand::CHECK)) hooks.on_update(UpdateCommand(cmd));
+        break;
+      }
       case NUMBER_CMD:
         on_number_cmd(r);
         break;
@@ -1296,6 +1312,20 @@ struct ApiServer::Impl {
     sw("clock_display", K_SW_CLOCK, "Clock display", "mdi:clock-digital");
     {
       pb::Writer w;
+      entity_head(w, "auto_update", K_SW_AUTO_UPDATE, "Auto update");
+      w.str(5, "mdi:update");
+      w.u32(8, ENTITY_CATEGORY_CONFIG);
+      send_msg(c, LIST_SWITCH, w);
+    }
+    {
+      pb::Writer w;
+      entity_head(w, "firmware", K_UPDATE, "Firmware");
+      w.u32(7, ENTITY_CATEGORY_CONFIG);
+      w.str(8, "firmware");
+      send_msg(c, LIST_UPDATE, w);
+    }
+    {
+      pb::Writer w;
       entity_head(w, "hardware_mic_mute", K_BS_HW_MIC_MUTE, "Hardware mic mute");
       w.str(8, "mdi:microphone-off");
       w.u32(9, ENTITY_CATEGORY_DIAGNOSTIC);
@@ -1476,6 +1506,8 @@ struct ApiServer::Impl {
     send_media(c);
     send_switch(K_SW_MIC_MUTE, sw_mic_mute, c);
     send_switch(K_SW_CLOCK, sw_clock, c);
+    send_switch(K_SW_AUTO_UPDATE, sw_auto_update, c);
+    send_update(c);
     send_binary(K_BS_HW_MIC_MUTE, bs_hw_mute, c);
     send_float(SENSOR_STATE, K_SENSOR_LUX, lux, c);
     send_float(NUMBER_STATE, K_NUMBER_CLOCK_BRI, clock_bri, c);
@@ -1490,6 +1522,19 @@ struct ApiServer::Impl {
     send_str(SELECT_STATE, K_SELECT_CLOCK_FACE, clock_face.v, clock_face.has, c);
   }
 
+  void send_update(const ClientPtr &to = nullptr) {
+    pb::Writer w;
+    w.fixed32(1, K_UPDATE, true);
+    w.boolean(2, !update_has);  // missing_state
+    w.boolean(3, update.in_progress);
+    w.boolean(4, update.has_progress);
+    w.flt(5, update.progress);
+    w.str(6, update.current_version);
+    w.str(7, update.latest_version);
+    w.str(8, update.title);
+    w.str(10, update.release_url);
+    emit(to, UPDATE_STATE, w);
+  }
   // TextSensorState, TextState and SelectState share the layout key / state / missing_state.
   void send_str(uint32_t type, uint32_t key, const std::string &s, bool has, const ClientPtr &to = nullptr) {
     pb::Writer w;
@@ -1558,6 +1603,8 @@ struct ApiServer::Impl {
       hooks.on_switch(SwitchId::MIC_MUTE, state);
     else if (key == K_SW_CLOCK)
       hooks.on_switch(SwitchId::CLOCK, state);
+    else if (key == K_SW_AUTO_UPDATE)
+      hooks.on_switch(SwitchId::AUTO_UPDATE, state);
   }
 
   void on_number_cmd(pb::Reader &r) {
@@ -1787,11 +1834,16 @@ void ApiServer::publish_media(MediaState st, float volume, bool muted) {
 }
 
 void ApiServer::publish_switch(SwitchId id, bool state) {
-  bool clock = id == SwitchId::CLOCK;
-  BoolState &s = clock ? impl_->sw_clock : impl_->sw_mic_mute;
+  BoolState &s = id == SwitchId::CLOCK         ? impl_->sw_clock
+                 : id == SwitchId::AUTO_UPDATE ? impl_->sw_auto_update
+                                               : impl_->sw_mic_mute;
   s.has = true;
   s.v = state;
-  if (impl_->states_on()) impl_->send_switch(clock ? K_SW_CLOCK : K_SW_MIC_MUTE, s);
+  if (impl_->states_on())
+    impl_->send_switch(id == SwitchId::CLOCK         ? K_SW_CLOCK
+                       : id == SwitchId::AUTO_UPDATE ? K_SW_AUTO_UPDATE
+                                                     : K_SW_MIC_MUTE,
+                       s);
 }
 
 void ApiServer::publish_binary_sensor(BinarySensorId, bool state) {
@@ -1835,6 +1887,12 @@ void ApiServer::fire_event(EventId, const std::string &event_type) {
   w.fixed32(1, K_EVENT_BUTTON, true);
   w.str(2, event_type, true);
   impl_->broadcast(EVENT_RESP, w);
+}
+
+void ApiServer::publish_update(const UpdateState &st) {
+  impl_->update = st;
+  impl_->update_has = true;
+  if (impl_->states_on()) impl_->send_update();
 }
 
 }  // namespace cs

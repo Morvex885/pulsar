@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -11,6 +12,7 @@
 
 #include "core/log.h"
 #include "esphome/mdns.h"
+#include "update/updater.h"
 
 namespace cs {
 namespace {
@@ -33,6 +35,12 @@ constexpr int64_t kTimerRingMaxMs = 15 * 60 * 1000;
 constexpr int64_t kListenTimeoutMs = 30'000;
 constexpr int64_t kProcessTimeoutMs = 120'000;
 constexpr uint16_t kSendspinPort = 8928;
+// Updates: releases of this repository on GitHub. The first check waits for the network after
+// boot; an automatic install waits until the speaker is idle (it restarts the daemon).
+constexpr const char *kUpdateRepo = "Morvex885/pulsar";
+constexpr int64_t kUpdateFirstCheckMs = 60'000;
+constexpr int64_t kUpdateCheckPeriodMs = 6 * 3600'000LL;
+constexpr int64_t kUpdateIdleRetryMs = 10 * 60'000;
 
 std::string read_line(const char *path) {
   std::ifstream f(path);
@@ -80,6 +88,8 @@ bool Settings::load(const std::string &path) {
     else if (k == "light_effect") light.effect = v;
     else if (k == "wake_word") wake_word = v;
     else if (k == "tz") tz = v;
+    else if (k == "auto_update") auto_update = v == "1";
+    else if (k == "update_attempt") update_attempt = v;
   }
   return true;
 }
@@ -97,7 +107,7 @@ void Settings::save(const std::string &path) const {
       << "\nclock_scroll_ms=" << clock_scroll_ms << "\nlight_on=" << light.on
       << "\nlight_brightness=" << light.brightness << "\nlight_r=" << light.r << "\nlight_g=" << light.g
       << "\nlight_b=" << light.b << "\nlight_effect=" << light.effect << "\nwake_word=" << wake_word
-      << "\ntz=" << tz << "\n";
+      << "\ntz=" << tz << "\nauto_update=" << auto_update << "\nupdate_attempt=" << update_attempt << "\n";
   }
   rename(tmp.c_str(), path.c_str());
 }
@@ -114,7 +124,8 @@ Controller::Controller(Loop &loop, const Model &model, const std::string &state_
       leds_(loop, model),
       clock_(loop, model),
       input_(loop, model),
-      light_(loop) {}
+      light_(loop),
+      updater_(loop, kUpdateRepo, PULSAR_VERSION) {}
 
 Controller::~Controller() = default;
 
@@ -178,6 +189,18 @@ bool Controller::start() {
   }
   mixer_.set_volume(st_.volume);
   mixer_.set_muted(st_.muted);
+  if (!st_.update_attempt.empty()) {
+    if (st_.update_attempt == PULSAR_VERSION) {
+      LOGI("updated to %s", PULSAR_VERSION);
+      st_.update_attempt.clear();
+      persist();
+    } else {
+      LOGW("update to %s did not stay installed (rolled back?); automatic updates skip it",
+           st_.update_attempt.c_str());
+    }
+  }
+  publish_update();
+  loop_.add_timer(kUpdateFirstCheckMs, [this] { check_update(); }, kUpdateCheckPeriodMs);
   if (!player_.init()) LOGE("player init failed");
   // ANNOUNCING is reported only for HA announcements (on_announce / media announce), not for
   // earcons, timer alarms or pipeline TTS that share the ANNOUNCE playback channel.
@@ -268,6 +291,8 @@ void Controller::on_client_connected(const std::string &client_info) {
   publish_media();
   api_->publish_switch(SwitchId::MIC_MUTE, st_.mic_muted);
   api_->publish_switch(SwitchId::CLOCK, st_.clock_on);
+  api_->publish_switch(SwitchId::AUTO_UPDATE, st_.auto_update);
+  publish_update();
   api_->publish_binary_sensor(BinarySensorId::HW_MIC_MUTE, hw_mic_muted_);
   api_->publish_number(NumberId::CLOCK_BRIGHTNESS, st_.clock_brightness * 100.f);
   api_->publish_number(NumberId::CLOCK_SCROLL, float(st_.clock_scroll_ms));
@@ -831,9 +856,120 @@ void Controller::on_switch(SwitchId id, bool state) {
   } else if (id == SwitchId::CLOCK) {
     st_.clock_on = state;
     clock_.set_enabled(state);
+  } else if (id == SwitchId::AUTO_UPDATE) {
+    st_.auto_update = state;
   }
   api_->publish_switch(id, state);
   persist();
+  if (id == SwitchId::AUTO_UPDATE) maybe_auto_update();
+}
+
+// ---------------- updates ----------------
+
+void Controller::publish_update() {
+  UpdateState u;
+  u.current_version = PULSAR_VERSION;
+  u.title = "pulsar";
+  // latest == current hides the offer: nothing newer, or not checked yet.
+  bool offer = !release_.version.empty() && release_newer(release_.version, PULSAR_VERSION);
+  u.latest_version = offer ? release_.version : u.current_version;
+  u.release_url = release_.url;
+  u.in_progress = u.has_progress = update_installing_;
+  u.progress = update_progress_;
+  api_->publish_update(u);
+}
+
+void Controller::check_update() {
+  updater_.check([this](const std::string &err, const Release &r) {
+    if (!err.empty()) {
+      LOGI("update check: %s", err.c_str());
+      return;
+    }
+    if (r.version != release_.version) LOGI("latest release %s (running %s)", r.version.c_str(), PULSAR_VERSION);
+    release_ = r;
+    publish_update();
+    maybe_auto_update();
+  });
+}
+
+// Restarting cuts off whatever plays: automatic installs wait for silence.
+bool Controller::idle_for_update() const {
+  return phase_ == Phase::IDLE && !announcing_ && !timer_ringing_ &&
+         player_.state(Channel::MUSIC) != PlayState::PLAYING && !(sendspin_ && sendspin_->streaming());
+}
+
+void Controller::maybe_auto_update() {
+  if (update_retry_) {
+    loop_.cancel_timer(update_retry_);
+    update_retry_ = 0;
+  }
+  bool current_known = false;
+  if (!st_.auto_update || release_.version.empty() || update_installing_ ||
+      !release_newer(release_.version, PULSAR_VERSION, &current_known) || !current_known ||
+      release_.version == st_.update_attempt)
+    return;
+  if (!idle_for_update()) {
+    update_retry_ = loop_.add_timer(kUpdateIdleRetryMs, [this] {
+      update_retry_ = 0;
+      maybe_auto_update();
+    });
+    return;
+  }
+  install_update("automatic");
+}
+
+void Controller::install_update(const char *why) {
+  if (updater_.busy() || update_installing_) return;
+  char exe[512];
+  ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+  if (n <= 0) {
+    LOGE("update: cannot find the running binary");
+    return;
+  }
+  // A binary replaced under the running daemon (installer, manual mv) reads "<path> (deleted)":
+  // the install location is still <path>.
+  std::string binary(exe, size_t(n));
+  const std::string deleted = " (deleted)";
+  if (binary.size() > deleted.size() && binary.ends_with(deleted)) binary.resize(binary.size() - deleted.size());
+  const Release r = release_;
+  LOGW("installing release %s (%s)", r.version.c_str(), why);
+  st_.update_attempt = r.version;
+  persist();
+  update_installing_ = true;
+  update_progress_ = 0;
+  publish_update();
+  updater_.install(
+      r, binary,
+      [this](float p) {
+        update_progress_ = p;
+        publish_update();
+      },
+      [this, r](const std::string &err, bool fatal) {
+        if (err.empty()) {
+          LOGW("installed %s, restarting", r.version.c_str());
+          update_progress_ = 100;
+          publish_update();
+          loop_.add_timer(500, [this] { loop_.stop(); });  // exit 0: supervise.sh starts the new binary
+          return;
+        }
+        LOGE("update to %s failed: %s", r.version.c_str(), err.c_str());
+        update_installing_ = false;
+        if (!fatal) {  // a network failure: the next check tries again
+          st_.update_attempt.clear();
+          persist();
+        }
+        publish_update();
+      });
+}
+
+void Controller::on_update(UpdateCommand cmd) {
+  if (cmd == UpdateCommand::CHECK) return check_update();
+  if (cmd != UpdateCommand::INSTALL) return;
+  if (release_.version.empty() || release_.version == PULSAR_VERSION) {
+    LOGW("update: no other release to install");
+    return;
+  }
+  install_update("requested from Home Assistant");
 }
 
 void Controller::on_number(NumberId id, float value) {

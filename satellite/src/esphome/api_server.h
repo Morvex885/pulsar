@@ -96,7 +96,7 @@ struct LightState {
 };
 
 // Auxiliary entities. Keys are stable and owned by the server.
-enum class SwitchId : uint32_t { MIC_MUTE = 1, CLOCK = 2 };
+enum class SwitchId : uint32_t { MIC_MUTE = 1, CLOCK = 2, AUTO_UPDATE = 3 };
 enum class SensorId : uint32_t { ILLUMINANCE = 1 };
 enum class BinarySensorId : uint32_t { HW_MIC_MUTE = 1 };
 enum class NumberId : uint32_t { CLOCK_BRIGHTNESS = 1, CLOCK_SCROLL = 2 };  // 0..100 %; 100..2000 ms
@@ -104,6 +104,18 @@ enum class TextId : uint32_t { CLOCK_TEXT = 1 };
 enum class SelectId : uint32_t { CLOCK_FACE = 1 };
 enum class ActionId : uint32_t { CLOCK_SHOW_TEXT = 1, CLOCK_SHOW_FACE = 2 };  // args (text|face, seconds)
 enum class EventId : uint32_t { BUTTON = 1 };             // event types: "action", "action_long", "volume_up", "volume_down"
+
+// "Firmware" update entity (UpdateStateResponse). Mirrors api.proto UpdateCommand.
+enum class UpdateCommand : uint32_t { NONE = 0, INSTALL = 1, CHECK = 2 };
+struct UpdateState {
+  bool in_progress = false;
+  bool has_progress = false;
+  float progress = 0;  // 0..100
+  std::string current_version;
+  std::string latest_version;  // == current_version when there is nothing newer (or not checked yet)
+  std::string title;
+  std::string release_url;
+};
 
 class ApiHooks {
  public:
@@ -140,6 +152,8 @@ class ApiHooks {
   // "Restart" button. The daemon should leave the loop and exit 0 (supervise.sh restarts it);
   // the call may destroy the server, so it is the last thing the server does for that message.
   virtual void on_restart() {}
+  // Update entity: install the offered release or check for one now.
+  virtual void on_update(UpdateCommand cmd) {}
 };
 
 struct ApiConfig {
@@ -183,6 +197,7 @@ class ApiServer {
   void publish_select(SelectId id, const std::string &state);
   void publish_light(const LightState &st);
   void fire_event(EventId id, const std::string &event_type);
+  void publish_update(const UpdateState &st);
 
  private:
   struct Impl;

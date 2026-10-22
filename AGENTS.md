@@ -21,11 +21,12 @@ at runtime; they are never copied into the repo.
 | `satellite/src/audio/frontend.*` | capture thread (ALSA → FIFO) + processing thread: Yandex VQE → wake + command spotters → 16 kHz stream |
 | `satellite/src/media/player.*` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`), channels MUSIC / ANNOUNCE; `Mixer` = ALSA "Master Playback Volume" (softvol of the `speakers` PCM) |
 | `satellite/src/sendspin/` | Sendspin player on top of sendspin-cpp, own ALSA sink on the `speakers` dmix |
+| `satellite/src/update/` | HA "Firmware" update entity backend: HTTPS on the firmware's OpenSSL (`https.*`, dlopen), GitHub release check / download / verify / swap (`updater.*`) |
 | `satellite/src/hw/` | LED ring / logo (framebuffers behind ledfb triggers), clock (sysfs segments), input (touch keys, `SW_MUTE_DEVICE`), light sensor (`ltr308als01`) |
 | `satellite/src/controller.*` | all satellite logic: voice pipeline state machine, entities, local commands, persistence |
 | `satellite/deploy/` | `dist.sh` (release archives, host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
 | `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install, health check |
-| `satellite/tools/` | probes: `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest` |
+| `satellite/tools/` | probes: `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `update_probe` (HTTPS client, release check, install into a scratch dir) |
 | `satellite/third_party/` | `fetch.sh` (pinned deps), `sysroot.sh` (alsa-lib link sysroot), CMake glue, zig toolchain wrappers |
 | `ssh/` | `build.sh` (static dropbear + sftp-server), `start.sh` (device side) |
 
@@ -54,7 +55,7 @@ one deployed) and `pulsar.debug` (unstripped, line tables) for `addr2line -f -e`
 crash report `main.cpp` writes to the log (non-PIE: addresses are absolute; armhf reports pc/lr only:
 glibc's `backtrace()` there runs libgcc_s's unwinder into the binary's static zig personality
 routine and segfaults). The version is
-`git describe --always --dirty` (`--version`, HA DeviceInfo and the "Version" entity). Host-side
+`git describe --tags --always --dirty` (`--version`, HA DeviceInfo and the "Version" entity). Host-side
 tests exist only for the installer (`go -C installer test ./...`); the daemon is verified on the
 device.
 
@@ -66,7 +67,10 @@ darwin/{arm64,amd64} and linux/{amd64,arm64}. Pushing a tag `v*` additionally bu
 `pulsar-{windows-amd64.zip,macos-{arm64,amd64}.tar.gz,linux-{amd64,arm64}.tar.gz}` (assembled by
 `satellite/deploy/dist.sh`: `pulsar-install`, both daemon binaries, dropbear and the device
 scripts in the repo layout), plus `pulsar-<arch>.bin`, `pulsar-<arch>.debug` and `SHA256SUMS`.
-Asset names are constant: README links `releases/latest/download/...`.
+Asset names are constant: README links `releases/latest/download/...`, and the daemon's updater
+downloads `releases/download/<tag>/pulsar-<arch>.bin` and `SHA256SUMS` (keep both names). Only
+stable releases are offered (`releases/latest`); the tag must equal the binary's
+`git describe` (the build job checks out the tag, so it does).
 
 ## Branches
 
@@ -108,6 +112,17 @@ at 1 MB by `supervise.sh`, one `.1` kept). Boot chain:
 `onboot.sh` (firmware) → `/data/quasar/rootkeeper.sh` → `boot.sh` → waits for quasar, `q stop` →
 `supervise.sh` restart loop while `enabled` exists. `ctl.sh reload` restarts the supervisor itself
 (needed after replacing `supervise.sh`; the installer does it when the script changed).
+
+Updates from HA (`src/update/`, entities "Firmware" + "Auto update"): the daemon checks
+`https://github.com/<repo>/releases/latest` (its redirect to `/releases/tag/<tag>`; the REST API
+is not used: its 60 requests/hour per public IP are exhausted behind shared VPN/CGNAT exits, seen
+on the test stations) a minute after start and every 6 h. Install: download over HTTPS (busybox
+`wget` has no TLS, there is no curl; `libssl.so.3` on the Midi, `libssl.so.1.1` on the Lite 2,
+CA bundle `/etc/ssl/certs/ca-certificates.crt`), sha256 against `SHA256SUMS`, `pulsar.new
+--version` must print `pulsar <tag>`, current binary copied to `.prev`, rename, exit 0.
+`state.conf` `update_attempt=<tag>` is set before the swap and cleared by the new binary; still
+set under another version = rolled back by `supervise.sh`, so auto-update skips that tag.
+Automatic installs need a parseable current version (`vX.Y.Z[-N-g<hash>]`) and an idle speaker.
 
 Supervisor contract (`supervise.sh` header has the details): daemon exit 0 = deliberate restart
 (SIGTERM from `ctl.sh`, the HA "Restart" button via `on_restart`), restarted after 1 s and not
