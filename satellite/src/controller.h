@@ -36,6 +36,10 @@ struct Settings {
   std::string tz = "MSK-3";    // POSIX TZ (default matches what the Yandex firmware showed); updated from HA
   bool auto_update = false;    // install new releases without asking
   bool nearest_answers = true; // wake arbitration with other pulsar stations
+  std::string music_viz = "All styles";  // one of Leds::music_styles()
+  float led_speed = 1;             // 0.25..4
+  bool voice_indication = true;    // listening / thinking / speaking shown on the ring
+  std::string led_case_color;      // stem of Leds::case_colors(), "" = none
   // Release being installed. Still set after a restart into another version: that release was
   // rolled back by supervise.sh (crash loop), automatic updates skip it.
   std::string update_attempt;
@@ -65,11 +69,12 @@ class Controller : public ApiHooks {
   void on_media_command(const MediaCommandRequest &cmd) override;
   void on_switch(SwitchId id, bool state) override;
   void on_button(ButtonId id) override;
-  void on_light(const LightState &st) override;
+  void on_light(const LightState &st, uint32_t transition_ms) override;
   void on_number(NumberId id, float value) override;
   void on_text(TextId id, const std::string &value) override;
   void on_select(SelectId id, const std::string &option) override;
   void on_action(ActionId id, const std::string &value, int32_t seconds) override;
+  void on_led_show(const std::string &effect, const std::string &color, int32_t seconds) override;
   void on_time(uint32_t epoch_seconds, const std::string &posix_tz) override;
   void on_restart() override;
   void on_voice_start_failed() override;
@@ -112,6 +117,7 @@ class Controller : public ApiHooks {
   void start_sendspin(const DeviceIdentity &id);
   void start_zigbee(const DeviceIdentity &id);
   void publish_media();
+  void update_music();
   void persist();
   void check_update();
   void install_update(const char *why);

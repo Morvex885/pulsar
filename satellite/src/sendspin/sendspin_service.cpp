@@ -16,11 +16,13 @@
 #include <optional>
 #include <vector>
 
+#include "audio/music_frame.h"
 #include "core/log.h"
 #include "sendspin/client.h"
 #include "sendspin/controller_role.h"
 #include "sendspin/metadata_role.h"
 #include "sendspin/player_role.h"
+#include "sendspin/visualizer_role.h"
 
 namespace cs {
 
@@ -449,7 +451,7 @@ class AlsaSink {
 // -----------------------------------------------------------------------------------------------
 
 struct SendspinService::Impl : ss::SendspinClientListener, ss::PlayerRoleListener, ss::MetadataRoleListener,
-                               ss::ControllerRoleListener {
+                               ss::ControllerRoleListener, ss::VisualizerRoleListener {
   Impl(Loop &l, SendspinConfig c, Hooks h)
       : loop(l), cfg(std::move(c)), hooks(std::move(h)), persistence(cfg.state_dir), client(make_config(cfg)) {}
 
@@ -481,6 +483,9 @@ struct SendspinService::Impl : ss::SendspinClientListener, ss::PlayerRoleListene
   bool streaming = false;
   bool connected = false;
   bool hooks_enabled = true;
+  // Visualizer drain thread only.
+  float vis_loudness = 0;
+  bool vis_beat = false;
 
   // --- SendspinClientListener (main loop) ---
   void on_group_update(const ss::GroupUpdateObject &g) override {
@@ -567,6 +572,36 @@ struct SendspinService::Impl : ss::SendspinClientListener, ss::PlayerRoleListene
       LOGI("sendspin: now playing: %s - %s", m.artist ? m.artist->c_str() : "?", m.title ? m.title->c_str() : "?");
   }
 
+  // --- VisualizerRoleListener: data callbacks on the library's drain thread ---
+  void on_loudness(int64_t, uint16_t loudness) override { vis_loudness = loudness / 65535.f; }
+  void on_beat(int64_t, bool) override { vis_beat = true; }
+  void on_spectrum(int64_t, const std::vector<uint16_t> &bins) override {
+    const size_t n = bins.size();
+    if (!n) return;
+    MusicFrame f;
+    for (size_t b = 0; b < 8; b++) {
+      size_t lo = b * n / 8, hi = (b + 1) * n / 8;
+      if (n < 8 || hi <= lo) {
+        f.bands[b] = bins[std::min(lo, n - 1)] / 65535.f;
+        continue;
+      }
+      uint32_t sum = 0;
+      for (size_t i = lo; i < hi; i++) sum += bins[i];
+      f.bands[b] = float(sum) / float(hi - lo) / 65535.f;
+    }
+    f.loudness = vis_loudness;
+    f.beat = vis_beat;
+    vis_beat = false;
+    loop.post([this, f] {
+      if (hooks_enabled && hooks.on_music) hooks.on_music(f);
+    });
+  }
+  // --- VisualizerRoleListener: stream start / end on the main loop ---
+  void on_visualizer_stream_start(const ss::ServerVisualizerStreamObject &s) override {
+    LOGI("sendspin: visualizer stream start, %zu types, %u fps", s.types.size(), s.rate_max);
+  }
+  void on_visualizer_stream_end() override { LOGI("sendspin: visualizer stream end"); }
+
   void poll() {
     client.loop();
     bool c = client.is_connected();
@@ -613,6 +648,18 @@ bool SendspinService::start(float volume, bool muted) {
   d.client.add_metadata().set_listener(&d);
   d.controller = &d.client.add_controller();
   d.controller->set_listener(&d);
+  // 8 log-spaced bands over the range the speaker-reference analyzer covers; ~30 frames/s matches
+  // the LED frame period (33 ms). Only ~1/7 of buffer_capacity holds wire data and the server
+  // sends frames as far ahead as audio (seconds): 64 KB keeps its flow control from starving them.
+  ss::VisualizerRoleConfig vc;
+  vc.support.buffer_capacity = 65536;
+  vc.stream.types = {ss::VisualizerDataType::SPECTRUM, ss::VisualizerDataType::LOUDNESS,
+                     ss::VisualizerDataType::BEAT};
+  vc.stream.rate_max = 30;
+  vc.stream.spectrum = ss::VisualizerSpectrumConfig{
+      .n_disp_bins = 8, .scale = ss::VisualizerSpectrumScale::LOG, .f_min = 40, .f_max = 7600};
+  vc.display_offset_ms = 0;
+  d.client.add_visualizer(std::move(vc)).set_listener(&d);
   d.client.set_listener(&d);
   d.client.set_network_provider(&d.network);
   d.client.set_persistence_provider(&d.persistence);

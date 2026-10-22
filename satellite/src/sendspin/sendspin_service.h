@@ -17,6 +17,8 @@
 
 namespace cs {
 
+struct MusicFrame;
+
 struct SendspinConfig {
   std::string name;  // friendly name shown in Music Assistant
   std::string product_name;
@@ -35,6 +37,7 @@ class SendspinService {
     std::function<void(bool muted)> on_mute;         // server set the player mute
     std::function<void(const std::string &code)> on_pairing_code;  // show code; empty = clear
     std::function<void(bool open)> on_pairing_window;  // ask the operator for the pairing gesture
+    std::function<void(const MusicFrame &f)> on_music;  // visualizer data from the server
   };
 
   SendspinService(Loop &loop, SendspinConfig cfg, Hooks hooks);

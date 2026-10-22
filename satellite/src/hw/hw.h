@@ -14,34 +14,58 @@
 
 namespace cs {
 
+struct MusicFrame;
+
 struct Rgb {
   uint8_t r = 0, g = 0, b = 0;
 };
 
 // Visual states driven by the controller. Animations run on the Loop via timers.
 enum class UiState {
-  IDLE,        // ring off (or user light), clock shows time
-  WAKE,        // short flash on wake word
+  IDLE,        // ring off (or led_show / user light / music), clock shows time
   LISTENING,   // streaming to HA
   THINKING,    // intent processing
   SPEAKING,    // TTS playing
-  ERROR,       // pipeline error (auto returns to IDLE)
-  MUTED,       // microphones muted
+  ERROR,       // pipeline error: runs its 3.5 s to the end, then IDLE
   TIMER_RING,  // timer finished, ringing
 };
 
+// Ring content, first active wins: volume overlay > voice state (ERROR / TIMER_RING always,
+// LISTENING / THINKING / SPEAKING with voice indication on) > one-shots (timer started, mute) >
+// led_show > mute (Lite 2: steady dim red) > user light > music visualization > off.
+// The Midi logo shows the voice state, else red while muted, else the ring's average colour.
 class Leds {
  public:
   Leds(Loop &loop, const Model &model);
   ~Leds();
   bool open();  // framebuffers / sysfs LEDs of Model::ring and Model::logo
   void set_ui_state(UiState s);
-  // User light (HA light entity) shown on the ring when UiState is IDLE.
-  void set_user_light(bool on, Rgb color, float brightness, const std::string &effect);
+  // Mic mute indication; the first call only sets the state (no one-shot).
+  void set_muted(bool muted);
+  // User light (HA light entity). Changes fade over transition_ms (0 = cut).
+  void set_user_light(bool on, Rgb color, float brightness, const std::string &effect, uint32_t transition_ms);
   // Transient volume indicator (0..1) shown on ring for ~1.5 s.
   void show_volume(float v);
   // Ambient light: dims the ring and logo (smoothed, with hysteresis; floor keeps them visible).
   void set_ambient_lux(float lux);
+  void show_timer_started();  // 15 s one-shot
+  // Effect (one of effect_names(), "" = solid colour) at full brightness for seconds; seconds <= 0:
+  // 5 s, capped at 3600 s. Replaces the previous one.
+  void show_temporary(const std::string &effect, Rgb color, int seconds);
+  void clear_temporary();
+  void set_voice_indication(bool on);
+  void set_speed(float k);  // 0.25..4: motion of effects and music styles
+  void set_music_style(const std::string &style);  // one of music_styles()
+  void set_media_playing(bool playing);
+  // Music features, ~30 per second while playing. Sendspin frames take precedence over the speaker
+  // reference while they keep coming.
+  void music_frame(const MusicFrame &f, bool from_sendspin);
+  // Colour correction for the case fabric: a stem of case_colors(), "" = none. False when the file
+  // is missing or unreadable (no correction then).
+  bool set_case_color(const std::string &stem);
+  static const std::vector<std::string> &effect_names();
+  static const std::vector<std::string> &music_styles();
+  static std::vector<std::string> case_colors();  // sorted stems of /system/vendor/quasar/ledconfigs/*.json
 
  private:
   struct Impl;

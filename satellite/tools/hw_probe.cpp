@@ -1,8 +1,11 @@
-// Hardware probe: cycles LED UI states, drives the clock, prints buttons/mute/lux.
+// Hardware probe: cycles LED UI states, effects and music styles, drives the clock, prints
+// buttons/mute/lux.
 // usage: hw_probe [input_seconds=15] [state_ms=2000]
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -10,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "audio/music_frame.h"
 #include "core/log.h"
 #include "core/loop.h"
 #include "hw/hw.h"
@@ -31,34 +35,44 @@ static std::string rd(const std::string &p) {
 
 static int led(const std::string &name) { return atoi(rd("/sys/class/leds/" + name + "/brightness").c_str()); }
 
+static const Model *g_model;
+
+// Every LED of a short ring, every third of the Midi's; the first logo LED.
 static std::string ring_dump() {
+  const Model &m = *g_model;
+  auto px = [&](const Model::LedStrip &s, int i) {
+    auto name = [&](const char *c) {
+      return m.led_prefix + ":" + c + ":" + s.sysfs_kind + std::to_string(s.first_index + i);
+    };
+    char b[16];
+    snprintf(b, sizeof b, "%02x%02x%02x", led(name("red")), led(name("green")), led(name("blue")));
+    return std::string(b);
+  };
   std::string s;
-  char b[32];
-  for (int i = 0; i < 24; i += 3) {
-    snprintf(b, sizeof b, "%d:%02x%02x%02x ", i, led("cucumber:red:ring" + std::to_string(i)),
-             led("cucumber:green:ring" + std::to_string(i)), led("cucumber:blue:ring" + std::to_string(i)));
-    s += b;
-  }
-  snprintf(b, sizeof b, "logo0:%02x%02x%02x", led("cucumber:red:logo0"), led("cucumber:green:logo0"),
-           led("cucumber:blue:logo0"));
-  return s + b;
+  const int step = m.ring.count > 6 ? 3 : 1;
+  for (int i = 0; i < m.ring.count; i += step) s += std::to_string(i) + ":" + px(m.ring, i) + " ";
+  if (m.logo.count) s += "logo0:" + px(m.logo, 0);
+  return s;
 }
 
 static std::string clock_dump() {
   static const uint8_t font[10] = {0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f};
+  const Model &m = *g_model;
+  auto lit = [&](const std::string &name) { return atoi(rd(m.clock_dir + name + "/brightness").c_str()) > 0; };
   std::string s;
-  for (int d = 1; d <= 4; d++) {
-    uint8_t m = 0;
+  for (int d = 0; d < 4; d++) {
+    uint8_t mask = 0;
     for (int seg = 0; seg < 7; seg++)
-      if (led(std::string("cucumber:white:clock-") + char('a' + seg) + std::to_string(d)) > 0) m |= 1 << seg;
+      if (lit(std::string(1, char(m.clock_seg_base + seg)) + std::to_string(m.clock_pos_base + d))) mask |= 1 << seg;
     char c = '?';
-    if (m == 0) c = ' ';
-    else if (m == 0x40) c = '-';
+    if (mask == 0) c = ' ';
+    else if (mask == 0x40) c = '-';
     for (int i = 0; i < 10; i++)
-      if (font[i] == m) c = char('0' + i);
+      if (font[i] == mask) c = char('0' + i);
     s += c;
-    if (d == 2) s += led("cucumber:white:clock-p3") ? ':' : ' ';
+    if (d == 1) s += !m.clock_colon.empty() && lit(m.clock_colon[0]) ? ':' : ' ';
   }
+  if (!m.clock_chip_current) return "[" + s + "]";
   return "[" + s + "] current=" + rd("/sys/bus/i2c/devices/3-0037/current") + "/" +
          rd("/sys/bus/i2c/devices/3-0021/current");
 }
@@ -82,6 +96,7 @@ int main(int argc, char **argv) {
 
   const Model *model = detect_model();
   if (!model) return 1;
+  g_model = model;
   Loop loop;
   Leds leds(loop, *model);
   Clock clock(loop, *model);
@@ -100,27 +115,83 @@ int main(int argc, char **argv) {
   });
 
   struct Step {
-    const char *name;
+    std::string name;
     std::function<void()> fn;
   };
+  // Synthetic music features at 30 frames/s while the music steps run.
+  uint64_t music_timer = 0;
+  const int64_t music_t0 = Loop::now_ms();
+  auto feed_music = [&] {
+    if (music_timer) return;
+    music_timer = loop.add_timer(33, [&] {
+      const double t = double(Loop::now_ms() - music_t0);
+      MusicFrame f;
+      for (size_t b = 0; b < 8; b++) f.bands[b] = float(0.5 + 0.5 * std::sin(2 * M_PI * (t / 800 + b / 8.0)));
+      f.loudness = float(0.5 + 0.5 * std::sin(2 * M_PI * t / 1000));
+      static int64_t last_beat = 0;
+      if (Loop::now_ms() - last_beat >= 500) f.beat = true, last_beat = Loop::now_ms();
+      leds.music_frame(f, false);
+    }, 33);
+  };
+
+  leds.set_muted(false);  // initial state, no indication
   std::vector<Step> steps = {
-      {"WAKE", [&] { leds.set_ui_state(UiState::WAKE); }},
       {"LISTENING", [&] { leds.set_ui_state(UiState::LISTENING); }},
       {"THINKING", [&] { leds.set_ui_state(UiState::THINKING); }},
       {"SPEAKING", [&] { leds.set_ui_state(UiState::SPEAKING); }},
-      {"ERROR(->IDLE)", [&] { leds.set_ui_state(UiState::ERROR); }},
-      {"MUTED", [&] { leds.set_ui_state(UiState::MUTED); }},
+      {"ERROR", [&] { leds.set_ui_state(UiState::ERROR); }},
+      // IDLE during the error is ignored: it runs its 3.54 s to the end, then the ring is off.
+      {"IDLE requested during ERROR (off once it ends)", [&] { leds.set_ui_state(UiState::IDLE); }},
       {"TIMER_RING", [&] { leds.set_ui_state(UiState::TIMER_RING); }},
-      {"IDLE user solid green 0.5", [&] {
+      {"IDLE, mic muted", [&] {
          leds.set_ui_state(UiState::IDLE);
-         leds.set_user_light(true, Rgb{0, 255, 0}, 0.5f, "");
+         leds.set_muted(true);
        }},
-      {"IDLE user Rainbow", [&] { leds.set_user_light(true, Rgb{255, 255, 255}, 0.6f, "Rainbow"); }},
-      {"IDLE user Breathe", [&] { leds.set_user_light(true, Rgb{255, 0, 255}, 0.6f, "Breathe"); }},
-      {"show_volume 0.5 (over user light off)", [&] {
-         leds.set_user_light(false, Rgb{}, 0, "");
-         leds.show_volume(0.5f);
-       }},
+      {"mic unmuted", [&] { leds.set_muted(false); }},
+  };
+  for (const auto &e : Leds::effect_names()) {
+    static const std::vector<std::string> kWhite = {"Rainbow", "Color loop", "Fire", "Aurora",
+                                                    "Lava lamp", "Candle", "Night light"};
+    const bool white = std::find(kWhite.begin(), kWhite.end(), e) != kWhite.end();
+    const Rgb col = white ? Rgb{255, 255, 255} : Rgb{255, 0, 255};
+    steps.push_back({"IDLE user " + e, [&, e, col] {
+                       leds.set_ui_state(UiState::IDLE);
+                       leds.set_user_light(true, col, 0.6f, e, 0);
+                     }});
+  }
+  steps.push_back({"led_show Comet green 3 s", [&] { leds.show_temporary("Comet", Rgb{0, 255, 0}, 3); }});
+  steps.push_back({"show_volume 0.2 (user light off)", [&] {
+                     leds.clear_temporary();
+                     leds.set_user_light(false, Rgb{}, 0, "", 0);
+                     leds.show_volume(0.2f);
+                   }});
+  steps.push_back({"show_volume 0.6", [&] { leds.show_volume(0.6f); }});
+  steps.push_back({"show_volume 1.0", [&] { leds.show_volume(1.0f); }});
+  for (const char *style : {"Spectrum", "Pulse", "Disco", "Polar"})
+    steps.push_back({std::string("music ") + style, [&, style] {
+                       feed_music();
+                       leds.set_media_playing(true);
+                       leds.set_music_style(style);
+                     }});
+  const auto cases = Leds::case_colors();
+  if (!cases.empty())
+    steps.push_back({"solid white, case colour " + cases[0], [&, c = cases[0]] {
+                       leds.set_media_playing(false);
+                       leds.set_user_light(true, Rgb{255, 255, 255}, 0.6f, "", 0);
+                       leds.set_case_color(c);
+                     }});
+  steps.push_back({"music off, light off, no case colour", [&] {
+                     if (music_timer) loop.cancel_timer(music_timer), music_timer = 0;
+                     leds.set_media_playing(false);
+                     leds.set_user_light(false, Rgb{}, 0, "", 0);
+                     leds.set_case_color("");
+                   }});
+  // Shown above the lamp and music for 15 s: last of the LED steps.
+  steps.push_back({"timer started (15 s)", [&] { leds.show_timer_started(); }});
+  // The 600 ms mute sweep shows over the countdown, which then goes on (green at the dumps).
+  steps.push_back({"mic muted during the countdown", [&] { leds.set_muted(true); }});
+  steps.push_back({"mic unmuted during the countdown", [&] { leds.set_muted(false); }});
+  const std::vector<Step> clock_steps = {
       {"clock flash_number 42", [&] { clock.flash_number(42); }},
       {"clock set_timer 125 s", [&] { clock.set_timer(125000, true); }},
       {"clock timer cleared, brightness 1.0 lux 0", [&] {
@@ -136,13 +207,18 @@ int main(int argc, char **argv) {
          leds.set_ui_state(UiState::IDLE);
        }},
   };
+  steps.insert(steps.end(), clock_steps.begin(), clock_steps.end());
   for (size_t i = 0; i < steps.size(); i++) {
     loop.add_timer(int64_t(i) * state_ms, [&, i] {
-      printf("== %s\n", steps[i].name);
+      printf("== %s\n", steps[i].name.c_str());
       steps[i].fn();
     });
     loop.add_timer(int64_t(i) * state_ms + state_ms / 2, [&] {
       printf("   ring %s\n   clock %s\n", ring_dump().c_str(), clock_dump().c_str());
+      fflush(stdout);
+    });
+    loop.add_timer(int64_t(i) * state_ms + state_ms * 3 / 4, [&] {
+      printf("   ring %s\n", ring_dump().c_str());
       fflush(stdout);
     });
   }

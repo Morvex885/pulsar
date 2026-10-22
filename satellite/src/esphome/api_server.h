@@ -96,12 +96,13 @@ struct LightState {
 };
 
 // Auxiliary entities. Keys are stable and owned by the server.
-enum class SwitchId : uint32_t { MIC_MUTE = 1, CLOCK = 2, AUTO_UPDATE = 3, NEAREST_ANSWERS = 4 };
+enum class SwitchId : uint32_t { MIC_MUTE = 1, CLOCK = 2, AUTO_UPDATE = 3, NEAREST_ANSWERS = 4, VOICE_INDICATION = 5 };
 enum class SensorId : uint32_t { ILLUMINANCE = 1 };
 enum class BinarySensorId : uint32_t { HW_MIC_MUTE = 1 };
-enum class NumberId : uint32_t { CLOCK_BRIGHTNESS = 1, CLOCK_SCROLL = 2 };  // 0..100 %; 100..2000 ms
+// 0..100 %; 100..2000 ms; 0.25..4 ×
+enum class NumberId : uint32_t { CLOCK_BRIGHTNESS = 1, CLOCK_SCROLL = 2, LED_SPEED = 3 };
 enum class TextId : uint32_t { CLOCK_TEXT = 1 };
-enum class SelectId : uint32_t { CLOCK_FACE = 1, ZIGBEE_MODE = 2 };
+enum class SelectId : uint32_t { CLOCK_FACE = 1, ZIGBEE_MODE = 2, MUSIC_VIZ = 3, CASE_COLOR = 4 };
 enum class ButtonId : uint32_t { ZIGBEE_JOIN = 1, ZIGBEE_LEAVE = 2 };
 enum class TextSensorId : uint32_t { ZIGBEE = 1 };
 enum class ActionId : uint32_t { CLOCK_SHOW_TEXT = 1, CLOCK_SHOW_FACE = 2 };  // args (text|face, seconds)
@@ -138,12 +139,15 @@ class ApiHooks {
   virtual void on_active_wake_words(const std::vector<std::string> &ids) = 0;
   virtual void on_media_command(const MediaCommandRequest &cmd) = 0;
   virtual void on_switch(SwitchId id, bool state) = 0;
-  virtual void on_light(const LightState &st) = 0;
+  // transition_ms: the command's transition length, ESPHome's default (1 s) when it has none.
+  virtual void on_light(const LightState &st, uint32_t transition_ms) = 0;
   virtual void on_number(NumberId id, float value) = 0;
   virtual void on_text(TextId id, const std::string &value) = 0;       // <= 64 UTF-8 characters
-  virtual void on_select(SelectId id, const std::string &option) = 0;  // one of ApiConfig::clock_faces
+  virtual void on_select(SelectId id, const std::string &option) = 0;  // one of the select's options
   // User-defined action call: value is the text (<= 64 chars) or the face ("" or one of clock_faces).
   virtual void on_action(ActionId id, const std::string &value, int32_t seconds) = 0;
+  // Action led_show: effect "" (solid colour) or one of ApiConfig::light_effects; color as given.
+  virtual void on_led_show(const std::string &effect, const std::string &color, int32_t seconds) = 0;
   // Time from HA (GetTimeResponse); posix_tz is the POSIX TZ string (e.g. "MSK-3"), may be empty.
   virtual void on_time(uint32_t epoch_seconds, const std::string &posix_tz) {}
   // HA answered VoiceAssistantRequest(start) with error=true: no pipeline will run.
@@ -165,6 +169,8 @@ struct ApiConfig {
   std::vector<std::string> active_wake_words;     // initially active ids
   std::vector<std::string> light_effects;         // ring light effects, besides "None"
   std::vector<std::string> clock_faces;           // Select «Clock face» options, "None" first
+  std::vector<std::string> music_styles;          // Select «Music visualization» options
+  std::vector<std::string> case_colors;           // Select «Case color» options, "None" first
   // Select «Zigbee role» options; empty: no Zigbee entities (no radio).
   std::vector<std::string> zigbee_modes;
   // File holding the Noise encryption key (base64 of 32 bytes, as in ESPHome's api: encryption:

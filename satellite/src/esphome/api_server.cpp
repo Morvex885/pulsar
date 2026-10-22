@@ -125,6 +125,11 @@ enum Key : uint32_t {
   K_BUTTON_ZIGBEE_LEAVE = 23,
   K_TEXT_ZIGBEE = 24,
   K_SW_NEAREST_ANSWERS = 25,
+  K_SELECT_MUSIC_VIZ = 26,
+  K_NUMBER_LED_SPEED = 27,
+  K_SW_VOICE_INDICATION = 28,
+  K_SELECT_CASE_COLOR = 29,
+  K_ACTION_LED_SHOW = 30,
 };
 
 // aioesphomeapi VoiceAssistantFeature bits.
@@ -147,6 +152,10 @@ constexpr uint32_t NUMBER_MODE_SLIDER = 2;
 constexpr uint32_t FORMAT_PURPOSE_DEFAULT = 0, FORMAT_PURPOSE_ANNOUNCEMENT = 1;
 constexpr uint32_t SERVICE_ARG_INT = 1, SERVICE_ARG_STRING = 3;  // api.proto ServiceArgType
 constexpr size_t kClockTextMax = 64;  // Text «Clock text» max_length, UTF-8 characters
+constexpr float kLedSpeedMin = 0.25f, kLedSpeedMax = 4.f;  // Number «LED speed»
+// LightCommandRequest without a transition: ESPHome's default_transition_length. Longer ones are
+// cut to a minute (frames run for the whole fade).
+constexpr uint32_t kDefaultTransitionMs = 1000, kMaxTransitionMs = 60000;
 
 constexpr size_t kMaxFrame = 1 << 20;            // reject absurd frames
 constexpr size_t kAudioBacklogLimit = 256 << 10;  // end the voice run when the socket is this far behind
@@ -357,11 +366,11 @@ struct ApiServer::Impl {
   MediaState media_state = MediaState::IDLE;
   float media_volume = 0;
   bool media_muted = false;
-  BoolState sw_mic_mute, sw_clock, sw_auto_update, sw_nearest_answers, bs_hw_mute;
+  BoolState sw_mic_mute, sw_clock, sw_auto_update, sw_nearest_answers, sw_voice_indication, bs_hw_mute;
   UpdateState update;
   bool update_has = false;
-  FloatState lux, clock_bri, clock_scroll;
-  StrState clock_text, clock_face, zigbee_mode, zigbee_status;
+  FloatState lux, clock_bri, clock_scroll, led_speed;
+  StrState clock_text, clock_face, zigbee_mode, zigbee_status, music_viz, case_color;
   LightState light;
   // Diagnostics, refreshed by diag_timer.
   FloatState rssi;
@@ -1337,6 +1346,37 @@ struct ApiServer::Impl {
     }
     {
       pb::Writer w;
+      entity_head(w, "voice_indication", K_SW_VOICE_INDICATION, "Voice indication");
+      w.str(5, "mdi:led-on");
+      w.u32(8, ENTITY_CATEGORY_CONFIG);
+      send_msg(c, LIST_SWITCH, w);
+    }
+    {
+      pb::Writer w;
+      entity_head(w, "led_speed", K_NUMBER_LED_SPEED, "LED speed");
+      w.str(5, "mdi:speedometer");
+      w.flt(6, kLedSpeedMin);
+      w.flt(7, kLedSpeedMax);
+      w.flt(8, 0.05f);
+      w.u32(10, ENTITY_CATEGORY_CONFIG);
+      w.str(11, "×");
+      w.u32(12, NUMBER_MODE_SLIDER);
+      send_msg(c, LIST_NUMBER, w);
+    }
+    auto select_entity = [&](const char *oid, uint32_t key, const char *name, const char *icon,
+                             const std::vector<std::string> &options) {
+      pb::Writer w;
+      entity_head(w, oid, key, name);
+      w.str(5, icon);
+      for (const auto &o : options) w.str(6, o, true);
+      w.u32(8, ENTITY_CATEGORY_CONFIG);
+      send_msg(c, LIST_SELECT, w);
+    };
+    select_entity("music_visualization", K_SELECT_MUSIC_VIZ, "Music visualization", "mdi:equalizer",
+                  cfg.music_styles);
+    select_entity("case_color", K_SELECT_CASE_COLOR, "Case color", "mdi:palette", cfg.case_colors);
+    {
+      pb::Writer w;
       entity_head(w, "firmware", K_UPDATE, "Firmware");
       w.u32(7, ENTITY_CATEGORY_CONFIG);
       w.str(8, "firmware");
@@ -1448,14 +1488,7 @@ struct ApiServer::Impl {
       send_msg(c, LIST_SELECT, w);
     }
     if (!cfg.zigbee_modes.empty()) {
-      {
-        pb::Writer w;
-        entity_head(w, "zigbee_role", K_SELECT_ZIGBEE_MODE, "Zigbee role");
-        w.str(5, "mdi:zigbee");
-        for (const auto &o : cfg.zigbee_modes) w.str(6, o, true);
-        w.u32(8, ENTITY_CATEGORY_CONFIG);
-        send_msg(c, LIST_SELECT, w);
-      }
+      select_entity("zigbee_role", K_SELECT_ZIGBEE_MODE, "Zigbee role", "mdi:zigbee", cfg.zigbee_modes);
       auto button = [&](const char *oid, uint32_t key, const char *name, const char *icon) {
         pb::Writer w;
         entity_head(w, oid, key, name);
@@ -1468,20 +1501,22 @@ struct ApiServer::Impl {
       text("zigbee", K_TEXT_ZIGBEE, "Zigbee", "mdi:zigbee");
     }
     // User-defined actions (HA registers esphome.<device>_<name>; every argument is required).
-    auto action = [&](const char *name, uint32_t key, const char *arg) {
-      pb::Writer w, a, s;
+    auto action = [&](const char *name, uint32_t key, std::initializer_list<std::pair<const char *, uint32_t>> args) {
+      pb::Writer w;
       w.str(1, name, true);
       w.fixed32(2, key, true);
-      a.str(1, arg, true);
-      a.u32(2, SERVICE_ARG_STRING);
-      s.str(1, "seconds", true);
-      s.u32(2, SERVICE_ARG_INT);
-      w.msg(3, a);
-      w.msg(3, s);
+      for (auto &[arg, type] : args) {
+        pb::Writer a;
+        a.str(1, arg, true);
+        a.u32(2, type);
+        w.msg(3, a);
+      }
       send_msg(c, LIST_SERVICES, w);
     };
-    action("clock_show_text", K_ACTION_CLOCK_TEXT, "text");
-    action("clock_show_face", K_ACTION_CLOCK_FACE, "face");
+    action("clock_show_text", K_ACTION_CLOCK_TEXT, {{"text", SERVICE_ARG_STRING}, {"seconds", SERVICE_ARG_INT}});
+    action("clock_show_face", K_ACTION_CLOCK_FACE, {{"face", SERVICE_ARG_STRING}, {"seconds", SERVICE_ARG_INT}});
+    action("led_show", K_ACTION_LED_SHOW,
+           {{"effect", SERVICE_ARG_STRING}, {"color", SERVICE_ARG_STRING}, {"seconds", SERVICE_ARG_INT}});
     send_msg(c, LIST_DONE, pb::Writer());
   }
 
@@ -1546,6 +1581,7 @@ struct ApiServer::Impl {
     send_switch(K_SW_CLOCK, sw_clock, c);
     send_switch(K_SW_AUTO_UPDATE, sw_auto_update, c);
     send_switch(K_SW_NEAREST_ANSWERS, sw_nearest_answers, c);
+    send_switch(K_SW_VOICE_INDICATION, sw_voice_indication, c);
     send_update(c);
     send_binary(K_BS_HW_MIC_MUTE, bs_hw_mute, c);
     send_float(SENSOR_STATE, K_SENSOR_LUX, lux, c);
@@ -1559,6 +1595,9 @@ struct ApiServer::Impl {
     send_float(NUMBER_STATE, K_NUMBER_CLOCK_SCROLL, clock_scroll, c);
     send_str(TEXT_STATE, K_TEXT_CLOCK, clock_text.v, clock_text.has, c);
     send_str(SELECT_STATE, K_SELECT_CLOCK_FACE, clock_face.v, clock_face.has, c);
+    send_float(NUMBER_STATE, K_NUMBER_LED_SPEED, led_speed, c);
+    send_str(SELECT_STATE, K_SELECT_MUSIC_VIZ, music_viz.v, music_viz.has, c);
+    send_str(SELECT_STATE, K_SELECT_CASE_COLOR, case_color.v, case_color.has, c);
     if (!cfg.zigbee_modes.empty()) {
       send_str(SELECT_STATE, K_SELECT_ZIGBEE_MODE, zigbee_mode.v, zigbee_mode.has, c);
       send_str(TEXT_SENSOR_STATE, K_TEXT_ZIGBEE, zigbee_status.v, zigbee_status.has, c);
@@ -1650,6 +1689,8 @@ struct ApiServer::Impl {
       hooks.on_switch(SwitchId::AUTO_UPDATE, state);
     else if (key == K_SW_NEAREST_ANSWERS)
       hooks.on_switch(SwitchId::NEAREST_ANSWERS, state);
+    else if (key == K_SW_VOICE_INDICATION)
+      hooks.on_switch(SwitchId::VOICE_INDICATION, state);
   }
 
   void on_number_cmd(pb::Reader &r) {
@@ -1665,6 +1706,8 @@ struct ApiServer::Impl {
       hooks.on_number(NumberId::CLOCK_BRIGHTNESS, std::min(100.0f, std::max(0.0f, v)));
     else if (key == K_NUMBER_CLOCK_SCROLL)
       hooks.on_number(NumberId::CLOCK_SCROLL, std::min(2000.0f, std::max(100.0f, v)));
+    else if (key == K_NUMBER_LED_SPEED)
+      hooks.on_number(NumberId::LED_SPEED, std::min(kLedSpeedMax, std::max(kLedSpeedMin, v)));
   }
 
   bool is_clock_face(const std::string &s) const {
@@ -1703,6 +1746,13 @@ struct ApiServer::Impl {
       LOGW("api: unknown Zigbee role '%s'", s.c_str());
       return;
     }
+    if (key == K_SELECT_MUSIC_VIZ || key == K_SELECT_CASE_COLOR) {
+      const bool viz = key == K_SELECT_MUSIC_VIZ;
+      for (const auto &o : viz ? cfg.music_styles : cfg.case_colors)
+        if (o == s) return hooks.on_select(viz ? SelectId::MUSIC_VIZ : SelectId::CASE_COLOR, s);
+      LOGW("api: unknown %s '%s'", viz ? "music visualization" : "case color", s.c_str());
+      return;
+    }
     if (key != K_SELECT_CLOCK_FACE) return;
     if (!is_clock_face(s)) {
       LOGW("api: unknown clock face '%s'", s.c_str());
@@ -1732,8 +1782,20 @@ struct ApiServer::Impl {
       }
       args.push_back(std::move(a));
     }
-    if ((key != K_ACTION_CLOCK_TEXT && key != K_ACTION_CLOCK_FACE) || args.size() != 2) {
+    const size_t want = key == K_ACTION_LED_SHOW ? 3 : 2;
+    if ((key != K_ACTION_CLOCK_TEXT && key != K_ACTION_CLOCK_FACE && key != K_ACTION_LED_SHOW) ||
+        args.size() != want) {
       LOGW("api: bad action call key=%u args=%zu", key, args.size());
+      return;
+    }
+    if (key == K_ACTION_LED_SHOW) {
+      const std::string &effect = args[0].s;
+      if (!effect.empty() && effect != "None" &&
+          std::find(cfg.light_effects.begin(), cfg.light_effects.end(), effect) == cfg.light_effects.end()) {
+        LOGW("api: unknown LED effect '%s'", effect.c_str());
+        return;
+      }
+      hooks.on_led_show(effect == "None" ? std::string() : effect, args[1].s, args[2].i);
       return;
     }
     if (key == K_ACTION_CLOCK_TEXT) {
@@ -1753,7 +1815,9 @@ struct ApiServer::Impl {
 
   void on_light_cmd(pb::Reader &r) {
     uint32_t key = 0;
-    bool has_state = false, state = false, has_bri = false, has_cbri = false, has_rgb = false, has_effect = false;
+    bool has_state = false, state = false, has_bri = false, has_cbri = false, has_rgb = false, has_effect = false,
+         has_transition = false;
+    uint32_t transition = 0;
     float bri = 0, cbri = 1, red = 0, green = 0, blue = 0;
     std::string effect;
     pb::Field f;
@@ -1772,6 +1836,8 @@ struct ApiServer::Impl {
         case 9: blue = f.flt(); break;
         case 18: has_effect = f.boolean(); break;
         case 19: effect = f.str(); break;
+        case 14: has_transition = f.boolean(); break;
+        case 15: transition = f.u32(); break;
       }
     }
     if (key != K_LIGHT_RING) return;
@@ -1791,7 +1857,7 @@ struct ApiServer::Impl {
       st.b *= scale;
     }
     if (has_effect) st.effect = effect == "None" ? std::string() : effect;
-    hooks.on_light(st);
+    hooks.on_light(st, has_transition ? std::min(transition, kMaxTransitionMs) : kDefaultTransitionMs);
     light = st;
     if (states_on()) send_light();
   }
@@ -1892,6 +1958,7 @@ void ApiServer::publish_switch(SwitchId id, bool state) {
     case SwitchId::CLOCK: s = &impl_->sw_clock; key = K_SW_CLOCK; break;
     case SwitchId::AUTO_UPDATE: s = &impl_->sw_auto_update; key = K_SW_AUTO_UPDATE; break;
     case SwitchId::NEAREST_ANSWERS: s = &impl_->sw_nearest_answers; key = K_SW_NEAREST_ANSWERS; break;
+    case SwitchId::VOICE_INDICATION: s = &impl_->sw_voice_indication; key = K_SW_VOICE_INDICATION; break;
   }
   if (!s) return;
   s->has = true;
@@ -1912,11 +1979,17 @@ void ApiServer::publish_sensor(SensorId, float value) {
 }
 
 void ApiServer::publish_number(NumberId id, float value) {
-  bool scroll = id == NumberId::CLOCK_SCROLL;
-  FloatState &s = scroll ? impl_->clock_scroll : impl_->clock_bri;
-  s.has = true;
-  s.v = value;
-  if (impl_->states_on()) impl_->send_float(NUMBER_STATE, scroll ? K_NUMBER_CLOCK_SCROLL : K_NUMBER_CLOCK_BRI, s);
+  FloatState *s = nullptr;
+  uint32_t key = 0;
+  switch (id) {
+    case NumberId::CLOCK_BRIGHTNESS: s = &impl_->clock_bri; key = K_NUMBER_CLOCK_BRI; break;
+    case NumberId::CLOCK_SCROLL: s = &impl_->clock_scroll; key = K_NUMBER_CLOCK_SCROLL; break;
+    case NumberId::LED_SPEED: s = &impl_->led_speed; key = K_NUMBER_LED_SPEED; break;
+  }
+  if (!s) return;
+  s->has = true;
+  s->v = value;
+  if (impl_->states_on()) impl_->send_float(NUMBER_STATE, key, *s);
 }
 
 void ApiServer::publish_text(TextId, const std::string &state) {
@@ -1925,9 +1998,17 @@ void ApiServer::publish_text(TextId, const std::string &state) {
 }
 
 void ApiServer::publish_select(SelectId id, const std::string &state) {
-  const bool zb = id == SelectId::ZIGBEE_MODE;
-  (zb ? impl_->zigbee_mode : impl_->clock_face) = {true, state};
-  if (impl_->states_on()) impl_->send_str(SELECT_STATE, zb ? K_SELECT_ZIGBEE_MODE : K_SELECT_CLOCK_FACE, state, true);
+  StrState *s = nullptr;
+  uint32_t key = 0;
+  switch (id) {
+    case SelectId::CLOCK_FACE: s = &impl_->clock_face; key = K_SELECT_CLOCK_FACE; break;
+    case SelectId::ZIGBEE_MODE: s = &impl_->zigbee_mode; key = K_SELECT_ZIGBEE_MODE; break;
+    case SelectId::MUSIC_VIZ: s = &impl_->music_viz; key = K_SELECT_MUSIC_VIZ; break;
+    case SelectId::CASE_COLOR: s = &impl_->case_color; key = K_SELECT_CASE_COLOR; break;
+  }
+  if (!s) return;
+  *s = {true, state};
+  if (impl_->states_on()) impl_->send_str(SELECT_STATE, key, state, true);
 }
 
 void ApiServer::publish_text_sensor(TextSensorId, const std::string &state) {

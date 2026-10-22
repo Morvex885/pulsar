@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstring>
 
+#include "audio/spectrum.h"
 #include "core/log.h"
 
 // Signatures of libyandex_evil.so (recovered by reverse engineering maind, verified on device):
@@ -368,6 +369,9 @@ void AudioFrontend::run() {
   std::vector<float> mics(period * nmic), spk(period * nspk);
   std::array<float, kLevelChunks> level_hist{};  // mean square per VQE frame
   size_t level_pos = 0;
+  SpectrumAnalyzer ana(model_.capture_rate, period);
+  if (!ana.ok()) LOGW("music analysis: unsupported capture layout");
+  bool music_was_on = false;
 
   while (running_) {
     {
@@ -392,6 +396,14 @@ void AudioFrontend::run() {
       for (size_t c = 0; c < nmic; c++) mics[i * nmic + c] = f[mic_ch[c]] * (1.0f / 32768.f);
       for (size_t c = 0; c < nspk; c++) spk[i * nspk + c] = f[spk_ch[c]] * (1.0f / 32768.f);
     }
+    const bool music_on = music_.load() && ana.ok();
+    if (music_on && !music_was_on) ana.reset();
+    music_was_on = music_on;
+    MusicFrame mf;
+    if (music_on && ana.process(spk.data(), nspk, mf))
+      loop_.post([this, mf] {
+        if (music_cb_) music_cb_(mf);
+      });
     if (!e.vqe_check(e.vqe_process(e.vqe, mics.data(), mics.size(), spk.data(), spk.size()), "VQE process")) continue;
 
     // VQE_OMNI is cleaned of the station's own playback but has no AGC, so it keeps the distance to

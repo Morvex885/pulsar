@@ -109,9 +109,9 @@ struct TestHooks : ApiHooks {
     srv->publish_switch(id, state);
   }
 
-  void on_light(const LightState &s) override {
-    printf("HOOK light on=%d bri=%.2f rgb=%.2f,%.2f,%.2f effect='%s'\n", s.on, s.brightness, s.r, s.g, s.b,
-           s.effect.c_str());
+  void on_light(const LightState &s, uint32_t transition_ms) override {
+    printf("HOOK light on=%d bri=%.2f rgb=%.2f,%.2f,%.2f effect='%s' transition=%u ms\n", s.on, s.brightness, s.r,
+           s.g, s.b, s.effect.c_str(), transition_ms);
   }
 
   void on_number(NumberId id, float v) override {
@@ -131,6 +131,10 @@ struct TestHooks : ApiHooks {
 
   void on_action(ActionId id, const std::string &v, int32_t seconds) override {
     printf("HOOK action %u '%s' %d\n", unsigned(id), v.c_str(), int(seconds));
+  }
+
+  void on_led_show(const std::string &effect, const std::string &color, int32_t seconds) override {
+    printf("HOOK led_show '%s' '%s' %d\n", effect.c_str(), color.c_str(), int(seconds));
   }
 
   void on_time(uint32_t epoch, const std::string &tz) override {
@@ -176,6 +180,8 @@ int main(int argc, char **argv) {
   cfg.active_wake_words = {"alisa"};
   cfg.light_effects = {"Rainbow", "Pulse"};
   cfg.clock_faces = {"None", "Smiley"};
+  cfg.music_styles = {"Off", "All styles", "Spectrum"};
+  cfg.case_colors = {"None", "blue"};
   cfg.zigbee_modes = {"Coordinator", "Router"};
   if (argc > 4) cfg.key_path = argv[4];
   ApiServer srv(loop, id, cfg, hooks);
@@ -184,6 +190,10 @@ int main(int argc, char **argv) {
   srv.publish_media(MediaState::IDLE, 0.5f, false);
   srv.publish_switch(SwitchId::MIC_MUTE, false);
   srv.publish_switch(SwitchId::CLOCK, true);
+  srv.publish_switch(SwitchId::VOICE_INDICATION, true);
+  srv.publish_number(NumberId::LED_SPEED, 1);
+  srv.publish_select(SelectId::MUSIC_VIZ, "All styles");
+  srv.publish_select(SelectId::CASE_COLOR, "None");
   srv.publish_binary_sensor(BinarySensorId::HW_MIC_MUTE, false);
   srv.publish_number(NumberId::CLOCK_BRIGHTNESS, 50);
   LightState ls;

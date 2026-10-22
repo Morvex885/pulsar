@@ -21,12 +21,12 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 | `satellite/src/core/` | epoll event loop (`Loop`: fds, timers, cross-thread `post`), logging |
 | `satellite/src/esphome/` | ESPHome API server (hand-written protobuf in `proto.h`), mDNS responder |
 | `satellite/src/model.*` | per-model hardware description (capture layout, VQE preset, LEDs, clock, inputs, sounds), detected from `/proc/device-tree/compatible` |
-| `satellite/src/audio/frontend.*` | capture thread (ALSA → FIFO) + processing thread: Yandex VQE → wake + command spotters → 16 kHz stream |
+| `satellite/src/audio/` | `frontend.*`: capture thread (ALSA → FIFO) + processing thread: Yandex VQE → wake + command spotters → 16 kHz stream; `spectrum.*`: music features of the speaker reference (512-point FFT at 16 kHz → 8 bands, loudness, beats as `MusicFrame`, `music_frame.h`) while the visualization can be shown |
 | `satellite/src/media/player.*` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`), channels MUSIC / ANNOUNCE; `Mixer` = ALSA "Master Playback Volume" (softvol of the `speakers` PCM) |
-| `satellite/src/sendspin/` | Sendspin player on top of sendspin-cpp, own ALSA sink on the `speakers` dmix |
+| `satellite/src/sendspin/` | Sendspin player on top of sendspin-cpp, own ALSA sink on the `speakers` dmix; roles player, metadata, controller, visualizer (8 log bands 40 Hz–7.6 kHz, loudness, beats → `MusicFrame`) |
 | `satellite/src/zigbee/` | Midi Zigbee radio: zbhci link to the Telink chip (`telink_link.*`), coordinator on pulsar's firmware + ZDO to the coordinator itself (`coordinator.*`), deCONZ-protocol TCP server for Zigbee2MQTT / ZHA (`deconz_server.*`), router control (`router.*`), `.ybl` parsing + XMODEM upload through the radio's bootloader (`flasher.*`), role / firmware orchestration (`service.*`), byte order helpers (`bytes.h`) |
 | `satellite/src/update/` | HA "Firmware" update entity backend: HTTPS on the firmware's OpenSSL (`https.*`, dlopen), GitHub release check / download / verify / swap (`updater.*`) |
-| `satellite/src/hw/` | LED ring / logo (framebuffers behind ledfb triggers), clock (sysfs segments), input (touch keys, `SW_MUTE_DEVICE`), light sensor (`ltr308als01`) |
+| `satellite/src/hw/` | LED ring / logo (framebuffers behind ledfb triggers; `leds.cpp`: output, case matrix, layer compositor, fades), pure rendering of voice states / one-shots / effects / music styles (`led_fx.*`), clock (sysfs segments), input (touch keys, `SW_MUTE_DEVICE`), light sensor (`ltr308als01`) |
 | `satellite/src/controller.*` | all satellite logic: voice pipeline state machine, entities, local commands, persistence |
 | `satellite/src/arbiter.*` | `WakeArbiter`: wake word claims between stations (UDP broadcast :6054, 250 ms window), best claim answers |
 | `satellite/deploy/` | `dist.sh` (release archives, host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
@@ -336,8 +336,13 @@ speaker reference ch 6 gives ~25–30 dB lower VQE output than ch 4 and no false
 played speech. Daemon: ~23 MB RSS, ~7 % CPU idle-listening. Capture overran the 42 ms device
 buffer when reading and VQE shared a thread; hence the separate capture thread with a FIFO.
 
-Not yet verified on the Lite 2: wake word → HA pipeline → TTS end to end, GStreamer playback
-through the 32-bit `libquasar_gstreamer.so`, Sendspin playback, LED animations by eye.
+Lite 2 LEDs: `led_ring_fb` scales each channel on its way to the LEDs; sysfs `brightness` reads
+the framebuffer value × ~0.36 (red), ~0.23 (green), ~0.2 (blue), so ring colours checked through
+sysfs only match the Midi's after that correction (`/dev/fb0` holds the written B,G,R bytes).
+
+Not yet verified on the Lite 2: wake word → HA pipeline → TTS end to end, Sendspin playback, LED
+animations by eye. GStreamer playback of an HTTP WAV through the media player works (heard on the
+speaker reference by the music analysis).
 
 ## Conventions
 
@@ -384,6 +389,23 @@ through the 32-bit `libquasar_gstreamer.so`, Sendspin playback, LED animations b
   flash > timer > temporary layer (`clock_show_text`/`clock_show_face` actions) > Text «Clock text» /
   Select «Clock face» > time. Only the scroll speed is persisted (`clock_scroll_ms=`). Moving
   content uses its own one-shot frame timer; the 5 s full segment rewrite counts 250 ms ticks only.
+- LED layers (`Leds::Impl::active_layer`, first active wins): volume overlay (1.5 s) > voice state
+  (ERROR runs its 3.54 s to the end, TIMER_RING; LISTENING / THINKING / SPEAKING only with
+  `voice_indication=1`) > one-shots (mute sweep 600 ms over the timer-started countdown 15 s,
+  which goes on underneath) > `led_show` > Lite 2 mute (steady dim red) > Light «Ring» > music
+  visualization (`music_viz=` ≠ Off and MUSIC channel playing / loading or a Sendspin stream) >
+  off. The Midi logo shows the voice state, else red while muted, else the ring's average. Layer
+  changes crossfade 250 ms, Light «Ring» changes over their transition (ESPHome default 1 s,
+  capped at 60 s). Voice states, one-shots and volume use the stock
+  patterns' colours and timings, re-drawn procedurally (`led_fx.cpp`); `fx::stock(raw, k)` gives
+  the stock raw value × k after the gamma-2 output. Output: `(v · ambient dim)²`, case matrix
+  (`led_case_color=`, rows = output R, G, B [inference: orientation not confirmed by eye]), × 0.8.
+  Effects and music move on a phase scaled by `led_speed=` (0.25–4). Music: Sendspin visualizer
+  frames win while they keep coming (300 ms), else the speaker-reference analysis, which only runs
+  while the visualization is shown (the light off). Not yet verified: Music Assistant actually
+  sending visualizer frames (sendspin-cli 8.0.0 with aiosendspin 9.1.1 fails the device's Noise
+  handshake, `psk_category` missing; with aiosendspin 10.2.1 forced it connects but never starts a
+  stream).
 - `installer/` (Go) is the only host-side installer. Device commands are busybox-sh strings sent
   through `sh()` (adb shell plus `__rc=` marker; one command ≤ 4 KB on these firmwares).
   The host side uses only the Go stdlib and `golang.org/x/net`, no host tools except adb (plus

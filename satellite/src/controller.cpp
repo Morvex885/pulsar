@@ -1,6 +1,7 @@
 #include "controller.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <unistd.h>
 #include <cstdio>
@@ -96,7 +97,13 @@ bool Settings::load(const std::string &path) {
     else if (k == "update_attempt") update_attempt = v;
     else if (k == "zigbee_role") zigbee_role = ZigbeeService::parse_mode(v);
     else if (k == "zigbee_flash_failed") zigbee_flash_failed = uint32_t(strtoul(v.c_str(), nullptr, 16));
+    else if (k == "music_viz") music_viz = v;
+    else if (k == "led_speed") led_speed = std::isfinite(fv) ? std::clamp(fv, 0.25f, 4.f) : 1.f;
+    else if (k == "voice_indication") voice_indication = v == "1";
+    else if (k == "led_case_color") led_case_color = v;
   }
+  const auto &styles = Leds::music_styles();
+  if (std::find(styles.begin(), styles.end(), music_viz) == styles.end()) music_viz = "All styles";
   return true;
 }
 
@@ -115,7 +122,9 @@ void Settings::save(const std::string &path) const {
       << "\nlight_b=" << light.b << "\nlight_effect=" << light.effect << "\nwake_word=" << wake_word
       << "\ntz=" << tz << "\nauto_update=" << auto_update << "\nupdate_attempt=" << update_attempt
       << "\nzigbee_role=" << ZigbeeService::role(zigbee_role).name << "\nzigbee_flash_failed=" << std::hex
-      << zigbee_flash_failed << std::dec << "\nnearest_answers=" << nearest_answers << "\n";
+      << zigbee_flash_failed << std::dec << "\nnearest_answers=" << nearest_answers << "\nmusic_viz=" << music_viz
+      << "\nled_speed=" << led_speed << "\nvoice_indication=" << voice_indication
+      << "\nled_case_color=" << led_case_color << "\n";
   }
   rename(tmp.c_str(), path.c_str());
 }
@@ -166,7 +175,11 @@ bool Controller::start() {
   cfg.wake_words = {{"alisa", "Алиса", {"ru"}}, {"yandex", "Яндекс", {"ru"}}};
   if (st_.wake_word != "alisa" && st_.wake_word != "yandex") st_.wake_word = "alisa";
   cfg.active_wake_words = {st_.wake_word};
-  cfg.light_effects = {"Rainbow", "Breathe"};
+  cfg.light_effects = Leds::effect_names();
+  cfg.music_styles = Leds::music_styles();
+  cfg.case_colors = {"None"};
+  const auto case_colors = Leds::case_colors();
+  cfg.case_colors.insert(cfg.case_colors.end(), case_colors.begin(), case_colors.end());
   cfg.clock_faces = {"None"};
   cfg.clock_faces.insert(cfg.clock_faces.end(), Clock::face_names().begin(), Clock::face_names().end());
   const auto slash = state_path_.rfind('/');
@@ -182,9 +195,12 @@ bool Controller::start() {
   clock_.set_enabled(st_.clock_on);
   clock_.set_brightness(st_.clock_brightness);
   clock_.set_scroll_ms(st_.clock_scroll_ms);
+  leds_.set_speed(st_.led_speed);
+  leds_.set_voice_indication(st_.voice_indication);
+  leds_.set_music_style(st_.music_viz);
   leds_.set_user_light(st_.light.on,
                        Rgb{uint8_t(st_.light.r * 255), uint8_t(st_.light.g * 255), uint8_t(st_.light.b * 255)},
-                       st_.light.brightness, st_.light.effect);
+                       st_.light.brightness, st_.light.effect, 0);
 
   if (!mixer_.open()) LOGW("mixer unavailable");
   if (st_.has_volume) {
@@ -201,6 +217,15 @@ bool Controller::start() {
   }
   mixer_.set_volume(st_.volume);
   mixer_.set_muted(st_.muted);
+  if (!st_.led_case_color.empty()) {  // after the volume: persist() writes it too
+    const bool listed =
+        std::find(case_colors.begin(), case_colors.end(), st_.led_case_color) != case_colors.end();
+    if (!listed) LOGW("case colour %s not in this firmware, none used", st_.led_case_color.c_str());
+    if (!listed || !leds_.set_case_color(st_.led_case_color)) {  // Leds logs an unreadable file
+      st_.led_case_color.clear();
+      persist();
+    }
+  }
   if (!st_.update_attempt.empty()) {
     if (st_.update_attempt == PULSAR_VERSION) {
       LOGI("updated to %s", PULSAR_VERSION);
@@ -278,6 +303,7 @@ bool Controller::start() {
     else if (arbitrating_)  // the request goes on with what was said right after the wake word
       arb_audio_.insert(arb_audio_.end(), pcm, pcm + n);
   });
+  mic_.on_music([this](const MusicFrame &f) { leds_.music_frame(f, false); });
   if (!mic_.start(model_dir(st_.wake_word), kCommandModel)) LOGE("microphone front-end failed to start");
   update_detection();
 
@@ -310,12 +336,16 @@ void Controller::on_client_connected(const std::string &client_info) {
   api_->publish_switch(SwitchId::CLOCK, st_.clock_on);
   api_->publish_switch(SwitchId::AUTO_UPDATE, st_.auto_update);
   api_->publish_switch(SwitchId::NEAREST_ANSWERS, st_.nearest_answers);
+  api_->publish_switch(SwitchId::VOICE_INDICATION, st_.voice_indication);
   publish_update();
   api_->publish_binary_sensor(BinarySensorId::HW_MIC_MUTE, hw_mic_muted_);
   api_->publish_number(NumberId::CLOCK_BRIGHTNESS, st_.clock_brightness * 100.f);
   api_->publish_number(NumberId::CLOCK_SCROLL, float(st_.clock_scroll_ms));
   api_->publish_text(TextId::CLOCK_TEXT, clock_text_);
   api_->publish_select(SelectId::CLOCK_FACE, clock_face_);
+  api_->publish_number(NumberId::LED_SPEED, st_.led_speed);
+  api_->publish_select(SelectId::MUSIC_VIZ, st_.music_viz);
+  api_->publish_select(SelectId::CASE_COLOR, st_.led_case_color.empty() ? "None" : st_.led_case_color);
   if (zigbee_) {
     api_->publish_select(SelectId::ZIGBEE_MODE, ZigbeeService::role(st_.zigbee_role).label);
     api_->publish_text_sensor(TextSensorId::ZIGBEE, zigbee_->status());
@@ -682,6 +712,9 @@ void Controller::on_timer_event(const TimerInfo &t) {
        t.is_active);
   switch (t.event) {
     case TimerEvent::STARTED:
+      if (!timers_.count(t.id)) leds_.show_timer_started();
+      timers_[t.id] = HaTimer{t.is_active, Loop::now_ms() + int64_t(t.seconds_left) * 1000, t.seconds_left};
+      break;
     case TimerEvent::UPDATED:
       timers_[t.id] = HaTimer{t.is_active, Loop::now_ms() + int64_t(t.seconds_left) * 1000, t.seconds_left};
       break;
@@ -818,6 +851,7 @@ void Controller::start_sendspin(const DeviceIdentity &id) {
     if (open) clock_.show_code("----");
     else clock_.clear_code();
   };
+  h.on_music = [this](const MusicFrame &f) { leds_.music_frame(f, true); };
   sendspin_ = std::make_unique<SendspinService>(loop_, std::move(cfg), std::move(h));
   if (!sendspin_->start(st_.volume, st_.muted)) {
     LOGE("Sendspin player unavailable");
@@ -902,6 +936,16 @@ void Controller::publish_media() {
     }
   }
   api_->publish_media(s, st_.volume, st_.muted);
+  update_music();
+}
+
+void Controller::update_music() {
+  const PlayState ps = player_.state(Channel::MUSIC);
+  const bool media =
+      ps == PlayState::PLAYING || ps == PlayState::LOADING || (sendspin_ && sendspin_->streaming());
+  leds_.set_media_playing(media);
+  // The speaker-reference analysis only runs while its result can be shown.
+  mic_.set_music_analysis(media && st_.music_viz != "Off" && !st_.light.on);
 }
 
 void Controller::on_media_command(const MediaCommandRequest &cmd) {
@@ -995,6 +1039,9 @@ void Controller::on_switch(SwitchId id, bool state) {
     st_.auto_update = state;
   } else if (id == SwitchId::NEAREST_ANSWERS) {
     st_.nearest_answers = state;
+  } else if (id == SwitchId::VOICE_INDICATION) {
+    st_.voice_indication = state;
+    leds_.set_voice_indication(state);
   }
   api_->publish_switch(id, state);
   persist();
@@ -1125,6 +1172,11 @@ void Controller::on_number(NumberId id, float value) {
     clock_.set_scroll_ms(st_.clock_scroll_ms);
     api_->publish_number(id, float(st_.clock_scroll_ms));
     persist();
+  } else if (id == NumberId::LED_SPEED) {
+    st_.led_speed = std::clamp(value, 0.25f, 4.f);
+    leds_.set_speed(st_.led_speed);
+    api_->publish_number(id, st_.led_speed);
+    persist();
   }
 }
 
@@ -1156,6 +1208,21 @@ void Controller::on_select(SelectId id, const std::string &option) {
     loop_.stop();
     return;
   }
+  if (id == SelectId::MUSIC_VIZ) {
+    st_.music_viz = option;
+    leds_.set_music_style(option);
+    api_->publish_select(id, option);
+    persist();
+    update_music();
+    return;
+  }
+  if (id == SelectId::CASE_COLOR) {
+    const std::string stem = option == "None" ? "" : option;
+    st_.led_case_color = leds_.set_case_color(stem) ? stem : "";
+    api_->publish_select(id, st_.led_case_color.empty() ? "None" : st_.led_case_color);
+    persist();
+    return;
+  }
   clock_face_ = option;
   clock_.set_face(clock_face_index(option));
   api_->publish_select(id, option);
@@ -1182,11 +1249,28 @@ void Controller::on_action(ActionId id, const std::string &value, int32_t second
   else clock_.show_temporary_face(clock_face_index(value), seconds);
 }
 
-void Controller::on_light(const LightState &l) {
+void Controller::on_led_show(const std::string &effect, const std::string &color, int32_t seconds) {
+  if (effect.empty() && color.empty()) return leds_.clear_temporary();
+  Rgb rgb{255, 255, 255};
+  if (!color.empty()) {
+    const std::string hex = color[0] == '#' ? color.substr(1) : color;
+    if (hex.size() != 6 || !std::all_of(hex.begin(), hex.end(), [](char c) { return isxdigit((unsigned char)c); })) {
+      LOGW("led_show: bad colour '%s'", color.c_str());
+      return;
+    }
+    const unsigned long v = strtoul(hex.c_str(), nullptr, 16);
+    rgb = Rgb{uint8_t(v >> 16), uint8_t(v >> 8), uint8_t(v)};
+  }
+  LOGI("leds: show '%s' #%02x%02x%02x, %d s requested", effect.c_str(), rgb.r, rgb.g, rgb.b, int(seconds));
+  leds_.show_temporary(effect, rgb, seconds);
+}
+
+void Controller::on_light(const LightState &l, uint32_t transition_ms) {
   st_.light = l;
   leds_.set_user_light(l.on, Rgb{uint8_t(l.r * 255), uint8_t(l.g * 255), uint8_t(l.b * 255)}, l.brightness,
-                       l.effect == "None" ? "" : l.effect);
+                       l.effect == "None" ? "" : l.effect, transition_ms);
   persist();
+  update_music();
 }
 
 void Controller::on_active_wake_words(const std::vector<std::string> &ids) {
@@ -1285,6 +1369,7 @@ void Controller::on_command(const std::string &word) {
 }
 
 void Controller::update_ui() {
+  leds_.set_muted(st_.mic_muted || hw_mic_muted_);
   update_commands();
   if (timer_ringing_) return leds_.set_ui_state(UiState::TIMER_RING);
   switch (phase_) {
@@ -1299,7 +1384,7 @@ void Controller::update_ui() {
   }
   if (arbitrating_) return leds_.set_ui_state(UiState::LISTENING);
   if (announcing_) return leds_.set_ui_state(UiState::SPEAKING);
-  leds_.set_ui_state((st_.mic_muted || hw_mic_muted_) ? UiState::MUTED : UiState::IDLE);
+  leds_.set_ui_state(UiState::IDLE);
 }
 
 }  // namespace cs
