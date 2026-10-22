@@ -100,10 +100,13 @@ at 1 MB by `supervise.sh`, one `.1` kept). Boot chain:
 
 Migration of pre-rename installs (`/data/cucumber-satellite`, binary `cucumber-satellite`):
 `install.sh` stops the old instance without starting the Yandex stack, copies `state.conf`,
-`api_key` (keeps HA's Noise pairing) and `sendspin/` (MA pairing) into `/data/pulsar`, replaces
-only the old hook line in `rootkeeper.sh` (timestamped backup), and after the health check passes
-renames the old dir to `/data/cucumber-satellite.migrated-<timestamp>` (kept as a manual rollback,
-safe to delete); on failure it restores the old layout.
+`api_key` (keeps HA's Noise pairing) and `sendspin/` (MA pairing) into `/data/pulsar` (old binary
+→ `pulsar.prev`), replaces only the old hook line in `rootkeeper.sh` in place (backup
+`rootkeeper.sh.bak-<YYYYMMDDHHMMSS>`), and after the health check passes renames the old dir to
+`/data/cucumber-satellite.migrated-<same ts>` (manual rollback, safe to delete). On failure it
+restores the old hook, `enabled` and supervisor automatically (no rollback prompt). Manual
+rollback: `rm /data/pulsar/enabled && ctl.sh reload` (stops without starting the Yandex stack),
+rename the dir back, swap the hook line back, old `ctl.sh enable`.
 
 Supervisor contract (`supervise.sh` header has the details): daemon exit 0 = deliberate restart
 (SIGTERM from `ctl.sh`, the HA "Restart" button via `on_restart`), restarted after 1 s and not

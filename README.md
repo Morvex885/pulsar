@@ -164,24 +164,38 @@ ESPHome-устройство `yandex-midi-xxxxxx` или `yandex-lite2-xxxxxx`. 
 
 1. останавливает старый демон (стек Яндекса при этом не запускается);
 2. копирует `state.conf` (настройки), `api_key` (ключ шифрования HA — переподключать колонку в HA
-   не нужно) и `sendspin/` (сопряжение с Music Assistant);
-3. заменяет в `/data/quasar/rootkeeper.sh` только старую строку автозапуска (с резервной копией
-   `rootkeeper.sh.bak-<время>`);
+   не нужно) и `sendspin/` (сопряжение с Music Assistant); старый бинарник остаётся как
+   `/data/pulsar/pulsar.prev`;
+3. заменяет в `/data/quasar/rootkeeper.sh` только старую строку автозапуска на новую (резервная
+   копия — `rootkeeper.sh.bak-<ГГГГММДДччммсс>`);
 4. запускает новый демон и, если проверка здоровья прошла, переименовывает старый каталог в
-   `/data/cucumber-satellite.migrated-<время>`. Если проверка не прошла, старая установка
-   возвращается как была.
+   `/data/cucumber-satellite.migrated-<ГГГГММДДччммсс>` (та же метка времени). Если миграция или
+   проверка не удались, старая установка (строка автозапуска, `enabled`, запущенный демон)
+   восстанавливается автоматически, без вопроса об откате.
 
 Вручную вернуться к старой версии:
 
 ```sh
-/data/pulsar/ctl.sh disable        # остановить новый демон (запустится стек Яндекса)
-rm /data/pulsar/enabled
-mv /data/cucumber-satellite.migrated-<время> /data/cucumber-satellite
-cp /data/quasar/rootkeeper.sh.bak-<время> /data/quasar/rootkeeper.sh   # копия от миграции
-/data/cucumber-satellite/ctl.sh enable
+rm /data/pulsar/enabled && /data/pulsar/ctl.sh reload   # остановить pulsar; стек Яндекса не запускается
+mv /data/cucumber-satellite.migrated-<метка> /data/cucumber-satellite
 ```
 
-Когда всё работает, каталог `/data/cucumber-satellite.migrated-<время>` можно удалить.
+Затем в `/data/quasar/rootkeeper.sh` замените строку автозапуска pulsar
+
+```sh
+[ -x /data/pulsar/boot.sh ] && /data/pulsar/boot.sh </dev/null >/dev/null 2>&1 &
+```
+
+обратно на старую
+
+```sh
+[ -x /data/cucumber-satellite/boot.sh ] && /data/cucumber-satellite/boot.sh </dev/null >/dev/null 2>&1 &
+```
+
+(можно и вернуть весь файл из `rootkeeper.sh.bak-<метка>`, но тогда пропадут изменения, сделанные в
+нём после миграции) и включите старый демон: `/data/cucumber-satellite/ctl.sh enable`.
+
+Когда всё работает, каталог `/data/cucumber-satellite.migrated-<метка>` можно удалить.
 
 ### Music Assistant
 
