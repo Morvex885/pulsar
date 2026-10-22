@@ -60,9 +60,14 @@ enum Msg : uint32_t {
   GET_TIME_REQ = 36,
   GET_TIME_RESP = 37,
   SUBSCRIBE_HA_STATES_REQ = 38,
+  LIST_SERVICES = 41,
+  EXECUTE_SERVICE_REQ = 42,
   LIST_NUMBER = 49,
   NUMBER_STATE = 50,
   NUMBER_CMD = 51,
+  LIST_SELECT = 52,
+  SELECT_STATE = 53,
+  SELECT_CMD = 54,
   LIST_BUTTON = 61,
   BUTTON_CMD = 62,
   LIST_MEDIA_PLAYER = 63,
@@ -72,6 +77,9 @@ enum Msg : uint32_t {
   VA_REQUEST = 90,
   VA_RESPONSE = 91,
   VA_EVENT_RESP = 92,
+  LIST_TEXT = 97,
+  TEXT_STATE = 98,
+  TEXT_CMD = 99,
   VA_AUDIO = 106,
   LIST_EVENT = 107,
   EVENT_RESP = 108,
@@ -102,6 +110,11 @@ enum Key : uint32_t {
   K_SENSOR_UPTIME = 11,
   K_TEXT_IP = 12,
   K_TEXT_VERSION = 13,
+  K_TEXT_CLOCK = 14,
+  K_SELECT_CLOCK_FACE = 15,
+  K_NUMBER_CLOCK_SCROLL = 16,
+  K_ACTION_CLOCK_TEXT = 17,
+  K_ACTION_CLOCK_FACE = 18,
 };
 
 // aioesphomeapi VoiceAssistantFeature bits.
@@ -122,6 +135,8 @@ constexpr uint32_t STATE_CLASS_MEASUREMENT = 1, STATE_CLASS_TOTAL_INCREASING = 2
 constexpr int64_t kDiagPeriodMs = 60000;  // Wi-Fi signal / uptime / IP refresh
 constexpr uint32_t NUMBER_MODE_SLIDER = 2;
 constexpr uint32_t FORMAT_PURPOSE_DEFAULT = 0, FORMAT_PURPOSE_ANNOUNCEMENT = 1;
+constexpr uint32_t SERVICE_ARG_INT = 1, SERVICE_ARG_STRING = 3;  // api.proto ServiceArgType
+constexpr size_t kClockTextMax = 64;  // Text «Clock text» max_length, UTF-8 characters
 
 constexpr size_t kMaxFrame = 1 << 20;            // reject absurd frames
 constexpr size_t kAudioBacklogLimit = 256 << 10;  // end the voice run when the socket is this far behind
@@ -142,8 +157,17 @@ struct FloatState {
   bool has = false;
   float v = 0;
 };
+struct StrState {
+  bool has = false;
+  std::string v;
+};
 
 float clamp01(float v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+size_t utf8_chars(const std::string &s) {
+  size_t n = 0;
+  for (unsigned char ch : s) n += (ch & 0xC0) != 0x80;
+  return n;
+}
 
 // ESPHome Noise transport: frames are [0x01][len BE16][payload]. The first client frame is an
 // empty "client hello", the server answers with a server hello, then one NNpsk0 round trip
@@ -324,7 +348,8 @@ struct ApiServer::Impl {
   float media_volume = 0;
   bool media_muted = false;
   BoolState sw_mic_mute, sw_clock, bs_hw_mute;
-  FloatState lux, clock_bri;
+  FloatState lux, clock_bri, clock_scroll;
+  StrState clock_text, clock_face;
   LightState light;
   // Diagnostics, refreshed by diag_timer.
   FloatState rssi;
@@ -1084,6 +1109,15 @@ struct ApiServer::Impl {
       case NUMBER_CMD:
         on_number_cmd(r);
         break;
+      case TEXT_CMD:
+        on_text_cmd(r);
+        break;
+      case SELECT_CMD:
+        on_select_cmd(r);
+        break;
+      case EXECUTE_SERVICE_REQ:
+        on_execute_service(r);
+        break;
       case LIGHT_CMD:
         on_light_cmd(r);
         break;
@@ -1339,6 +1373,47 @@ struct ApiServer::Impl {
     };
     text("ip_address", K_TEXT_IP, "IP address", "mdi:ip-network");
     text("version", K_TEXT_VERSION, "Version", "mdi:new-box");
+    {
+      pb::Writer w;
+      entity_head(w, "clock_text_speed", K_NUMBER_CLOCK_SCROLL, "Clock text speed");
+      w.str(5, "mdi:speedometer");
+      w.flt(6, 100);
+      w.flt(7, 2000);
+      w.flt(8, 50);
+      w.u32(10, ENTITY_CATEGORY_CONFIG);
+      w.str(11, "ms");
+      w.u32(12, NUMBER_MODE_SLIDER);
+      send_msg(c, LIST_NUMBER, w);
+    }
+    {
+      pb::Writer w;
+      entity_head(w, "clock_text", K_TEXT_CLOCK, "Clock text");
+      w.str(5, "mdi:form-textbox");
+      w.u32(9, kClockTextMax);  // max_length
+      send_msg(c, LIST_TEXT, w);
+    }
+    {
+      pb::Writer w;
+      entity_head(w, "clock_face", K_SELECT_CLOCK_FACE, "Clock face");
+      w.str(5, "mdi:emoticon-outline");
+      for (const auto &o : cfg.clock_faces) w.str(6, o, true);
+      send_msg(c, LIST_SELECT, w);
+    }
+    // User-defined actions (HA registers esphome.<device>_<name>; every argument is required).
+    auto action = [&](const char *name, uint32_t key, const char *arg) {
+      pb::Writer w, a, s;
+      w.str(1, name, true);
+      w.fixed32(2, key, true);
+      a.str(1, arg, true);
+      a.u32(2, SERVICE_ARG_STRING);
+      s.str(1, "seconds", true);
+      s.u32(2, SERVICE_ARG_INT);
+      w.msg(3, a);
+      w.msg(3, s);
+      send_msg(c, LIST_SERVICES, w);
+    };
+    action("clock_show_text", K_ACTION_CLOCK_TEXT, "text");
+    action("clock_show_face", K_ACTION_CLOCK_FACE, "face");
     send_msg(c, LIST_DONE, pb::Writer());
   }
 
@@ -1409,20 +1484,24 @@ struct ApiServer::Impl {
     send_float(SENSOR_STATE, K_SENSOR_RSSI, rssi, c);
     send_uptime(c);
     send_ip(c);
-    send_text(K_TEXT_VERSION, id.project_version, true, c);
+    send_str(TEXT_SENSOR_STATE, K_TEXT_VERSION, id.project_version, true, c);
+    send_float(NUMBER_STATE, K_NUMBER_CLOCK_SCROLL, clock_scroll, c);
+    send_str(TEXT_STATE, K_TEXT_CLOCK, clock_text.v, clock_text.has, c);
+    send_str(SELECT_STATE, K_SELECT_CLOCK_FACE, clock_face.v, clock_face.has, c);
   }
 
-  void send_text(uint32_t key, const std::string &s, bool has, const ClientPtr &to = nullptr) {
+  // TextSensorState, TextState and SelectState share the layout key / state / missing_state.
+  void send_str(uint32_t type, uint32_t key, const std::string &s, bool has, const ClientPtr &to = nullptr) {
     pb::Writer w;
     w.fixed32(1, key, true);
     w.str(2, s);
     w.boolean(3, !has);
-    emit(to, TEXT_SENSOR_STATE, w);
+    emit(to, type, w);
   }
   void send_ip(const ClientPtr &to = nullptr) {
     char buf[INET_ADDRSTRLEN] = "";
     if (ip) inet_ntop(AF_INET, &ip, buf, sizeof buf);
-    send_text(K_TEXT_IP, buf, ip != 0, to);
+    send_str(TEXT_SENSOR_STATE, K_TEXT_IP, buf, ip != 0, to);
   }
   void send_uptime(const ClientPtr &to = nullptr) {
     send_float(SENSOR_STATE, K_SENSOR_UPTIME, {true, float((Loop::now_ms() - started_ms) / 1000)}, to);
@@ -1489,8 +1568,89 @@ struct ApiServer::Impl {
       if (f.num == 1) key = f.u32();
       if (f.num == 2) v = f.flt();
     }
-    if (key != K_NUMBER_CLOCK_BRI || v != v) return;
-    hooks.on_number(NumberId::CLOCK_BRIGHTNESS, std::min(100.0f, std::max(0.0f, v)));
+    if (v != v) return;
+    if (key == K_NUMBER_CLOCK_BRI)
+      hooks.on_number(NumberId::CLOCK_BRIGHTNESS, std::min(100.0f, std::max(0.0f, v)));
+    else if (key == K_NUMBER_CLOCK_SCROLL)
+      hooks.on_number(NumberId::CLOCK_SCROLL, std::min(2000.0f, std::max(100.0f, v)));
+  }
+
+  bool is_clock_face(const std::string &s) const {
+    for (const auto &o : cfg.clock_faces)
+      if (o == s) return true;
+    return false;
+  }
+
+  void on_text_cmd(pb::Reader &r) {
+    uint32_t key = 0;
+    std::string s;
+    pb::Field f;
+    while (r.next(f)) {
+      if (f.num == 1) key = f.u32();
+      if (f.num == 2) s = f.str();
+    }
+    if (key != K_TEXT_CLOCK) return;
+    if (utf8_chars(s) > kClockTextMax) {
+      LOGW("api: clock text too long (%zu chars)", utf8_chars(s));
+      return;
+    }
+    hooks.on_text(TextId::CLOCK_TEXT, s);
+  }
+
+  void on_select_cmd(pb::Reader &r) {
+    uint32_t key = 0;
+    std::string s;
+    pb::Field f;
+    while (r.next(f)) {
+      if (f.num == 1) key = f.u32();
+      if (f.num == 2) s = f.str();
+    }
+    if (key != K_SELECT_CLOCK_FACE) return;
+    if (!is_clock_face(s)) {
+      LOGW("api: unknown clock face '%s'", s.c_str());
+      return;
+    }
+    hooks.on_select(SelectId::CLOCK_FACE, s);
+  }
+
+  void on_execute_service(pb::Reader &r) {
+    struct Arg {
+      std::string s;
+      int32_t i = 0;
+    };
+    uint32_t key = 0;
+    std::vector<Arg> args;
+    pb::Field f;
+    while (r.next(f)) {
+      if (f.num == 1) key = f.u32();
+      if (f.num != 2) continue;  // 3/4 call_id / return_response: actions declare no response
+      Arg a;
+      pb::Reader ar(f);
+      pb::Field af;
+      while (ar.next(af)) {
+        if (af.num == 4) a.s = af.str();
+        if (af.num == 5) a.i = int32_t(uint32_t(af.v >> 1) ^ -uint32_t(af.v & 1));  // sint32 zigzag
+        if (af.num == 2) a.i = int32_t(uint32_t(af.v));                            // legacy_int
+      }
+      args.push_back(std::move(a));
+    }
+    if ((key != K_ACTION_CLOCK_TEXT && key != K_ACTION_CLOCK_FACE) || args.size() != 2) {
+      LOGW("api: bad action call key=%u args=%zu", key, args.size());
+      return;
+    }
+    if (key == K_ACTION_CLOCK_TEXT) {
+      if (utf8_chars(args[0].s) > kClockTextMax) {
+        LOGW("api: clock text too long (%zu chars)", utf8_chars(args[0].s));
+        return;
+      }
+      hooks.on_action(ActionId::CLOCK_SHOW_TEXT, args[0].s, args[1].i);
+    } else {
+      if (!args[0].s.empty() && !is_clock_face(args[0].s)) {
+        LOGW("api: unknown clock face '%s'", args[0].s.c_str());
+        return;
+      }
+      hooks.on_action(ActionId::CLOCK_SHOW_FACE, args[0].s, args[1].i);
+    }
   }
 
   void on_light_cmd(pb::Reader &r) {
@@ -1646,10 +1806,22 @@ void ApiServer::publish_sensor(SensorId, float value) {
   if (impl_->states_on()) impl_->send_float(SENSOR_STATE, K_SENSOR_LUX, impl_->lux);
 }
 
-void ApiServer::publish_number(NumberId, float value) {
-  impl_->clock_bri.has = true;
-  impl_->clock_bri.v = value;
-  if (impl_->states_on()) impl_->send_float(NUMBER_STATE, K_NUMBER_CLOCK_BRI, impl_->clock_bri);
+void ApiServer::publish_number(NumberId id, float value) {
+  bool scroll = id == NumberId::CLOCK_SCROLL;
+  FloatState &s = scroll ? impl_->clock_scroll : impl_->clock_bri;
+  s.has = true;
+  s.v = value;
+  if (impl_->states_on()) impl_->send_float(NUMBER_STATE, scroll ? K_NUMBER_CLOCK_SCROLL : K_NUMBER_CLOCK_BRI, s);
+}
+
+void ApiServer::publish_text(TextId, const std::string &state) {
+  impl_->clock_text = {true, state};
+  if (impl_->states_on()) impl_->send_str(TEXT_STATE, K_TEXT_CLOCK, state, true);
+}
+
+void ApiServer::publish_select(SelectId, const std::string &state) {
+  impl_->clock_face = {true, state};
+  if (impl_->states_on()) impl_->send_str(SELECT_STATE, K_SELECT_CLOCK_FACE, state, true);
 }
 
 void ApiServer::publish_light(const LightState &st) {

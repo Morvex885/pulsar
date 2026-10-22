@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "core/loop.h"
 #include "model.h"
@@ -64,6 +65,20 @@ class Clock {
   // clock is disabled. Codes longer than 4 digits page through 3-digit groups.
   void show_code(const std::string &digits);
   void clear_code();
+  // Custom content shown when no pairing code, volume flash or timer is on screen. Text is UTF-8:
+  // one cell per character, ':' lights the colon after the preceding character instead of taking
+  // a cell; up to 4 cells are shown static and centred, longer text scrolls right-to-left in a
+  // loop. set_text and set_face replace each other; set_text("") / set_face(-1) clear only their
+  // own kind.
+  void set_text(const std::string &utf8);
+  void set_face(int index);    // index into face_names(); -1 = none
+  void set_scroll_ms(int ms);  // scroll step, clamped to 100..2000
+  // Temporary layer above set_text/set_face content. seconds <= 0: one pass of a scrolling text,
+  // 5 s otherwise; capped at 3600 s. Replaces the previous layer; "" / -1 removes it.
+  void show_temporary_text(const std::string &utf8, int seconds);
+  void show_temporary_face(int index, int seconds);
+  // Names of set_face indices: the 17 static faces, then "Blink", "All faces".
+  static const std::vector<std::string> &face_names();
 
  private:
   struct Impl;

@@ -27,6 +27,7 @@ struct Settings {
   bool mic_muted = false;      // software microphone mute
   bool clock_on = true;
   float clock_brightness = 1.0f;
+  int clock_scroll_ms = 400;   // clock text scroll step
   LightState light;            // user ring light
   std::string wake_word = "alisa";
   std::string tz = "MSK-3";    // POSIX TZ (default matches what the Yandex firmware showed); updated from HA
@@ -52,6 +53,9 @@ class Controller : public ApiHooks {
   void on_switch(SwitchId id, bool state) override;
   void on_light(const LightState &st) override;
   void on_number(NumberId id, float value) override;
+  void on_text(TextId id, const std::string &value) override;
+  void on_select(SelectId id, const std::string &option) override;
+  void on_action(ActionId id, const std::string &value, int32_t seconds) override;
   void on_time(uint32_t epoch_seconds, const std::string &posix_tz) override;
   void on_restart() override;
   void on_voice_start_failed() override;
@@ -144,6 +148,9 @@ class Controller : public ApiHooks {
   // light sensor publishing
   float last_lux_published_ = -1;
   int64_t last_lux_ms_ = 0;
+  // Clock text / face entity states; not persisted (the clock shows the time after a restart).
+  std::string clock_text_;
+  std::string clock_face_ = "None";
   // Sendspin (Music Assistant) player; declared last so it stops (and stops calling back into
   // the members above) first.
   bool sendspin_pairing_prompt_ = false;

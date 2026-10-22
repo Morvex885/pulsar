@@ -119,6 +119,20 @@ struct TestHooks : ApiHooks {
     srv->publish_number(id, v);
   }
 
+  void on_text(TextId id, const std::string &v) override {
+    printf("HOOK text %u '%s'\n", unsigned(id), v.c_str());
+    srv->publish_text(id, v);
+  }
+
+  void on_select(SelectId id, const std::string &o) override {
+    printf("HOOK select %u '%s'\n", unsigned(id), o.c_str());
+    srv->publish_select(id, o);
+  }
+
+  void on_action(ActionId id, const std::string &v, int32_t seconds) override {
+    printf("HOOK action %u '%s' %d\n", unsigned(id), v.c_str(), int(seconds));
+  }
+
   void on_time(uint32_t epoch, const std::string &tz) override {
     printf("HOOK time epoch=%u tz='%s'\n", epoch, tz.c_str());
   }
@@ -157,6 +171,7 @@ int main(int argc, char **argv) {
   cfg.wake_words = {{"alisa", "Алиса", {"ru"}}, {"yandex", "Яндекс", {"ru"}}};
   cfg.active_wake_words = {"alisa"};
   cfg.light_effects = {"Rainbow", "Pulse"};
+  cfg.clock_faces = {"None", "Smiley"};
   if (argc > 4) cfg.key_path = argv[4];
   ApiServer srv(loop, id, cfg, hooks);
   hooks.srv = &srv;
@@ -171,6 +186,9 @@ int main(int argc, char **argv) {
   ls.brightness = 0.8f;
   ls.r = 0.0f, ls.g = 0.5f, ls.b = 1.0f;
   srv.publish_light(ls);
+  srv.publish_number(NumberId::CLOCK_SCROLL, 400);
+  srv.publish_text(TextId::CLOCK_TEXT, "");
+  srv.publish_select(SelectId::CLOCK_FACE, "None");
   if (!srv.start()) return 1;
 
   float lux = 100;

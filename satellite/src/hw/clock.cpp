@@ -69,6 +69,92 @@ constexpr uint8_t kFont[10] = {
 };
 constexpr uint8_t kMinus = 0x40;  // g
 
+// Printable ASCII 0x20..0x7E, from github.com/dmadison/LED-Segment-ASCII 7-Segment-ASCII_HEX.txt
+// (MIT, Copyright (c) 2017 David Madison); decimal point bits dropped, '.' drawn like ','.
+constexpr uint8_t kAscii[95] = {
+    0x00, 0x06, 0x22, 0x7E, 0x6D, 0x52, 0x46, 0x20, 0x29, 0x0B, 0x21, 0x70, 0x10, 0x40, 0x10, 0x52,  // ' '../
+    0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F, 0x09, 0x0D, 0x61, 0x48, 0x43, 0x53,  // 0..?
+    0x5F, 0x77, 0x7C, 0x39, 0x5E, 0x79, 0x71, 0x3D, 0x76, 0x30, 0x1E, 0x75, 0x38, 0x15, 0x37, 0x3F,  // @..O
+    0x73, 0x6B, 0x33, 0x6D, 0x78, 0x3E, 0x3E, 0x2A, 0x76, 0x6E, 0x5B, 0x39, 0x64, 0x0F, 0x23, 0x08,  // P.._
+    0x02, 0x5F, 0x7C, 0x58, 0x5E, 0x7B, 0x71, 0x6F, 0x74, 0x10, 0x0C, 0x75, 0x30, 0x14, 0x54, 0x5C,  // `..o
+    0x73, 0x67, 0x50, 0x6D, 0x78, 0x1C, 0x1C, 0x14, 0x76, 0x6E, 0x5B, 0x46, 0x30, 0x70, 0x01,        // p..~
+};
+
+// Cyrillic А..Я approximations; lower case uses the same glyphs.
+constexpr uint8_t kCyrillic[32] = {
+    0x77, 0x7D, 0x7F, 0x31, 0x5E, 0x79, 0x76, 0x4F,  // А Б В Г Д Е Ж З
+    0x3E, 0x3E, 0x75, 0x37, 0x15, 0x76, 0x3F, 0x37,  // И Й К Л М Н О П
+    0x73, 0x39, 0x78, 0x6E, 0x71, 0x76, 0x3E, 0x66,  // Р С Т У Ф Х Ц Ч
+    0x2A, 0x2A, 0x7C, 0x7C, 0x7C, 0x4F, 0x3F, 0x67,  // Ш Щ Ъ Ы Ь Э Ю Я
+};
+
+uint8_t glyph_for(uint32_t cp) {
+  if (cp >= 0x20 && cp <= 0x7E) return kAscii[cp - 0x20] & 0x7F;
+  if (cp >= 0x410 && cp <= 0x44F) return kCyrillic[(cp - 0x410) % 32];
+  if (cp == 0x401 || cp == 0x451) return kCyrillic[5];  // Ё ё
+  if (cp == 0xB0) return 0x63;                          // °
+  return 0;
+}
+
+struct Cell {
+  uint8_t glyph;
+  bool colon_after;
+};
+
+// One cell per code point; ':' lights the colon after the previous cell. Malformed UTF-8 bytes
+// become blank cells, one per byte.
+std::vector<Cell> layout_text(const std::string &utf8) {
+  std::vector<Cell> cells;
+  const size_t n = utf8.size();
+  for (size_t i = 0; i < n;) {
+    unsigned char b = utf8[i];
+    uint32_t cp = 0xFFFD;
+    size_t len = b < 0x80 ? 1 : (b >> 5) == 0x6 ? 2 : (b >> 4) == 0xE ? 3 : (b >> 3) == 0x1E ? 4 : 0;
+    if (len == 1) {
+      cp = b;
+    } else if (len && i + len <= n) {
+      uint32_t v = b & (0x7F >> len);
+      size_t k = 1;
+      for (; k < len && (utf8[i + k] & 0xC0) == 0x80; k++) v = v << 6 | (utf8[i + k] & 0x3F);
+      if (k == len) cp = v;
+      else len = 0;
+    } else {
+      len = 0;
+    }
+    i += len ? len : 1;
+    if (cp == ':') {
+      if (!cells.empty()) cells.back().colon_after = true;
+      continue;
+    }
+    cells.push_back({glyph_for(cp), false});
+  }
+  return cells;
+}
+
+// Faces from the "LED Studio" page (Text.html), positions left to right.
+struct Face {
+  const char *name;
+  uint8_t g[kDigits];
+};
+constexpr Face kFaces[] = {
+    {"Smiley", {0x40, 0x18, 0x0C, 0x40}},    {"Sad", {0x40, 0x21, 0x03, 0x40}},
+    {"Neutral", {0x40, 0x40, 0x40, 0x40}},   {"Surprised", {0x40, 0x09, 0x00, 0x40}},
+    {"Angry", {0x41, 0x40, 0x40, 0x41}},     {"Wink", {0x40, 0x18, 0x0C, 0x00}},
+    {"Big Smile", {0x40, 0x38, 0x1C, 0x40}}, {"Sleepy", {0x08, 0x40, 0x40, 0x08}},
+    {"Dead", {0x74, 0x08, 0x08, 0x74}},      {"Cool", {0x22, 0x18, 0x0C, 0x22}},
+    {"Love", {0x30, 0x18, 0x0C, 0x30}},      {"Robot", {0x3F, 0x09, 0x00, 0x3F}},
+    {"UwU", {0x1C, 0x1C, 0x1C, 0x1C}},       {"UwU thin", {0x1C, 0x14, 0x14, 0x1C}},
+    {"UwU happy", {0x23, 0x1C, 0x1C, 0x23}}, {"OwO", {0x23, 0x08, 0x08, 0x23}},
+    {">w<", {0x46, 0x1C, 0x1C, 0x70}},
+};
+constexpr int kStaticFaces = int(sizeof kFaces / sizeof kFaces[0]);
+constexpr int kFaceBlink = kStaticFaces, kFaceAll = kStaticFaces + 1, kFaceCount = kStaticFaces + 2;
+constexpr uint8_t kBlinkOpen[kDigits] = {0x23, 0x08, 0x08, 0x23};
+constexpr uint8_t kBlinkShut[kDigits] = {0x40, 0x08, 0x08, 0x40};
+constexpr int64_t kBlinkPeriodMs = 3000, kBlinkShutMs = 200, kBlinkStepMs = 100;
+constexpr int64_t kFaceCycleMs = 2000;
+constexpr int64_t kTemporaryMs = 5000, kTemporaryMaxS = 3600;
+
 }  // namespace
 
 struct Clock::Impl {
@@ -98,8 +184,20 @@ struct Clock::Impl {
   uint64_t tick = 0;
   unsigned refreshes = 0;
 
+  struct Content {
+    enum Kind { NONE, TEXT, FACE } kind = NONE;
+    std::vector<Cell> cells;  // TEXT
+    int face = -1;            // FACE: index into face_names()
+    int64_t since = 0;        // origin of scroll / animation phase
+  };
+  Content base, overlay;  // base: Text/Select entities; overlay: temporary layer (actions)
+  int64_t overlay_until = 0;
+  int scroll_ms = 400;
+  uint64_t anim = 0;  // one-shot timer re-armed at each frame boundary of moving content
+
   ~Impl() {
     if (tick) loop.cancel_timer(tick);
+    if (anim) loop.cancel_timer(anim);
     for (auto &d : seg_fd)
       for (int fd : d)
         if (fd >= 0) close(fd);
@@ -185,10 +283,68 @@ struct Clock::Impl {
     g[1] = kFont[v % 10];
   }
 
+  const Content *shown_content() const {
+    if (overlay.kind != Content::NONE) return &overlay;
+    if (base.kind != Content::NONE) return &base;
+    return nullptr;
+  }
+
+  int64_t anim_step(const Content &c) const {
+    if (c.kind == Content::TEXT && c.cells.size() > size_t(kDigits)) return scroll_ms;
+    if (c.kind == Content::FACE && c.face == kFaceBlink) return kBlinkStepMs;
+    if (c.kind == Content::FACE && c.face == kFaceAll) return kFaceCycleMs;
+    return 0;
+  }
+
+  void render(const Content &c, int64_t now, uint8_t g[kDigits], bool &colon) const {
+    const int64_t t = now - c.since;
+    if (c.kind == Content::TEXT) {
+      const int n = int(c.cells.size());
+      // Static text is centred; scrolling text enters from the right and ends on a blank frame.
+      const int first = n <= kDigits ? -(kDigits - n) / 2 : int((t / scroll_ms) % (n + kDigits)) - (kDigits - 1);
+      for (int p = 0; p < kDigits; p++) {
+        int ci = first + p;
+        if (ci < 0 || ci >= n) continue;
+        g[p] = c.cells[ci].glyph;
+        if (p == 1) colon = c.cells[ci].colon_after;
+      }
+    } else if (c.face == kFaceBlink) {
+      memcpy(g, t % kBlinkPeriodMs < kBlinkPeriodMs - kBlinkShutMs ? kBlinkOpen : kBlinkShut, kDigits);
+    } else if (c.face == kFaceAll) {
+      memcpy(g, kFaces[(t / kFaceCycleMs) % kStaticFaces].g, kDigits);
+    } else if (c.face >= 0 && c.face < kStaticFaces) {
+      memcpy(g, kFaces[c.face].g, kDigits);
+    }
+  }
+
+  // Frame timer for moving content; also fires when the temporary layer ends, so a single scroll
+  // pass does not show the start of a second one until the next tick.
+  void schedule_anim() {
+    if (anim) {
+      loop.cancel_timer(anim);
+      anim = 0;
+    }
+    if (!tick) return;  // not opened
+    const Content *c = shown_content();
+    if (!c) return;
+    const int64_t step = anim_step(*c);
+    const int64_t now = Loop::now_ms();
+    int64_t delay = step ? step - (now - c->since) % step : 0;
+    if (c == &overlay) delay = std::max<int64_t>(1, step ? std::min(delay, overlay_until - now) : overlay_until - now);
+    if (!delay) return;
+    anim = loop.add_timer(delay, [this] {
+      anim = 0;
+      refresh();
+      schedule_anim();
+    });
+  }
+
   void refresh() {
     int64_t now = Loop::now_ms();
-    // Every ~5 s rewrite all segments even if unchanged (sysfs state may be changed by others).
-    if (++refreshes % 20 == 0) forget_written();
+    if (overlay.kind != Content::NONE && now >= overlay_until) {
+      overlay = {};
+      schedule_anim();
+    }
     if (!code.empty()) return show_code(now);
     uint8_t g[kDigits] = {0, 0, 0, 0};
     bool colon = false;
@@ -212,6 +368,8 @@ struct Clock::Impl {
       }
       colon = left > 0 || (now / 500) % 2 == 0;  // blink at 00:00
       if (left == 0 && (now / 500) % 2) memset(g, 0, sizeof g);
+    } else if (const Content *c = shown_content()) {
+      render(*c, now, g, colon);
     } else {
       time_t t = time(nullptr);
       struct tm tm;
@@ -283,7 +441,13 @@ bool Clock::open() {
        d.model.clock_chip_current ? "chip current" : "segment brightness");
   d.apply_level();
   d.refresh();
-  d.tick = d.loop.add_timer(kTickMs, [&d] { d.refresh(); }, kTickMs);
+  // Every ~5 s rewrite all segments even if unchanged (sysfs state may be changed by others);
+  // counted on the tick only, animation frames refresh in between.
+  d.tick = d.loop.add_timer(kTickMs, [&d] {
+    if (++d.refreshes % 20 == 0) d.forget_written();
+    d.refresh();
+  }, kTickMs);
+  d.schedule_anim();
   return true;
 }
 
@@ -326,6 +490,77 @@ void Clock::show_code(const std::string &digits) {
 void Clock::clear_code() {
   impl_->code.clear();
   impl_->refresh();
+}
+
+void Clock::set_text(const std::string &utf8) {
+  auto &d = *impl_;
+  std::vector<Cell> cells = layout_text(utf8);
+  if (cells.empty()) {
+    // Non-empty text without cells (only ':') still replaces the face, as the controller does.
+    if (d.base.kind == Impl::Content::TEXT || !utf8.empty()) d.base = {};
+  } else {
+    d.base = {Impl::Content::TEXT, std::move(cells), -1, Loop::now_ms()};
+  }
+  d.refresh();
+  d.schedule_anim();
+}
+
+void Clock::set_face(int index) {
+  auto &d = *impl_;
+  if (index < 0 || index >= kFaceCount) {
+    if (d.base.kind == Impl::Content::FACE) d.base = {};
+  } else {
+    d.base = {Impl::Content::FACE, {}, index, Loop::now_ms()};
+  }
+  d.refresh();
+  d.schedule_anim();
+}
+
+void Clock::set_scroll_ms(int ms) {
+  impl_->scroll_ms = std::max(100, std::min(2000, ms));
+  impl_->refresh();
+  impl_->schedule_anim();
+}
+
+void Clock::show_temporary_text(const std::string &utf8, int seconds) {
+  auto &d = *impl_;
+  std::vector<Cell> cells = layout_text(utf8);
+  const int64_t now = Loop::now_ms();
+  if (cells.empty()) {
+    d.overlay = {};
+  } else {
+    const int64_t n = int64_t(cells.size());
+    d.overlay_until = now + (seconds > 0   ? std::min<int64_t>(seconds, kTemporaryMaxS) * 1000
+                             : n > kDigits ? (n + kDigits) * d.scroll_ms
+                                           : kTemporaryMs);
+    d.overlay = {Impl::Content::TEXT, std::move(cells), -1, now};
+  }
+  d.refresh();
+  d.schedule_anim();
+}
+
+void Clock::show_temporary_face(int index, int seconds) {
+  auto &d = *impl_;
+  const int64_t now = Loop::now_ms();
+  if (index < 0 || index >= kFaceCount) {
+    d.overlay = {};
+  } else {
+    d.overlay_until = now + (seconds > 0 ? std::min<int64_t>(seconds, kTemporaryMaxS) * 1000 : kTemporaryMs);
+    d.overlay = {Impl::Content::FACE, {}, index, now};
+  }
+  d.refresh();
+  d.schedule_anim();
+}
+
+const std::vector<std::string> &Clock::face_names() {
+  static const std::vector<std::string> names = [] {
+    std::vector<std::string> v;
+    for (const Face &f : kFaces) v.emplace_back(f.name);
+    v.emplace_back("Blink");
+    v.emplace_back("All faces");
+    return v;
+  }();
+  return names;
 }
 
 }  // namespace cs

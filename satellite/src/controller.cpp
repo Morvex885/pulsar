@@ -1,5 +1,7 @@
 #include "controller.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -39,6 +41,14 @@ std::string read_line(const char *path) {
   return s;
 }
 
+// Index in Clock::face_names(); -1 for "None" / "".
+int clock_face_index(const std::string &name) {
+  const auto &names = Clock::face_names();
+  for (size_t i = 0; i < names.size(); i++)
+    if (names[i] == name) return int(i);
+  return -1;
+}
+
 }  // namespace
 
 // ---------------- Settings ----------------
@@ -61,6 +71,7 @@ bool Settings::load(const std::string &path) {
     else if (k == "mic_muted") mic_muted = v == "1";
     else if (k == "clock_on") clock_on = v == "1";
     else if (k == "clock_brightness") clock_brightness = fv;
+    else if (k == "clock_scroll_ms") clock_scroll_ms = std::clamp(int(fv), 100, 2000);
     else if (k == "light_on") light.on = v == "1";
     else if (k == "light_brightness") light.brightness = fv;
     else if (k == "light_r") light.r = fv;
@@ -82,7 +93,8 @@ void Settings::save(const std::string &path) const {
       return;
     }
     f << "volume2=" << volume << "\nvolume=" << volume_legacy << "\nmuted=" << muted << "\nmic_muted=" << mic_muted
-      << "\nclock_on=" << clock_on << "\nclock_brightness=" << clock_brightness << "\nlight_on=" << light.on
+      << "\nclock_on=" << clock_on << "\nclock_brightness=" << clock_brightness
+      << "\nclock_scroll_ms=" << clock_scroll_ms << "\nlight_on=" << light.on
       << "\nlight_brightness=" << light.brightness << "\nlight_r=" << light.r << "\nlight_g=" << light.g
       << "\nlight_b=" << light.b << "\nlight_effect=" << light.effect << "\nwake_word=" << wake_word
       << "\ntz=" << tz << "\n";
@@ -135,6 +147,8 @@ bool Controller::start() {
   if (st_.wake_word != "alisa" && st_.wake_word != "yandex") st_.wake_word = "alisa";
   cfg.active_wake_words = {st_.wake_word};
   cfg.light_effects = {"Rainbow", "Breathe"};
+  cfg.clock_faces = {"None"};
+  cfg.clock_faces.insert(cfg.clock_faces.end(), Clock::face_names().begin(), Clock::face_names().end());
   const auto slash = state_path_.rfind('/');
   cfg.key_path = (slash == std::string::npos ? std::string(".") : state_path_.substr(0, slash)) + "/api_key";
   api_ = std::make_unique<ApiServer>(loop_, id, cfg, *this);
@@ -144,6 +158,7 @@ bool Controller::start() {
   if (!clock_.open()) LOGW("clock unavailable");
   clock_.set_enabled(st_.clock_on);
   clock_.set_brightness(st_.clock_brightness);
+  clock_.set_scroll_ms(st_.clock_scroll_ms);
   leds_.set_user_light(st_.light.on,
                        Rgb{uint8_t(st_.light.r * 255), uint8_t(st_.light.g * 255), uint8_t(st_.light.b * 255)},
                        st_.light.brightness, st_.light.effect);
@@ -255,6 +270,9 @@ void Controller::on_client_connected(const std::string &client_info) {
   api_->publish_switch(SwitchId::CLOCK, st_.clock_on);
   api_->publish_binary_sensor(BinarySensorId::HW_MIC_MUTE, hw_mic_muted_);
   api_->publish_number(NumberId::CLOCK_BRIGHTNESS, st_.clock_brightness * 100.f);
+  api_->publish_number(NumberId::CLOCK_SCROLL, float(st_.clock_scroll_ms));
+  api_->publish_text(TextId::CLOCK_TEXT, clock_text_);
+  api_->publish_select(SelectId::CLOCK_FACE, clock_face_);
   api_->publish_light(st_.light);
   if (last_lux_published_ >= 0) api_->publish_sensor(SensorId::ILLUMINANCE, last_lux_published_);
 }
@@ -824,7 +842,40 @@ void Controller::on_number(NumberId id, float value) {
     clock_.set_brightness(st_.clock_brightness);
     api_->publish_number(id, st_.clock_brightness * 100.f);
     persist();
+  } else if (id == NumberId::CLOCK_SCROLL) {
+    st_.clock_scroll_ms = std::clamp(int(std::lround(value / 50.f)) * 50, 100, 2000);
+    clock_.set_scroll_ms(st_.clock_scroll_ms);
+    api_->publish_number(id, float(st_.clock_scroll_ms));
+    persist();
   }
+}
+
+void Controller::on_text(TextId id, const std::string &value) {
+  clock_text_ = value;
+  clock_.set_text(value);
+  api_->publish_text(id, value);
+  // Text and face replace each other on the display; Clock::set_text already dropped the face.
+  if (!value.empty() && clock_face_ != "None") {
+    clock_face_ = "None";
+    api_->publish_select(SelectId::CLOCK_FACE, clock_face_);
+  }
+}
+
+void Controller::on_select(SelectId id, const std::string &option) {
+  clock_face_ = option;
+  clock_.set_face(clock_face_index(option));
+  api_->publish_select(id, option);
+  if (option != "None" && !clock_text_.empty()) {
+    clock_text_.clear();
+    api_->publish_text(TextId::CLOCK_TEXT, clock_text_);
+  }
+}
+
+void Controller::on_action(ActionId id, const std::string &value, int32_t seconds) {
+  const bool text = id == ActionId::CLOCK_SHOW_TEXT;
+  LOGI("clock: temporary %s '%s' for %d s", text ? "text" : "face", value.c_str(), int(seconds));
+  if (text) clock_.show_temporary_text(value, seconds);
+  else clock_.show_temporary_face(clock_face_index(value), seconds);
 }
 
 void Controller::on_light(const LightState &l) {

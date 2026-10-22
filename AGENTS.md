@@ -206,3 +206,7 @@ through the 32-bit `libquasar_gstreamer.so`, Sendspin playback, LED animations b
   `volume2=` (stock curve, authoritative) and `volume=` (same raw level on the pre-curve mapping, for
   binaries rolled back to `.prev`); without `volume2=`, `volume=` is converted once. Mute writes
   softvol raw 0 (still -60 dB, not silence) and also zeroes the channel and Sendspin gains.
+- Clock layers (`Clock::Impl::refresh`): pairing code (ignores the "Clock display" switch) > volume
+  flash > timer > temporary layer (`clock_show_text`/`clock_show_face` actions) > Text «Clock text» /
+  Select «Clock face» > time. Only the scroll speed is persisted (`clock_scroll_ms=`). Moving
+  content uses its own one-shot frame timer; the 5 s full segment rewrite counts 250 ms ticks only.
