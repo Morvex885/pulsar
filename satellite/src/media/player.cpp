@@ -10,10 +10,11 @@
 // Threading: a dedicated thread runs a GMainLoop on the default GMainContext; bus watches live
 // there. Public methods marshal work into it with g_idle_add; callbacks go back via Loop::post.
 //
-// Struct layouts used without headers (aarch64, GStreamer 1.x):
-//   GstMessage: GstMiniObject (64 bytes) | GstMessageType type @64 | guint64 timestamp @72 |
-//               GstObject *src @80
-//   GError:     GQuark domain @0 | gint code @4 | gchar *message @8
+// Struct layouts used without headers (GStreamer 1.x public structs):
+//   GstMessage: GstMiniObject | GstMessageType type | guint64 timestamp | GstObject *src. Mirrored
+//               with native types below (MessageView): type/src at 64/80 on aarch64, 36/48 on
+//               armhf (GstMiniObject is 36 bytes there; the ARM EABI 8-aligns the timestamp).
+//   GError:     GQuark domain @0 | gint code @4 | gchar *message @8 (same on both ABIs)
 #include "media/player.h"
 
 #include <alsa/asoundlib.h>
@@ -23,6 +24,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -73,8 +75,28 @@ constexpr int kResourceErrorRead = 9;
 constexpr int GST_FORMAT_TIME = 3;
 constexpr int GST_SEEK_FLAG_FLUSH_KEY_UNIT = (1 << 0) | (1 << 2);
 
-inline uint32_t msg_type(gp msg) { return *reinterpret_cast<uint32_t *>(static_cast<char *>(msg) + 64); }
-inline gp msg_src(gp msg) { return *reinterpret_cast<gp *>(static_cast<char *>(msg) + 80); }
+struct MiniObjectView {
+  size_t type;  // GType (gsize)
+  int refcount;
+  int lockstate;
+  unsigned flags;
+  void *copy, *dispose, *free;
+  unsigned n_qdata;
+  void *qdata;
+};
+struct MessageView {
+  MiniObjectView mini_object;
+  uint32_t type;  // GstMessageType
+  uint64_t timestamp;
+  void *src;  // GstObject *
+};
+#if defined(__aarch64__)
+static_assert(offsetof(MessageView, type) == 64 && offsetof(MessageView, src) == 80);
+#elif defined(__arm__)
+static_assert(offsetof(MessageView, type) == 36 && offsetof(MessageView, src) == 48);
+#endif
+inline uint32_t msg_type(gp msg) { return static_cast<const MessageView *>(msg)->type; }
+inline gp msg_src(gp msg) { return static_cast<const MessageView *>(msg)->src; }
 inline const char *gerror_message(gp err) {
   return err ? *reinterpret_cast<const char **>(static_cast<char *>(err) + 8) : "?";
 }
