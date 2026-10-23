@@ -9,7 +9,7 @@ D=/data/pulsar
 pidof pulsar >/dev/null 2>&1 && exit 0
 pidof supervise.sh >/dev/null 2>&1 && exit 0  # never two supervisors
 # Supported models only (see src/model.cpp); anything else keeps the Yandex stack.
-tr '\0' '\n' </proc/device-tree/compatible | grep -qxE 'yandex,(cucumber|plum)' || exit 0
+tr '\0' '\n' </proc/device-tree/compatible | grep -qxE 'yandex,(cucumber|plum|station-midi|station)' || exit 0
 
 # onboot.sh launches quasar right before calling us; wait for it, then stop it.
 i=0

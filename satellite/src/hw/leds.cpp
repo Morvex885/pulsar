@@ -28,6 +28,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include "audio/music_frame.h"
@@ -55,7 +58,44 @@ constexpr int64_t kWarnEveryMs = 10000;  // rate limit for repeated per-frame wr
 constexpr const char *kLedDir = "/sys/class/leds/";
 constexpr const char *kCaseDir = "/system/vendor/quasar/ledconfigs/";
 
-enum Layer { L_VOLUME = 1, L_VOICE, L_ONESHOT, L_SHOW, L_MUTE, L_USER, L_MUSIC, L_OFF };
+
+// Stock text pattern (ledpatterns/panel/*.led): optional "loop"/"no_size_optimization" header, then
+// one line per frame: RRGGBB00 per LED followed by the frame time in ms (hex). Used on the 2-D
+// Station 2 panel, where the ring effects do not fit.
+struct StockPattern {
+  std::vector<std::vector<uint32_t>> frames;  // 0xRRGGBB per LED
+  std::vector<int64_t> end_ms;                // cumulative end time of each frame
+  bool load(const std::string &path) {
+    std::ifstream in(path);
+    if (!in) return false;
+    std::string line;
+    while (std::getline(in, line)) {
+      std::istringstream ss(line);
+      std::vector<std::string> tok;
+      for (std::string t; ss >> t;) tok.push_back(t);
+      if (tok.size() < 3) continue;  // header
+      std::vector<uint32_t> f;
+      for (size_t i = 0; i + 1 < tok.size(); i++) f.push_back(uint32_t(std::strtoul(tok[i].c_str(), nullptr, 16) >> 8));
+      const int64_t dt = std::max<int64_t>(1, std::strtol(tok.back().c_str(), nullptr, 16));
+      frames.push_back(std::move(f));
+      end_ms.push_back((end_ms.empty() ? 0 : end_ms.back()) + dt);
+    }
+    return !frames.empty();
+  }
+  size_t index_at(int64_t t, bool loop) const {
+    const int64_t total = end_ms.back();
+    if (loop) t %= total;
+    else if (t >= total) return frames.size() - 1;
+    return size_t(std::upper_bound(end_ms.begin(), end_ms.end(), t) - end_ms.begin());
+  }
+  void draw(size_t idx, Col *out, int n) const {
+    const auto &f = frames[std::min(idx, frames.size() - 1)];
+    for (int i = 0; i < n && size_t(i) < f.size(); i++)
+      if (f[size_t(i)]) out[i] = fx::stock(f[size_t(i)]);
+  }
+};
+
+enum Layer { L_VOLUME = 1, L_VOICE, L_ONESHOT, L_SHOW, L_MUTE, L_USER, L_MUSIC, L_BT, L_OFF };
 
 fx::Voice to_voice(UiState s) {
   switch (s) {
@@ -128,6 +168,22 @@ struct Leds::Impl {
   // volume overlay
   float volume = 0;
   int64_t volume_until = 0;
+  // stock panel patterns (Station 2 only, loaded on first use)
+  StockPattern sp_listen, sp_think, sp_speak, sp_error, sp_volume, sp_bt;
+  bool bt_on = false;
+  int64_t bt_t0 = 0;
+  bool stock_tried = false, stock_ok = false, use_stock = true;
+  bool ensure_stock() {
+    if (stock_tried || n != 89) return stock_ok;
+    stock_tried = true;
+    const std::string dir = "/system/vendor/quasar/ledpatterns/panel/";
+    stock_ok = sp_listen.load(dir + "alice_listening.led") && sp_think.load(dir + "alice_thinking.led") &&
+               sp_speak.load(dir + "alice_speaking.led") && sp_error.load(dir + "error.led") &&
+               sp_volume.load(dir + "volume.led");
+    sp_bt.load(dir + "bluetooth_pairing.led");  // optional
+    LOGI("leds: stock panel patterns %s", stock_ok ? "loaded" : "unavailable");
+    return stock_ok;
+  }
   // time
   float speed = 1;
   double phase = 0;  // speed-scaled seconds
@@ -164,7 +220,7 @@ struct Leds::Impl {
 
   // Opens one strip's framebuffer if its trigger is active and the fb has the expected name.
   int open_strip_fb(const Model::LedStrip &s, fb_var_screeninfo &var) {
-    if (!trigger_is(led_name(s, "red", 0), s.trigger)) {
+    if (!s.trigger.empty() && !trigger_is(led_name(s, "red", 0), s.trigger)) {
       LOGW("leds: trigger %s not active on %s", s.trigger.c_str(), led_name(s, "red", 0).c_str());
       return -1;
     }
@@ -194,6 +250,7 @@ struct Leds::Impl {
   }
 
   bool open_sysfs() {
+    if (model.led_prefix.empty()) return false;
     static const char *cols[] = {"red", "green", "blue"};
     for (int i = 0; i < n + nlogo; i++)
       for (const char *c : cols) {
@@ -232,13 +289,25 @@ struct Leds::Impl {
   // Writes count pixels of px (RGB) to a framebuffer as BGR and latches them.
   // which: 0 = ring, 1 = logo (write warning rate limit).
   void write_fb(int fd, fb_var_screeninfo &var, const uint8_t *px, int count, int which, const char *what) {
-    std::vector<uint8_t> bgr(size_t(count) * 3);
-    for (int i = 0; i < count; i++) {
-      bgr[i * 3] = px[i * 3 + 2];
-      bgr[i * 3 + 1] = px[i * 3 + 1];
-      bgr[i * 3 + 2] = px[i * 3];
+    if (var.bits_per_pixel == 32) {
+      std::vector<uint8_t> bgra(size_t(count) * 4);
+      for (int i = 0; i < count; i++) {
+        // The Station 2 panel takes R,G,B byte order (measured: BGRA made red show up blue).
+        bgra[i * 4 + 0] = px[i * 3 + 0];
+        bgra[i * 4 + 1] = px[i * 3 + 1];
+        bgra[i * 4 + 2] = px[i * 3 + 2];
+        bgra[i * 4 + 3] = 0;
+      }
+      if (pwrite(fd, bgra.data(), bgra.size(), 0) != ssize_t(bgra.size())) warn_write(which, what);
+    } else {
+      std::vector<uint8_t> bgr(size_t(count) * 3);
+      for (int i = 0; i < count; i++) {
+        bgr[i * 3] = px[i * 3 + 2];
+        bgr[i * 3 + 1] = px[i * 3 + 1];
+        bgr[i * 3 + 2] = px[i * 3];
+      }
+      if (pwrite(fd, bgr.data(), bgr.size(), 0) != ssize_t(bgr.size())) warn_write(which, what);
     }
-    if (pwrite(fd, bgr.data(), bgr.size(), 0) != ssize_t(bgr.size())) warn_write(which, what);
     ioctl(fd, FBIOPAN_DISPLAY, &var);  // latch
   }
 
@@ -318,10 +387,25 @@ struct Leds::Impl {
     bool animated = true;
     switch (lay) {
       case L_VOLUME:
-        fx::volume(volume, ring, n);
+        if (use_stock && ensure_stock())
+          sp_volume.draw(size_t(std::lround(volume * float(sp_volume.frames.size() - 1))), ring, n);
+        else
+          fx::volume(volume, ring, n);
         animated = false;
         break;
-      case L_VOICE: fx::voice(to_voice(state), now - state_t0, ring, n); break;
+      case L_VOICE:
+        if (use_stock && ensure_stock() && state != UiState::TIMER_RING) {
+          const int64_t t = int64_t(double(now - state_t0) * speed);
+          switch (to_voice(state)) {
+            case fx::Voice::LISTENING: sp_listen.draw(sp_listen.index_at(t, true), ring, n); break;
+            case fx::Voice::THINKING: sp_think.draw(sp_think.index_at(t, true), ring, n); break;
+            case fx::Voice::SPEAKING: sp_speak.draw(sp_speak.index_at(t, true), ring, n); break;
+            default: sp_error.draw(sp_error.index_at(t, false), ring, n); break;
+          }
+        } else {
+          fx::voice(to_voice(state), now - state_t0, ring, n);
+        }
+        break;
       case L_ONESHOT:
         if (sweep != Sweep::NONE)
           fx::mute_sweep(sweep == Sweep::MUTE_ON, now - sweep_t0, ring, n);
@@ -335,6 +419,12 @@ struct Leds::Impl {
         break;
       case L_USER: animated = fx::effect(user_effect, user_col, user_bri, phase, dt, user_fx, ring, n); break;
       case L_MUSIC: render_music(now, ring); break;
+      case L_BT:
+        if (use_stock && ensure_stock() && !sp_bt.frames.empty())
+          sp_bt.draw(sp_bt.index_at(int64_t(double(now - bt_t0) * speed), true), ring, n);
+        else
+          fx::effect("Breathe", fx::rgb(0, 100, 255), 1, phase, dt, show_fx, ring, n);
+        break;
       default: animated = false; break;
     }
     if (nlogo) {
@@ -356,6 +446,7 @@ struct Leds::Impl {
     if (now < volume_until) return L_VOLUME;
     if (voice_shown()) return L_VOICE;
     if (sweep != Sweep::NONE || timer_shot) return L_ONESHOT;
+    if (bt_on) return L_BT;
     if (show_on) return L_SHOW;
     if (short_ring && muted) return L_MUTE;
     if (user_on && user_bri > 0) return L_USER;
@@ -585,6 +676,27 @@ void Leds::set_music_style(const std::string &style) {
   d.style = i;
   d.cycle_t0 = Loop::now_ms();
   d.frame();
+}
+
+void Leds::set_bluetooth(bool pairing) {
+  auto &d = *impl_;
+  if (d.bt_on == pairing) return;
+  d.bt_on = pairing;
+  d.bt_t0 = Loop::now_ms();
+  d.frame();
+}
+
+void Leds::set_stock_style(bool on) {
+  auto &d = *impl_;
+  if (d.use_stock == on) return;
+  d.use_stock = on;
+  d.frame();
+}
+
+const std::vector<std::string> &Leds::panel_effect_names() {
+  static const std::vector<std::string> kNames = {"Radar", "Ripple", "Rain",   "Matrix",
+                                                  "Plasma", "Waves", "Spiral", "Heartbeat"};
+  return kNames;
 }
 
 void Leds::set_media_playing(bool playing) {

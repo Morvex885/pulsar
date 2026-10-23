@@ -287,7 +287,69 @@ void volume(float v, Col *out, int n) {
 // ---------------------------------------------------------------------------------------------
 // Effects
 
+
+// ---------------------------------------------------------------------------------------------
+// 2-D panel effects (Station 2): the 84 LEDs are treated as a 7 x 12 grid in raster order (the
+// remaining ones stay dark). x: -3..3, y: -5.5..5.5 from the centre.
+
+bool panel_effect(const std::string &name, Col c, float bri, double t, Col *out, int n) {
+  constexpr int kW = 7, kH = 12, kGrid = kW * kH;
+  const float sat = std::max({c.r, c.g, c.b}) - std::min({c.r, c.g, c.b});
+  const bool plain = sat < 0.1f;  // white / unset colour: use a hue that drifts instead
+  const Col base = plain ? hsv(float(std::fmod(t / 12, 1.0)), 1, 1) : c;
+  auto hash = [](int v) {
+    uint32_t h = uint32_t(v) * 2654435761u;
+    h ^= h >> 15;
+    return float(h & 0xffff) / 65535.f;
+  };
+  std::fill(out, out + n, Col{});
+  for (int i = 0; i < std::min(n, kGrid); i++) {
+    const float x = float(i % kW) - 3.f, y = float(i / kW) - 5.5f;
+    const float r = std::sqrt(x * x + y * y), a = std::atan2(y, x);
+    Col col;
+    if (name == "Radar") {
+      const float d = std::fmod(float(std::fmod(t * 0.55, 1.0)) * kTau - a + 2 * kTau, kTau);
+      col = base * (d < 3.f ? std::exp(-d * 1.4f) : 0.f);
+      if (r < 0.9f) col = cmax(col, base * 0.5f);
+    } else if (name == "Ripple") {
+      const float k = 0.5f + 0.5f * std::cos(kTau * (r / 3.2f - float(t) / 2.2f));
+      col = (plain ? hsv(float(std::fmod(t / 14 + r / 12, 1.0)), 1, 1) : base) * (k * k * k);
+    } else if (name == "Rain" || name == "Matrix") {
+      const int cx = i % kW, ry = i / kW;
+      const float speed = 2.5f + 3.f * hash(cx);
+      const float head = float(std::fmod(t * speed + 20 * hash(cx + 9), kH + 7)) - 3.f;
+      const float behind = head - float(ry);
+      const float k = behind < 0 || behind > 5 ? 0.f : std::exp(-behind * 0.75f);
+      if (name == "Matrix")
+        col = behind >= 0 && behind < 0.8f ? stock(0xc8ffd0, k) : stock(0x00ff30, k * 0.9f);
+      else
+        col = base * k;
+    } else if (name == "Plasma") {
+      const float tt = float(t);
+      const float v = std::sin(x * 0.9f + tt * 0.7f) + std::sin(y * 0.6f + tt * 0.5f) +
+                      std::sin((x + y) * 0.5f + tt * 0.3f) + std::sin(r * 0.8f - tt * 0.6f);
+      col = hsv(float(std::fmod(v / 8 + 0.5f + t / 30, 1.0)), 1, 1);
+    } else if (name == "Waves") {
+      const float k = 0.5f + 0.5f * std::sin(kTau * (y / 6.f - float(t) / 3.f) + x * 0.45f);
+      col = (plain ? hsv(0.55f + 0.1f * k, 1, 1) : base) * (0.1f + 0.9f * k * k);
+    } else if (name == "Spiral") {
+      const float k = 0.5f + 0.5f * std::cos(a * 2 + r * 1.3f - float(t) * 2.5f);
+      col = (plain ? hsv(float(std::fmod(t / 10 + r / 10, 1.0)), 1, 1) : base) * (k * k);
+    } else if (name == "Heartbeat") {
+      const float p = float(std::fmod(t, 1.4));
+      const float env = std::max(std::exp(-p * 7), 0.8f * std::exp(-std::fabs(p - 0.28f) * 9));
+      const float s = 1.2f + env * 3.2f;
+      col = (plain ? stock(0xff1030) : base) * (std::exp(-r * r / (2 * s * s)) * (0.15f + 0.85f * env));
+    } else {
+      return false;
+    }
+    out[i] = col * bri;
+  }
+  return true;
+}
+
 bool effect(const std::string &name, Col c, float bri, double t, double dt, EffectState &st, Col *out, int n) {
+  if (n >= 84 && panel_effect(name, c, bri, t, out, n)) return true;
   if (name == "Rainbow") {
     for (int i = 0; i < n; i++) out[i] = hsv(float(std::fmod(t / 6, 1.0)) + float(i) / n, 1, 1) * bri;
     return true;

@@ -96,17 +96,17 @@ struct LightState {
 };
 
 // Auxiliary entities. Keys are stable and owned by the server.
-enum class SwitchId : uint32_t { MIC_MUTE = 1, CLOCK = 2, AUTO_UPDATE = 3, NEAREST_ANSWERS = 4, VOICE_INDICATION = 5 };
+enum class SwitchId : uint32_t { MIC_MUTE = 1, CLOCK = 2, AUTO_UPDATE = 3, NEAREST_ANSWERS = 4, VOICE_INDICATION = 5, BLUETOOTH = 6, SENDSPIN = 7 };
 enum class SensorId : uint32_t { ILLUMINANCE = 1 };
 enum class BinarySensorId : uint32_t { HW_MIC_MUTE = 1 };
 // 0..100 %; 100..2000 ms; 0.25..4 ×
 enum class NumberId : uint32_t { CLOCK_BRIGHTNESS = 1, CLOCK_SCROLL = 2, LED_SPEED = 3 };
 enum class TextId : uint32_t { CLOCK_TEXT = 1 };
-enum class SelectId : uint32_t { CLOCK_FACE = 1, ZIGBEE_MODE = 2, MUSIC_VIZ = 3, CASE_COLOR = 4 };
+enum class SelectId : uint32_t { CLOCK_FACE = 1, ZIGBEE_MODE = 2, MUSIC_VIZ = 3, CASE_COLOR = 4, LED_STYLE = 5, QUICK_COMMANDS = 6, BLUETOOTH_TYPE = 7 };
 enum class ButtonId : uint32_t { ZIGBEE_JOIN = 1, ZIGBEE_LEAVE = 2 };
 enum class TextSensorId : uint32_t { ZIGBEE = 1 };
 enum class ActionId : uint32_t { CLOCK_SHOW_TEXT = 1, CLOCK_SHOW_FACE = 2 };  // args (text|face, seconds)
-enum class EventId : uint32_t { BUTTON = 1 };             // event types: "action", "action_long", "volume_up", "volume_down"
+enum class EventId : uint32_t { BUTTON = 1, VOICE_COMMAND = 2 };             // event types: "action", "action_long", "volume_up", "volume_down"
 
 // "Firmware" update entity (UpdateStateResponse). Mirrors api.proto UpdateCommand.
 enum class UpdateCommand : uint32_t { NONE = 0, INSTALL = 1, CHECK = 2 };
@@ -171,6 +171,14 @@ struct ApiConfig {
   std::vector<std::string> clock_faces;           // Select «Clock face» options, "None" first
   std::vector<std::string> music_styles;          // Select «Music visualization» options
   std::vector<std::string> case_colors;           // Select «Case color» options, "None" first
+  std::vector<std::string> led_styles;            // Select «LED style» options; empty: no entity
+  bool zigbee_status = false;                     // Zigbee text sensor without role / buttons
+  std::vector<std::string> bluetooth_types;       // Select «Bluetooth type» options; empty: no entity
+  bool has_sendspin = false;                      // Switch «Sendspin» (Music Assistant player)
+  bool has_bluetooth = false;                     // Switch «Bluetooth» (speaker pairing)
+  std::vector<std::string> quick_commands;        // Select «Quick commands» options
+  bool has_clock = true;                          // 7-segment clock entities
+  bool has_case_color = true;                     // Select «Case color»
   // Select «Zigbee role» options; empty: no Zigbee entities (no radio).
   std::vector<std::string> zigbee_modes;
   // File holding the Noise encryption key (base64 of 32 bytes, as in ESPHome's api: encryption:

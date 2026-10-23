@@ -32,3 +32,16 @@ fetch noise-c https://github.com/esphome-libs/noise-c.git refs/tags/v0.1.13
 fetch IXWebSocket https://github.com/machinezone/IXWebSocket.git refs/tags/v12.0.1
 fetch micro-flac https://github.com/esphome-libs/micro-flac.git refs/tags/v0.3.0 lib/micro-ogg-demuxer
 fetch micro-opus https://github.com/esphome-libs/micro-opus.git refs/tags/v0.3.5 lib/opus lib/micro-ogg-demuxer
+
+# Local patches, applied once on top of the pinned checkouts (skipped when already applied).
+apply_patch() {
+  dir=src/$1 file=patches/$2
+  if patch -p1 -R --dry-run -s -f -d "$dir" <"$file" >/dev/null 2>&1; then
+    return
+  fi
+  patch -p1 -s -d "$dir" <"$file"
+  echo "patched $1 ($2)"
+}
+# std::condition_variable::wait() returns at once on the Station 2 (glibc 2.30 userland), which kept the
+# server's GC thread at 100 % of a core: it polls instead.
+apply_patch IXWebSocket ixwebsocket-gc-poll.patch

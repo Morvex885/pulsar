@@ -30,7 +30,20 @@ namespace ss = ::sendspin;
 
 namespace {
 
-constexpr const char *kPcm = "speakers";
+
+const char *playback_pcm_name() {
+  static const char *name = []() -> const char * {
+    snd_pcm_t *p = nullptr;
+    if (snd_pcm_open(&p, "speakers", SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK) == 0) {
+      snd_pcm_close(p);
+      return "speakers";
+    }
+    return "default";
+  }();
+  return name;
+}
+#define kPcm playback_pcm_name()
+
 constexpr int64_t kLoopTickMs = 10;        // SendspinClient::loop() cadence (integration guide)
 constexpr int kWaitSliceMs = 20;           // longest snd_pcm_wait() slice inside one write
 constexpr float kGainRampSec = 0.08f;      // full-scale duck ramp duration

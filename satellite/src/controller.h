@@ -15,6 +15,9 @@
 #include "model.h"
 #include "sendspin/sendspin_service.h"
 #include "update/updater.h"
+#include "hw/bluetooth.h"
+#include "zigbee/ezsp_bridge.h"
+#include "zigbee/ezsp_router.h"
 #include "zigbee/service.h"
 
 namespace cs {
@@ -40,11 +43,16 @@ struct Settings {
   float led_speed = 1;             // 0.25..4
   bool voice_indication = true;    // listening / thinking / speaking shown on the ring
   std::string led_case_color;      // stem of Leds::case_colors(), "" = none
+  std::string quick_commands = "playing";  // playing | always | off: commands without the wake word
+  bool sendspin = true;   // Sendspin player (Music Assistant); a switch on the panel model
+  std::string bt_type = "Headphones";  // Bluetooth device class: Headphones / Speaker
+  std::string led_style = "Standard";  // Station 2: "Standard" (Yandex patterns) / "Custom"
   // Release being installed. Still set after a restart into another version: that release was
   // rolled back by supervise.sh (crash loop), automatic updates skip it.
   std::string update_attempt;
   // zigbee_role=off | pulsar-coordinator | router (ZigbeeService::kRoles)
   ZigbeeService::Mode zigbee_role = ZigbeeService::Mode::OFF;
+  std::string zigbee_ncp = "router";  // Station 2 radio: off | bridge (TCP serial port) | router
   // zigbee_flash_failed=<hex>: radio image version given up on (the radio did not take it); not
   // written again until the role changes or another image version is installed.
   uint32_t zigbee_flash_failed = 0;
@@ -201,6 +209,12 @@ class Controller : public ApiHooks {
   uint64_t update_retry_ = 0;  // waits for idle before an automatic install
   // Zigbee radio (Midi): coordinator for ZHA or router in another network.
   std::unique_ptr<ZigbeeService> zigbee_;
+  std::unique_ptr<EzspBridge> ezsp_;
+  std::unique_ptr<EzspRouter> ezsp_router_;
+  std::unique_ptr<Bluetooth> bt_;
+  bool extra_command(const std::string &word);
+  std::string ncp_status() const;
+  const char *ncp_label() const;
   std::string zigbee_status_;  // last status line published
   // Sendspin (Music Assistant) player; declared last so it stops (and stops calling back into
   // the members above) first.

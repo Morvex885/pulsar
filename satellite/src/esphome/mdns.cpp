@@ -342,7 +342,12 @@ bool MdnsResponder::start() {
   schedule_announcements();
   if (!open_netlink()) LOGW("mdns: rtnetlink unavailable (%s); relying on the 30 s poll", strerror(errno));
   // Fallback for missed netlink events; announces only on an actual change.
-  poll_timer_ = loop_.add_timer(30000, [this] { check_network(false); }, 30000);
+  // Also re-announces every 30 s: Music Assistant (python-zeroconf) finds the Sendspin player from
+  // the unsolicited announcement and does not reconnect after its own restart otherwise.
+  poll_timer_ = loop_.add_timer(30000, [this] {
+    check_network(false);
+    announce(false);
+  }, 30000);
   for (const auto &s : services_) LOGI("mdns: advertising %s port %u", s.instance_fqdn.c_str(), s.port);
   return true;
 }

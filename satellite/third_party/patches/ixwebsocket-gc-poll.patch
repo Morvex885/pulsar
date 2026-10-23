@@ -1,0 +1,29 @@
+diff --git a/ixwebsocket/IXSocketServer.cpp b/ixwebsocket/IXSocketServer.cpp
+index bf9d20a..78e0d58 100644
+--- a/ixwebsocket/IXSocketServer.cpp
++++ b/ixwebsocket/IXSocketServer.cpp
+@@ -475,11 +475,20 @@ namespace ix
+             // with a sleep
+             if (!_stopGc)
+             {
+-                std::unique_lock<std::mutex> lock(_conditionVariableMutexGC);
+-                if(!_canContinueGC) {
+-                    _conditionVariableGC.wait(lock, [this]{ return _canContinueGC; });
++                // pulsar: poll instead of std::condition_variable::wait(), which returns at once
++                // on the Station 2 (glibc 2.30 userland) and kept this thread at 100 % of a core
++                for (;;)
++                {
++                    {
++                        std::lock_guard<std::mutex> lock(_conditionVariableMutexGC);
++                        if (_canContinueGC || _stopGc)
++                        {
++                            _canContinueGC = false;
++                            break;
++                        }
++                    }
++                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                 }
+-                _canContinueGC = false;
+             }
+         }
+     }

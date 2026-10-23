@@ -79,6 +79,33 @@ Model lite2() {
 
 }  // namespace
 
+// Station 2: 32-bit userland on aarch64 kernel, 4 mics + 2 spk loopback on hw:0,2 at 48 kHz (16 ch),
+// 89-LED screen on /dev/fb0 (32 bpp BGRA), midi_touch input, gpio-keys mute.
+Model station2() {
+  Model m;
+  m.codename = "station-midi";
+  m.host_prefix = "yandex-station2-";
+  m.friendly_name = "Яндекс Станция 2";
+  m.model_name = "Yandex Station 2";
+  m.capture_pcm = "hw:0,2";
+  m.capture_rate = 48000;
+  m.capture_channels = 16;
+  m.mic_channels = {0, 2, 4, 7};
+  m.spk_channels = {8, 9};
+  m.vqe_preset = "yandexmidi";
+  m.led_prefix = "";
+  m.ring = {89, 0, "/dev/fb0", "YNDX LED screen", "", "ring"};
+  m.clock_dir = "";
+  m.keys_input = "midi_touch";
+  m.mute_input = "gpio-keys";
+  m.error_sound = "ru-RU/vins_error.wav";
+  m.volume_map = {{0, 0}, {1, 49}, {20, 255}};
+  m.panel = true;
+  m.bluetooth = true;
+  m.ncp_tty = "/dev/ttyS3";  // quasar.cfg zigbee.tty.port; EFR32 answers ASH RST at 115200 8N1
+  return m;
+}
+
 const Model *detect_model() {
   static const Model *model = [] () -> const Model * {
     std::ifstream f("/proc/device-tree/compatible", std::ios::binary);
@@ -89,6 +116,7 @@ const Model *detect_model() {
       pos += entry.size() + 1;
       if (entry == "yandex,cucumber") return new Model(midi());
       if (entry == "yandex,plum") return new Model(lite2());
+      if (entry == "yandex,station-midi" || entry == "yandex,station") return new Model(station2());
     }
     for (char &c : compat)
       if (c == '\0') c = ' ';

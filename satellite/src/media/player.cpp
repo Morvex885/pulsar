@@ -208,6 +208,19 @@ bool load_api(void *&glib, void *&gst) {
 }
 
 // Static plugins compiled into libquasar_gstreamer.so that playbin needs for our formats.
+
+const char *playback_pcm_name() {
+  static const char *name = []() -> const char * {
+    snd_pcm_t *p = nullptr;
+    if (snd_pcm_open(&p, "speakers", SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK) == 0) {
+      snd_pcm_close(p);
+      return "speakers";
+    }
+    return "default";
+  }();
+  return name;
+}
+
 const char *const kPlugins[] = {"coreelements", "playback",    "typefindfunctions", "audioconvert", "audioresample",
                                 "audiorate",    "volume",      "alsa_nocapturelog", "wavparse",     "ogg",
                                 "opus",         "opusparse",   "flac",              "audioparsers", "libav",
@@ -586,7 +599,7 @@ bool Player::init() {
     c.id = Channel(i);
     gp perr = nullptr;
     char desc[160];
-    snprintf(desc, sizeof desc, "playbin name=ch%d audio-sink=\"alsasink device=speakers\"", i);
+    snprintf(desc, sizeof desc, "playbin name=ch%d audio-sink=\"alsasink device=%s\"", i, playback_pcm_name());
     c.pipe = g.gst_parse_launch(desc, &perr);
     if (!c.pipe) {
       LOGE("player: cannot create playbin: %s", gerror_message(perr));
