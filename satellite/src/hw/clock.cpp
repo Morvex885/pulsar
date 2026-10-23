@@ -22,9 +22,9 @@
 // stored brightness 0.0196 = 5/255). The brightness_scale tables are left untouched.
 //
 // Station Lite 2: /sys/class/leds/plum:white:clock<SEG><pos>, SEG = A..G (standard segments),
-// pos = 0..3 left to right, colon = DH + DL; H0..H3, DM and DEGREE stay dark (maind's
-// /leds/clock frameBuilder config in quasar.cfg). No global current: maind dims through the
-// per-segment brightness value (0..255), and so do we.
+// pos = 0..3 left to right, colon = DH + DL; H0..H3 and DEGREE stay dark (maind's /leds/clock
+// frameBuilder config in quasar.cfg), DM only lights in the voice animations (Model::clock_center).
+// No global current: maind dims through the per-segment brightness value (0..255), and so do we.
 //
 // Time is local time via localtime_r, i.e. it honours the process TZ (the device has no
 // /etc/localtime or zoneinfo, so the daemon must setenv("TZ", "<POSIX TZ>") + tzset(), e.g. from
@@ -32,14 +32,18 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "audio/music_frame.h"
 #include "core/log.h"
 #include "hw/ambient.h"
+#include "hw/clock_fx.h"
 #include "hw/hw.h"
 #include "hw/sysfs.h"
 
@@ -154,6 +158,31 @@ constexpr uint8_t kBlinkShut[kDigits] = {0x40, 0x08, 0x08, 0x40};
 constexpr int64_t kBlinkPeriodMs = 3000, kBlinkShutMs = 200, kBlinkStepMs = 100;
 constexpr int64_t kFaceCycleMs = 2000;
 constexpr int64_t kTemporaryMs = 5000, kTemporaryMaxS = 3600;
+constexpr int64_t kFxFrameMs = 20;     // animation frame step (the stock patterns use 20 ms frames)
+constexpr int64_t kMusicFrameMs = 40;  // level meter redraw while shown
+constexpr float kMusicReleaseMs = 250.f;  // meters fall with this time constant
+// Each digit's meter spans the recent range of its two bands: the range follows peaks and dips at
+// once and closes in on the current value with this time constant. A mixed song keeps a nearly
+// constant spectral tilt and moves by only a few dB, which on a fixed scale left every song
+// looking alike (measured on a Midi: ±0.15 of 3 segments per digit).
+constexpr float kRangeTauMs = 3000.f;
+// Narrowest range, in band units: ~7 dB on the speaker reference (45 dB scale), ~9 dB on
+// Sendspin (60 dB scale); keeps steady passages from blowing noise up to full height.
+constexpr float kMinRange = 0.15f;
+constexpr int64_t kRangeKeepMs = 10000;   // a source's ranges start over after this long without it
+constexpr int64_t kRangeMaxStepMs = 100;  // decay step across a gap (frames come every ~33 ms)
+// While the meters are shown, the time takes over for the last kVizTimeMs of every cycle.
+constexpr int64_t kVizCycleMs = 30000, kVizTimeMs = 3000;
+
+clockfx::Anim shot_anim(ClockShot s) {
+  switch (s) {
+    case ClockShot::BOOT: return clockfx::Anim::BOOT;
+    case ClockShot::PAUSE: return clockfx::Anim::PAUSE;
+    case ClockShot::NEXT: return clockfx::Anim::NEXT;
+    case ClockShot::PREVIOUS: return clockfx::Anim::PREVIOUS;
+  }
+  return clockfx::Anim::BOOT;
+}
 
 }  // namespace
 
@@ -168,6 +197,7 @@ struct Clock::Impl {
   // last written state (-1 = unknown)
   int seg_last[kDigits][kSegs];
   int colon_last = -1;
+  int center_fd = -1, center_last = -1;
   int level_last = -1;
   int on_value = 255;  // value of a lit segment (dimmed level when there is no chip current)
 
@@ -193,7 +223,22 @@ struct Clock::Impl {
   Content base, overlay;  // base: Text/Select entities; overlay: temporary layer (actions)
   int64_t overlay_until = 0;
   int scroll_ms = 400;
-  uint64_t anim = 0;  // one-shot timer re-armed at each frame boundary of moving content
+  uint64_t anim = 0;  // one-shot frame timer of moving content, re-armed by every refresh
+
+  UiState ui = UiState::IDLE;
+  bool voice_indication = true;
+  std::optional<clockfx::Anim> voice, shot;  // voice state / ringing; one-shot (boot, player)
+  int64_t voice_t0 = 0, shot_t0 = 0;
+  bool updating = false;
+
+  bool levels_on = false, media = false, viz = false;
+  std::array<float, kDigits> mus_in{}, mus_shown{};  // per digit, 0..1 within its range
+  struct Range {
+    std::array<float, kDigits> lo{}, hi{};
+    int64_t last_ms = INT64_MIN / 2;  // last frame of this source
+  };
+  Range ranges[2];  // speaker reference, Sendspin
+  int64_t mus_in_ms = 0, sendspin_until = 0, mus_drawn_ms = 0, viz_t0 = 0;
 
   ~Impl() {
     if (tick) loop.cancel_timer(tick);
@@ -204,6 +249,7 @@ struct Clock::Impl {
     for (int fd : colon_fd)
       if (fd >= 0) close(fd);
     for (int fd : current_fds) close(fd);
+    if (center_fd >= 0) close(center_fd);
   }
 
   int open_led(const std::string &name) const {
@@ -218,19 +264,28 @@ struct Clock::Impl {
     for (auto &d : seg_last)
       for (int &v : d) v = -1;
     colon_last = -1;
+    center_last = -1;
   }
 
-  void set_seg(int d, int s, bool on) {
-    int v = on ? on_value : 0;
-    if (seg_last[d][s] == v || seg_fd[d][s] < 0) return;
-    if (hwutil::write_int_fd(seg_fd[d][s], v)) seg_last[d][s] = v;
+  int scaled(uint8_t v) const { return (v * on_value + 127) / 255; }
+
+  void set_seg(int d, int s, uint8_t v) {
+    const int x = scaled(v);
+    if (seg_last[d][s] == x || seg_fd[d][s] < 0) return;
+    if (hwutil::write_int_fd(seg_fd[d][s], x)) seg_last[d][s] = x;
   }
 
-  void set_colon(bool on) {
-    int v = on ? on_value : 0;
-    if (colon_last == v) return;
-    for (int fd : colon_fd) hwutil::write_int_fd(fd, v);
-    colon_last = v;
+  void set_colon(uint8_t v) {
+    const int x = scaled(v);
+    if (colon_last == x) return;
+    for (int fd : colon_fd) hwutil::write_int_fd(fd, x);
+    colon_last = x;
+  }
+
+  void set_center(uint8_t v) {
+    const int x = scaled(v);
+    if (center_last == x || center_fd < 0) return;
+    if (hwutil::write_int_fd(center_fd, x)) center_last = x;
   }
 
   float ambient() const { return dimmer.factor(); }  // 0.02..1, 1 while lux is unknown
@@ -249,11 +304,20 @@ struct Clock::Impl {
     }
   }
 
-  void show(const uint8_t glyph[kDigits], bool colon, bool force = false) {
+  void draw(const clockfx::Frame &f, bool force) {
     const bool on = enabled || force;
     for (int d = 0; d < kDigits; d++)
-      for (int s = 0; s < kSegs; s++) set_seg(d, s, on && (glyph[d] >> s & 1));
-    set_colon(on && colon);
+      for (int s = 0; s < kSegs; s++) set_seg(d, s, on ? f.seg[d][s] : 0);
+    set_colon(on ? f.colon : 0);
+    set_center(on ? f.center : 0);
+  }
+
+  static clockfx::Frame glyph_frame(const uint8_t g[kDigits], bool colon) {
+    clockfx::Frame f;
+    for (int d = 0; d < kDigits; d++)
+      for (int s = 0; s < kSegs; s++) f.seg[d][s] = (g[d] >> s & 1) ? 255 : 0;
+    f.colon = colon ? 255 : 0;
+    return f;
   }
 
   // Up to 4 digits shown as is; longer codes page through 3-digit groups ("123-", "-456"),
@@ -275,7 +339,7 @@ struct Clock::Impl {
         for (size_t i = 0; i < grp.size(); i++) g[1 + i] = glyph(grp[i]);
       }
     }
-    show(g, false, true);
+    draw(glyph_frame(g, false), true);
   }
 
   static void two(uint8_t *g, int v, bool blank_lead) {
@@ -317,39 +381,66 @@ struct Clock::Impl {
     }
   }
 
-  // Frame timer for moving content; also fires when the temporary layer ends, so a single scroll
-  // pass does not show the start of a second one until the next tick.
-  void schedule_anim() {
+  void arm(int64_t delay) {
     if (anim) {
       loop.cancel_timer(anim);
       anim = 0;
     }
-    if (!tick) return;  // not opened
-    const Content *c = shown_content();
-    if (!c) return;
-    const int64_t step = anim_step(*c);
-    const int64_t now = Loop::now_ms();
-    int64_t delay = step ? step - (now - c->since) % step : 0;
-    if (c == &overlay) delay = std::max<int64_t>(1, step ? std::min(delay, overlay_until - now) : overlay_until - now);
-    if (!delay) return;
+    if (!tick || delay <= 0) return;  // not opened / nothing moves between ticks
     anim = loop.add_timer(delay, [this] {
       anim = 0;
       refresh();
-      schedule_anim();
     });
   }
 
-  void refresh() {
-    int64_t now = Loop::now_ms();
-    if (overlay.kind != Content::NONE && now >= overlay_until) {
-      overlay = {};
-      schedule_anim();
+  void update_voice() {
+    std::optional<clockfx::Anim> a;
+    switch (ui) {
+      case UiState::LISTENING:
+        if (voice_indication) a = clockfx::Anim::LISTENING;
+        break;
+      case UiState::THINKING:
+        if (voice_indication) a = clockfx::Anim::THINKING;
+        break;
+      case UiState::SPEAKING:
+        if (voice_indication) a = clockfx::Anim::SPEAKING;
+        break;
+      case UiState::TIMER_RING: a = clockfx::Anim::RINGING; break;
+      case UiState::IDLE:
+      case UiState::ERROR: break;
     }
-    if (!code.empty()) return show_code(now);
-    uint8_t g[kDigits] = {0, 0, 0, 0};
-    bool colon = false;
+    if (a == voice) return;
+    voice = a;
+    voice_t0 = Loop::now_ms();
+  }
+
+  // Content, first active wins: pairing code (even when disabled) > volume number > voice state /
+  // ringing > update (dark) > one-shot > timer countdown > temporary layer > Text/Face > music
+  // levels > time.
+  void refresh() {
+    const int64_t now = Loop::now_ms();
+    if (overlay.kind != Content::NONE && now >= overlay_until) overlay = {};
+    if (shot && now - shot_t0 >= clockfx::duration_ms(*shot)) shot.reset();
+    const bool eligible = levels_on && media && now - mus_in_ms < kMusicStaleMs;
+    if (eligible && !viz) {
+      viz_t0 = mus_drawn_ms = now;
+      mus_shown = {};
+    }
+    viz = eligible;
+    if (!code.empty()) {
+      show_code(now);
+      return arm(0);
+    }
+    if (!enabled) {
+      draw({}, false);
+      return arm(0);
+    }
+    clockfx::Frame f;
+    int64_t next = 0;  // ms to the next frame change before the tick, 0 = none
+    auto frame_step = [now](int64_t t0) { return kFxFrameMs - (now - t0) % kFxFrameMs; };
     if (now < flash_until) {
       // Right-aligned number, '-' for negatives.
+      uint8_t g[kDigits] = {0, 0, 0, 0};
       int v = flash_value, n = std::abs(v);
       int pos = kDigits - 1;
       do {
@@ -357,7 +448,18 @@ struct Clock::Impl {
         n /= 10;
       } while (n && pos >= 0);
       if (v < 0 && pos >= 0) g[pos] = kMinus;
+      f = glyph_frame(g, false);
+      next = flash_until - now;
+    } else if (voice) {
+      clockfx::render(*voice, now - voice_t0, f);
+      next = frame_step(voice_t0);
+    } else if (updating) {
+      // dark until the new binary takes over
+    } else if (shot) {
+      clockfx::render(*shot, now - shot_t0, f);
+      next = std::max<int64_t>(1, std::min(frame_step(shot_t0), shot_t0 + clockfx::duration_ms(*shot) - now));
     } else if (timer_end || timer_paused) {
+      uint8_t g[kDigits] = {0, 0, 0, 0};
       int64_t left = std::max<int64_t>(0, ((timer_end ? timer_end - now : timer_paused) + 999) / 1000);
       if (left >= 3600) {  // h:mm (hours >= 10 show as hh:mm)
         two(g, int(std::min<int64_t>(left / 3600, 99)), true);
@@ -366,11 +468,27 @@ struct Clock::Impl {
         two(g, int(left / 60), true);
         two(g + 2, int(left % 60), false);
       }
-      colon = left > 0 || (now / 500) % 2 == 0;  // blink at 00:00
+      bool colon = left > 0 || (now / 500) % 2 == 0;  // blink at 00:00
       if (left == 0 && (now / 500) % 2) memset(g, 0, sizeof g);
+      f = glyph_frame(g, colon);
     } else if (const Content *c = shown_content()) {
+      uint8_t g[kDigits] = {0, 0, 0, 0};
+      bool colon = false;
       render(*c, now, g, colon);
+      f = glyph_frame(g, colon);
+      // Also fires when the temporary layer ends, so a single scroll pass does not show the start
+      // of a second one until the next tick.
+      const int64_t step = anim_step(*c);
+      next = step ? step - (now - c->since) % step : 0;
+      if (c == &overlay) next = std::max<int64_t>(1, step ? std::min(next, overlay_until - now) : overlay_until - now);
+    } else if (viz && (now - viz_t0) % kVizCycleMs < kVizCycleMs - kVizTimeMs) {
+      const float k = std::exp(-float(now - mus_drawn_ms) / kMusicReleaseMs);
+      for (size_t b = 0; b < mus_shown.size(); b++) mus_shown[b] = std::max(mus_in[b], mus_shown[b] * k);
+      mus_drawn_ms = now;
+      clockfx::levels(mus_shown, f);
+      next = kMusicFrameMs;
     } else {
+      uint8_t g[kDigits] = {0, 0, 0, 0};
       time_t t = time(nullptr);
       struct tm tm;
       localtime_r(&t, &tm);
@@ -378,9 +496,10 @@ struct Clock::Impl {
       two(g + 2, tm.tm_min, false);
       timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
-      colon = ts.tv_nsec < 500000000;  // on for the first half of every second
+      f = glyph_frame(g, ts.tv_nsec < 500000000);  // colon on for the first half of every second
     }
-    show(g, colon);
+    draw(f, false);
+    arm(next);
   }
 };
 
@@ -418,6 +537,10 @@ bool Clock::open() {
       close(fd);
     }
   }
+  if (!d.model.clock_center.empty()) {
+    d.center_fd = d.open_led(d.model.clock_center);
+    if (d.center_fd < 0) LOGW("clock: missing centre LED %s", d.model.clock_center.c_str());
+  }
   if (d.model.clock_chip_current) {
     // Global current of the clock driver chips, found through the LED device links of the
     // leftmost and rightmost digit (one chip each on the Midi).
@@ -439,15 +562,14 @@ bool Clock::open() {
   }
   LOGI("clock: %d segments, %zu colon LEDs, %s dimming", found, d.colon_fd.size(),
        d.model.clock_chip_current ? "chip current" : "segment brightness");
-  d.apply_level();
-  d.refresh();
   // Every ~5 s rewrite all segments even if unchanged (sysfs state may be changed by others);
   // counted on the tick only, animation frames refresh in between.
   d.tick = d.loop.add_timer(kTickMs, [&d] {
     if (++d.refreshes % 20 == 0) d.forget_written();
     d.refresh();
   }, kTickMs);
-  d.schedule_anim();
+  d.apply_level();
+  d.refresh();
   return true;
 }
 
@@ -502,7 +624,6 @@ void Clock::set_text(const std::string &utf8) {
     d.base = {Impl::Content::TEXT, std::move(cells), -1, Loop::now_ms()};
   }
   d.refresh();
-  d.schedule_anim();
 }
 
 void Clock::set_face(int index) {
@@ -513,13 +634,11 @@ void Clock::set_face(int index) {
     d.base = {Impl::Content::FACE, {}, index, Loop::now_ms()};
   }
   d.refresh();
-  d.schedule_anim();
 }
 
 void Clock::set_scroll_ms(int ms) {
   impl_->scroll_ms = std::max(100, std::min(2000, ms));
   impl_->refresh();
-  impl_->schedule_anim();
 }
 
 void Clock::show_temporary_text(const std::string &utf8, int seconds) {
@@ -536,7 +655,6 @@ void Clock::show_temporary_text(const std::string &utf8, int seconds) {
     d.overlay = {Impl::Content::TEXT, std::move(cells), -1, now};
   }
   d.refresh();
-  d.schedule_anim();
 }
 
 void Clock::show_temporary_face(int index, int seconds) {
@@ -549,7 +667,6 @@ void Clock::show_temporary_face(int index, int seconds) {
     d.overlay = {Impl::Content::FACE, {}, index, now};
   }
   d.refresh();
-  d.schedule_anim();
 }
 
 const std::vector<std::string> &Clock::face_names() {
@@ -561,6 +678,76 @@ const std::vector<std::string> &Clock::face_names() {
     return v;
   }();
   return names;
+}
+
+void Clock::set_ui_state(UiState s) {
+  impl_->ui = s;
+  impl_->update_voice();
+  impl_->refresh();
+}
+
+void Clock::set_voice_indication(bool on) {
+  impl_->voice_indication = on;
+  impl_->update_voice();
+  impl_->refresh();
+}
+
+void Clock::play(ClockShot s) {
+  impl_->shot = shot_anim(s);
+  impl_->shot_t0 = Loop::now_ms();
+  impl_->refresh();
+}
+
+void Clock::set_updating(bool on) {
+  impl_->updating = on;
+  impl_->refresh();
+}
+
+void Clock::set_music_style(const std::string &style) {
+  impl_->levels_on = style == "Levels";
+  impl_->refresh();
+}
+
+void Clock::set_media_playing(bool playing) {
+  impl_->media = playing;
+  impl_->refresh();
+}
+
+void Clock::music_frame(const MusicFrame &f, bool from_sendspin) {
+  auto &d = *impl_;
+  const int64_t now = Loop::now_ms();
+  if (from_sendspin) d.sendspin_until = now + kSendspinFreshMs;
+  else if (now < d.sendspin_until) return;
+  // The sources use different scales, so each keeps its own ranges. Music Assistant restarts the
+  // Sendspin stream on every seek / skip (~0.7 s without frames; the speaker reference fills in
+  // meanwhile): a range survives such an interlude frozen, and starts over only after
+  // kRangeKeepMs without frames of its source.
+  Impl::Range &r = d.ranges[from_sendspin];
+  const int64_t gap = now - r.last_ms;
+  const bool restart = gap >= kRangeKeepMs;
+  const float k = restart ? 0.f : std::exp(-float(std::min(gap, kRangeMaxStepMs)) / kRangeTauMs);
+  for (int i = 0; i < kDigits; i++) {
+    const float x = (f.bands[2 * i] + f.bands[2 * i + 1]) / 2;
+    float &lo = r.lo[i], &hi = r.hi[i];
+    if (restart) {
+      lo = hi = x;
+    } else {
+      hi = x > hi ? x : x + (hi - x) * k;
+      lo = x < lo ? x : x + (lo - x) * k;
+    }
+    // A range narrower than kMinRange is widened around its centre but kept inside 0..1, so
+    // silence (bands at 0) stays dark instead of showing the middle of the meter.
+    const float span = std::max(hi - lo, kMinRange);
+    const float base = std::clamp((hi + lo - span) / 2, 0.f, 1.f - span);
+    d.mus_in[i] = std::clamp((x - base) / span, 0.f, 1.f);
+  }
+  r.last_ms = now;
+  d.mus_in_ms = now;
+}
+
+const std::vector<std::string> &Clock::music_styles() {
+  static const std::vector<std::string> styles = {"Off", "Levels"};
+  return styles;
 }
 
 }  // namespace cs

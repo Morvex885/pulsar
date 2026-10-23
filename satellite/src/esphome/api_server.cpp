@@ -130,6 +130,7 @@ enum Key : uint32_t {
   K_SW_VOICE_INDICATION = 28,
   K_SELECT_CASE_COLOR = 29,
   K_ACTION_LED_SHOW = 30,
+  K_SELECT_CLOCK_MUSIC = 31,
 };
 
 // aioesphomeapi VoiceAssistantFeature bits.
@@ -370,7 +371,7 @@ struct ApiServer::Impl {
   UpdateState update;
   bool update_has = false;
   FloatState lux, clock_bri, clock_scroll, led_speed;
-  StrState clock_text, clock_face, zigbee_mode, zigbee_status, music_viz, case_color;
+  StrState clock_text, clock_face, zigbee_mode, zigbee_status, music_viz, case_color, clock_music;
   LightState light;
   // Diagnostics, refreshed by diag_timer.
   FloatState rssi;
@@ -1375,6 +1376,8 @@ struct ApiServer::Impl {
     select_entity("music_visualization", K_SELECT_MUSIC_VIZ, "Music visualization", "mdi:equalizer",
                   cfg.music_styles);
     select_entity("case_color", K_SELECT_CASE_COLOR, "Case color", "mdi:palette", cfg.case_colors);
+    select_entity("clock_music", K_SELECT_CLOCK_MUSIC, "Clock music", "mdi:equalizer-outline",
+                  cfg.clock_music_styles);
     {
       pb::Writer w;
       entity_head(w, "firmware", K_UPDATE, "Firmware");
@@ -1598,6 +1601,7 @@ struct ApiServer::Impl {
     send_float(NUMBER_STATE, K_NUMBER_LED_SPEED, led_speed, c);
     send_str(SELECT_STATE, K_SELECT_MUSIC_VIZ, music_viz.v, music_viz.has, c);
     send_str(SELECT_STATE, K_SELECT_CASE_COLOR, case_color.v, case_color.has, c);
+    send_str(SELECT_STATE, K_SELECT_CLOCK_MUSIC, clock_music.v, clock_music.has, c);
     if (!cfg.zigbee_modes.empty()) {
       send_str(SELECT_STATE, K_SELECT_ZIGBEE_MODE, zigbee_mode.v, zigbee_mode.has, c);
       send_str(TEXT_SENSOR_STATE, K_TEXT_ZIGBEE, zigbee_status.v, zigbee_status.has, c);
@@ -1744,6 +1748,12 @@ struct ApiServer::Impl {
       for (const auto &o : cfg.zigbee_modes)
         if (o == s) return hooks.on_select(SelectId::ZIGBEE_MODE, s);
       LOGW("api: unknown Zigbee role '%s'", s.c_str());
+      return;
+    }
+    if (key == K_SELECT_CLOCK_MUSIC) {
+      for (const auto &o : cfg.clock_music_styles)
+        if (o == s) return hooks.on_select(SelectId::CLOCK_MUSIC, s);
+      LOGW("api: unknown clock music '%s'", s.c_str());
       return;
     }
     if (key == K_SELECT_MUSIC_VIZ || key == K_SELECT_CASE_COLOR) {
@@ -2005,6 +2015,7 @@ void ApiServer::publish_select(SelectId id, const std::string &state) {
     case SelectId::ZIGBEE_MODE: s = &impl_->zigbee_mode; key = K_SELECT_ZIGBEE_MODE; break;
     case SelectId::MUSIC_VIZ: s = &impl_->music_viz; key = K_SELECT_MUSIC_VIZ; break;
     case SelectId::CASE_COLOR: s = &impl_->case_color; key = K_SELECT_CASE_COLOR; break;
+    case SelectId::CLOCK_MUSIC: s = &impl_->clock_music; key = K_SELECT_CLOCK_MUSIC; break;
   }
   if (!s) return;
   *s = {true, state};

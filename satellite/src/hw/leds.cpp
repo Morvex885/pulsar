@@ -48,8 +48,6 @@ constexpr float kMaxScale = 0.8f;     // global cap: never drive LEDs above 80 %
 constexpr int64_t kVolumeShowMs = 1500;
 constexpr int64_t kFadeMs = 250;      // crossfade between layers
 constexpr int64_t kMaxStepMs = 100;   // longest time step of one frame (after an idle stretch)
-constexpr int64_t kSendspinFreshMs = 300;
-constexpr int64_t kMusicStaleMs = 500;
 constexpr int64_t kCycleStyleMs = 30000, kCycleFadeMs = 1000;  // "All styles"
 constexpr int64_t kWarnEveryMs = 10000;  // rate limit for repeated per-frame write warnings
 constexpr const char *kLedDir = "/sys/class/leds/";

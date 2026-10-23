@@ -68,7 +68,8 @@ Model lite2() {
   m.clock_seg_base = 'A';
   m.clock_pos_base = 0;
   m.clock_colon = {"DH", "DL"};
-  m.clock_aux = {"H0", "H1", "H2", "H3", "DM", "DEGREE"};
+  m.clock_aux = {"H0", "H1", "H2", "H3", "DEGREE"};
+  m.clock_center = "DM";  // centre dot of the stock voice patterns (their extra LED 35)
   m.clock_chip_current = false;
   m.keys_input = "aw9610x";
   m.mute_input = "gpio-keys";

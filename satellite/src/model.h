@@ -38,6 +38,7 @@ struct Model {
   char clock_seg_base = 'a';  // name of segment a ('a' or 'A')
   int clock_pos_base = 1;     // name of the leftmost digit position
   std::vector<std::string> clock_colon, clock_aux;  // colon LEDs; LEDs kept dark
+  std::string clock_center;  // LED at g height between digits 1 and 2 ("" = none)
   // true: segments switch 0/255, dimming via the driver chips' "current" attribute;
   // false: dimming via the per-segment brightness value itself.
   bool clock_chip_current = true;

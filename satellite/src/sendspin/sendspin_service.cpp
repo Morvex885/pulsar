@@ -481,6 +481,13 @@ struct SendspinService::Impl : ss::SendspinClientListener, ss::PlayerRoleListene
   ss::ControllerRole *controller = nullptr;
   uint64_t tick = 0;
   bool streaming = false;
+  // Music Assistant ends and restarts the stream on every seek / skip (~10 ms apart); a stop or
+  // pause comes with group state "stopped" (just before or just after the stream end, seen on a
+  // Midi). A stream end without it is held this long, so a restart does not flap the HA media
+  // state, the command spotter and the music displays.
+  static constexpr int64_t kStreamEndHoldMs = 1000;
+  uint64_t end_timer = 0;
+  bool group_stopped = false;
   bool connected = false;
   bool hooks_enabled = true;
   // Visualizer drain thread only.
@@ -492,6 +499,10 @@ struct SendspinService::Impl : ss::SendspinClientListener, ss::PlayerRoleListene
     LOGI("sendspin: group %s%s%s", g.group_name ? g.group_name->c_str() : "-",
          g.playback_state ? " state=" : "",
          g.playback_state ? (*g.playback_state == ss::SendspinPlaybackState::PLAYING ? "playing" : "stopped") : "");
+    if (g.playback_state) {
+      group_stopped = *g.playback_state != ss::SendspinPlaybackState::PLAYING;
+      if (group_stopped && end_timer) finish_stream();
+    }
   }
   void on_time_sync_updated(float error) override { LOGD("sendspin: time sync error %.0f us", error); }
   void on_pairing_started(const std::string &server_id) override {
@@ -537,18 +548,35 @@ struct SendspinService::Impl : ss::SendspinClientListener, ss::PlayerRoleListene
     LOGI("sendspin: stream start %s %u Hz/%u ch/%u bit", kCodec[std::min<unsigned>(unsigned(*p.codec), 3)],
          *p.sample_rate, *p.channels, *p.bit_depth);
     sink.configure(*p.sample_rate, *p.channels, *p.bit_depth);
+    group_stopped = false;
+    if (end_timer) {
+      loop.cancel_timer(end_timer);
+      end_timer = 0;
+    }
     if (!streaming) {
       streaming = true;
       if (hooks_enabled && hooks.on_stream) hooks.on_stream(true);
     }
   }
   void on_stream_end() override {
-    sink.release();
-    if (streaming) {
-      LOGI("sendspin: stream end");
-      streaming = false;
-      if (hooks_enabled && hooks.on_stream) hooks.on_stream(false);
+    sink.release();  // the audio stops at once; only the reported state is held
+    if (!streaming || end_timer) return;
+    // Not while the owner tears the service down: the timer would outlive it.
+    if (group_stopped || !hooks_enabled) return finish_stream();
+    end_timer = loop.add_timer(kStreamEndHoldMs, [this] {
+      end_timer = 0;
+      finish_stream();
+    });
+  }
+  void finish_stream() {
+    if (end_timer) {
+      loop.cancel_timer(end_timer);
+      end_timer = 0;
     }
+    if (!streaming) return;
+    LOGI("sendspin: stream end");
+    streaming = false;
+    if (hooks_enabled && hooks.on_stream) hooks.on_stream(false);
   }
   void on_volume_changed(uint8_t v) override {
     LOGI("sendspin: server volume %u", v);
@@ -613,6 +641,7 @@ struct SendspinService::Impl : ss::SendspinClientListener, ss::PlayerRoleListene
              info ? hex_tail(info->server_id, 12).c_str() : "?");
       } else {
         LOGI("sendspin: server disconnected");
+        finish_stream();
       }
     }
   }
@@ -626,6 +655,7 @@ SendspinService::~SendspinService() {
   d.hooks_enabled = false;  // the owner is being torn down
   if (d.tick) d.loop.cancel_timer(d.tick);
   if (d.client.is_started()) d.client.stop();  // goodbye to the server, joins the library threads
+  if (d.end_timer) d.loop.cancel_timer(d.end_timer);
 }
 
 bool SendspinService::start(float volume, bool muted) {

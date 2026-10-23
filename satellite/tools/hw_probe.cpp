@@ -1,5 +1,5 @@
-// Hardware probe: cycles LED UI states, effects and music styles, drives the clock, prints
-// buttons/mute/lux.
+// Hardware probe: cycles LED UI states, effects and music styles, drives the clock and its
+// animations, prints buttons/mute/lux.
 // usage: hw_probe [input_seconds=15] [state_ms=2000]
 #include <fcntl.h>
 #include <unistd.h>
@@ -77,6 +77,29 @@ static std::string clock_dump() {
          rd("/sys/bus/i2c/devices/3-0021/current");
 }
 
+// Brightness of every segment (a..g per digit, 2 hex digits each) and the centre LED.
+static std::string clock_values() {
+  const Model &m = *g_model;
+  auto val = [&](const std::string &name) {
+    return std::clamp(atoi(rd(m.clock_dir + name + "/brightness").c_str()), 0, 255);
+  };
+  std::string s;
+  char b[8];
+  for (int d = 0; d < 4; d++) {
+    for (int seg = 0; seg < 7; seg++) {
+      const std::string name = std::string(1, char(m.clock_seg_base + seg)) + std::to_string(m.clock_pos_base + d);
+      snprintf(b, sizeof b, "%02x", val(name));
+      s += b;
+    }
+    s += ' ';
+  }
+  if (!m.clock_center.empty()) {
+    snprintf(b, sizeof b, "c=%02x", val(m.clock_center));
+    s += b;
+  }
+  return s;
+}
+
 int main(int argc, char **argv) {
   int input_s = argc > 1 ? atoi(argv[1]) : 15;
   int state_ms = argc > 2 ? atoi(argv[2]) : 2000;
@@ -131,6 +154,7 @@ int main(int argc, char **argv) {
       static int64_t last_beat = 0;
       if (Loop::now_ms() - last_beat >= 500) f.beat = true, last_beat = Loop::now_ms();
       leds.music_frame(f, false);
+      clock.music_frame(f, false);
     }, 33);
   };
 
@@ -201,6 +225,31 @@ int main(int argc, char **argv) {
        }},
       {"clock lux 10", [&] { clock.set_ambient_lux(10); }},
       {"clock lux 1000", [&] { clock.set_ambient_lux(1000); }},
+      {"clock LISTENING", [&] { clock.set_ui_state(UiState::LISTENING); }},
+      {"clock THINKING", [&] { clock.set_ui_state(UiState::THINKING); }},
+      {"clock SPEAKING", [&] { clock.set_ui_state(UiState::SPEAKING); }},
+      {"clock voice indication off", [&] { clock.set_voice_indication(false); }},
+      {"clock TIMER_RING", [&] { clock.set_ui_state(UiState::TIMER_RING); }},
+      {"clock IDLE", [&] {
+         clock.set_voice_indication(true);
+         clock.set_ui_state(UiState::IDLE);
+       }},
+      {"clock BOOT", [&] { clock.play(ClockShot::BOOT); }},
+      {"clock PAUSE", [&] { clock.play(ClockShot::PAUSE); }},
+      {"clock NEXT", [&] { clock.play(ClockShot::NEXT); }},
+      {"clock PREVIOUS", [&] { clock.play(ClockShot::PREVIOUS); }},
+      {"clock updating", [&] { clock.set_updating(true); }},
+      {"clock update done", [&] { clock.set_updating(false); }},
+      {"clock music Levels", [&] {
+         feed_music();
+         clock.set_media_playing(true);
+         clock.set_music_style("Levels");
+       }},
+      {"clock music Off", [&] {
+         if (music_timer) loop.cancel_timer(music_timer), music_timer = 0;
+         clock.set_music_style("Off");
+         clock.set_media_playing(false);
+       }},
       {"clock disabled", [&] { clock.set_enabled(false); }},
       {"clock enabled, idle off", [&] {
          clock.set_enabled(true);
@@ -214,11 +263,12 @@ int main(int argc, char **argv) {
       steps[i].fn();
     });
     loop.add_timer(int64_t(i) * state_ms + state_ms / 2, [&] {
-      printf("   ring %s\n   clock %s\n", ring_dump().c_str(), clock_dump().c_str());
+      printf("   ring %s\n   clock %s\n   values %s\n", ring_dump().c_str(), clock_dump().c_str(),
+             clock_values().c_str());
       fflush(stdout);
     });
     loop.add_timer(int64_t(i) * state_ms + state_ms * 3 / 4, [&] {
-      printf("   ring %s\n", ring_dump().c_str());
+      printf("   ring %s\n   values %s\n", ring_dump().c_str(), clock_values().c_str());
       fflush(stdout);
     });
   }

@@ -26,7 +26,7 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 | `satellite/src/sendspin/` | Sendspin player on top of sendspin-cpp, own ALSA sink on the `speakers` dmix; roles player, metadata, controller, visualizer (8 log bands 40 Hz–7.6 kHz, loudness, beats → `MusicFrame`) |
 | `satellite/src/zigbee/` | Midi Zigbee radio: zbhci link to the Telink chip (`telink_link.*`), coordinator on pulsar's firmware + ZDO to the coordinator itself (`coordinator.*`), deCONZ-protocol TCP server for Zigbee2MQTT / ZHA (`deconz_server.*`), router control (`router.*`), `.ybl` parsing + XMODEM upload through the radio's bootloader (`flasher.*`), role / firmware orchestration (`service.*`), byte order helpers (`bytes.h`) |
 | `satellite/src/update/` | HA "Firmware" update entity backend: HTTPS on the firmware's OpenSSL (`https.*`, dlopen), GitHub release check / download / verify / swap (`updater.*`) |
-| `satellite/src/hw/` | LED ring / logo (framebuffers behind ledfb triggers; `leds.cpp`: output, case matrix, layer compositor, fades), pure rendering of voice states / one-shots / effects / music styles (`led_fx.*`), clock (sysfs segments), input (touch keys, `SW_MUTE_DEVICE`), light sensor (`ltr308als01`) |
+| `satellite/src/hw/` | LED ring / logo (framebuffers behind ledfb triggers; `leds.cpp`: output, case matrix, layer compositor, fades), pure rendering of voice states / one-shots / effects / music styles (`led_fx.*`), clock (sysfs segments, per-LED brightness; `clock.cpp`: layers), pure rendering of the clock's stock animations and music levels (`clock_fx.*`), input (touch keys, `SW_MUTE_DEVICE`), light sensor (`ltr308als01`) |
 | `satellite/src/controller.*` | all satellite logic: voice pipeline state machine, entities, local commands, persistence |
 | `satellite/src/arbiter.*` | `WakeArbiter`: wake word claims between stations (UDP broadcast :6054, 250 ms window), best claim answers |
 | `satellite/deploy/` | `dist.sh` (release archives, host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
@@ -333,7 +333,7 @@ carried over).
 | VQE preset | `cucumber`: 4 mics, 4 spk, chunk 3072 | `plum`: 2 mics, 1 spk, 48 kHz, chunk 1536 → 512 @ 16 kHz; outputs 1, 2, 4, 6, 8, 9 |
 | Spotters | alisa: types 0, 3, 4; command: type 0 | alisa/yandex: types 0 and 4 (1 ch each); command: type 0. Models in `spotter_models/` are plum-tuned |
 | Ring | `/dev/fb0` 24×1 + `/dev/fb1` logo 6×1, BGR | `/dev/fb0` "YNDX LED ring" 3×1, 24 bpp, BGR; trigger `led_ring_fb`; sysfs `plum:<color>:ring1..3`; no logo |
-| Clock | `cucumber:white:clock-<seg><digit>`, dimming via chip `current` | `plum:white:clock<SEG><pos>`: A–G × 0–3, colon `DH`+`DL`; `H0..3`, `DM`, `DEGREE` kept dark (`quasar.cfg` `/leds/clock`); dimming via per-LED `brightness` 0–255 |
+| Clock | `cucumber:white:clock-<seg><digit>`, dimming via chip `current`; no centre dot | `plum:white:clock<SEG><pos>`: A–G × 0–3, colon `DH`+`DL`; `H0..3`, `DEGREE` kept dark (`quasar.cfg` `/leds/clock`); `DM` = centre dot at g height (`Model::clock_center`, extra LED 35 of the stock patterns [inference: position not confirmed by eye]); dimming via per-LED `brightness` 0–255 |
 | Keys | `awinic_sar`: 582 action, 115/114 volume | `aw9610x`: same codes |
 | Mic mute | input `mute`: `SW_MUTE_DEVICE` | input `gpio-keys`: `SW_MUTE_DEVICE` (+ `KEY_MUTE`) |
 | Light sensor | `ltr308als01` (iio) | same |
@@ -398,9 +398,22 @@ speaker reference by the music analysis).
   `RAW_MAIN_MIC_SYNC`), Midi vs Lite 2 level offset, broadcast delivery through the firmware's
   iptables and the access point.
 - Clock layers (`Clock::Impl::refresh`): pairing code (ignores the "Clock display" switch) > volume
-  flash > timer > temporary layer (`clock_show_text`/`clock_show_face` actions) > Text «Clock text» /
-  Select «Clock face» > time. Only the scroll speed is persisted (`clock_scroll_ms=`). Moving
-  content uses its own one-shot frame timer; the 5 s full segment rewrite counts 250 ms ticks only.
+  flash > voice state (TIMER_RING always, LISTENING / THINKING / SPEAKING with
+  `voice_indication=1`) > update install (dark from `install_update` until exit, back on failure) >
+  one-shot (boot on every start, player pause / next / previous) > timer > temporary layer
+  (`clock_show_text`/`clock_show_face` actions) > Text «Clock text» / Select «Clock face» > music
+  levels (Select «Clock music», `clock_music=`, default Off; media playing and frames fresh; the
+  time takes over 3 s of every 30 s; each digit spans its own recent range, 3 s time constant,
+  kept per source and reset after 10 s without that source) > time. "Clock display" off keeps
+  everything else dark.
+  Persisted: scroll speed (`clock_scroll_ms=`) and `clock_music=`. The animations are the stock
+  Lite 2 `ledpatterns/clock` patterns re-drawn in `clock_fx.cpp` (envelopes measured, ≤ 10/255
+  off; NEXT's column 1 is drawn symmetric where the stock one decays early); the Midi firmware ships
+  only `ringing`, pulsar shows the full set there too. Frames are per-LED brightness 0..255, scaled
+  by the level on the Lite 2 (Midi: chip current). Moving content re-arms a one-shot frame timer on
+  every refresh (20 ms animations, 40 ms meters); the 5 s full segment rewrite counts 250 ms ticks
+  only. Player one-shots fire only when the command took effect (`music_pause()` returns whether
+  something played; next / previous when Sendspin accepted the transport command).
 - LED layers (`Leds::Impl::active_layer`, first active wins): volume overlay (1.5 s) > voice state
   (ERROR runs its 3.54 s to the end, TIMER_RING; LISTENING / THINKING / SPEAKING only with
   `voice_indication=1`) > one-shots (mute sweep 600 ms over the timer-started countdown 15 s,
@@ -413,11 +426,15 @@ speaker reference by the music analysis).
   the stock raw value × k after the gamma-2 output. Output: `(v · ambient dim)²`, case matrix
   (`led_case_color=`, rows = output R, G, B [inference: orientation not confirmed by eye]), × 0.8.
   Effects and music move on a phase scaled by `led_speed=` (0.25–4). Music: Sendspin visualizer
-  frames win while they keep coming (300 ms), else the speaker-reference analysis, which only runs
-  while the visualization is shown (the light off). Not yet verified: Music Assistant actually
-  sending visualizer frames (sendspin-cli 8.0.0 with aiosendspin 9.1.1 fails the device's Noise
-  handshake, `psk_category` missing; with aiosendspin 10.2.1 forced it connects but never starts a
-  stream).
+  frames win while they keep coming (`kSendspinFreshMs` 500 ms, `audio/music_frame.h`, shared with
+  the clock), else the speaker-reference analysis, which only runs while the visualization is shown
+  (the light off). Music Assistant 2.10.8 (aiosendspin 10.2.1) sends visualizer frames (seen on
+  both stations), but ends and restarts the Sendspin stream on every seek / skip (its hidden
+  `allow_legacy_clients` option, on by default, against the spec's `stream/clear`), ~0.7 s
+  without audio and frames. `SendspinService` releases the sink at once but holds the reported
+  stream end 1 s unless the group state says "stopped" (pause / stop: just before or just after
+  the stream end), so a restart does not flap the HA media state, the command spotter and the
+  music displays.
 - `installer/` (Go) is the only host-side installer. Device commands are busybox-sh strings sent
   through `sh()` (adb shell plus `__rc=` marker; one command ≤ 4 KB on these firmwares).
   The host side uses only the Go stdlib and `golang.org/x/net`, no host tools except adb (plus

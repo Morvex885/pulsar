@@ -182,6 +182,7 @@ int main(int argc, char **argv) {
   cfg.clock_faces = {"None", "Smiley"};
   cfg.music_styles = {"Off", "All styles", "Spectrum"};
   cfg.case_colors = {"None", "blue"};
+  cfg.clock_music_styles = {"Off", "Levels"};
   cfg.zigbee_modes = {"Coordinator", "Router"};
   if (argc > 4) cfg.key_path = argv[4];
   ApiServer srv(loop, id, cfg, hooks);
@@ -194,6 +195,7 @@ int main(int argc, char **argv) {
   srv.publish_number(NumberId::LED_SPEED, 1);
   srv.publish_select(SelectId::MUSIC_VIZ, "All styles");
   srv.publish_select(SelectId::CASE_COLOR, "None");
+  srv.publish_select(SelectId::CLOCK_MUSIC, "Off");
   srv.publish_binary_sensor(BinarySensorId::HW_MIC_MUTE, false);
   srv.publish_number(NumberId::CLOCK_BRIGHTNESS, 50);
   LightState ls;
