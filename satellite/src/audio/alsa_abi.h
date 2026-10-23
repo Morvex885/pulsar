@@ -5,10 +5,12 @@
 
 namespace cs::alsa {
 
-// The armhf build links unversioned ALSA for the Lite 2. On versioned Midi firmware,
-// those relocations can bind ALSA_0.9 compatibility entry points with older signatures
-// (values instead of pointers). The __ aliases name the modern ABI unambiguously.
-// Unversioned firmware does not export them: keep using its normal API there.
+// Midi firmware images with a 32-bit userland ship a versioned libasound (ALSA_0.9 +
+// ALSA_0.9.0rc4). The armhf build links the Lite 2's unversioned one, so its references bind to
+// the ALSA_0.9 compat entries of these functions, which take values instead of pointers (period /
+// buffer read back as 0, wake word dead). The __snd_* aliases are the current ABI; a library
+// without them has only that ABI under the plain name. Every snd_pcm_hw_params_get_* /
+// set_*_near call goes through here.
 template <typename Function>
 Function modern_symbol(const char *alias, Function fallback) {
   auto symbol = dlsym(RTLD_DEFAULT, alias);

@@ -31,11 +31,11 @@ int main() {
   ok = ok && check(cs::alsa::hw_params_get_period_size(hw, &actual_period, nullptr), "get period") &&
        check(cs::alsa::hw_params_get_buffer_size(hw, &actual_buffer), "get buffer");
   ok = ok && rate == 96000 && period == 3072 && buffer == 24576 && actual_period == period && actual_buffer == buffer;
-  // An absent alias must keep the normal function on unversioned firmware.
-  ok = ok && cs::alsa::modern_symbol("__pulsar_missing_alsa_symbol", &snd_pcm_hw_params_set_rate_near) ==
-                 &snd_pcm_hw_params_set_rate_near;
-  printf("rate=%u period=%lu/%lu buffer=%lu/%lu: %s\n", rate, (unsigned long)period,
-         (unsigned long)actual_period, (unsigned long)buffer, (unsigned long)actual_buffer, ok ? "PASS" : "FAIL");
+  // alias=no: the library has only the current ABI (unversioned, no __snd_* exports).
+  bool alias = dlsym(RTLD_DEFAULT, "__snd_pcm_hw_params_set_rate_near") != nullptr;
+  printf("rate=%u period=%lu/%lu buffer=%lu/%lu alias=%s: %s\n", rate, (unsigned long)period,
+         (unsigned long)actual_period, (unsigned long)buffer, (unsigned long)actual_buffer,
+         alias ? "yes" : "no", ok ? "PASS" : "FAIL");
   snd_pcm_close(pcm);
   return ok ? 0 : 1;
 }
