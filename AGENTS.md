@@ -90,8 +90,10 @@ force pushes or deletion; changes land through a pull request with green `build 
 `build (armhf)` checks, squash or rebase only (linear history). Work on a short-lived branch
 (`feat/…`, `fix/…`, `docs/…`), open a PR, merge; the branch is deleted on merge. Release tags `v*`
 cannot be moved or deleted. Nothing personal goes into the repository: no real IPs, MACs, serials,
-Wi-Fi names, tokens, device logs or names/e-mails in commits (`192.168.1.50` is the documentation
-placeholder).
+Wi-Fi names, tokens or device logs (`192.168.1.50` is the documentation placeholder). Commits made
+for the maintainer (including by agents) use `Morvex885
+<278529280+Morvex885@users.noreply.github.com>`, no real names or e-mails; contributors' commit
+identities are their own business (a squash merge takes the PR author's GitHub identity).
 
 ## Deploy
 
