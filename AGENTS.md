@@ -352,9 +352,8 @@ Lite 2 LEDs: `led_ring_fb` scales each channel on its way to the LEDs; sysfs `br
 the framebuffer value × ~0.36 (red), ~0.23 (green), ~0.2 (blue), so ring colours checked through
 sysfs only match the Midi's after that correction (`/dev/fb0` holds the written B,G,R bytes).
 
-Not yet verified on the Lite 2: wake word → HA pipeline → TTS end to end, Sendspin playback, LED
-animations by eye. GStreamer playback of an HTTP WAV through the media player works (heard on the
-speaker reference by the music analysis).
+Verified on the Lite 2 by the owner: wake word → HA pipeline → TTS end to end, Sendspin and HA
+media playback, LED animations.
 
 ## Conventions
 
