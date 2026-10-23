@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "audio/spectrum.h"
+#include "audio/alsa_abi.h"
 #include "core/log.h"
 
 // Signatures of libyandex_evil.so (recovered by reverse engineering maind, verified on device):
@@ -313,14 +314,14 @@ void AudioFrontend::run() {
       if ((err = snd_pcm_hw_params_set_format(pcm, hw, SND_PCM_FORMAT_S16_LE)) < 0) return fail("set_format", err);
       if ((err = snd_pcm_hw_params_set_channels(pcm, hw, nch)) < 0) return fail("set_channels", err);
       unsigned rate = model_.capture_rate;
-      if ((err = snd_pcm_hw_params_set_rate_near(pcm, hw, &rate, nullptr)) < 0) return fail("set_rate_near", err);
+      if ((err = alsa::hw_params_set_rate_near(pcm, hw, &rate, nullptr)) < 0) return fail("set_rate_near", err);
       if (rate != model_.capture_rate) {
         LOGE("capture %s: rate %u Hz, need %u", dev, rate, model_.capture_rate);
         return fail("rate", 0);
       }
       snd_pcm_uframes_t per = period, buf = period * 8;
-      if ((err = snd_pcm_hw_params_set_period_size_near(pcm, hw, &per, nullptr)) < 0) return fail("set_period_size_near", err);
-      if ((err = snd_pcm_hw_params_set_buffer_size_near(pcm, hw, &buf)) < 0) return fail("set_buffer_size_near", err);
+      if ((err = alsa::hw_params_set_period_size_near(pcm, hw, &per, nullptr)) < 0) return fail("set_period_size_near", err);
+      if ((err = alsa::hw_params_set_buffer_size_near(pcm, hw, &buf)) < 0) return fail("set_buffer_size_near", err);
       if ((err = snd_pcm_hw_params(pcm, hw)) < 0) return fail("snd_pcm_hw_params", err);
       LOGI("capture %s: %u Hz, %u ch, period %lu, buffer %lu", dev, rate, nch, (unsigned long)per,
            (unsigned long)buf);

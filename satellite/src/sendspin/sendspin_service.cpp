@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "audio/music_frame.h"
+#include "audio/alsa_abi.h"
 #include "core/log.h"
 #include "sendspin/client.h"
 #include "sendspin/controller_role.h"
@@ -306,8 +307,8 @@ class AlsaSink {
     if (err >= 0) step = "rate", err = snd_pcm_hw_params_set_rate(pcm_, hw, want_rate_, 0);
     if (err >= 0) step = "hw_params", err = snd_pcm_hw_params(pcm_, hw);
     if (err >= 0) {
-      snd_pcm_hw_params_get_period_size(hw, &period, nullptr);
-      snd_pcm_hw_params_get_buffer_size(hw, &buffer);
+      alsa::hw_params_get_period_size(hw, &period, nullptr);
+      alsa::hw_params_get_buffer_size(hw, &buffer);
       snd_pcm_sw_params_t *sw = nullptr;
       snd_pcm_sw_params_alloca(&sw);
       step = "sw_params";
