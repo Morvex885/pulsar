@@ -1,6 +1,6 @@
 #!/bin/sh
 # Starts dropbear SSH on port 22 (root, blank password allowed: -B).
-# Installed to /data/dropbear; called at boot from /data/quasar/rootkeeper.sh.
+# Installed to /data/dropbear; started at boot by /etc/init.d/S99zpulsar (written by pulsar-install).
 # Independent of adbd: never touches adb.
 D=/data/dropbear
 cd "$D" || exit 1

@@ -75,10 +75,6 @@ func probe(s string, ours bool) {
 		skip(name + " — adb is not root, skipped")
 		return
 	}
-	if _, err := sh(s, "grep -q rootkeeper.sh /system/vendor/quasar/onboot.sh"); err != nil {
-		skip(name + " — firmware does not run " + rkPath + " at boot, skipped")
-		return
-	}
 	var state string
 	if _, err := sh(s, "pidof pulsar >/dev/null"); err == nil {
 		state = "satellite running"

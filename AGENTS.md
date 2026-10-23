@@ -30,7 +30,7 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 | `satellite/src/controller.*` | all satellite logic: voice pipeline state machine, entities, local commands, persistence |
 | `satellite/src/arbiter.*` | `WakeArbiter`: wake word claims between stations (UDP broadcast :6054, 250 ms window), best claim answers |
 | `satellite/deploy/` | `dist.sh` (release archives, host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
-| `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install, health check |
+| `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install (incl. `/etc/init.d/S99zpulsar`), health check |
 | `satellite/tools/` | probes: `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `update_probe` (HTTPS client, release check, install into a scratch dir), `zigbee_probe` (Zigbee coordinator, either firmware, + deCONZ server on another port, without the daemon; `flash <image>` writes a radio image) |
 | `satellite/third_party/` | `fetch.sh` (pinned deps), `sysroot.sh` (alsa-lib link sysroot), CMake glue, zig toolchain wrappers |
 | `ssh/` | `build.sh` (static dropbear + sftp-server), `start.sh` (device side) |
@@ -97,7 +97,7 @@ placeholder).
 
 ```sh
 go -C installer run . --list         # discover stations (mDNS; --scan = adb port scan of the /24) + model probe
-go -C installer run . <ip>[:port]    # build if needed, copy binary (+ .prev), add boot hook, restart
+go -C installer run . <ip>[:port]    # build if needed, copy binary (+ .prev), write /etc/init.d/S99zpulsar, restart
 ```
 
 Models are identified by `/proc/device-tree/compatible` (`yandex,<codename>`) both by the daemon
@@ -115,13 +115,17 @@ ssh root@<ip> 'cd /data/pulsar && cp pulsar pulsar.prev &&
 ```
 
 Device layout: `/data/pulsar/{pulsar,.prev,.bad,boot.sh,supervise.sh,
-ctl.sh,state.conf,api_key,enabled,sendspin/,zigbee-coordinator.ybl,zigbee-router.ybl}`. `api_key`: ESPHome Noise PSK (base64 of 32 bytes,
+ctl.sh,state.conf,api_key,enabled,sendspin/,zigbee-coordinator.ybl,zigbee-router.ybl}`. Outside /data:
+`/etc/init.d/S99zpulsar` (autostart, written by the installer). `api_key`: ESPHome Noise PSK (base64 of 32 bytes,
 0600), written by HA's auto-provisioning or `ctl.sh api-key`; absent = plaintext (Noise with the
 all-zeros key is then accepted so HA can provision); corrupt = API fails closed. `.bad`: binary
 replaced by the crash-loop rollback. Log: `/tmp/pulsar.log` (`ctl.sh log N`; rotated
-at 1 MB by `supervise.sh`, one `.1` kept). Boot chain:
-`onboot.sh` (firmware) → `/data/quasar/rootkeeper.sh` → `boot.sh` → waits for quasar, `q stop` →
-`supervise.sh` restart loop while `enabled` exists. `ctl.sh reload` restarts the supervisor itself
+at 1 MB by `supervise.sh`, one `.1` kept). Boot chain: busybox init → `rcS` (runs
+`/etc/init.d/S??*` in order with `start`, waiting for each) → `S97quasar` (Midi) / `S99quasar`
+(Lite 2) → `onboot.sh` (adbd via `activate_adb.sh check`, quasar in background; returns); then
+`S99zpulsar` (sorts after `S99quasar`; `S99pulsar` would not) → `boot.sh` in background (once per
+boot: `/tmp/pulsar-boot.lock`) → waits for quasar, `q stop` → `supervise.sh` restart loop while
+`enabled` exists. `ctl.sh reload` restarts the supervisor itself
 (needed after replacing `supervise.sh`; the installer does it when the script changed).
 
 Updates from HA (`src/update/`, entities "Firmware" + "Auto update"): the daemon checks
@@ -145,10 +149,18 @@ device whose HA already holds a key cannot talk to HA until the key is removed t
 
 ## Device safety rules
 
-- **Never break root adb access.** Do not touch adbd, `/data/quasar/activate_*` markers, or the
-  existing contents of `/data/quasar/rootkeeper.sh`. It is shared with other tooling: only insert
-  hook lines, and only before its endless `while` loop (code after the loop never runs).
-- Do not modify the rootfs (`/system`, `/etc`); everything persistent lives in `/data`.
+- **Never break root adb access.** Do not touch adbd, `/data/quasar/activate_*` markers or
+  `/data/quasar/rootkeeper.sh` (it belongs to the root method): the installer only removes the hook
+  lines older versions of it added there (`hookSat` / `hookSSH`) and never creates, deletes or
+  otherwise changes the file.
+- Do not modify the rootfs (`/system`, `/etc`); everything persistent lives in `/data`. The single
+  exception is `/etc/init.d/S99zpulsar`, written by the installer only after checking that the
+  rootfs is not protected (`/proc/cmdline` without `verity`/`dm=`, nothing but `control` in
+  `/dev/mapper`, `df /etc /system/vendor/quasar` on one filesystem mounted at `/`), with `/`
+  remounted rw only for the write and back to ro.
+- Protecting a station from Yandex firmware OTA is not pulsar's job (station owner / root method);
+  an OTA that replaces the system partition removes `S99zpulsar`, and re-running the installer
+  restores it.
 - Several devices may share one adb server: always pass `adb -s <serial>`.
 - `adb shell` on this firmware is a pty: output has `\r`, is not binary-safe (use push/pull) and
   the exit status is always 0 (see `sh()` in `installer/adb.go`).
@@ -328,7 +340,7 @@ carried over).
 | Volume | "Master Playback Volume" softvol on `speakers` | same names; `speakers` comes from `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) |
 | alsa-lib | 1.2.10, versioned | 1.2.1.2, unversioned |
 | Earcons | `common/spotter_*.mp3`, `timer.wav`, `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` |
-| Boot hook | `onboot.sh` → `/data/quasar/rootkeeper.sh` | same (line 67); `q stop` available |
+| Boot | `S97quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh` | `S99quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh`; `q stop` available |
 | Zigbee | Telink B91 on `/dev/ttyS2`, reset/boot via `zb_control` (see Zigbee radio) | none |
 
 Lite 2 measurements: echo test (speech played through `speakers`, raw capture → `ww_offline`):
@@ -409,5 +421,6 @@ speaker reference by the music analysis).
 - `installer/` (Go) is the only host-side installer. Device commands are busybox-sh strings sent
   through `sh()` (adb shell plus `__rc=` marker; one command ≤ 4 KB on these firmwares).
   The host side uses only the Go stdlib and `golang.org/x/net`, no host tools except adb (plus
-  make / `ssh/build.sh` in a checkout). The rootkeeper edit (`planRootkeeper`) is covered by
-  `rootkeeper_test.go`; keep it pure.
+  make / `ssh/build.sh` in a checkout). The pure parts (init script `initScript`, rootfs check
+  `rootfsGuard` / `rootMountRW`, rootkeeper clean-up `unhookRootkeeper` / `hookActive` /
+  `checkRootkeeper`) are covered by `autostart_test.go` and `rootkeeper_test.go`; keep them pure.
