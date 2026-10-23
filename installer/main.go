@@ -28,14 +28,18 @@ the supported, rooted stations found. Per station:
   differs from the installed one, the installed one is kept as .prev; an identical one is not
   copied and leaves .prev alone);
 - --ssh also installs dropbear (static build from ssh/build.sh) to /data/dropbear;
-- adds the boot hooks to /data/quasar/rootkeeper.sh (backup: rootkeeper.sh.bak-<timestamp>),
-  placed before an endless ` + "`while`" + ` loop if the script has one, otherwise appended, and shows the
-  diff against the backup;
+- writes /etc/init.d/S99zpulsar, which starts pulsar (and dropbear, if installed) at boot after the
+  firmware's quasar script; / is remounted read-write only for this write, and not at all when the
+  file is already current. Not written when the root filesystem is protected (dm-verity /
+  device-mapper, /etc not on it): pulsar then does not start by itself after a reboot (exit status 1
+  unless an older hook still starts it);
+- then removes the boot hook lines older versions added to /data/quasar/rootkeeper.sh (backup:
+  rootkeeper.sh.bak-<timestamp>), leaving the rest of the file as is, and shows the diff;
 - enables the satellite (stops the Yandex stack) unless --no-enable; an already running
   satellite is restarted with the new binary and, after ~10 s, checked (process alive, no crash
   report in the log); on failure the previous binary is put back (asked, or automatic with --yes).
 In a repository checkout (satellite/Makefile present) the daemon is built first
-(make; ssh/build.sh for --ssh). Nothing outside /data is modified. Re-running is safe.
+(make; ssh/build.sh for --ssh). Outside /data only /etc/init.d/S99zpulsar is written. Re-running is safe.
 adb: from PATH, else platform-tools/ next to the installer, else downloaded there
 from dl.google.com (Android SDK Platform-Tools 37.0.1; Google's terms apply).
 --list only shows what was found; --yes installs to every station found without asking.
@@ -206,9 +210,20 @@ func run() int {
 	}
 
 	failed := 0
+	var notes []string
 	for _, st := range chosen {
-		if !installOne(st) {
+		ok, note, lost := installOne(st)
+		if !ok || lost {
 			failed = 1
+		}
+		if note != "" {
+			notes = append(notes, st.serial+": "+note)
+		}
+	}
+	if len(notes) > 0 {
+		fmt.Println("== autostart summary")
+		for _, n := range notes {
+			fmt.Println(n)
 		}
 	}
 	return failed

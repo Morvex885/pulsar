@@ -58,21 +58,27 @@ func sha256File(p string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// installOne deploys, (re)starts and checks one station; every step checks its own status.
-func installOne(st station) bool {
+// installOne deploys, (re)starts and checks one station; every step checks its own status. note is
+// set when autostart could not be (re)written; lost: the station has no autostart at all.
+func installOne(st station) (ok bool, note string, lost bool) {
 	s := st.serial
 	bin := filepath.Join(root, "satellite", "build", st.arch, "pulsar")
 	if fi, err := os.Stat(bin); err != nil || fi.Size() == 0 {
 		fmt.Fprintf(os.Stderr, "%s: %s missing\n", s, bin)
-		return false
+		return false, "", false
 	}
 	ts := time.Now().Format("20060102150405")
-	changed, supChanged, ok := deployFiles(s, bin, ts, st.arch, st.zigbee)
+	changed, supChanged, ok := deployFiles(s, bin, st.arch, st.zigbee)
 	if !ok {
-		return false
+		return false, "", false
+	}
+	fmt.Printf("== %s: autostart\n", s)
+	note, lost, ok = bootAutostart(s, ts)
+	if !ok {
+		return false, "", false
 	}
 	if opts.noEnable {
-		return true
+		return true, note, lost
 	}
 	fmt.Printf("== %s: start\n", s)
 	// Marker in the log: the health check looks only at what happens after it.
@@ -86,17 +92,16 @@ func installOne(st station) bool {
 		dataDir+"/ctl.sh "+action+"; else "+dataDir+"/ctl.sh enable; fi")
 	fmt.Println()
 	if !healthCheck(s, changed, mark) {
-		return false
+		return false, note, lost
 	}
 	_ = shTo(os.Stdout, s, dataDir+"/ctl.sh status; "+dataDir+"/ctl.sh log 5")
 	fmt.Println()
-	return true
+	return true, note, lost
 }
 
-// deployFiles copies the daemon, scripts, the radio's firmware images (zigbee), dropbear (--ssh)
-// and boot hooks. changed: the binary was replaced; supChanged: supervise.sh differs from the
-// installed one.
-func deployFiles(s, bin, ts, arch string, zigbee bool) (changed, supChanged, ok bool) {
+// deployFiles copies the daemon, scripts, the radio's firmware images (zigbee) and dropbear (--ssh).
+// changed: the binary was replaced; supChanged: supervise.sh differs from the installed one.
+func deployFiles(s, bin, arch string, zigbee bool) (changed, supChanged, ok bool) {
 	changed, supChanged = true, true
 	sshOut := filepath.Join(root, "ssh", "out", arch)
 	deploy := filepath.Join(root, "satellite", "deploy")
@@ -164,11 +169,6 @@ func deployFiles(s, bin, ts, arch string, zigbee bool) (changed, supChanged, ok 
 		}
 	}
 
-	fmt.Printf("== %s: boot hooks\n", s)
-	if !bootHooks(s, ts) {
-		return
-	}
-
 	if opts.ssh {
 		_ = shTo(os.Stdout, s, "pidof dropbear >/dev/null || /data/dropbear/start.sh </dev/null >/dev/null 2>&1 &")
 	}
@@ -201,70 +201,216 @@ func deployRadioImage(s, name string) bool {
 	return shTo(os.Stdout, s, "cd "+dataDir+" && mv "+name+".new "+name+" && sync") == nil
 }
 
-// bootHooks adds the hook lines to rootkeeper.sh (planRootkeeper), keeping a backup.
-func bootHooks(s, ts string) bool {
+// bootAutostart makes initPath current, then removes the hooks older installers added to
+// rootkeeper.sh. note: autostart could not be written (said in the final summary); lost: nothing
+// starts pulsar at boot; !ok: station error.
+func bootAutostart(s, ts string) (note string, lost, ok bool) {
+	// Dropbear is installed by --ssh, in this run or an earlier one: never drop its autostart.
+	_, err := sh(s, "[ -x /data/dropbear/start.sh ]")
+	want := initScript(err == nil)
+	sum := sha256.Sum256([]byte(want))
+	wantSum := hex.EncodeToString(sum[:])
+	if have, _ := sh(s, "[ -f "+initPath+" ] && sha256sum "+initPath); firstField(have) == wantSum {
+		fmt.Println(initPath + " up to date")
+	} else {
+		reason, ok := writeInitScript(s, want, wantSum)
+		if !ok {
+			return "", false, false
+		}
+		if reason != "" {
+			fmt.Printf("%s not written: %s\n", initPath, reason)
+			note, lost := autostartFallback(s, reason)
+			return note, lost, true
+		}
+	}
+	return "", false, migrateRootkeeper(s, ts)
+}
+
+// writeInitScript writes want to initPath. reason != "": refused, nothing written (protected or
+// unreadable rootfs, remount failed); !ok: station error, reported on stderr.
+func writeInitScript(s, want, wantSum string) (reason string, ok bool) {
+	mounts, err := sh(s, "cat /proc/mounts")
+	if err != nil {
+		return "cannot read /proc/mounts", true
+	}
+	rw, found := rootMountRW(mounts)
+	if !found {
+		return "/ not found in /proc/mounts", true
+	}
+	cmdline, err := sh(s, "cat /proc/cmdline")
+	if err != nil {
+		return "cannot read /proc/cmdline", true
+	}
+	// The pipe keeps ls from formatting for the pty (columns, colour).
+	mapper, _ := sh(s, "ls /dev/mapper 2>/dev/null | cat")
+	df, err := sh(s, "df /etc /system/vendor/quasar")
+	if err != nil {
+		return "df /etc /system/vendor/quasar failed", true
+	}
+	if r := rootfsGuard(cmdline, mapper, df); r != "" {
+		return r, true
+	}
+	fmt.Println("rootfs: no dm-verity or device-mapper, /etc and /system/vendor/quasar on the root filesystem")
+
+	tmp, err := os.MkdirTemp("", "pulsar-install")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return "", false
+	}
+	defer os.RemoveAll(tmp)
+	file := filepath.Join(tmp, "S99zpulsar")
+	if err := os.WriteFile(file, []byte(want), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return "", false
+	}
+	src := dataDir + "/S99zpulsar.new"
+	if push(s, file, src) != nil {
+		return "", false
+	}
+	defer sh(s, "rm -f "+src)
+	// Checked by the shell that runs it at boot (busybox sh).
+	if _, err := sh(s, "sh -n "+src); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %s fails sh -n on the device, not installed\n", s, src)
+		return "", false
+	}
+	if !rw {
+		// Whatever happened in between, / must not stay read-write.
+		defer func() {
+			m, err := sh(s, "cat /proc/mounts")
+			if now, _ := rootMountRW(m); err == nil && !now {
+				return
+			}
+			_, _ = sh(s, "mount -o remount,ro /")
+			m, err = sh(s, "cat /proc/mounts")
+			if now, _ := rootMountRW(m); err == nil && !now {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "%s: the root filesystem is still mounted read-write: run \"mount -o remount,ro /\" on the station or reboot it\n", s)
+			ok = false
+		}()
+	}
+	out, err := shRaw(s, writeInitCmd(src, wantSum, !rw))
+	if strings.Contains(out, "remount-rw-failed") {
+		return "mount -o remount,rw / failed", true
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: writing %s failed:\n%s\n", s, initPath, out)
+		return "", false
+	}
+	if got, _ := sh(s, "sha256sum "+initPath); firstField(got) != wantSum {
+		fmt.Fprintf(os.Stderr, "%s: %s on the device differs from the checked file\n", s, initPath)
+		return "", false
+	}
+	fmt.Printf("wrote %s:\n", initPath)
+	for _, l := range splitLines(want) {
+		fmt.Println("  " + l)
+	}
+	return "", true
+}
+
+// writeInitCmd is one device command, so the read-write window never spans two adb calls. The
+// ignored HUP lets it finish if adb drops; the dot name keeps rcS's S??* glob from running a
+// partial file. The subshell keeps exit from skipping shRaw's status echo.
+func writeInitCmd(src, sum string, remount bool) string {
+	l := []string{"( trap '' HUP INT"}
+	if remount {
+		l = append(l, "mount -o remount,rw / || { echo remount-rw-failed; exit 1; }")
+	}
+	l = append(l,
+		"T=/etc/init.d/.S99zpulsar.tmp",
+		"cp "+src+" $T && chmod 755 $T && set -- $(sha256sum $T) && [ \"$1\" = "+sum+" ] && mv $T "+initPath+" && sync",
+		"rc=$?",
+		"rm -f $T")
+	if remount {
+		l = append(l, "mount -o remount,ro / || rc=1")
+	}
+	l = append(l, "exit $rc )")
+	return strings.Join(l, "\n")
+}
+
+// autostartFallback tells, after initPath could not be written, what still starts pulsar at boot.
+func autostartFallback(s, reason string) (note string, lost bool) {
+	if _, err := sh(s, "grep -qxF '"+hookSat+"' "+initPath); err == nil {
+		return fmt.Sprintf("%s not updated (%s); the installed one still starts pulsar at boot", initPath, reason), false
+	}
+	if rk, exists, ok := readRootkeeper(s); ok && exists && hookActive(rk) {
+		if _, err := sh(s, "grep -q rootkeeper.sh /system/vendor/quasar/onboot.sh"); err == nil {
+			return fmt.Sprintf("%s not written (%s); pulsar still starts at boot through the old hook in %s", initPath, reason, rkPath), false
+		}
+	}
+	return fmt.Sprintf("autostart NOT installed (%s): after a reboot pulsar does not start by itself and the Yandex stack runs; %s/ctl.sh enable starts it again", reason, dataDir), true
+}
+
+// readRootkeeper returns rkPath's content; exists is false when there is no such file.
+func readRootkeeper(s string) (rk string, exists, ok bool) {
+	if _, err := sh(s, "[ -f "+rkPath+" ]"); err != nil {
+		return "", false, true
+	}
+	tmp, err := os.MkdirTemp("", "pulsar-install")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return "", true, false
+	}
+	defer os.RemoveAll(tmp)
+	f := filepath.Join(tmp, "rk")
+	if pull(s, rkPath, f) != nil {
+		return "", true, false
+	}
+	b, err := os.ReadFile(f)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return "", true, false
+	}
+	return string(b), true, true
+}
+
+// migrateRootkeeper removes the hook lines older installers added to rootkeeper.sh (now in
+// initPath), keeping a backup. Never creates or deletes the file: it belongs to the root method.
+func migrateRootkeeper(s, ts string) bool {
+	rk, exists, ok := readRootkeeper(s)
+	if !ok || !exists {
+		return ok
+	}
+	out, removed := unhookRootkeeper(rk)
+	if removed == 0 {
+		return true
+	}
+	// Nothing but our hook lines and the blank separators we added may go.
+	if bad := checkRootkeeper(out, rk); bad != "" {
+		fmt.Fprintf(os.Stderr, "%s: removing the pulsar lines would change more of %s, not written:\n%s\n", s, rkPath, bad)
+		return false
+	}
 	tmp, err := os.MkdirTemp("", "pulsar-install")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return false
 	}
 	defer os.RemoveAll(tmp)
-	rkFile := filepath.Join(tmp, "rk")
-	rk := "#!/bin/sh\n"
-	if shTo(os.Stdout, s, "[ -f "+rkPath+" ]") == nil {
-		if pull(s, rkPath, rkFile) != nil {
-			return false
-		}
-		b, err := os.ReadFile(rkFile)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return false
-		}
-		rk = string(b)
-	}
-	newRK, added, write := planRootkeeper(rk, opts.ssh)
-	if !write {
-		fmt.Println("already present in " + rkPath)
-		return true
-	}
-	// Nothing but our hook lines and blank separators may change.
-	if bad := checkRootkeeper(rk, newRK); bad != "" {
-		fmt.Fprintf(os.Stderr, "%s: unexpected change to %s, not written:\n%s\n", s, rkPath, bad)
-		return false
-	}
 	newFile := filepath.Join(tmp, "rk.new")
-	if err := os.WriteFile(newFile, []byte(newRK), 0o644); err != nil {
+	if err := os.WriteFile(newFile, []byte(out), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return false
 	}
 	if push(s, newFile, rkPath+".new") != nil {
 		return false
 	}
-	// Checked by the shell that runs it at boot (busybox sh).
 	if _, err := sh(s, "sh -n "+rkPath+".new"); err != nil {
 		_, _ = sh(s, "rm -f "+rkPath+".new")
 		fmt.Fprintf(os.Stderr, "%s: %s.new fails sh -n on the device, not written\n", s, rkPath)
 		return false
 	}
 	bak := rkPath + ".bak-" + ts
-	if shTo(os.Stdout, s, "{ [ ! -f "+rkPath+" ] || cp -p "+rkPath+" "+bak+"; } && chmod 755 "+rkPath+".new && mv "+rkPath+".new "+rkPath+" && sync") != nil {
+	if shTo(os.Stdout, s, "cp -p "+rkPath+" "+bak+" && chmod 755 "+rkPath+".new && mv "+rkPath+".new "+rkPath+" && sync") != nil {
 		return false
 	}
 	if got, _ := sh(s, "sha256sum "+rkPath); firstField(got) != sha256File(newFile) {
 		fmt.Fprintf(os.Stderr, "%s: %s on the device differs from the checked file\n", s, rkPath)
 		return false
 	}
-	if shTo(os.Stdout, s, "[ -f "+bak+" ]") == nil {
-		fmt.Printf("%s changed, diff against %s on the device:\n", rkPath, bak)
-		d, _ := shRaw(s, "diff "+bak+" "+rkPath)
-		for _, l := range splitLines(d) {
-			fmt.Println("  " + l)
-		}
-	} else {
-		fmt.Printf("created %s with:\n", rkPath)
-		for _, l := range added {
-			fmt.Println("  " + l)
-		}
+	fmt.Printf("removed the old pulsar lines from %s, diff against %s on the device:\n", rkPath, bak)
+	d, _ := shRaw(s, "diff "+bak+" "+rkPath)
+	for _, l := range splitLines(d) {
+		fmt.Println("  " + l)
 	}
 	return true
 }
