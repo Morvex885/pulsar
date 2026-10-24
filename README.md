@@ -525,8 +525,9 @@ ssh/              сборка и запуск dropbear
 
 ## Лицензия
 
-[MIT](LICENSE). Сторонние библиотеки, которые скачиваются при сборке, распространяются под своими
-лицензиями: sendspin-cpp, ArduinoJson, noise-c, IXWebSocket, micro-flac, micro-opus, alsa-lib,
-dropbear, OpenSSH. Установщик написан на Go (стандартная библиотека и `golang.org/x/net`,
-лицензия BSD). `adb` в архивы не входит: установщик скачивает Android SDK Platform-Tools с сайта
-Google, они распространяются на условиях Google.
+[GNU AGPL-3.0](LICENSE). Прошивки Zigbee-радио (`radio/`) основаны на Telink Zigbee SDK и, как и он,
+распространяются под Apache License 2.0. Сторонние библиотеки, которые скачиваются при сборке,
+распространяются под своими лицензиями: sendspin-cpp, ArduinoJson, noise-c, IXWebSocket, micro-flac,
+micro-opus, alsa-lib, dropbear, OpenSSH. Установщик написан на Go (стандартная библиотека и
+`golang.org/x/net`, лицензия BSD). `adb` в архивы не входит: установщик скачивает Android SDK
+Platform-Tools с сайта Google, они распространяются на условиях Google.
