@@ -34,7 +34,7 @@ satellite/
   - `rustls` = `{ default-features = false, features = ["ring", "std", "tls12", "logging"] }`
   - `rustls-pki-types` = `{ features = ["std"] }`
   - `ring`, `log` (`features = ["std"]`), `libc`, `libloading`
-  - `snow` (фичи по умолчанию, чистый Rust)
+  - `snow` = `{ default-features = false, features = ["use-chacha20poly1305", "use-sha2", "use-curve25519", "use-getrandom"] }` — чистый Rust, только примитивы `Noise_NNpsk0_25519_ChaChaPoly_SHA256` (WP-01). Фичи по умолчанию не нужны: `std` в snow 0.10.0 включает `ring` (не-weak `ring/std`) вместе с неиспользуемыми AES-GCM и BLAKE2
   - `socket2` = `{ features = ["all"] }`
   - `cc` (build-зависимость шима)
   - для dev-зависимостей: `tokio` с фичей `test-util`

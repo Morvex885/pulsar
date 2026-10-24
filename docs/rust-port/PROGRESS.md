@@ -19,7 +19,7 @@
 | ID | Пакет | C++ строк | Старт после | Влить после | Статус | Исполнитель | Ревью | Midi | Lite 2 | Заметки |
 |---|---|---|---|---|---|---|---|---|---|---|
 | WP-00 | Скелет: workspace, сборка, CI, core, alsa, main, документы | ~1000 + инфра | — | — | влит | Morvex885 (агент) | [reviews/WP-00.md](reviews/WP-00.md) | да | да (через adb: на станции нет ssh) |  |
-| WP-01 | ESPHome: транспорт, Noise, клиенты, voice-владелец | ~1490 | WP-00 | — | в работе | Morvex885 (агент WP-01) | [reviews/WP-01.md](reviews/WP-01.md) | — | — |  |
+| WP-01 | ESPHome: транспорт, Noise, клиенты, voice-владелец | ~1490 | WP-00 | — | влит | Morvex885 (агент WP-01) | [reviews/WP-01.md](reviews/WP-01.md) | — | — |  |
 | WP-02 | ESPHome: сообщения, сущности, команды, api_selftest | ~1190 | WP-01 | — | свободен |  | [reviews/WP-02.md](reviews/WP-02.md) | требуется | требуется |  |
 | WP-03 | mDNS + арбитраж wake word, lan_probe | ~850 | WP-00 | — | в работе | Morvex885 (агент WP-03) | [reviews/WP-03.md](reviews/WP-03.md) | требуется | требуется |  |
 | WP-04 | Аудио-фронтенд: VQE/спотер, захват, спектр, ww_offline | ~890 | WP-00 | — | в работе | Morvex885 (агент WP-04) | [reviews/WP-04.md](reviews/WP-04.md) | требуется | требуется |  |
@@ -109,3 +109,4 @@ git ls-files 'satellite/src/*' 'satellite/tools/*.cpp' | xargs wc -l
 - WP-11: кросс-clippy в `make check` идёт через `cargo-zigbuild clippy` (build-скрипт `ring` компилирует C для цели; ARCHITECTURE п.10). `make check` теперь требует zig (любой версии) и cargo-zigbuild 0.24.0; job `check` в CI ставит zig 0.14.1 и cargo-zigbuild.
 - WP-11: раздел AGENTS.md «Updates from HA» (и строка Layout `satellite/src/update/`) ещё описывает HTTPS на OpenSSL прошивки через dlopen; WP-13 должен переписать его под `pulsar-update` (rustls + ring, CA-бандл `/etc/ssl/certs/ca-certificates.crt`).
 - WP-11: при закрытии всех handle updater отменяет идущую установку до `--version` и замены (бинарь не меняется, `Installed` не приходит); C++ доводил её до конца. Поэтому WP-12 при выходе с установкой в полёте стирает `update_attempt` (иначе автообновление пропускало бы тег) — пункт добавлен в `wp/WP-12.md`.
+- WP-01: контракт `[workspace.dependencies]` — `snow` без фич по умолчанию (`use-chacha20poly1305`, `use-sha2`, `use-curve25519`, `use-getrandom`): только примитивы NNpsk0, без `ring`, AES-GCM и BLAKE2, которые тянет фича `std` snow 0.10.0.

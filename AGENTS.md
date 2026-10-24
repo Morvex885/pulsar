@@ -29,7 +29,7 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 | Path | Content |
 |---|---|
 | `satellite/src/core/` | epoll event loop (`Loop`: fds, timers, cross-thread `post`), logging |
-| `satellite/src/esphome/` | ESPHome API server (hand-written protobuf in `proto.h`), mDNS responder |
+| `satellite/src/esphome/` | ESPHome API server, mDNS responder; transport, Noise and the hand-written protobuf codec are ported to `satellite/crates/pulsar-esphome` |
 | `satellite/src/model.*` | per-model hardware description (capture layout, VQE preset, LEDs, clock, inputs, sounds), detected from `/proc/device-tree/compatible` |
 | `satellite/src/audio/` | `frontend.*`: capture thread (ALSA → FIFO) + processing thread: Yandex VQE → wake + command spotters → 16 kHz stream; `spectrum.*`: music features of the speaker reference (512-point FFT at 16 kHz → 8 bands, loudness, beats as `MusicFrame`, `music_frame.h`) while the visualization can be shown |
 | `satellite/src/media/player.*` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`), channels MUSIC / ANNOUNCE; `Mixer` = ALSA "Master Playback Volume" (softvol of the `speakers` PCM) |
