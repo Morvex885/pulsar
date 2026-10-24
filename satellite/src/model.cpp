@@ -111,6 +111,8 @@ Model mini2() {
   m.clock_chip_current = false;
   m.keys_input = "sar0_pad0";
   m.mute_gpio = 414;  // GPIOZ_3: pull-up, 0 = muted (latched by the mic circuit), edge "falling"
+  m.has_clock = false;  // the panel's chip (i2c 0-003f) does not probe on this firmware
+  m.has_lux = false;    // no ambient light sensor
   m.error_sound = "ru-RU/playback_error.opus";
   m.wake_sound = "common/spotter_start.opus";
   m.cancel_sound = "common/spotter_cancel.opus";

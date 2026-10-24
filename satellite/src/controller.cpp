@@ -172,7 +172,8 @@ bool Controller::start() {
   id.project_version = PULSAR_VERSION;
 
   // Hardware first: UI feedback should work even if HA is not connected. The clock panel and the
-  // light sensor are optional: a station without one (Mini 2) gets no such entities in HA.
+  // light sensor are optional: a model without them (Mini 2) gets no such entities in HA, and a
+  // clock that this firmware does bring up re-enables its own.
   if (!leds_.open()) LOGW("LEDs unavailable");
   const bool clock_ok = clock_.open();
   if (!clock_ok) LOGW("clock unavailable");
@@ -193,8 +194,8 @@ bool Controller::start() {
   cfg.clock_faces.insert(cfg.clock_faces.end(), Clock::face_names().begin(), Clock::face_names().end());
   const auto slash = state_path_.rfind('/');
   cfg.key_path = (slash == std::string::npos ? std::string(".") : state_path_.substr(0, slash)) + "/api_key";
-  cfg.has_clock = clock_ok;
-  cfg.has_lux = lux_ok;
+  cfg.has_clock = model_.has_clock || clock_ok;
+  cfg.has_lux = model_.has_lux;
   if (!model_.zigbee_tty.empty())
     for (const auto &r : ZigbeeService::kRoles) cfg.zigbee_modes.push_back(r.label);
   api_ = std::make_unique<ApiServer>(loop_, id, cfg, *this);

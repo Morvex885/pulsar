@@ -76,6 +76,12 @@ struct Model {
   // (active low, 1 = asserted) exported by the kernel's zb_control driver. zigbee_tty empty: none.
   std::string zigbee_tty;
   std::string zigbee_reset, zigbee_boot;
+
+  // Entities for hardware the model lacks. has_clock false (Mini 2: its clock chip does not probe):
+  // no clock entities unless Clock::open() still finds the panel. has_lux false (Mini 2: no
+  // sensor): no illuminance entity.
+  bool has_clock = true;
+  bool has_lux = true;
 };
 
 // The detected model; nullptr on unsupported hardware.
