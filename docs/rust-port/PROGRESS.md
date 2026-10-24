@@ -24,7 +24,7 @@
 | WP-03 | mDNS + арбитраж wake word, lan_probe | ~850 | WP-00 | — | влит | Morvex885 (агент WP-03) | [reviews/WP-03.md](reviews/WP-03.md) | да | да |  |
 | WP-04 | Аудио-фронтенд: VQE/спотер, захват, спектр, ww_offline | ~890 | WP-00 | — | в работе | Morvex885 (агент WP-04) | [reviews/WP-04.md](reviews/WP-04.md) | требуется | требуется |  |
 | WP-05 | Плеер (GStreamer) + Mixer, player_probe | ~1010 | WP-00 | — | влит | Morvex885 (агент WP-05) | [reviews/WP-05.md](reviews/WP-05.md) | да | да |  |
-| WP-06 | Sendspin: C-шим над sendspin-cpp, сервис, ALSA-sink | ~840 + шим | WP-00 | — | в работе | Morvex885 (агент WP-06) | [reviews/WP-06.md](reviews/WP-06.md) | требуется | требуется |  |
+| WP-06 | Sendspin: C-шим над sendspin-cpp, сервис, ALSA-sink | ~840 + шим | WP-00 | — | влит | Morvex885 (агент WP-06) | [reviews/WP-06.md](reviews/WP-06.md) | да | да |  |
 | WP-07 | LED (led_fx, композитор, вывод) + кнопки, hw_probe (LED/ввод) | ~1500 | WP-00 | — | влит | Morvex885 (агент WP-07) | [reviews/WP-07.md](reviews/WP-07.md) | да | да |  |
 | WP-08 | Часы + clock_fx + датчик света, hw_probe целиком | ~1380 | WP-00 | WP-07 | в работе | Morvex885 (агент WP-08) | [reviews/WP-08.md](reviews/WP-08.md) | требуется | требуется |  |
 | WP-09 | Zigbee: линк, координатор, роутер, прошивальщик | ~1440 | WP-00 | — | в работе | Morvex885 (агент WP-09) | [reviews/WP-09.md](reviews/WP-09.md) | требуется | — |  |

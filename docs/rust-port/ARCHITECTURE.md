@@ -95,6 +95,7 @@ satellite/
 9. Комментарии на английском и объясняют факты устройства и ограничения, а не код (конвенция AGENTS.md).
 10. `make -C satellite check` должен проходить: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` (host), тот же clippy для станций через `cargo-zigbuild clippy … --target aarch64-unknown-linux-gnu.2.36 --target armv7-unknown-linux-gnueabihf.2.30` (цели ставит rustup по `rust-toolchain.toml`, линкер не нужен; с WP-11 build-скрипт `ring` компилирует C для цели, поэтому нужен zig — любой версии, в CI 0.14.1 — и cargo-zigbuild 0.24.0, с теми же `CARGO_ZIGBUILD_*`, что у arch-сборок), `cargo test --workspace --locked` (host x86_64, без sendspin-cpp).
     - Clippy линтует host и обе цели. Архитектурно-зависимый код вместе со всеми его хелперами целиком лежит под `#[cfg(target_arch = …)]`, чтобы ни на одной из них не было мёртвого кода.
+    - FFI-сторона `pulsar-sendspin` (cfg `sendspin_ffi`) линтуется отдельным проходом: `CARGO_TARGET_DIR=target/clippy-ffi RUSTFLAGS='--cfg sendspin_ffi' cargo clippy -p pulsar-sendspin --all-targets` для обеих целей (только проверка типов, C++ не компилируется и не линкуется).
 
 ## `pulsar-core` (WP-00)
 

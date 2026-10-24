@@ -36,12 +36,18 @@ $(ARCHES):
 # lints the code under #[cfg(target_arch = ...)] for both stations (type-checks only, nothing is
 # linked or run, so any zig does); build scripts compile C for those targets (ring), hence
 # cargo-zigbuild.
+# The third lints pulsar-sendspin's FFI side (cfg sendspin_ffi, normally set by its build.rs when
+# the Makefile provides sendspin-cpp): type-checks only, nothing C++ compiled or linked; its own
+# target dir keeps the changed RUSTFLAGS from rebuilding the others.
 check:
 	$(if $(ZIG_PATH),,$(error $(ZIG_MISSING)))
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy --workspace --all-targets --locked -- -D warnings
 	env $(ZIGBUILD_ENV) $(CARGO_ZIGBUILD) clippy --workspace --all-targets --locked \
 	  --target aarch64-unknown-linux-gnu.2.36 --target armv7-unknown-linux-gnueabihf.2.30 -- -D warnings
+	CARGO_TARGET_DIR=target/clippy-ffi RUSTFLAGS='--cfg sendspin_ffi' $(CARGO) clippy -p pulsar-sendspin \
+	  --all-targets --locked --target aarch64-unknown-linux-gnu --target armv7-unknown-linux-gnueabihf \
+	  -- -D warnings
 	$(CARGO) test --workspace --locked
 
 clean:
