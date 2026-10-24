@@ -137,6 +137,7 @@ pub mod sysfs {                                               // порт hw/sys
 pub mod net {                                                 // выбор интерфейса из esphome/mdns.cpp
     pub struct Iface { pub name: String, pub index: u32, pub addr: std::net::Ipv4Addr }
     pub fn best_interface() -> Option<Iface>;               // wlan0=3, iface маршрута по умолчанию (/proc/net/route)=2, иначе 1; IFF_UP|IFF_MULTICAST, не loopback, не 169.254/16
+    pub fn best_interface_checked() -> Result<Option<Iface>, ()>; // то же, Err = getifaddrs не удался (mDNS тогда сохраняет прежний выбор, как C++ refresh_iface)
     pub fn score(name: &str, default_route_iface: Option<&str>) -> u32; // чистая часть
 }
 pub mod tz { pub fn set_tz(posix_tz: &str); }               // set_var("TZ") + libc::tzset в sys.rs; вызывающий зовёт только при изменении значения (гонка getenv с потоками GLib — как в C++)
@@ -256,6 +257,11 @@ pub mod mdns {
                       pub fn ipv4(&self) -> Option<std::net::Ipv4Addr>; }
                       // ipv4(): выбор интерфейса синхронно в spawn (как refresh_iface() в C++ start()), дальше обновляет актор (netlink, опрос 30 с);
                       // add_service/set_txt его не меняют
+                      // add_service/set_txt сразу после spawn (до первого запуска актора) уходят в стартовый анонс, как C++ add_service до start()
+    // только для lan_probe (контроллер не использует): тот же респондер плюс канал вопросов, на которые ушёл ответ
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum Reply { Legacy, Unicast, Multicast }
+    pub struct Answered { pub from: std::net::SocketAddrV4, pub name: String, pub qtype: u16, pub reply: Reply }
+    pub fn spawn_traced(host: String) -> Result<(MdnsHandle, tokio::sync::mpsc::UnboundedReceiver<Answered>), String>;
 }
 pub mod arbiter {
     pub struct Claim { pub station: String, pub wake: String, pub busy: bool, pub level_db: f32 }
@@ -265,6 +271,11 @@ pub mod arbiter {
                          // ok(): итог открытия сокета в spawn (socket / SO_REUSEADDR / SO_BROADCAST / bind), не меняется
         pub fn claim(&self, wake: &str, level_db: f32, busy: bool, decide: bool) -> u64; // decide=false = только рассылка (busy-claim при звонке таймера)
         pub fn cancel(&self); }
+        // cancel(): уже отправленный актором Decided (а без сокета — поставленный в очередь самим claim()) может прийти и после cancel();
+        // контроллер забывает свой claim_id при cancel и сопоставляет события по id
+    // только для lan_probe: тот же арбитр плюс канал принятых чужих claims (после фильтров и дедупа, как строка лога "arbiter: claim from")
+    pub fn spawn_traced(station: String, port: u16)
+        -> (ArbiterHandle, tokio::sync::mpsc::UnboundedReceiver<ArbiterEvent>, tokio::sync::mpsc::UnboundedReceiver<Claim>);
 }
 ```
 

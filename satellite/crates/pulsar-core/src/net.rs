@@ -13,7 +13,14 @@ pub struct Iface {
 /// The best usable IPv4 interface: up, multicast-capable, not loopback, not 169.254/16 (the
 /// stations' p2p0 carries a link-local address); first of the highest `score` wins.
 pub fn best_interface() -> Option<Iface> {
-    let addrs = sys::ipv4_ifaddrs()?;
+    best_interface_checked().ok().flatten()
+}
+
+/// `best_interface`, with Err when getifaddrs failed: the mDNS responder then keeps its
+/// current choice, as the C++ one did.
+#[allow(clippy::result_unit_err)]
+pub fn best_interface_checked() -> Result<Option<Iface>, ()> {
+    let addrs = sys::ipv4_ifaddrs().ok_or(())?;
     let def = std::fs::read_to_string("/proc/net/route")
         .ok()
         .and_then(|t| default_route_iface(&t));
@@ -30,11 +37,11 @@ pub fn best_interface() -> Option<Iface> {
             best = Some((s, a));
         }
     }
-    best.map(|(_, a)| Iface {
+    Ok(best.map(|(_, a)| Iface {
         index: sys::if_nametoindex(&a.name),
         name: a.name,
         addr: a.addr,
-    })
+    }))
 }
 
 /// wlan0 = 3 (the stations' Wi-Fi), the default route's interface = 2, anything else = 1.

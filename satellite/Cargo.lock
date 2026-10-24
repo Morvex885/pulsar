@@ -319,6 +319,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulsar-lan"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "log",
+ "pulsar-core",
+ "socket2",
+ "tokio",
+]
+
+[[package]]
 name = "pulsar-update"
 version = "0.0.0"
 dependencies = [
