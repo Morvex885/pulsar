@@ -89,6 +89,7 @@ satellite/
 8. `unsafe` и все вызовы `libc` (включая `std::env::set_var`) живут только в модулях `sys.rs`/`ffi.rs` и в обработчике крашей.
    - В каждом крейте `#![deny(unsafe_op_in_unsafe_fn)]`, у каждого блока комментарий `// SAFETY:`.
    - Символы dlopen резолвятся один раз в структуру указателей на функции.
+   - `gst.rs` в `pulsar-media` — такой же FFI-модуль, как `ffi.rs` (dlopen GLib/GStreamer прошивки).
    - Раскладки C-структур — `#[repr(C)]` с compile-time `assert!(core::mem::offset_of!(…) == …)` под `#[cfg(target_arch)]`.
    - Обработчик крашей не аллоцирует и не использует `eprintln!`/`std::io`: только `libc::write(2, …)`.
 9. Комментарии на английском и объясняют факты устройства и ограничения, а не код (конвенция AGENTS.md).
@@ -296,9 +297,13 @@ pub struct SpectrumAnalyzer;                                 // pub: new(rate, c
 #[derive(Clone, Copy, PartialEq, Eq, Debug)] pub enum Channel { Music, Announce }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)] pub enum PlayState { Idle, Loading, Playing, Paused, Error }
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)] pub struct PlayId(pub u64);
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlayerEvent { State(Channel, PlayState), Done { id: PlayId, ok: bool } } // Done ровно один раз на каждый play(); вытеснение/stop -> ok=false
+// намеренное отличие от C++: список, закончившийся до stop/play, получает ok по факту (C++ проверял gen при исполнении
+// колбэка на Loop и отдавал false); вытесненный stop/play список получает false синхронно из этого вызова
 pub fn spawn() -> (PlayerHandle, tokio::sync::mpsc::UnboundedReceiver<PlayerEvent>);
-// ошибка dlopen/gst_init логируется ("player init failed"), handle деградированный: каждый play() -> Done{id, ok:false}, state() = Idle (как player.cpp:612-615)
+// ошибка dlopen/gst_init логируется ("player init failed"), handle деградированный: каждый play() -> Done{id, ok:false}, state() = Idle (как player.cpp:612-615);
+// плеер один на процесс: повторный spawn() логирует ошибку и отдаёт деградированный handle
 impl PlayerHandle { pub fn play(&self, ch: Channel, urls: Vec<String>) -> PlayId; pub fn pause(&self, ch: Channel); pub fn resume(&self, ch: Channel);
                     pub fn stop(&self, ch: Channel); pub fn state(&self, ch: Channel) -> PlayState; pub fn set_channel_gain(&self, ch: Channel, gain: f32); }
 // state(ch) пишет только рабочий поток GLib (атомик), как в C++: команды уходят туда через g_idle_add, поэтому play/pause/resume/stop

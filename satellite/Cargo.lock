@@ -330,6 +330,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulsar-media"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "libloading",
+ "log",
+ "pulsar-alsa",
+ "pulsar-core",
+ "tokio",
+]
+
+[[package]]
 name = "pulsar-update"
 version = "0.0.0"
 dependencies = [

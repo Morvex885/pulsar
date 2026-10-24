@@ -1,0 +1,12 @@
+/system/vendor/quasar/sounds/common/spotter_start.mp3	file:///system/vendor/quasar/sounds/common/spotter_start.mp3
+http://192.168.1.50:8000/music.mp3	http://192.168.1.50:8000/music.mp3
+https://example.com/a.mp3	https://example.com/a.mp3
+file:///data/a.wav	file:///data/a.wav
+relative/path.mp3	relative/path.mp3
+	
+/	file:///
+x://	x://
+/a://b	/a://b
+//host/x	file:////host/x
+c:\\x.mp3	c:\\x.mp3
+media-source://media_source/local/a.mp3	media-source://media_source/local/a.mp3
