@@ -368,9 +368,11 @@ level is the state (the daemon polls it, as maind does); GPIOZ_8 (419) only puls
 press. The button emits no evdev event (`sar0_pad0` carries 582/115/114 only), and the press does
 not update `data/is_speaker_muted`, so that file cannot be used as the state. Verified on hardware
 (firmware 0.369): VQE preset loading and capture, wake word → HA pipeline → TTS, playback through
-the firmware's 32-bit GStreamer on `default`, the LED ring, touch keys, volume and the GPIO mic mute.
-Not yet verified: Sendspin/Music Assistant playback, the installer, the clock (see above), spotter
-quality (the models in `spotter_models/` are the Lite 2's).
+the firmware's 32-bit GStreamer on `default`, Sendspin with Music Assistant, the LED ring, touch
+keys, volume, the GPIO mic mute and `pulsar-install` end to end (model detected, rootfs guard
+passed, `/etc/init.d/S99zpulsar` written with `/` back in ro, `/etc/init.d/S99quasar` untouched,
+pulsar running after a reboot). Not yet verified: the clock (see above), spotter quality (the
+models in `spotter_models/` are the Lite 2's).
 
 ## Conventions
 
