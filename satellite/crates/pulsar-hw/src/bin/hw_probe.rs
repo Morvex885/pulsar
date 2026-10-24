@@ -29,6 +29,7 @@ fn say(line: &str) {
 
 fn main() -> ExitCode {
     pulsar_core::init_logger();
+    pulsar_core::add_own_target(module_path!());
     let args: Vec<String> = std::env::args().skip(1).collect();
     let arg = |i: usize, default: u64| args.get(i).map_or(Some(default), |s| s.parse::<u64>().ok());
     let cmd = args.first().map(String::as_str);

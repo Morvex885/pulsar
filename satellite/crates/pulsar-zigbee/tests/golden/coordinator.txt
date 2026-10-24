@@ -1,0 +1,494 @@
+step start
+send 0a04 0104010500010200000600011900
+send 0a04 f2e0a161000000012100
+send 0a00 -
+step state-none
+changed ready=1 formed=0 forming=0 pan=ffff ch=11 ext=0000000000000000 ieee=00124b0001020304 nwk=fffe upd=0 key=000102030405060708090a0b0c0d0e0f seq=0 fc=0
+step send-not-formed
+send_result 0
+step form
+send 0a01 0f621adddddddddddddddd0102030405060708090a0b0c0d0e0f1004030201004b12000010000002
+step state-forming
+changed ready=1 formed=0 forming=1 pan=1a62 ch=15 ext=dddddddddddddddd ieee=00124b0001020304 nwk=0000 upd=2 key=0102030405060708090a0b0c0d0e0f10 seq=0 fc=4096
+step state-up
+formed ok=1
+changed ready=1 formed=1 forming=0 pan=1a63 ch=15 ext=dddddddddddddddd ieee=00124b0001020304 nwk=0000 upd=2 key=0102030405060708090a0b0c0d0e0f10 seq=0 fc=4100
+step state-same
+step state-counter
+step state-short
+step send-nwk
+send_result 1
+send 0a10 00023412010401060001050503010203
+pending 1
+sent 00000100 00
+pending 0
+step send-group
+send_result 1
+send 0a10 0101050004010800010d00021122
+sent 00000101 e9
+step send-ieee
+send_result 1
+send 0a10 0203efcdab01008d15000200000100000d00050534120000
+sent 00000102 a7
+step confirm-unknown
+step send-ack-fail
+send_result 1
+send 0a10 0302214301040106000100000101
+sent 00000103 a7
+pending 0
+step send-too-long
+send_result 0
+send_result 1
+send 0a10 040221430000000000000000c8abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab
+sent 00000105 00
+step send-self-nonzdo
+send_result 1
+sent 00000106 c1
+send_result 1
+sent 00000107 c1
+step zdo-nwk-addr
+send_result 1
+sent 00000200 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8000 lqi=255 rssi=0 data=100004030201004b12000000
+send_result 1
+sent 00000201 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8000 lqi=255 rssi=0 data=1181
+send_result 1
+sent 00000202 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8000 lqi=255 rssi=0 data=1281
+step zdo-nwk-addr-by-ieee
+send_result 1
+sent 00000203 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8000 lqi=255 rssi=0 data=130004030201004b12000000
+step zdo-ieee-addr
+send_result 1
+sent 00000210 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8001 lqi=255 rssi=0 data=200004030201004b12000000
+send_result 1
+sent 00000211 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8001 lqi=255 rssi=0 data=2181
+send_result 1
+sent 00000212 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8001 lqi=255 rssi=0 data=2281
+step zdo-node-desc
+send_result 1
+sent 00000220 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8002 lqi=255 rssi=0 data=3000000000408f0a14528000412c800000
+step zdo-simple-desc
+send_result 1
+sent 00000230 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8004 lqi=255 rssi=0 data=400000000e0104010500010200000600011900
+send_result 1
+sent 00000231 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8004 lqi=255 rssi=0 data=410000000af2e0a161000000012100
+send_result 1
+sent 00000232 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8004 lqi=255 rssi=0 data=4283000000
+send_result 1
+sent 00000233 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8004 lqi=255 rssi=0 data=4383000000
+step zdo-active-ep
+send_result 1
+sent 00000240 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8005 lqi=255 rssi=0 data=500000000201f2
+step zdo-permit-join
+send_result 1
+sent 00000250 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8036 lqi=255 rssi=0 data=6000
+send 0a03 3c
+send_result 1
+sent 00000251 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8036 lqi=255 rssi=0 data=6100
+step zdo-nwk-update
+send_result 1
+sent 00000260 00
+send_result 1
+sent 00000261 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8038 lqi=255 rssi=0 data=7184
+step zdo-unknown
+send_result 1
+sent 00000270 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8031 lqi=255 rssi=0 data=7284
+send_result 1
+sent 00000271 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8000 lqi=255 rssi=0 data=7384
+step scan
+send_result 1
+send 0a06 00f8ff0702
+step scan-busy
+send_result 1
+sent 00000301 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8038 lqi=255 rssi=0 data=8184
+send_result 1
+step scan-rsp
+sent 00000300 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8038 lqi=255 rssi=0 data=800000f8ff07000000000314c805
+send 0a10 0502555501040106000100000101
+sent 00000302 00
+step scan-rsp-unsolicited
+step scan-rsp-short
+send_result 1
+send 0a06 0008010000
+sent 00000310 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8038 lqi=255 rssi=0 data=820000080100000000000114
+step scan-rsp-empty
+send_result 1
+send 0a06 0008000005
+sent 00000311 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8038 lqi=255 rssi=0 data=8300000800000000000000
+step scan-hold-timeout
+send_result 1
+send 0a06 0008000003
+send_result 1
+send 0a10 0602555501040106000100000102
+sent 00000313 00
+sent 00000312 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8038 lqi=255 rssi=0 data=840000080000000000000130
+step scan-ack-fail
+send_result 1
+send 0a06 0008000001
+sent 00000320 a7
+send_result 1
+send 0a06 0008000001
+sent 00000321 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8038 lqi=255 rssi=0 data=860000080000000000000131
+step indication-nwk
+received src=1234 dst=0000 group=0 src_ep=1 dst_ep=1 profile=0104 cluster=0006 lqi=200 rssi=-60 data=aabbcc
+step indication-ieee
+received src=fffe dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8013 lqi=255 rssi=127 data=1020
+step indication-group
+received src=5678 dst=0005 group=1 src_ep=2 dst_ep=255 profile=0104 cluster=0008 lqi=16 rssi=-128 data=-
+step indication-truncated
+step events
+step endpoints
+send 0a04 f2ff
+send 0a04 03040100010201000000
+send 0a04 f2e0a161000000012100
+step commands
+send 0a03 00
+send 0a03 fe
+send 0a02 -
+send 0a05 1403
+step form-refused
+send 0a01 0fffff00000000000000000000000000000000000000000000000000000000000000000000000000
+formed ok=0
+step form-superseded
+send 0a01 0bffff00000000000000000000000000000000000000000000000000000000000000000000000000
+formed ok=0
+send 0a01 19ad0b00000000000000000000000000000000000000000000000000000000000000000000000000
+formed ok=1
+changed ready=1 formed=1 forming=0 pan=0bad ch=25 ext=0102030405060708 ieee=00124b0001020304 nwk=0000 upd=0 key=202122232425262728292a2b2c2d2e2f seq=1 fc=7
+step form-failed
+send 0a01 0fffff00000000000000000000000000000000000000000000000000000000000000000000000000
+formed ok=0
+changed ready=1 formed=0 forming=0 pan=ffff ch=25 ext=0000000000000000 ieee=00124b0001020304 nwk=fffe upd=0 key=000102030405060708090a0b0c0d0e0f seq=0 fc=0
+changed ready=1 formed=1 forming=0 pan=0bad ch=25 ext=0102030405060708 ieee=00124b0001020304 nwk=0000 upd=0 key=202122232425262728292a2b2c2d2e2f seq=1 fc=9
+step collision
+sent 00001000 a7
+pending 256
+step sweep
+t+5
+t+10
+t+15
+t+20
+t+25
+t+30
+send 0a00 -
+pending 256
+t+35
+t+40
+t+45
+t+50
+sent 000010f9 a7
+sent 000010fa a7
+sent 000010fb a7
+sent 000010fc a7
+sent 000010fd a7
+sent 000010fe a7
+sent 000010ff a7
+sent 00001100 a7
+sent 00001001 a7
+sent 00001002 a7
+sent 00001003 a7
+sent 00001004 a7
+sent 00001005 a7
+sent 00001006 a7
+sent 00001007 a7
+sent 00001008 a7
+sent 00001009 a7
+sent 0000100a a7
+sent 0000100b a7
+sent 0000100c a7
+sent 0000100d a7
+sent 0000100e a7
+sent 0000100f a7
+sent 00001010 a7
+sent 00001011 a7
+sent 00001012 a7
+sent 00001013 a7
+sent 00001014 a7
+sent 00001015 a7
+sent 00001016 a7
+sent 00001017 a7
+sent 00001018 a7
+sent 00001019 a7
+sent 0000101a a7
+sent 0000101b a7
+sent 0000101c a7
+sent 0000101d a7
+sent 0000101e a7
+sent 0000101f a7
+sent 00001020 a7
+sent 00001021 a7
+sent 00001022 a7
+sent 00001023 a7
+sent 00001024 a7
+sent 00001025 a7
+sent 00001026 a7
+sent 00001027 a7
+sent 00001028 a7
+sent 00001029 a7
+sent 0000102a a7
+sent 0000102b a7
+sent 0000102c a7
+sent 0000102d a7
+sent 0000102e a7
+sent 0000102f a7
+sent 00001030 a7
+sent 00001031 a7
+sent 00001032 a7
+sent 00001033 a7
+sent 00001034 a7
+sent 00001035 a7
+sent 00001036 a7
+sent 00001037 a7
+sent 00001038 a7
+sent 00001039 a7
+sent 0000103a a7
+sent 0000103b a7
+sent 0000103c a7
+sent 0000103d a7
+sent 0000103e a7
+sent 0000103f a7
+sent 00001040 a7
+sent 00001041 a7
+sent 00001042 a7
+sent 00001043 a7
+sent 00001044 a7
+sent 00001045 a7
+sent 00001046 a7
+sent 00001047 a7
+sent 00001048 a7
+sent 00001049 a7
+sent 0000104a a7
+sent 0000104b a7
+sent 0000104c a7
+sent 0000104d a7
+sent 0000104e a7
+sent 0000104f a7
+sent 00001050 a7
+sent 00001051 a7
+sent 00001052 a7
+sent 00001053 a7
+sent 00001054 a7
+sent 00001055 a7
+sent 00001056 a7
+sent 00001057 a7
+sent 00001058 a7
+sent 00001059 a7
+sent 0000105a a7
+sent 0000105b a7
+sent 0000105c a7
+sent 0000105d a7
+sent 0000105e a7
+sent 0000105f a7
+sent 00001060 a7
+sent 00001061 a7
+sent 00001062 a7
+sent 00001063 a7
+sent 00001064 a7
+sent 00001065 a7
+sent 00001066 a7
+sent 00001067 a7
+sent 00001068 a7
+sent 00001069 a7
+sent 0000106a a7
+sent 0000106b a7
+sent 0000106c a7
+sent 0000106d a7
+sent 0000106e a7
+sent 0000106f a7
+sent 00001070 a7
+sent 00001071 a7
+sent 00001072 a7
+sent 00001073 a7
+sent 00001074 a7
+sent 00001075 a7
+sent 00001076 a7
+sent 00001077 a7
+sent 00001078 a7
+sent 00001079 a7
+sent 0000107a a7
+sent 0000107b a7
+sent 0000107c a7
+sent 0000107d a7
+sent 0000107e a7
+sent 0000107f a7
+sent 00001080 a7
+sent 00001081 a7
+sent 00001082 a7
+sent 00001083 a7
+sent 00001084 a7
+sent 00001085 a7
+sent 00001086 a7
+sent 00001087 a7
+sent 00001088 a7
+sent 00001089 a7
+sent 0000108a a7
+sent 0000108b a7
+sent 0000108c a7
+sent 0000108d a7
+sent 0000108e a7
+sent 0000108f a7
+sent 00001090 a7
+sent 00001091 a7
+sent 00001092 a7
+sent 00001093 a7
+sent 00001094 a7
+sent 00001095 a7
+sent 00001096 a7
+sent 00001097 a7
+sent 00001098 a7
+sent 00001099 a7
+sent 0000109a a7
+sent 0000109b a7
+sent 0000109c a7
+sent 0000109d a7
+sent 0000109e a7
+sent 0000109f a7
+sent 000010a0 a7
+sent 000010a1 a7
+sent 000010a2 a7
+sent 000010a3 a7
+sent 000010a4 a7
+sent 000010a5 a7
+sent 000010a6 a7
+sent 000010a7 a7
+sent 000010a8 a7
+sent 000010a9 a7
+sent 000010aa a7
+sent 000010ab a7
+sent 000010ac a7
+sent 000010ad a7
+sent 000010ae a7
+sent 000010af a7
+sent 000010b0 a7
+sent 000010b1 a7
+sent 000010b2 a7
+sent 000010b3 a7
+sent 000010b4 a7
+sent 000010b5 a7
+sent 000010b6 a7
+sent 000010b7 a7
+sent 000010b8 a7
+sent 000010b9 a7
+sent 000010ba a7
+sent 000010bb a7
+sent 000010bc a7
+sent 000010bd a7
+sent 000010be a7
+sent 000010bf a7
+sent 000010c0 a7
+sent 000010c1 a7
+sent 000010c2 a7
+sent 000010c3 a7
+sent 000010c4 a7
+sent 000010c5 a7
+sent 000010c6 a7
+sent 000010c7 a7
+sent 000010c8 a7
+sent 000010c9 a7
+sent 000010ca a7
+sent 000010cb a7
+sent 000010cc a7
+sent 000010cd a7
+sent 000010ce a7
+sent 000010cf a7
+sent 000010d0 a7
+sent 000010d1 a7
+sent 000010d2 a7
+sent 000010d3 a7
+sent 000010d4 a7
+sent 000010d5 a7
+sent 000010d6 a7
+sent 000010d7 a7
+sent 000010d8 a7
+sent 000010d9 a7
+sent 000010da a7
+sent 000010db a7
+sent 000010dc a7
+sent 000010dd a7
+sent 000010de a7
+sent 000010df a7
+sent 000010e0 a7
+sent 000010e1 a7
+sent 000010e2 a7
+sent 000010e3 a7
+sent 000010e4 a7
+sent 000010e5 a7
+sent 000010e6 a7
+sent 000010e7 a7
+sent 000010e8 a7
+sent 000010e9 a7
+sent 000010ea a7
+sent 000010eb a7
+sent 000010ec a7
+sent 000010ed a7
+sent 000010ee a7
+sent 000010ef a7
+sent 000010f0 a7
+sent 000010f1 a7
+sent 000010f2 a7
+sent 000010f3 a7
+sent 000010f4 a7
+sent 000010f5 a7
+sent 000010f6 a7
+sent 000010f7 a7
+sent 000010f8 a7
+t+55
+t+60
+send 0a00 -
+pending 0
+step boot
+send_result 1
+send 0a10 0802777701040106000000000101
+send_result 1
+send 0a10 0902777701040106000000000101
+send 0a01 0fffff00000000000000000000000000000000000000000000000000000000000000000000000000
+send_result 1
+send 0a06 0008000001
+send_result 1
+formed ok=0
+changed ready=0 formed=1 forming=0 pan=0bad ch=25 ext=0102030405060708 ieee=00124b0001020304 nwk=0000 upd=0 key=202122232425262728292a2b2c2d2e2f seq=1 fc=9
+sent 00002000 a7
+sent 00002001 a7
+sent 00002003 a7
+sent 00002002 a7
+send 0a10 0a02777701040106000000000101
+send 0a04 0104010500010200000600011900
+send 0a04 03040100010201000000
+send 0a04 f2e0a161000000012100
+send 0a00 -
+pending 0
+step after-boot
+send_result 0
+changed ready=1 formed=1 forming=0 pan=0bad ch=25 ext=0102030405060708 ieee=00124b0001020304 nwk=0000 upd=0 key=202122232425262728292a2b2c2d2e2f seq=1 fc=1033
+send_result 1
+sent 00002005 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8005 lqi=255 rssi=0 data=92000000030103f2
+step sweep-scan
+send_result 1
+send 0a06 0008000000
+sent 00002006 00
+received src=0000 dst=0000 group=0 src_ep=0 dst_ep=0 profile=0000 cluster=8038 lqi=255 rssi=0 data=930000080000000000000101
+send 0a00 -

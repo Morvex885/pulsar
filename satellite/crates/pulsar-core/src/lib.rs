@@ -17,7 +17,9 @@ mod timers;
 pub mod tz;
 
 pub use ambient::AmbientDimmer;
-pub use logger::{LogLine, init_logger, set_log_sink, stderr_level, take_log_lines};
+pub use logger::{
+    LogLine, add_own_target, init_logger, set_log_sink, stderr_level, take_log_lines,
+};
 pub use timers::Timers;
 
 /// Milliseconds on CLOCK_MONOTONIC (not affected by NTP steps after boot).

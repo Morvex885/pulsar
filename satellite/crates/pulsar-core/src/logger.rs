@@ -54,6 +54,17 @@ pub fn set_log_sink(min_level: Option<Level>, notify: Option<Arc<Notify>>) {
     update_max_level(&g.core);
 }
 
+/// Treats records whose target is `prefix` or lies under it (`prefix::…`) as pulsar's own, like
+/// `pulsar*` targets: stderr at PULSAR_LOG_LEVEL and the sink. Tools call it with
+/// `module_path!()` (their crate name does not start with "pulsar"); before or after
+/// `init_logger`.
+pub fn add_own_target(prefix: &'static str) {
+    let mut own = OWN_TARGETS.lock().unwrap_or_else(|e| e.into_inner());
+    if !own.contains(&prefix) {
+        own.push(prefix);
+    }
+}
+
 /// Stderr's level from PULSAR_LOG_LEVEL (Info until `init_logger`), independent of the sink.
 pub fn stderr_level() -> LevelFilter {
     filter_of(global().core.stderr_level)
@@ -74,6 +85,8 @@ static GLOBAL: Mutex<Global> = Mutex::new(Global {
     line: String::new(),
 });
 static LOGGER: Logger = Logger;
+/// Prefixes of `add_own_target`.
+static OWN_TARGETS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
 thread_local! {
     // Set while the sink's Notify runs on this thread: a record from there is dropped instead
@@ -122,7 +135,15 @@ fn level_of(num: i32) -> Level {
 
 /// Records of other crates (rustls, tokio, …) are not pulsar's messages: stderr only.
 fn is_foreign(target: &str) -> bool {
-    !target.starts_with("pulsar")
+    if target.starts_with("pulsar") {
+        return false;
+    }
+    let own = OWN_TARGETS.lock().unwrap_or_else(|e| e.into_inner());
+    !own.iter().any(|p| {
+        target
+            .strip_prefix(p)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+    })
 }
 
 fn basename(file: &str) -> &str {
@@ -647,6 +668,27 @@ mod tests {
         assert!(core.take().is_empty());
         assert!(!core.write(0, 1, "a.rs", 1, "x", false, &mut out));
         assert!(core.take().is_empty());
+    }
+
+    #[test]
+    fn own_targets_are_not_foreign() {
+        assert!(is_foreign("wp_own_target_probe"));
+        assert!(!is_foreign("pulsar_zigbee::link"));
+        add_own_target("wp_own_target_probe");
+        add_own_target("wp_own_target_probe");
+        assert!(!is_foreign("wp_own_target_probe"));
+        assert!(!is_foreign("wp_own_target_probe::sub"));
+        assert!(is_foreign("wp_own_target_probex"));
+        assert!(is_foreign("rustls::client"));
+        assert_eq!(
+            OWN_TARGETS
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| **p == "wp_own_target_probe")
+                .count(),
+            1
+        );
     }
 
     #[test]

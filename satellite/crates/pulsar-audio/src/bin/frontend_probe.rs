@@ -158,6 +158,7 @@ impl Recorder {
 
 fn main() -> ExitCode {
     pulsar_core::init_logger();
+    pulsar_core::add_own_target(module_path!());
     let Some(m) = pulsar_core::model::detect_model() else {
         return ExitCode::from(1);
     };

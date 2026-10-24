@@ -85,7 +85,7 @@ satellite/
    - `main` после выхода контроллера уничтожает handle и ждёт `actors::join_all(3 s)`. К этому моменту уже взведён watchdog teardown на 5 с.
    - Потоки останавливаются в `Drop` своего владельца (флаг + join).
 6. Не держать `RefCell`-borrow через `.await`. Состояние актора хранится по значению в его задаче.
-7. Логи пишутся через `log::{debug,info,warn,error}!`, бэкенд — в `pulsar-core`. Тексты сообщений берутся из C++, где они несут смысл для пользователя. Записи чужих крейтов (target не начинается с `pulsar`) идут только в stderr и только с уровня Warn, в ESPHome-sink не попадают. `Trace` отбрасывается.
+7. Логи пишутся через `log::{debug,info,warn,error}!`, бэкенд — в `pulsar-core`. Тексты сообщений берутся из C++, где они несут смысл для пользователя. Записи чужих крейтов (target не начинается с `pulsar`) идут только в stderr и только с уровня Warn, в ESPHome-sink не попадают. Утилита, чей крейт-бинарь назван не `pulsar*` (`zigbee_probe`, `hw_probe`, …), сразу после `init_logger()` вызывает `pulsar_core::add_own_target(module_path!())`: её записи (target равен префиксу или лежит под `префикс::`) тогда считаются своими — уровень stderr из PULSAR_LOG_LEVEL и sink. `Trace` отбрасывается.
 8. `unsafe` и все вызовы `libc` (включая `std::env::set_var`) живут только в модулях `sys.rs`/`ffi.rs` и в обработчике крашей.
    - В каждом крейте `#![deny(unsafe_op_in_unsafe_fn)]`, у каждого блока комментарий `// SAFETY:`.
    - Символы dlopen резолвятся один раз в структуру указателей на функции.
@@ -102,6 +102,7 @@ satellite/
 ```rust
 // log: бэкенд log::Log; stderr-строка как в C++: "HH:MM:SS.mmm L file:line msg\n" (локальное время через libc::localtime_r, L из "DIWE", file = basename)
 pub fn init_logger();                                        // уровень из PULSAR_LOG_LEVEL (0=Debug,1=Info(по умолчанию),2=Warn,3=Error)
+pub fn add_own_target(prefix: &'static str);                // target == prefix или prefix::… — свои записи, как pulsar*; до или после init_logger (п.7)
 pub fn stderr_level() -> log::LevelFilter;                   // текущий уровень stderr (для шума alsa-lib: только при Debug, как в C++)
 pub struct LogLine { pub level: log::Level, pub text: String } // text = "[W][file.rs:12]: message"
 pub fn set_log_sink(min_level: Option<log::Level>, notify: Option<std::sync::Arc<tokio::sync::Notify>>); // None = выкл., очередь и счётчик сбрасываются

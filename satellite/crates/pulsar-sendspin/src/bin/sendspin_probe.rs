@@ -112,6 +112,7 @@ struct Counts {
 
 fn main() -> ExitCode {
     pulsar_core::init_logger();
+    pulsar_core::add_own_target(module_path!());
     // As in the daemon (the player sets it): alsa-lib's own messages only at debug level.
     pulsar_alsa::quiet_error_handler();
     let args = match parse_args() {

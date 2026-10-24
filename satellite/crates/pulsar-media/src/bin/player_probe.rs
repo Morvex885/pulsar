@@ -238,6 +238,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     pulsar_core::init_logger();
+    pulsar_core::add_own_target(module_path!());
     let t0 = pulsar_core::now_ms();
     let ts = || (pulsar_core::now_ms() - t0) as f64 / 1000.0;
 

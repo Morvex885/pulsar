@@ -39,6 +39,7 @@ fn main() -> ExitCode {
 
 fn run() -> u8 {
     pulsar_core::init_logger();
+    pulsar_core::add_own_target(module_path!());
     let Some(m) = pulsar_core::model::detect_model() else {
         return 1;
     };
