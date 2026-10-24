@@ -30,9 +30,11 @@ impl AmbientDimmer {
     /// Feeds a lux reading (polled every ~2 s); true if `factor()` changed.
     pub fn update(&mut self, lux: f32) -> bool {
         let a = (1.0 + lux.max(0.0)).log10() / 501f32.log10();
-        let target = 0.02 + 0.98 * a.min(1.0);
+        // The C++ station builds (clang -ffp-contract=on, aarch64 / cortex-a53) fused both
+        // `a + b * c` below into one FMA; mul_add keeps their rounding.
+        let target = a.min(1.0).mul_add(0.98, 0.02);
         self.smooth = if self.primed {
-            self.smooth + ALPHA * (target - self.smooth)
+            (target - self.smooth).mul_add(ALPHA, self.smooth)
         } else {
             target
         };
@@ -97,5 +99,27 @@ mod tests {
         // Small steps back down stay within the band again.
         assert!(!d.update(0.4));
         assert!(close(d.factor(), 0.0526));
+    }
+
+    /// Readings where the fused and the unfused arithmetic round differently; expected bits
+    /// from the C++ `AmbientDimmer` built with FMA contraction (unfused it gives 3cbae0ea,
+    /// 3ccdc4b0, 3d6e24a3, 3d4d3b5a).
+    #[test]
+    fn rounds_like_the_fused_cxx_build() {
+        let first = |lux: u32| {
+            let mut d = AmbientDimmer::new();
+            d.update(f32::from_bits(lux));
+            d.factor().to_bits()
+        };
+        assert_eq!(first(0x3c93_74bd), 0x3cba_e0eb); // 0.018 lx
+        assert_eq!(first(0x3d07_2b02), 0x3ccd_c4af); // 0.033 lx
+        let second = |lux: u32| {
+            let mut d = AmbientDimmer::new();
+            d.update(0.0);
+            d.update(f32::from_bits(lux));
+            d.factor().to_bits()
+        };
+        assert_eq!(second(0x3f9e_b852), 0x3d6e_24a5); // 1.24 lx
+        assert_eq!(second(0x3f63_d70a), 0x3d4d_3b59); // 0.89 lx
     }
 }

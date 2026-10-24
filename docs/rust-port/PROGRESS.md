@@ -26,7 +26,7 @@
 | WP-05 | Плеер (GStreamer) + Mixer, player_probe | ~1010 | WP-00 | — | влит | Morvex885 (агент WP-05) | [reviews/WP-05.md](reviews/WP-05.md) | да | да |  |
 | WP-06 | Sendspin: C-шим над sendspin-cpp, сервис, ALSA-sink | ~840 + шим | WP-00 | — | влит | Morvex885 (агент WP-06) | [reviews/WP-06.md](reviews/WP-06.md) | да | да |  |
 | WP-07 | LED (led_fx, композитор, вывод) + кнопки, hw_probe (LED/ввод) | ~1500 | WP-00 | — | влит | Morvex885 (агент WP-07) | [reviews/WP-07.md](reviews/WP-07.md) | да | да |  |
-| WP-08 | Часы + clock_fx + датчик света, hw_probe целиком | ~1380 | WP-00 | WP-07 | в работе | Morvex885 (агент WP-08) | [reviews/WP-08.md](reviews/WP-08.md) | требуется | требуется |  |
+| WP-08 | Часы + clock_fx + датчик света, hw_probe целиком | ~1380 | WP-00 | WP-07 | влит | Morvex885 (агент WP-08) | [reviews/WP-08.md](reviews/WP-08.md) | да | да (lux под светом — чек-лист владельца) |  |
 | WP-09 | Zigbee: линк, координатор, роутер, прошивальщик | ~1440 | WP-00 | — | влит | Morvex885 (агент WP-09) | [reviews/WP-09.md](reviews/WP-09.md) | да | — |  |
 | WP-10 | Zigbee: deCONZ-сервер, сервис ролей, zigbee_probe | ~1180 | WP-09 | — | свободен |  | [reviews/WP-10.md](reviews/WP-10.md) | требуется | — |  |
 | WP-11 | Обновления: HTTPS (rustls), updater, update_probe | ~880 | WP-00 | — | влит | Morvex885 (агент WP-11) | [reviews/WP-11.md](reviews/WP-11.md) | да | да |  |
@@ -90,6 +90,7 @@ graph LR
 - [ ] Голосовые таймеры HA: отсчёт на часах, звонок, остановка кнопкой и wake word.
 - [ ] LED и часы визуально: голосовые состояния, эффекты, музыкальные стили, цвет корпуса, лица и текст часов.
 - [ ] Сенсорные кнопки и аппаратный mute.
+- [ ] Датчик света Lite 2 под освещением: `hw_probe light 10` даёт lux > 0 (при проверке WP-08 в комнате было темно: raw 0–2, т. е. 0–0,44 лк при scale 0,220897).
 - [ ] Zigbee на Midi: coordinator с Z2M/ZHA, join/leave роутера.
 - [ ] После вливания в `main` и релиза: обновление C++-станции на Rust-релиз из HA и откат.
 
@@ -118,3 +119,4 @@ git ls-files 'satellite/src/*' 'satellite/tools/*.cpp' | xargs wc -l
 - WP-04: `pulsar-audio` сам подгружает `/system/vendor/quasar/libs/libiconv.so` (и `libtflite.so`) перед `libyandex_evil.so`: на Lite 2 она нужна evil-библиотеке и лежит вне пути поиска; C++-демон получал её загруженной плеером (GLib), C++ `ww_offline` на Lite 2 без `LD_LIBRARY_PATH` не работал. Плеер (WP-05, `pulsar-media/src/gst.rs`) подгружает её сам для GLib; оба dlopen одной библиотеки независимы от порядка запуска сервисов, повторный — только счётчик ссылок.
 - WP-09: в `pulsar-core` добавлен `add_own_target(prefix)` (контракт: ARCHITECTURE п.7 и блок `pulsar-core`): записи бинарей с крейтом не `pulsar*` иначе считались чужими (только Warn+). Утилиты вызывают `pulsar_core::add_own_target(module_path!())` сразу после `init_logger()`; применено ко всем утилитам, ставящим логгер (`zigbee_probe`, `hw_probe`, `ww_offline`, `frontend_probe`, `lan_probe`, `player_probe`, `sendspin_probe`).
 - WP-09: при hangup или ошибке чтения tty радио Rust-линк один раз пишет лог и перестаёт читать, таймеры (ACK, reset) продолжают работать; C++ в этом случае крутился в цикле на 100 % CPU. На UART с CLOCAL (`/dev/ttyS2`) hangup не случается. Пустое неблокирующее чтение при VMIN = VTIME = 0 возвращает 0 байт (n_tty), это не hangup: конец ввода — только READ_CLOSED рантайма.
+- WP-08: станционный C++ сливает `a + b*c` в FMA (`-ffp-contract=on`), Rust — нет; правило `mul_add` для побитового паритета и сборки golden-harness с `-mfma` — ARCHITECTURE.md, «Плавающая точка и паритет». Исправлен `AmbientDimmer` в `pulsar-core`.

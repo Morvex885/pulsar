@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 libc = { workspace = true }
 log = { workspace = true }
+pulsar-clock = { path = "../pulsar-clock" }
 pulsar-core = { path = "../pulsar-core" }
 tokio = { workspace = true }
 
