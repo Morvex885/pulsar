@@ -2,6 +2,16 @@
 
 Guide for coding agents working on pulsar. User-facing docs: `README.md` (Russian).
 
+## Rust port (branch `rust`)
+
+The daemon and its tools are being ported to Rust on the integration branch `rust`, following
+`docs/rust-port/` (tracker `PROGRESS.md`, rules `PROCESS.md`, contracts `ARCHITECTURE.md`, station
+protocol `STATIONS.md`; in Russian). Work packages land by a direct fast-forward push to `rust`, one
+commit per package, as `PROCESS.md` describes; for this work that replaces the rules of
+"Branches" below. Rust code lives in `satellite/crates/` (Cargo workspace `satellite/Cargo.toml`);
+the C++ in `satellite/src/` and `satellite/tools/` is the reference until the package that
+replaces a file deletes it (unchanged copy: tag `rust-port-base`).
+
 ## What this is
 
 A native C++ daemon replacing the Yandex stack (`maind` / `quasar_launcher2`) on rooted Yandex
@@ -31,8 +41,8 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 | `satellite/src/arbiter.*` | `WakeArbiter`: wake word claims between stations (UDP broadcast :6054, 250 ms window), best claim answers |
 | `satellite/deploy/` | `dist.sh` (release archives, host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
 | `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install (incl. `/etc/init.d/S99zpulsar`), health check |
-| `satellite/tools/` | probes: `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `update_probe` (HTTPS client, release check, install into a scratch dir), `zigbee_probe` (Zigbee coordinator, either firmware, + deCONZ server on another port, without the daemon; `flash <image>` writes a radio image), `alsa_abi_probe` (ALSA hw-params ABI on the `null` PCM, no sound) |
-| `satellite/third_party/` | `fetch.sh` (pinned deps), `sysroot.sh` (alsa-lib link sysroot), CMake glue, zig toolchain wrappers |
+| `satellite/tools/` | C++ probes not yet ported (built from a `rust-port-base` worktree): `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `update_probe` (HTTPS client, release check, install into a scratch dir), `zigbee_probe` (Zigbee coordinator, either firmware, + deCONZ server on another port, without the daemon; `flash <image>` writes a radio image). Ported tools live in `satellite/crates/*/src/bin/`: `alsa_abi_probe` (`pulsar-alsa`; ALSA hw-params ABI on the `null` PCM, no sound) |
+| `satellite/third_party/` | `fetch.sh` (pinned deps), CMake glue, zig toolchain wrappers (sendspin-cpp only) |
 | `ssh/` | `build.sh` (static dropbear + sftp-server), `start.sh` (device side) |
 | `radio/` | Zigbee firmware for the Midi radio on the Telink Zigbee SDK: `build.sh` (pinned SDK + toolchain, `sdk.patch`), `Makefile`, `coordinator/` and `router/` (apps), `ybl.c` (host tool: binary → `.ybl`) |
 
@@ -44,30 +54,37 @@ logs), `re/` (Ghidra projects and decompiled Yandex code), `ref/` (upstream chec
 ```sh
 make -C satellite -j"$(nproc)"                       # both: build/{aarch64,armhf}/pulsar
 make -C satellite ARCH=armhf                          # one architecture
-make -C satellite ARCH=armhf build/armhf/tools/ww_offline   # any tool in satellite/tools/
+make -C satellite ARCH=armhf tools                    # every tool → build/armhf/tools/
+make -C satellite ARCH=armhf build/armhf/tools/alsa_abi_probe   # one tool (crates/*/src/bin/<name>.rs)
+make -C satellite check                              # host: cargo fmt --check, clippy -D warnings (host + both targets), tests
+# C++ tools not yet ported: from a worktree of tag rust-port-base, e.g.
+#   git worktree add /tmp/pulsar-cxx rust-port-base && make -C /tmp/pulsar-cxx/satellite ARCH=armhf build/armhf/tools/ww_offline
 ssh/build.sh                                         # → ssh/out/{aarch64,armhf}/{dropbearmulti,sftp-server}
 radio/build.sh                                       # → radio/out/zigbee-{coordinator,router}.ybl (needs libc6:i386, unzip)
 go -C installer test ./...                           # installer unit tests
 go -C installer run . [args]                         # installer from a checkout (builds the daemon first)
 ```
 
-Host tools: **zig 0.14.1** (`ZIG=/path/to/zig` if not in PATH; the Makefile rejects ≤ 0.13, whose
-armhf C++ release builds crash before `main`), make, git, curl, cmake ≥ 3.16, ninja, patch; Go 1.27+
-(installer). The
-first build fetches pinned dependencies into `satellite/third_party/src/` and builds an ALSA
-sysroot per architecture into `satellite/build/<arch>/sysroot/` (Midi: versioned like the
-firmware's alsa-lib; Lite 2: unversioned, exporting only `snd_*`, otherwise the daemon would import
-zig's compiler-rt helpers from libasound). Outputs per arch: `pulsar` (stripped, the
-one deployed) and `pulsar.debug` (unstripped, line tables) for `addr2line -f -e` on the
-crash report `main.cpp` writes to the log (non-PIE: addresses are absolute; armhf reports pc/lr only:
-glibc's `backtrace()` there runs libgcc_s's unwinder into the binary's static zig personality
-routine and segfaults). The version is
-`git describe --tags --always --dirty` (`--version`, HA DeviceInfo and the "Version" entity). Host-side
-tests exist only for the installer (`go -C installer test ./...`); the daemon is verified on the
-device.
+Host tools: rustup (installs the toolchain pinned in `satellite/rust-toolchain.toml` with both
+targets), **cargo-zigbuild 0.24.0** (`cargo install cargo-zigbuild --locked --version 0.24.0`),
+**zig 0.14.1** (`ZIG=/path/to/zig` if not in PATH; the Makefile rejects ≤ 0.13, whose armhf C++
+release builds crash before `main`), a host C compiler (`cc`, for `make check`), make, git, curl,
+patch; cmake ≥ 3.16 and ninja for sendspin-cpp only; Go 1.27+ (installer). The first build fetches
+pinned dependencies into `satellite/third_party/src/` and builds sendspin-cpp per architecture
+into `satellite/build/<arch>/third_party/`; cargo's output is in `satellite/target/`. libasound is
+loaded at runtime (`dlopen`, `pulsar-alsa`), nothing ALSA is linked. Outputs per arch: `pulsar`
+(stripped, the one deployed) and `pulsar.debug` (unstripped, line tables) for `addr2line -f -e` on
+the crash report the daemon writes to the log (`=== CRASH`; non-PIE, `-C relocation-model=static`:
+addresses are absolute; `handler=` is the address of `pulsar_crash_handler`; aarch64 adds an
+`fp:` frame-pointer chain, armhf reports pc/lr only). The version is `git describe --tags
+--match 'v*' --always --dirty` (`--version`, HA DeviceInfo and the "Version" entity; release tags
+only, so the updater can parse it).
+Host-side tests: `make -C satellite check` (Rust crates, x86_64, without sendspin-cpp) and the
+installer (`go -C installer test ./...`); hardware behaviour is verified on the device.
 
-CI (`.github/workflows/build.yml`) builds the daemon and every tool for both architectures and the
-radio firmware images (job `radio`) on each pull request and push to `main`; the binaries are
+CI (`.github/workflows/build.yml`) builds the daemon and every tool for both architectures, runs
+`make -C satellite check` (job `check`) and builds the radio firmware images (job `radio`) on each
+pull request and push to `main` or `rust`; the binaries are
 attached to the run as artifacts. Job `installer`
 vets the installer for linux/windows/darwin, runs its tests and cross-builds it for windows/amd64,
 darwin/{arm64,amd64} and linux/{amd64,arm64}. Pushing a tag `v*` additionally builds dropbear (job
