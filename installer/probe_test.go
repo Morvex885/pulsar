@@ -2,29 +2,28 @@ package main
 
 import "testing"
 
-// The devicetree compatible list as `tr '\0' ' '` leaves it, for every supported model.
-func TestCodename(t *testing.T) {
+// The devicetree compatible list as `tr '\0' '\n'` leaves it, for every supported model.
+func TestStationCode(t *testing.T) {
 	cases := []struct {
 		compat, code string
-		ok           bool
+		supported    bool
 	}{
-		{"yandex,cucumber amlogic, a5 ", "cucumber", true},
-		{"yandex,plum amlogic, axg ", "plum", true},
-		// Mini 2: the codename contains a hyphen; a pattern without it would cut it to "station".
-		{"yandex,station-mini2 amlogic, axg ", "station-mini2", true},
-		{"yandex,station ", "station", true}, // some other station: found, then skipped by archOf
-		{"amlogic, axg ", "", false},
+		// Board-specific variants come first; only the exact supported codename may win.
+		{"yandex,cucumber-dvt2\nyandex,cucumber\namlogic, a5", "cucumber", true},
+		{"yandex,plum\namlogic, axg", "plum", true},
+		// Mini 2: the codename contains a hyphen.
+		{"yandex,station-mini2\namlogic, axg", "station-mini2", true},
+		// The old separator (spaces) works too.
+		{"yandex,cucumber-dvt2 yandex,cucumber amlogic, a5", "cucumber", true},
+		// Some other station: named from its codename, then skipped as unsupported.
+		{"yandex,station\namlogic, axg", "station", false},
+		{"yandex,cucumber-dvt2\namlogic, a5", "cucumber-dvt2", false},
+		{"amlogic, axg", "", false},
 	}
 	for _, c := range cases {
-		m := codename.FindStringSubmatch(c.compat)
-		if !c.ok {
-			if m != nil {
-				t.Errorf("%q: got %q, want no match", c.compat, m[1])
-			}
-			continue
-		}
-		if m == nil || m[1] != c.code {
-			t.Errorf("%q: got %v, want %q", c.compat, m, c.code)
+		code, supported := stationCode(c.compat)
+		if code != c.code || supported != c.supported {
+			t.Errorf("%q: got (%q, %v), want (%q, %v)", c.compat, code, supported, c.code, c.supported)
 		}
 	}
 }

@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"regexp"
+	"strings"
 )
 
 // Devicetree codename -> name / userland ABI (build/<arch>/). Only models listed in archOf get
@@ -42,8 +42,26 @@ type station struct {
 // found: installable stations, in the order printed by probe.
 var found []station
 
-// The codename may contain a hyphen: "station-mini2".
-var codename = regexp.MustCompile(`yandex,([a-z0-9_-]*)`)
+// stationCode picks the model from the NUL-separated devicetree compatible list (one entry per
+// line here). The first entry with a supported codename wins: the list starts with board-specific
+// variants, e.g. "yandex,cucumber-dvt2" before "yandex,cucumber" on the Midi. The first codename
+// is returned even when nothing is supported, so that probe can name the unknown device.
+func stationCode(compat string) (string, bool) {
+	var first string
+	for _, entry := range strings.Fields(compat) {
+		code, ok := strings.CutPrefix(entry, "yandex,")
+		if !ok || code == "" {
+			continue
+		}
+		if first == "" {
+			first = code
+		}
+		if archOf(code) != "" {
+			return code, true
+		}
+	}
+	return first, false
+}
 
 // probe prints one status line for s and records it in found if it is installable. A device we
 // connected to ourselves is disconnected again when it is not.
@@ -54,23 +72,22 @@ func probe(s string, ours bool) {
 			disconnect(s)
 		}
 	}
-	compat, err := sh(s, `tr '\0' ' ' </proc/device-tree/compatible`)
+	compat, err := sh(s, `tr '\0' '\n' </proc/device-tree/compatible`)
 	if err != nil {
 		skip("adb not usable (unauthorized or offline)")
 		return
 	}
-	m := codename.FindStringSubmatch(compat)
-	if m == nil || m[1] == "" {
+	code, supported := stationCode(compat)
+	if code == "" {
 		skip("not a Yandex Station")
 		return
 	}
-	code := m[1]
 	name := modelName(code)
 	if name == "" {
 		name = "unknown Yandex device"
 	}
 	name += " (" + code + ")"
-	if archOf(code) == "" {
+	if !supported {
 		skip(name + " — not supported yet, skipped")
 		return
 	}
