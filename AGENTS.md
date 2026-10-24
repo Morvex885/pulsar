@@ -6,8 +6,9 @@ Guide for coding agents working on pulsar. User-facing docs: `README.md` (Russia
 
 A native C++ daemon replacing the Yandex stack (`maind` / `quasar_launcher2`) on rooted Yandex
 Stations: Midi (`cucumber`: usually aarch64, glibc 2.36, 1 GB RAM; some images run a 32-bit
-armhf userland) and Lite 2 (`plum`: 32-bit armhf, glibc 2.30, 237 MB RAM). It exposes the speaker to Home Assistant over the ESPHome Native API
-(port 6053; plaintext until a Noise key is provisioned, then Noise) and to Music Assistant as a Sendspin player (port 8928); on the Midi
+armhf userland) and Lite 2 (`plum`: 32-bit armhf, glibc 2.30, 237 MB RAM). It exposes the speaker
+to Home Assistant over the ESPHome Native API (port 6053; plaintext until a Noise key is
+provisioned, then Noise) and to Music Assistant as a Sendspin player (port 8928); on the Midi
 its Zigbee radio runs pulsar's own firmware (`radio/`): a deCONZ-protocol network coordinator for
 Zigbee2MQTT / ZHA (port 6638) or a router in another network (e.g. Zigbee2MQTT). Wake word, command
 spotting and echo cancellation use the firmware's own proprietary libraries, loaded with `dlopen`
@@ -103,15 +104,15 @@ go -C installer run . <ip>[:port]    # build if needed, copy binary (+ .prev), w
 ```
 
 Models are identified by `/proc/device-tree/compatible` (`yandex,<codename>`) both by the daemon
-(`detect_model()`, exits on unknown hardware) and by the installer (`modelName()`, `nativeABI()`,
-`archOf()` in `installer/probe.go`). The binary is `build/<arch>/pulsar` for the userspace whose
-dynamic loader is on the station (`/lib/ld-linux-aarch64.so.1`, `/lib/ld-linux-armhf.so.3`): the
-model's usual ABI when that loader is present. A Midi image with only the armhf loader (#13) gets
-the armhf build; a Lite 2 without it is skipped (no 64-bit plum firmware has been seen, and the
-aarch64 binary needs glibc 2.34). Adding a model: hardware study first (ALSA capture layout, VQE
-preset, spotter channels, LEDs, clock, inputs, earcons), then a `Model` in `src/model.cpp` and
-`modelName()` / `nativeABI()` entries. An `archOf()` fallback is only for a second userspace ABI
-that has actually been seen on that model.
+(`detect_model()`, exits on unknown hardware) and by the installer (`modelName()`, `abis()`,
+`archOf()` in `installer/probe.go`). The binary is `build/<arch>/pulsar` for the model's first
+ABI whose dynamic loader is on the station (`/lib/ld-linux-aarch64.so.1`,
+`/lib/ld-linux-armhf.so.3`): its usual one, or for the Midi the armhf build on images with only
+that loader (#13). A Lite 2 without the armhf loader is skipped (no 64-bit plum firmware has
+been seen, and the aarch64 binary needs glibc 2.34). Adding a model: hardware study first (ALSA
+capture layout, VQE preset, spotter channels, LEDs, clock, inputs, earcons), then a `Model` in
+`src/model.cpp` and `modelName()` / `abis()` entries. A second ABI in `abis()` is only for a
+userspace that has actually been seen on that model.
 
 Manual binary update (e.g. over ssh):
 

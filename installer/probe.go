@@ -3,10 +3,11 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
-// Devicetree codename -> name. Only models listed in nativeABI get installed: the daemon drives
+// Devicetree codename -> name. Only models listed in abis get installed: the daemon drives
 // model-specific hardware (mic array + VQE preset, LEDs, clock, inputs).
 func modelName(code string) string {
 	switch code {
@@ -18,35 +19,29 @@ func modelName(code string) string {
 	return ""
 }
 
-// nativeABI is the userspace the known firmware of this model ships. "" = not supported.
-// The installed binary is build/<arch>/pulsar for that ABI when its dynamic loader is present.
-func nativeABI(code string) string {
+// abis lists the userspace ABIs a model's firmware runs, its usual one first; nil = model not
+// supported. The installed binary is build/<arch>/pulsar for the first ABI whose dynamic loader
+// is on the station. A second ABI is only for a userspace actually seen on that model: some Midi
+// images run a 32-bit userspace on the 64-bit kernel (#13) and need the armhf build (its ALSA
+// ABI is the one in audio/alsa_abi.h, #14). Lite 2 stays armhf-only: no 64-bit plum firmware has
+// been seen, and the aarch64 binary needs glibc 2.34 — on a miss it would crash-loop back to
+// the Yandex stack (no .prev on a first install).
+func abis(code string) []string {
 	switch code {
 	case "cucumber":
-		return "aarch64"
+		return []string{"aarch64", "armhf"}
 	case "plum":
-		return "armhf"
+		return []string{"armhf"}
 	}
-	return ""
+	return nil
 }
 
-// archOf picks build/<arch>/ from the loaders actually on the station. uname and the codename are
-// not enough: some Midi images run a 32-bit userspace on the 64-bit kernel (#13) and then need
-// the armhf build (its ALSA ABI is the one in audio/alsa_abi.h, #14). Lite 2 stays armhf-only.
-// A 64-bit plum image has not been seen, and the aarch64 binary needs glibc 2.34, so installing
-// it on a miss would crash-loop back to the Yandex stack (no .prev on a first install).
-func archOf(code string, aarch64, armhf bool) string {
-	switch nativeABI(code) {
-	case "aarch64":
-		if aarch64 {
-			return "aarch64"
-		}
-		if code == "cucumber" && armhf {
-			return "armhf"
-		}
-	case "armhf":
-		if armhf {
-			return "armhf"
+// archOf picks the model's first ABI whose loader is on the station (loaders: the words the
+// loader probe printed). "" = none of the model's ABIs: skip the station.
+func archOf(code string, loaders []string) string {
+	for _, a := range abis(code) {
+		if slices.Contains(loaders, a) {
+			return a
 		}
 	}
 	return ""
@@ -91,8 +86,12 @@ func probe(s string, ours bool) {
 		name = "unknown Yandex device"
 	}
 	name += " (" + code + ")"
-	if nativeABI(code) == "" {
+	if abis(code) == nil {
 		skip(name + " — not supported yet, skipped")
+		return
+	}
+	if uid, _ := sh(s, "id -u"); uid != "0" {
+		skip(name + " — adb is not root, skipped")
 		return
 	}
 	// `; true`: a missing loader is not an error. Without it the last [ -x ] exits 1 on a
@@ -102,13 +101,9 @@ func probe(s string, ours bool) {
 		skip("adb not usable (unauthorized or offline)")
 		return
 	}
-	arch := archOf(code, strings.Contains(loaders, "aarch64"), strings.Contains(loaders, "armhf"))
+	arch := archOf(code, strings.Fields(loaders))
 	if arch == "" {
 		skip(name + " — unsupported userland ABI, skipped")
-		return
-	}
-	if uid, _ := sh(s, "id -u"); uid != "0" {
-		skip(name + " — adb is not root, skipped")
 		return
 	}
 	var state string
@@ -121,7 +116,7 @@ func probe(s string, ours bool) {
 	}
 	found = append(found, station{s, arch, hasZigbee(code)})
 	note := ""
-	if arch != nativeABI(code) {
+	if arch != abis(code)[0] {
 		note = ", " + arch + " build"
 	}
 	fmt.Printf("  [%d] %s: %s — %s%s\n", len(found), s, name, state, note)
