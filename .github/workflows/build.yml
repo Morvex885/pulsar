@@ -65,11 +65,15 @@ jobs:
           if-no-files-found: error
 
   check:
-    # Host: cargo fmt --check, clippy -D warnings, tests (without sendspin-cpp).
+    # Host: cargo fmt --check, clippy -D warnings (host + both stations, the latter through
+    # cargo-zigbuild: ring's build script compiles C for the target), tests (without sendspin-cpp).
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
       - name: rust toolchain (rust-toolchain.toml)
         working-directory: satellite
         run: rustup toolchain install
@@ -81,6 +85,13 @@ jobs:
             satellite/target
           key: rust-host-${{ hashFiles('satellite/Cargo.lock', 'satellite/rust-toolchain.toml') }}
           restore-keys: rust-host-
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-zigbuild
+          key: cargo-zigbuild-0.24.0-${{ runner.os }}-check
+      - run: |
+          cargo-zigbuild --version 2>/dev/null | grep -qx 'cargo-zigbuild 0.24.0' ||
+            cargo install cargo-zigbuild --locked --force --version 0.24.0
       - run: make -C satellite check
 
   radio:

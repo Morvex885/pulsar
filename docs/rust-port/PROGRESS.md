@@ -29,7 +29,7 @@
 | WP-08 | Часы + clock_fx + датчик света, hw_probe целиком | ~1380 | WP-00 | WP-07 | в работе | Morvex885 (агент WP-08) | [reviews/WP-08.md](reviews/WP-08.md) | требуется | требуется |  |
 | WP-09 | Zigbee: линк, координатор, роутер, прошивальщик | ~1440 | WP-00 | — | в работе | Morvex885 (агент WP-09) | [reviews/WP-09.md](reviews/WP-09.md) | требуется | — |  |
 | WP-10 | Zigbee: deCONZ-сервер, сервис ролей, zigbee_probe | ~1180 | WP-09 | — | свободен |  | [reviews/WP-10.md](reviews/WP-10.md) | требуется | — |  |
-| WP-11 | Обновления: HTTPS (rustls), updater, update_probe | ~880 | WP-00 | — | в работе | Morvex885 (агент WP-11) | [reviews/WP-11.md](reviews/WP-11.md) | требуется | требуется |  |
+| WP-11 | Обновления: HTTPS (rustls), updater, update_probe | ~880 | WP-00 | — | влит | Morvex885 (агент WP-11) | [reviews/WP-11.md](reviews/WP-11.md) | да | да |  |
 | WP-12 | Контроллер целиком + тестовый режим портов | ~1650 | WP-02, WP-03, WP-04, WP-05, WP-06, WP-07, WP-08, WP-10, WP-11 | — | свободен |  | [reviews/WP-12.md](reviews/WP-12.md) | требуется | требуется |  |
 | WP-13 | Финал: паритет, замеры, AGENTS.md/README, чек-лист владельца | — | WP-12 | — | свободен |  | [reviews/WP-13.md](reviews/WP-13.md) | требуется | требуется |  |
 
@@ -106,3 +106,6 @@ git ls-files 'satellite/src/*' 'satellite/tools/*.cpp' | xargs wc -l
 - WP-00: `rust-port-base` = `5059a8d` (до тега `origin/main` ушёл вперёд на коммит смены лицензии на AGPL-3.0; `satellite/` в нём не менялся). `VERSION` в Makefile — `git describe --tags --match 'v*' --always --dirty`: иначе ближайшим тегом был бы `rust-port-base`, и updater не разобрал бы версию.
 - Lite 2: ssh включён владельцем (dropbear, как на Midi); station.sh работает на обеих станциях. WP-00 на Lite 2 проверялся через adb до включения ssh.
 - WP-07: armhf собирается с `-C target-cpu=cortex-a53` (`RUSTFLAGS` в Makefile), как C++ `-mcpu=cortex_a53`: `mul_add` — аппаратный `vfma`, FMA-паритет с C++ (ARCHITECTURE.md, рецепт линковки). sysfs `brightness` кольца Lite 2 ограничен 63 (reviews/WP-07.md).
+- WP-11: кросс-clippy в `make check` идёт через `cargo-zigbuild clippy` (build-скрипт `ring` компилирует C для цели; ARCHITECTURE п.10). `make check` теперь требует zig (любой версии) и cargo-zigbuild 0.24.0; job `check` в CI ставит zig 0.14.1 и cargo-zigbuild.
+- WP-11: раздел AGENTS.md «Updates from HA» (и строка Layout `satellite/src/update/`) ещё описывает HTTPS на OpenSSL прошивки через dlopen; WP-13 должен переписать его под `pulsar-update` (rustls + ring, CA-бандл `/etc/ssl/certs/ca-certificates.crt`).
+- WP-11: при закрытии всех handle updater отменяет идущую установку до `--version` и замены (бинарь не меняется, `Installed` не приходит); C++ доводил её до конца. Поэтому WP-12 при выходе с установкой в полёте стирает `update_attempt` (иначе автообновление пропускало бы тег) — пункт добавлен в `wp/WP-12.md`.

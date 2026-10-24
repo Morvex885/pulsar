@@ -5,7 +5,8 @@
 # the one deployed) and build/<arch>/pulsar.debug (line tables, for `addr2line -f -e` on the crash
 # report; non-PIE, so the addresses in it are absolute). `make ARCH=armhf tools` builds every tool
 # (crates/*/src/bin/*.rs) into build/<arch>/tools/, `make ARCH=armhf build/armhf/tools/<name>` one
-# of them. `make check`: fmt, clippy and tests on the host (without sendspin-cpp).
+# of them. `make check`: fmt, clippy and tests on the host (without sendspin-cpp); clippy also
+# for both stations, through cargo-zigbuild.
 #
 # The Sendspin player links sendspin-cpp and its dependencies statically. They are fetched once
 # (pinned commits/tags, see third_party/fetch.sh) into third_party/src/ and built per ARCH with
@@ -15,7 +16,15 @@
 # `uv tool install cmake`, `uv tool install ninja`). Use ZIG=/path/to/zig for another zig.
 ZIG   ?= zig
 CARGO ?= cargo
+CARGO_ZIGBUILD ?= cargo-zigbuild
 ARCHES := aarch64 armhf
+
+# zig for cargo-zigbuild: arch builds and the station clippy of `make check`. cargo-zigbuild would
+# prefer `python3 -m ziglang` (any version) over the zig checked here: point it at that zig and at
+# a python that does not exist.
+ZIG_PATH     := $(shell command -v $(ZIG))
+ZIG_MISSING  := zig not found: '$(ZIG)'; install zig 0.14.1 and pass ZIG=/path/to/zig
+ZIGBUILD_ENV := CARGO_ZIGBUILD_ZIG_PATH='$(abspath $(ZIG_PATH))' CARGO_ZIGBUILD_PYTHON_PATH=/nonexistent/python3
 
 ifeq ($(ARCH),)
 
@@ -24,12 +33,15 @@ $(ARCHES):
 	+$(MAKE) --no-print-directory ARCH=$@ binary
 
 # Host build: pulsar-sendspin compiles without its sendspin-cpp FFI here. The second clippy run
-# lints the code under #[cfg(target_arch = ...)] for both stations (type-checks only, no linker).
+# lints the code under #[cfg(target_arch = ...)] for both stations (type-checks only, nothing is
+# linked or run, so any zig does); build scripts compile C for those targets (ring), hence
+# cargo-zigbuild.
 check:
+	$(if $(ZIG_PATH),,$(error $(ZIG_MISSING)))
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy --workspace --all-targets --locked -- -D warnings
-	$(CARGO) clippy --workspace --all-targets --locked --target aarch64-unknown-linux-gnu \
-	  --target armv7-unknown-linux-gnueabihf -- -D warnings
+	env $(ZIGBUILD_ENV) $(CARGO_ZIGBUILD) clippy --workspace --all-targets --locked \
+	  --target aarch64-unknown-linux-gnu.2.36 --target armv7-unknown-linux-gnueabihf.2.30 -- -D warnings
 	$(CARGO) test --workspace --locked
 
 clean:
@@ -61,9 +73,8 @@ else
 $(error ARCH must be one of: $(ARCHES))
 endif
 
-ZIG_PATH := $(shell command -v $(ZIG))
 ifeq ($(ZIG_PATH),)
-$(error zig not found: '$(ZIG)'; install zig 0.14.1 and pass ZIG=/path/to/zig)
+$(error $(ZIG_MISSING))
 endif
 ZIG_VERSION := $(shell $(ZIG) version 2>/dev/null)
 ifneq ($(filter 0.11.% 0.12.% 0.13.%,$(ZIG_VERSION)),)
@@ -92,13 +103,11 @@ BUILD_TIME := $(shell TZ=UTC0 LC_ALL=C git log -1 --format=%cd --date=format-loc
 # no CC_*/CXX_*/ZIG_TARGET/ZIG_CPU here (cc adds --target=<llvm triple>, which
 # third_party/toolchain/zig-c++ does not filter; those wrappers serve the CMake build only).
 # Non-PIE (relocation-model=static) keeps crash report addresses absolute; frame pointers feed
-# the aarch64 crash report's fp: chain. cargo-zigbuild would prefer `python3 -m ziglang` (any
-# version) over the zig checked above: point it at that zig and at a python that does not exist.
+# the aarch64 crash report's fp: chain.
 CARGO_ENV := PULSAR_VERSION='$(VERSION)' PULSAR_BUILD_TIME='$(BUILD_TIME)' \
              PULSAR_SS_SRC=$(CURDIR)/$(SS_SRC) PULSAR_SS_BUILD=$(CURDIR)/$(SS_BUILD) PULSAR_REQUIRE_SS=1 \
              RUSTFLAGS='-C relocation-model=static -C force-frame-pointers=yes $(RUST_CPU)' \
-             CARGO_ZIGBUILD_ZIG_PATH='$(abspath $(ZIG_PATH))' \
-             CARGO_ZIGBUILD_PYTHON_PATH=/nonexistent/python3
+             $(ZIGBUILD_ENV)
 ZIGBUILD  := env $(CARGO_ENV) $(CARGO) zigbuild --release --locked --target $(RUST_TARGET).$(GLIBC)
 OUT       := target/$(RUST_TARGET)/release
 TOOLS     := $(basename $(notdir $(wildcard crates/*/src/bin/*.rs)))

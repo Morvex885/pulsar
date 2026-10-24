@@ -41,7 +41,7 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 | `satellite/src/arbiter.*` | `WakeArbiter`: wake word claims between stations (UDP broadcast :6054, 250 ms window), best claim answers |
 | `satellite/deploy/` | `dist.sh` (release archives, host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
 | `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install (incl. `/etc/init.d/S99zpulsar`), health check |
-| `satellite/tools/` | C++ probes not yet ported (built from a `rust-port-base` worktree): `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `update_probe` (HTTPS client, release check, install into a scratch dir), `zigbee_probe` (Zigbee coordinator, either firmware, + deCONZ server on another port, without the daemon; `flash <image>` writes a radio image). Ported tools live in `satellite/crates/*/src/bin/`: `alsa_abi_probe` (`pulsar-alsa`; ALSA hw-params ABI on the `null` PCM, no sound) |
+| `satellite/tools/` | C++ probes not yet ported (built from a `rust-port-base` worktree): `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `zigbee_probe` (Zigbee coordinator, either firmware, + deCONZ server on another port, without the daemon; `flash <image>` writes a radio image). Ported tools live in `satellite/crates/*/src/bin/`: `alsa_abi_probe` (`pulsar-alsa`; ALSA hw-params ABI on the `null` PCM, no sound), `update_probe` (`pulsar-update`; HTTPS client, release check, install into a scratch dir) |
 | `satellite/third_party/` | `fetch.sh` (pinned deps), CMake glue, zig toolchain wrappers (sendspin-cpp only) |
 | `ssh/` | `build.sh` (static dropbear + sftp-server), `start.sh` (device side) |
 | `radio/` | Zigbee firmware for the Midi radio on the Telink Zigbee SDK: `build.sh` (pinned SDK + toolchain, `sdk.patch`), `Makefile`, `coordinator/` and `router/` (apps), `ybl.c` (host tool: binary → `.ybl`) |
@@ -56,7 +56,7 @@ make -C satellite -j"$(nproc)"                       # both: build/{aarch64,armh
 make -C satellite ARCH=armhf                          # one architecture
 make -C satellite ARCH=armhf tools                    # every tool → build/armhf/tools/
 make -C satellite ARCH=armhf build/armhf/tools/alsa_abi_probe   # one tool (crates/*/src/bin/<name>.rs)
-make -C satellite check                              # host: cargo fmt --check, clippy -D warnings (host + both targets), tests
+make -C satellite check                              # host: cargo fmt --check, clippy -D warnings (host + both targets via cargo-zigbuild, needs zig of any version), tests
 # C++ tools not yet ported: from a worktree of tag rust-port-base, e.g.
 #   git worktree add /tmp/pulsar-cxx rust-port-base && make -C /tmp/pulsar-cxx/satellite ARCH=armhf build/armhf/tools/ww_offline
 ssh/build.sh                                         # → ssh/out/{aarch64,armhf}/{dropbearmulti,sftp-server}
@@ -66,9 +66,10 @@ go -C installer run . [args]                         # installer from a checkout
 ```
 
 Host tools: rustup (installs the toolchain pinned in `satellite/rust-toolchain.toml` with both
-targets), **cargo-zigbuild 0.24.0** (`cargo install cargo-zigbuild --locked --version 0.24.0`),
-**zig 0.14.1** (`ZIG=/path/to/zig` if not in PATH; the Makefile rejects ≤ 0.13, whose armhf C++
-release builds crash before `main`), a host C compiler (`cc`, for `make check`), make, git, curl,
+targets), **cargo-zigbuild 0.24.0** (`cargo install cargo-zigbuild --locked --version 0.24.0`;
+also for `make check`), **zig 0.14.1** (`ZIG=/path/to/zig` if not in PATH; arch builds reject
+≤ 0.13, whose armhf C++ release builds crash before `main`; `make check` takes any zig: its
+station clippy only compiles ring's C), a host C compiler (`cc`, for `make check`), make, git, curl,
 patch; cmake ≥ 3.16 and ninja for sendspin-cpp only; Go 1.27+ (installer). The first build fetches
 pinned dependencies into `satellite/third_party/src/` and builds sendspin-cpp per architecture
 into `satellite/build/<arch>/third_party/`; cargo's output is in `satellite/target/`. libasound is

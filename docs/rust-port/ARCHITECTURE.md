@@ -92,7 +92,7 @@ satellite/
    - Раскладки C-структур — `#[repr(C)]` с compile-time `assert!(core::mem::offset_of!(…) == …)` под `#[cfg(target_arch)]`.
    - Обработчик крашей не аллоцирует и не использует `eprintln!`/`std::io`: только `libc::write(2, …)`.
 9. Комментарии на английском и объясняют факты устройства и ограничения, а не код (конвенция AGENTS.md).
-10. `make -C satellite check` должен проходить: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` (host), тот же clippy с `--target aarch64-unknown-linux-gnu --target armv7-unknown-linux-gnueabihf` (цели ставит rustup по `rust-toolchain.toml`, линкер не нужен), `cargo test --workspace --locked` (host x86_64, без sendspin-cpp).
+10. `make -C satellite check` должен проходить: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` (host), тот же clippy для станций через `cargo-zigbuild clippy … --target aarch64-unknown-linux-gnu.2.36 --target armv7-unknown-linux-gnueabihf.2.30` (цели ставит rustup по `rust-toolchain.toml`, линкер не нужен; с WP-11 build-скрипт `ring` компилирует C для цели, поэтому нужен zig — любой версии, в CI 0.14.1 — и cargo-zigbuild 0.24.0, с теми же `CARGO_ZIGBUILD_*`, что у arch-сборок), `cargo test --workspace --locked` (host x86_64, без sendspin-cpp).
     - Clippy линтует host и обе цели. Архитектурно-зависимый код вместе со всеми его хелперами целиком лежит под `#[cfg(target_arch = …)]`, чтобы ни на одной из них не было мёртвого кода.
 
 ## `pulsar-core` (WP-00)
