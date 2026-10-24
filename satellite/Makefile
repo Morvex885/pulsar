@@ -135,13 +135,6 @@ tools: $(SS_STAMP) FORCE | $(filter binary,$(MAKECMDGOALS))
 	@mkdir -p $(BUILD)/tools
 	for t in $(TOOLS); do $(ZIG) objcopy --strip-all $(OUT)/$$t $(BUILD)/tools/$$t || exit 1; done
 
-# Two cargo-zigbuild runs started at the same moment race on creating its zig wrapper files
-# ("Error: File exists (os error 17)", seen in CI on `make -j binary tools`); they would wait for
-# each other on cargo's target lock anyway, so `tools` runs after `binary` when both are asked.
-ifneq ($(filter binary,$(MAKECMDGOALS)),)
-tools: | binary
-endif
-
 $(BUILD)/tools/%: $(SS_STAMP) FORCE
 	+$(ZIGBUILD) --bin $*
 	@mkdir -p $(dir $@)
