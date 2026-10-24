@@ -31,7 +31,6 @@ namespace ss = ::sendspin;
 
 namespace {
 
-constexpr const char *kPcm = "speakers";
 constexpr int64_t kLoopTickMs = 10;        // SendspinClient::loop() cadence (integration guide)
 constexpr int kWaitSliceMs = 20;           // longest snd_pcm_wait() slice inside one write
 constexpr float kGainRampSec = 0.08f;      // full-scale duck ramp duration
@@ -124,6 +123,7 @@ class AlwaysNetwork : public ss::SendspinNetworkProvider {
 class AlsaSink {
  public:
   std::function<void(uint32_t frames, int64_t finish_us)> on_played;
+  std::string pcm;  // Model::playback_pcm, set before start()
 
   ~AlsaSink() {
     std::lock_guard<std::mutex> lk(io_mu_);
@@ -295,7 +295,7 @@ class AlsaSink {
         next_open_us_ = now + kReopenRetryUs;
         return false;
     }
-    int err = snd_pcm_open(&pcm_, kPcm, SND_PCM_STREAM_PLAYBACK, 0);
+    int err = snd_pcm_open(&pcm_, pcm.c_str(), SND_PCM_STREAM_PLAYBACK, 0);
     const char *step = "open";
     snd_pcm_hw_params_t *hw = nullptr;
     snd_pcm_hw_params_alloca(&hw);
@@ -321,7 +321,7 @@ class AlsaSink {
     if (err >= 0) step = "prepare", err = snd_pcm_prepare(pcm_);
     if (err < 0) {
       if (!open_failed_logged_)
-        LOGE("sendspin: ALSA '%s' %s failed for %u Hz/%u ch/%u bit: %s", kPcm, step, want_rate_, want_channels_,
+        LOGE("sendspin: ALSA '%s' %s failed for %u Hz/%u ch/%u bit: %s", pcm.c_str(), step, want_rate_, want_channels_,
              want_bits_, snd_strerror(err));
       open_failed_logged_ = true;
       close_locked();
@@ -339,7 +339,7 @@ class AlsaSink {
     delay_min_ = INT32_MAX;
     delay_max_ = 0;
     stats_us_ = now;
-    LOGI("sendspin: ALSA '%s' open %u Hz/%u ch/%u bit (period %lu, buffer %lu frames = %.0f ms)", kPcm, rate_,
+    LOGI("sendspin: ALSA '%s' open %u Hz/%u ch/%u bit (period %lu, buffer %lu frames = %.0f ms)", pcm.c_str(), rate_,
          channels_, bits_, (unsigned long)period, (unsigned long)buffer, buffer * 1000.0 / rate_);
     return true;
   }
@@ -348,7 +348,7 @@ class AlsaSink {
     if (!pcm_) return;
     snd_pcm_close(pcm_);
     pcm_ = nullptr;
-    LOGI("sendspin: ALSA '%s' closed", kPcm);
+    LOGI("sendspin: ALSA '%s' closed", pcm.c_str());
   }
 
   bool recover_locked(int err) {
@@ -454,7 +454,9 @@ class AlsaSink {
 struct SendspinService::Impl : ss::SendspinClientListener, ss::PlayerRoleListener, ss::MetadataRoleListener,
                                ss::ControllerRoleListener, ss::VisualizerRoleListener {
   Impl(Loop &l, SendspinConfig c, Hooks h)
-      : loop(l), cfg(std::move(c)), hooks(std::move(h)), persistence(cfg.state_dir), client(make_config(cfg)) {}
+      : loop(l), cfg(std::move(c)), hooks(std::move(h)), persistence(cfg.state_dir), client(make_config(cfg)) {
+    sink.pcm = cfg.pcm;
+  }
 
   static ss::SendspinClientConfig make_config(const SendspinConfig &c) {
     ss::SendspinClientConfig k;

@@ -262,6 +262,7 @@ struct Player::Impl {
   explicit Impl(Loop &l) : loop(l) {}
 
   Loop &loop;
+  std::string pcm;  // playback device of alsasink (Model::playback_pcm)
   void *glib = nullptr, *gst = nullptr;
   gp mainloop = nullptr;
   std::thread thread;
@@ -550,9 +551,10 @@ Player::~Player() {
   }
 }
 
-bool Player::init() {
+bool Player::init(const std::string &pcm) {
   auto &d = *impl_;
   if (d.ok) return true;
+  d.pcm = pcm;
   if (!load_api(d.glib, d.gst)) return false;
   gp err = nullptr;
   if (access(kCaBundle, R_OK) == 0) setenv("SSL_CERT_FILE", kCaBundle, 0);
@@ -586,7 +588,7 @@ bool Player::init() {
     c.id = Channel(i);
     gp perr = nullptr;
     char desc[160];
-    snprintf(desc, sizeof desc, "playbin name=ch%d audio-sink=\"alsasink device=speakers\"", i);
+    snprintf(desc, sizeof desc, "playbin name=ch%d audio-sink=\"alsasink device=%s\"", i, d.pcm.c_str());
     c.pipe = g.gst_parse_launch(desc, &perr);
     if (!c.pipe) {
       LOGE("player: cannot create playbin: %s", gerror_message(perr));
@@ -724,14 +726,15 @@ bool find_master(snd_ctl_t *ctl) {
 }
 }  // namespace
 
-// Level p = v * top level, piecewise linear through the map. Any audible volume is at least the
-// lowest stock step (level 1): the stock firmware never sets the raw values between it and 0.
+// Level p = v * top level, piecewise linear through the map. On the Midi/Lite 2 any audible
+// volume is at least the lowest stock step (level 1, Model::volume_min_step); the Mini 2 takes
+// every level on the 0..255 line.
 int Mixer::to_raw(float v) const {
   const auto &m = model_.volume_map;
   if (v <= 0.0f || m.size() < 2) return 0;
   const double p = std::min(1.0f, v) * m.back().level;
-  if (p <= m[1].level) return m[1].raw;
-  for (size_t i = 2; i < m.size(); i++)
+  if (model_.volume_min_step && p <= m[1].level) return m[1].raw;
+  for (size_t i = 1; i < m.size(); i++)
     if (p <= m[i].level)
       return int(std::lround(m[i - 1].raw + (p - m[i - 1].level) * (m[i].raw - m[i - 1].raw) /
                                                 double(m[i].level - m[i - 1].level)));
@@ -763,7 +766,8 @@ bool Mixer::open() {
   if (!find_master(ctl)) {
     // Opening the softvol PCM once creates the control.
     snd_pcm_t *pcm = nullptr;
-    if (snd_pcm_open(&pcm, "speakers", SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK) == 0) snd_pcm_close(pcm);
+    if (snd_pcm_open(&pcm, model_.playback_pcm.c_str(), SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK) == 0)
+      snd_pcm_close(pcm);
     if (!find_master(ctl)) {
       LOGE("mixer: control '%s' not found", kMasterCtl);
       snd_ctl_close(ctl);

@@ -78,6 +78,52 @@ Model lite2() {
   return m;
 }
 
+// Station Mini 2: Amlogic AXG, 32-bit armhf userland (glibc 2.30, kernel 4.9.68, 238 MiB RAM).
+// Capture is the "default" 6-channel multi device of /etc/asound.conf: 4 PDM mics on channels
+// 0..3 (hw:0,1 channels 0/2/4/6) and 2 TDM amplifier loopback channels on 4/5 (hw:0,0). The ring
+// is 6 RGB LEDs of an IS31FL3236 with no ledfb trigger (sysfs brightness only). The clock chip
+// (second IS31FL3236 at i2c 0-003f) fails to probe on this firmware, so there are no clock LEDs.
+// Mic mute is not an evdev switch: the button is momentary and the mic circuit latches the mute
+// on GPIOZ_3 (global 414), which maind polls itself.
+Model mini2() {
+  Model m;
+  m.codename = "station-mini2";
+  m.host_prefix = "yandex-mini2-";
+  m.friendly_name = "Яндекс Станция Мини 2";
+  m.model_name = "Yandex Station Mini 2";
+  m.capture_pcm = "default";
+  m.capture_rate = 48000;
+  m.capture_channels = 6;
+  m.mic_channels = {0, 1, 2, 3};
+  m.spk_channels = {4, 5};
+  m.vqe_preset = "yandexmini_2";
+  m.playback_pcm = "default";
+  m.led_prefix = "mini2";
+  m.ring = {6, 1, "", "", "", "ring"};
+  // quasar.cfg /leds/clock frameBuilder: segments A..G on positions 1..4, the colon is
+  // PLUS1 + PLUS2, DEGREE and MINUS are never lit for the time. Dimming would be per-LED
+  // brightness (maxBrightness 255), like the Lite 2.
+  m.clock_dir = "/sys/class/leds/mini2:white:clock";
+  m.clock_seg_base = 'A';
+  m.clock_pos_base = 1;
+  m.clock_colon = {"PLUS1", "PLUS2"};
+  m.clock_aux = {"DEGREE", "MINUS"};
+  m.clock_chip_current = false;
+  m.keys_input = "sar0_pad0";
+  m.mute_gpio = 414;  // GPIOZ_3: pull-up, 0 = muted (latched by the mic circuit), edge "falling"
+  m.has_clock = false;  // the panel's chip (i2c 0-003f) does not probe on this firmware
+  m.has_lux = false;    // no ambient light sensor
+  m.error_sound = "ru-RU/playback_error.opus";
+  m.wake_sound = "common/spotter_start.opus";
+  m.cancel_sound = "common/spotter_cancel.opus";
+  m.timer_sound = "common/timer.opus";
+  // set_volume.sh is "amixer set 'Master' <percent>%": the platform level steps by 5 %, so the
+  // softvol raw value (0..255) is the percentage, i.e. 12.75 per level with no offset.
+  m.volume_map = {{0, 0}, {20, 255}};
+  m.volume_min_step = false;
+  return m;
+}
+
 }  // namespace
 
 const Model *detect_model() {
@@ -90,6 +136,7 @@ const Model *detect_model() {
       pos += entry.size() + 1;
       if (entry == "yandex,cucumber") return new Model(midi());
       if (entry == "yandex,plum") return new Model(lite2());
+      if (entry == "yandex,station-mini2") return new Model(mini2());
     }
     for (char &c : compat)
       if (c == '\0') c = ' ';

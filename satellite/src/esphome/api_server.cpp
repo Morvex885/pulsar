@@ -1330,7 +1330,7 @@ struct ApiServer::Impl {
       send_msg(c, LIST_SWITCH, w);
     };
     sw("mute_microphones", K_SW_MIC_MUTE, "Mute microphones", "mdi:microphone-off");
-    sw("clock_display", K_SW_CLOCK, "Clock display", "mdi:clock-digital");
+    if (cfg.has_clock) sw("clock_display", K_SW_CLOCK, "Clock display", "mdi:clock-digital");
     {
       pb::Writer w;
       entity_head(w, "auto_update", K_SW_AUTO_UPDATE, "Auto update");
@@ -1376,8 +1376,9 @@ struct ApiServer::Impl {
     select_entity("music_visualization", K_SELECT_MUSIC_VIZ, "Music visualization", "mdi:equalizer",
                   cfg.music_styles);
     select_entity("case_color", K_SELECT_CASE_COLOR, "Case color", "mdi:palette", cfg.case_colors);
-    select_entity("clock_music", K_SELECT_CLOCK_MUSIC, "Clock music", "mdi:equalizer-outline",
-                  cfg.clock_music_styles);
+    if (cfg.has_clock)
+      select_entity("clock_music", K_SELECT_CLOCK_MUSIC, "Clock music", "mdi:equalizer-outline",
+                    cfg.clock_music_styles);
     {
       pb::Writer w;
       entity_head(w, "firmware", K_UPDATE, "Firmware");
@@ -1392,7 +1393,7 @@ struct ApiServer::Impl {
       w.u32(9, ENTITY_CATEGORY_DIAGNOSTIC);
       send_msg(c, LIST_BINARY_SENSOR, w);
     }
-    {
+    if (cfg.has_lux) {
       pb::Writer w;
       entity_head(w, "illuminance", K_SENSOR_LUX, "Illuminance");
       w.str(6, "lx");
@@ -1401,7 +1402,7 @@ struct ApiServer::Impl {
       w.u32(10, STATE_CLASS_MEASUREMENT);
       send_msg(c, LIST_SENSOR, w);
     }
-    {
+    if (cfg.has_clock) {
       pb::Writer w;
       entity_head(w, "clock_brightness", K_NUMBER_CLOCK_BRI, "Clock brightness");
       w.str(5, "mdi:brightness-6");
@@ -1464,7 +1465,7 @@ struct ApiServer::Impl {
     };
     text("ip_address", K_TEXT_IP, "IP address", "mdi:ip-network");
     text("version", K_TEXT_VERSION, "Version", "mdi:new-box");
-    {
+    if (cfg.has_clock) {
       pb::Writer w;
       entity_head(w, "clock_text_speed", K_NUMBER_CLOCK_SCROLL, "Clock text speed");
       w.str(5, "mdi:speedometer");
@@ -1476,14 +1477,14 @@ struct ApiServer::Impl {
       w.u32(12, NUMBER_MODE_SLIDER);
       send_msg(c, LIST_NUMBER, w);
     }
-    {
+    if (cfg.has_clock) {
       pb::Writer w;
       entity_head(w, "clock_text", K_TEXT_CLOCK, "Clock text");
       w.str(5, "mdi:form-textbox");
       w.u32(9, kClockTextMax);  // max_length
       send_msg(c, LIST_TEXT, w);
     }
-    {
+    if (cfg.has_clock) {
       pb::Writer w;
       entity_head(w, "clock_face", K_SELECT_CLOCK_FACE, "Clock face");
       w.str(5, "mdi:emoticon-outline");
@@ -1516,8 +1517,10 @@ struct ApiServer::Impl {
       }
       send_msg(c, LIST_SERVICES, w);
     };
-    action("clock_show_text", K_ACTION_CLOCK_TEXT, {{"text", SERVICE_ARG_STRING}, {"seconds", SERVICE_ARG_INT}});
-    action("clock_show_face", K_ACTION_CLOCK_FACE, {{"face", SERVICE_ARG_STRING}, {"seconds", SERVICE_ARG_INT}});
+    if (cfg.has_clock) {
+      action("clock_show_text", K_ACTION_CLOCK_TEXT, {{"text", SERVICE_ARG_STRING}, {"seconds", SERVICE_ARG_INT}});
+      action("clock_show_face", K_ACTION_CLOCK_FACE, {{"face", SERVICE_ARG_STRING}, {"seconds", SERVICE_ARG_INT}});
+    }
     action("led_show", K_ACTION_LED_SHOW,
            {{"effect", SERVICE_ARG_STRING}, {"color", SERVICE_ARG_STRING}, {"seconds", SERVICE_ARG_INT}});
     send_msg(c, LIST_DONE, pb::Writer());
@@ -1581,27 +1584,29 @@ struct ApiServer::Impl {
   void send_all_states(const ClientPtr &c) {
     send_media(c);
     send_switch(K_SW_MIC_MUTE, sw_mic_mute, c);
-    send_switch(K_SW_CLOCK, sw_clock, c);
+    if (cfg.has_clock) send_switch(K_SW_CLOCK, sw_clock, c);
     send_switch(K_SW_AUTO_UPDATE, sw_auto_update, c);
     send_switch(K_SW_NEAREST_ANSWERS, sw_nearest_answers, c);
     send_switch(K_SW_VOICE_INDICATION, sw_voice_indication, c);
     send_update(c);
     send_binary(K_BS_HW_MIC_MUTE, bs_hw_mute, c);
-    send_float(SENSOR_STATE, K_SENSOR_LUX, lux, c);
-    send_float(NUMBER_STATE, K_NUMBER_CLOCK_BRI, clock_bri, c);
+    if (cfg.has_lux) send_float(SENSOR_STATE, K_SENSOR_LUX, lux, c);
+    if (cfg.has_clock) send_float(NUMBER_STATE, K_NUMBER_CLOCK_BRI, clock_bri, c);
     send_light(c);
     refresh_diagnostics(false);
     send_float(SENSOR_STATE, K_SENSOR_RSSI, rssi, c);
     send_uptime(c);
     send_ip(c);
     send_str(TEXT_SENSOR_STATE, K_TEXT_VERSION, id.project_version, true, c);
-    send_float(NUMBER_STATE, K_NUMBER_CLOCK_SCROLL, clock_scroll, c);
-    send_str(TEXT_STATE, K_TEXT_CLOCK, clock_text.v, clock_text.has, c);
-    send_str(SELECT_STATE, K_SELECT_CLOCK_FACE, clock_face.v, clock_face.has, c);
+    if (cfg.has_clock) {
+      send_float(NUMBER_STATE, K_NUMBER_CLOCK_SCROLL, clock_scroll, c);
+      send_str(TEXT_STATE, K_TEXT_CLOCK, clock_text.v, clock_text.has, c);
+      send_str(SELECT_STATE, K_SELECT_CLOCK_FACE, clock_face.v, clock_face.has, c);
+      send_str(SELECT_STATE, K_SELECT_CLOCK_MUSIC, clock_music.v, clock_music.has, c);
+    }
     send_float(NUMBER_STATE, K_NUMBER_LED_SPEED, led_speed, c);
     send_str(SELECT_STATE, K_SELECT_MUSIC_VIZ, music_viz.v, music_viz.has, c);
     send_str(SELECT_STATE, K_SELECT_CASE_COLOR, case_color.v, case_color.has, c);
-    send_str(SELECT_STATE, K_SELECT_CLOCK_MUSIC, clock_music.v, clock_music.has, c);
     if (!cfg.zigbee_modes.empty()) {
       send_str(SELECT_STATE, K_SELECT_ZIGBEE_MODE, zigbee_mode.v, zigbee_mode.has, c);
       send_str(TEXT_SENSOR_STATE, K_TEXT_ZIGBEE, zigbee_status.v, zigbee_status.has, c);
@@ -1973,7 +1978,7 @@ void ApiServer::publish_switch(SwitchId id, bool state) {
   if (!s) return;
   s->has = true;
   s->v = state;
-  if (impl_->states_on()) impl_->send_switch(key, *s);
+  if (impl_->states_on() && (impl_->cfg.has_clock || key != K_SW_CLOCK)) impl_->send_switch(key, *s);
 }
 
 void ApiServer::publish_binary_sensor(BinarySensorId, bool state) {
@@ -1985,7 +1990,7 @@ void ApiServer::publish_binary_sensor(BinarySensorId, bool state) {
 void ApiServer::publish_sensor(SensorId, float value) {
   impl_->lux.has = true;
   impl_->lux.v = value;
-  if (impl_->states_on()) impl_->send_float(SENSOR_STATE, K_SENSOR_LUX, impl_->lux);
+  if (impl_->states_on() && impl_->cfg.has_lux) impl_->send_float(SENSOR_STATE, K_SENSOR_LUX, impl_->lux);
 }
 
 void ApiServer::publish_number(NumberId id, float value) {
@@ -1999,12 +2004,13 @@ void ApiServer::publish_number(NumberId id, float value) {
   if (!s) return;
   s->has = true;
   s->v = value;
-  if (impl_->states_on()) impl_->send_float(NUMBER_STATE, key, *s);
+  if (impl_->states_on() && (impl_->cfg.has_clock || key == K_NUMBER_LED_SPEED))
+    impl_->send_float(NUMBER_STATE, key, *s);
 }
 
 void ApiServer::publish_text(TextId, const std::string &state) {
   impl_->clock_text = {true, state};
-  if (impl_->states_on()) impl_->send_str(TEXT_STATE, K_TEXT_CLOCK, state, true);
+  if (impl_->states_on() && impl_->cfg.has_clock) impl_->send_str(TEXT_STATE, K_TEXT_CLOCK, state, true);
 }
 
 void ApiServer::publish_select(SelectId id, const std::string &state) {
@@ -2019,7 +2025,10 @@ void ApiServer::publish_select(SelectId id, const std::string &state) {
   }
   if (!s) return;
   *s = {true, state};
-  if (impl_->states_on()) impl_->send_str(SELECT_STATE, key, state, true);
+  if (!impl_->states_on()) return;
+  const bool clock = key == K_SELECT_CLOCK_FACE || key == K_SELECT_CLOCK_MUSIC;
+  if (clock && !impl_->cfg.has_clock) return;
+  impl_->send_str(SELECT_STATE, key, state, true);
 }
 
 void ApiServer::publish_text_sensor(TextSensorId, const std::string &state) {

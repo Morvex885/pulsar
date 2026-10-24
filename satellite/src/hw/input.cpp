@@ -1,6 +1,8 @@
 // Buttons via evdev (devices matched by name in /proc/bus/input/devices, names per Model).
 // Station Midi: touch keys "awinic_sar", mute switch "mute"; Station Lite 2: touch keys "aw9610x",
-// mute switch "gpio-keys". Both use the same key codes and switch:
+// mute switch "gpio-keys"; Station Mini 2: touch keys "sar0_pad0", mute switch on a plain GPIO
+// (Model::mute_gpio, polled from sysfs: its firmware has no evdev switch). The touch keys use the
+// same key codes and the switch the same meaning:
 //
 // touch keys (capacitive, EV_KEY only; Midi KEY bitmap "40 0 0 0 0 0 0 0 c000000000000 0"):
 //   KEY_VOICECOMMAND (582) -> ACTION   (maind: "ACTIVATE")
@@ -9,7 +11,8 @@
 // mute switch (gpio-keys, KEY bitmap bit 113 KEY_MUTE, SW bitmap 0x4000 = SW_MUTE_DEVICE (14)):
 //   the hardware microphone mute slider/toggle; SW_MUTE_DEVICE=1 means muted. Its KEY_MUTE
 //   press/release events are ignored, the switch state is authoritative (initial value via
-//   EVIOCGSW).
+//   EVIOCGSW). Where the firmware has no such device (Mini 2) there is a momentary mute button
+//   instead, driving one latched GPIO line: pulled up, low while muted, so the level is the state.
 // ACTION: SHORT on release before 800 ms, LONG as soon as it has been held for 800 ms.
 // VOLUME_*: SHORT on press, auto-repeated every 200 ms after being held for 500 ms, for at most 10 s.
 // Devices that disappear (ENODEV) are looked up again every 3 s; SYN_DROPPED triggers a state resync.
@@ -37,6 +40,7 @@ constexpr int64_t kRepeatDelayMs = 500;
 constexpr int64_t kRepeatMs = 200;
 constexpr int64_t kMaxHoldMs = 10000;  // a key held longer than this is taken as stuck
 constexpr int64_t kReopenMs = 3000;    // retry period for missing/vanished input devices
+constexpr int64_t kGpioPollMs = 100;   // GPIO mute switch sampling period
 // maind's buttonsClickLimiter for "activate" (quasar.cfg): touches shorter than 56 ms and clicks
 // closer than 300 ms to the previous one are dropped.
 constexpr int64_t kMinActionPressMs = 56;
@@ -75,6 +79,7 @@ struct Input::Impl {
   Loop &loop;
   const Model &model;
   int keys_fd = -1, mute_fd = -1;
+  int mute_gpio_fd = -1;  // GPIO mute switch value file
   bool muted = false;
   ButtonCb button_cb;
   MuteCb mute_cb;
@@ -87,15 +92,17 @@ struct Input::Impl {
   int repeat_code = 0;
   int64_t repeat_since = 0;
   uint64_t retry_timer = 0;
+  uint64_t mute_poll_timer = 0;
   // After SYN_DROPPED the kernel discards events up to the next SYN_REPORT; the state is then
   // read back from the device.
   bool keys_dropped = false, mute_dropped = false;
 
   ~Impl() {
-    for (uint64_t t : {action_timer, repeat_timer, retry_timer})
+    for (uint64_t t : {action_timer, repeat_timer, retry_timer, mute_poll_timer})
       if (t) loop.cancel_timer(t);
     close_dev(keys_fd);
     close_dev(mute_fd);
+    if (mute_gpio_fd >= 0) close(mute_gpio_fd);
   }
 
   void close_dev(int &fd) {
@@ -199,6 +206,53 @@ struct Input::Impl {
     else LOGW("input: EVIOCGSW: %s", strerror(errno));
   }
 
+  // GPIO mute switch: exports the line (if nothing else did) and opens its value file. maind
+  // leaves it exported, so after "q stop" the file is usually already there; a pin that another
+  // process still owns fails the export, and we only retry later.
+  int open_gpio_mute() {
+    const std::string num = std::to_string(model.mute_gpio);
+    const std::string dir = "/sys/class/gpio/gpio" + num;
+    std::string cur;
+    if (!hwutil::read_file(dir + "/direction", cur)) {
+      hwutil::write_file("/sys/class/gpio/export", num);
+      hwutil::write_file(dir + "/direction", "in");
+      if (!hwutil::read_file(dir + "/direction", cur)) {
+        LOGW("input: gpio%s not available for the mute switch", num.c_str());
+        return -1;
+      }
+    }
+    int fd = ::open((dir + "/value").c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+      LOGW("input: open %s/value: %s", dir.c_str(), strerror(errno));
+      return -1;
+    }
+    LOGI("input: mute switch on gpio%s (%s)", num.c_str(), hwutil::trim(cur).c_str());
+    return fd;
+  }
+
+  // The pin cannot be polled with poll(2) (sysfs value files are always ready), so it is sampled.
+  void start_gpio_poll() {
+    if (mute_poll_timer) return;
+    mute_poll_timer = loop.add_timer(
+        kGpioPollMs,
+        [this] {
+          if (mute_gpio_fd >= 0) read_gpio_mute_state();
+        },
+        kGpioPollMs);
+  }
+
+  // Active low: the switch grounds the pulled-up line while the microphones are muted.
+  void read_gpio_mute_state() {
+    char b[8];
+    if (lseek(mute_gpio_fd, 0, SEEK_SET) < 0 || ::read(mute_gpio_fd, b, sizeof b) <= 0) {
+      LOGW("input: cannot read the mute gpio, reopening");
+      close(mute_gpio_fd);
+      mute_gpio_fd = -1;
+      return;
+    }
+    set_muted(b[0] == '0');
+  }
+
   // Key state after lost events: synthesize the releases we missed (presses are not invented).
   void resync_keys() {
     unsigned long keys[KEY_MAX / (8 * sizeof(long)) + 1] = {};
@@ -271,10 +325,17 @@ struct Input::Impl {
       keys_fd = open_dev(model.keys_input, true);
       keys_dropped = false;
     }
-    if (mute_fd < 0) {
+    if (mute_fd < 0 && !model.mute_input.empty()) {
       mute_fd = open_dev(model.mute_input, true);
       mute_dropped = false;
       if (mute_fd >= 0) read_mute_state();
+    }
+    if (mute_gpio_fd < 0 && model.mute_gpio) {
+      mute_gpio_fd = open_gpio_mute();
+      if (mute_gpio_fd >= 0) {
+        read_gpio_mute_state();
+        start_gpio_poll();
+      }
     }
   }
 };
@@ -285,13 +346,19 @@ Input::~Input() = default;
 bool Input::open() {
   auto &d = *impl_;
   d.keys_fd = d.open_dev(d.model.keys_input, false);
-  d.mute_fd = d.open_dev(d.model.mute_input, false);
-  if (d.mute_fd >= 0) {
-    d.read_mute_state();
-    LOGI("input: initial hardware mute %s", d.muted ? "on" : "off");
+  if (!d.model.mute_input.empty()) {
+    d.mute_fd = d.open_dev(d.model.mute_input, false);
+    if (d.mute_fd >= 0) d.read_mute_state();
+  } else if (d.model.mute_gpio) {
+    d.mute_gpio_fd = d.open_gpio_mute();
+    if (d.mute_gpio_fd >= 0) {
+      d.read_gpio_mute_state();
+      d.start_gpio_poll();
+    }
   }
+  if (d.mute_fd >= 0 || d.mute_gpio_fd >= 0) LOGI("input: initial hardware mute %s", d.muted ? "on" : "off");
   d.retry_timer = d.loop.add_timer(kReopenMs, [&d] { d.reopen_missing(); }, kReopenMs);
-  return d.keys_fd >= 0 || d.mute_fd >= 0;
+  return d.keys_fd >= 0 || d.mute_fd >= 0 || d.mute_gpio_fd >= 0;
 }
 
 bool Input::hw_muted() const { return impl_->muted; }

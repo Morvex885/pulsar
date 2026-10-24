@@ -1,6 +1,9 @@
 // Hardware probe: cycles LED UI states, effects and music styles, drives the clock and its
 // animations, prints buttons/mute/lux.
 // usage: hw_probe [input_seconds=15] [state_ms=2000]
+// The ring/clock dumps and the chip "current" restore are written for the Midi (cucumber sysfs
+// names, i2c 3-0037/3-0021): on other models they print nothing. Leds/Clock/Input themselves use
+// the detected Model.
 #include <fcntl.h>
 #include <unistd.h>
 

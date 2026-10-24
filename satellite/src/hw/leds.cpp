@@ -162,6 +162,7 @@ struct Leds::Impl {
 
   // Opens one strip's framebuffer if its trigger is active and the fb has the expected name.
   int open_strip_fb(const Model::LedStrip &s, fb_var_screeninfo &var) {
+    if (s.fb_dev.empty()) return -1;  // model without a ledfb (Mini 2): sysfs LEDs only
     if (!trigger_is(led_name(s, "red", 0), s.trigger)) {
       LOGW("leds: trigger %s not active on %s", s.trigger.c_str(), led_name(s, "red", 0).c_str());
       return -1;
