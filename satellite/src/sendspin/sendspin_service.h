@@ -27,7 +27,7 @@ struct SendspinConfig {
   std::string software_version;
   std::string mac;        // "aa:bb:cc:dd:ee:ff"
   std::string state_dir;  // identity/pairing persistence directory
-  std::string pcm = "speakers";  // Model::playback_pcm, mixed with the GStreamer channels
+  std::string pcm;  // Model::playback_pcm, mixed with the GStreamer channels
   uint16_t port = 8928;
 };
 

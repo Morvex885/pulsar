@@ -123,7 +123,7 @@ class AlwaysNetwork : public ss::SendspinNetworkProvider {
 class AlsaSink {
  public:
   std::function<void(uint32_t frames, int64_t finish_us)> on_played;
-  std::string pcm = "speakers";  // Model::playback_pcm, set before start()
+  std::string pcm;  // Model::playback_pcm, set before start()
 
   ~AlsaSink() {
     std::lock_guard<std::mutex> lk(io_mu_);
