@@ -104,4 +104,4 @@ git ls-files 'satellite/src/*' 'satellite/tools/*.cpp' | xargs wc -l
 ## Заметки
 
 - WP-00: `rust-port-base` = `5059a8d` (до тега `origin/main` ушёл вперёд на коммит смены лицензии на AGPL-3.0; `satellite/` в нём не менялся). `VERSION` в Makefile — `git describe --tags --match 'v*' --always --dirty`: иначе ближайшим тегом был бы `rust-port-base`, и updater не разобрал бы версию.
-- Lite 2: на станции нет ssh-сервера (dropbear не установлен), поэтому `station.sh` там не работает, пока владелец не включит ssh. До тех пор для проверок, которые не останавливают демон, допустим ручной adb-протокол из `reviews/WP-00.md` («Проверка на станциях»).
+- Lite 2: ssh включён владельцем (dropbear, как на Midi); station.sh работает на обеих станциях. WP-00 на Lite 2 проверялся через adb до включения ssh.
