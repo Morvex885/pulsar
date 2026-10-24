@@ -22,7 +22,7 @@
 | WP-01 | ESPHome: транспорт, Noise, клиенты, voice-владелец | ~1490 | WP-00 | — | в работе | Morvex885 (агент WP-01) | [reviews/WP-01.md](reviews/WP-01.md) | — | — |  |
 | WP-02 | ESPHome: сообщения, сущности, команды, api_selftest | ~1190 | WP-01 | — | свободен |  | [reviews/WP-02.md](reviews/WP-02.md) | требуется | требуется |  |
 | WP-03 | mDNS + арбитраж wake word, lan_probe | ~850 | WP-00 | — | свободен |  | [reviews/WP-03.md](reviews/WP-03.md) | требуется | требуется |  |
-| WP-04 | Аудио-фронтенд: VQE/спотер, захват, спектр, ww_offline | ~890 | WP-00 | — | свободен |  | [reviews/WP-04.md](reviews/WP-04.md) | требуется | требуется |  |
+| WP-04 | Аудио-фронтенд: VQE/спотер, захват, спектр, ww_offline | ~890 | WP-00 | — | в работе | Morvex885 (агент WP-04) | [reviews/WP-04.md](reviews/WP-04.md) | требуется | требуется |  |
 | WP-05 | Плеер (GStreamer) + Mixer, player_probe | ~1010 | WP-00 | — | в работе | Morvex885 (агент WP-05) | [reviews/WP-05.md](reviews/WP-05.md) | требуется | требуется |  |
 | WP-06 | Sendspin: C-шим над sendspin-cpp, сервис, ALSA-sink | ~840 + шим | WP-00 | — | свободен |  | [reviews/WP-06.md](reviews/WP-06.md) | требуется | требуется |  |
 | WP-07 | LED (led_fx, композитор, вывод) + кнопки, hw_probe (LED/ввод) | ~1500 | WP-00 | — | в работе | Morvex885 (агент WP-07) | [reviews/WP-07.md](reviews/WP-07.md) | требуется | требуется |  |
