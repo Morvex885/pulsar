@@ -334,6 +334,7 @@ println!("cargo:rustc-link-lib=c++");
 ```
 
 - `c++abi` и `-Wl,--start-group`/`--end-group` не понадобились: zig сам линкует свои libc++, libc++abi и libunwind статически. Для статических библиотек sendspin-cpp с перекрёстными ссылками `--start-group` остаётся запасным путём (см. «Допущения»).
+- С WP-07 для armhf в `RUSTFLAGS` добавлен `-C target-cpu=cortex-a53`, как `-mcpu=cortex_a53` у C++-сборки: `mul_add` становится аппаратным `vfma` вместо вызова `fmaf` (паритет FMA с C++, см. `pulsar-hw` `led_fx`).
 - non-PIE линкуется: оба бинаря `EXEC`. `NEEDED`: aarch64 — только `libc.so.6` (максимум `GLIBC_2.34`); armhf — `libpthread.so.0`, `libc.so.6`, `libdl.so.2`, `ld-linux-armhf.so.3` (максимум `GLIBC_2.30`), `hard-float ABI`.
 - При компиляции `cc` печатает безвредные предупреждения проверки компилятора через обёртки cargo-zigbuild: aarch64 — `zig: error: version '.2.36' in target triple 'aarch64-unknown-linux-gnu.2.36' is invalid`, armhf — `…/cargo-zigbuild/0.24.0/aeabi_unaligned.c:1:1: error: FileNotFound`. Объект при этом собирается и линкуется (`cxx_probe`, `__cxa_throw`, `_Unwind_RaiseException` в бинаре).
 - Запуск на станциях: на Midi (aarch64) и Lite 2 (armhf) бинарь печатает `cxx-link-probe: caught exception ok`, rc=0 (WP-00, `reviews/WP-00.md`).

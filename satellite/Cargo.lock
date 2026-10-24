@@ -102,6 +102,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulsar-hw"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "log",
+ "pulsar-core",
+ "tokio",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"

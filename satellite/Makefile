@@ -46,11 +46,15 @@ else
 ifeq ($(ARCH),aarch64)
 TARGET      := aarch64-linux-gnu.2.36
 CPU         :=
+RUST_CPU    :=
 RUST_TARGET := aarch64-unknown-linux-gnu
 GLIBC       := 2.36
 else ifeq ($(ARCH),armhf)
 TARGET      := arm-linux-gnueabihf.2.30
 CPU         := -mcpu=cortex_a53
+# Same core as the C++ build: VFPv4 makes f32/f64 mul_add a vfma instruction (the generic armv7
+# target calls libm fmaf instead).
+RUST_CPU    := -C target-cpu=cortex-a53
 RUST_TARGET := armv7-unknown-linux-gnueabihf
 GLIBC       := 2.30
 else
@@ -92,7 +96,7 @@ BUILD_TIME := $(shell TZ=UTC0 LC_ALL=C git log -1 --format=%cd --date=format-loc
 # version) over the zig checked above: point it at that zig and at a python that does not exist.
 CARGO_ENV := PULSAR_VERSION='$(VERSION)' PULSAR_BUILD_TIME='$(BUILD_TIME)' \
              PULSAR_SS_SRC=$(CURDIR)/$(SS_SRC) PULSAR_SS_BUILD=$(CURDIR)/$(SS_BUILD) PULSAR_REQUIRE_SS=1 \
-             RUSTFLAGS='-C relocation-model=static -C force-frame-pointers=yes' \
+             RUSTFLAGS='-C relocation-model=static -C force-frame-pointers=yes $(RUST_CPU)' \
              CARGO_ZIGBUILD_ZIG_PATH='$(abspath $(ZIG_PATH))' \
              CARGO_ZIGBUILD_PYTHON_PATH=/nonexistent/python3
 ZIGBUILD  := env $(CARGO_ENV) $(CARGO) zigbuild --release --locked --target $(RUST_TARGET).$(GLIBC)

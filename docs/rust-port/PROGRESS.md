@@ -25,7 +25,7 @@
 | WP-04 | Аудио-фронтенд: VQE/спотер, захват, спектр, ww_offline | ~890 | WP-00 | — | в работе | Morvex885 (агент WP-04) | [reviews/WP-04.md](reviews/WP-04.md) | требуется | требуется |  |
 | WP-05 | Плеер (GStreamer) + Mixer, player_probe | ~1010 | WP-00 | — | в работе | Morvex885 (агент WP-05) | [reviews/WP-05.md](reviews/WP-05.md) | требуется | требуется |  |
 | WP-06 | Sendspin: C-шим над sendspin-cpp, сервис, ALSA-sink | ~840 + шим | WP-00 | — | в работе | Morvex885 (агент WP-06) | [reviews/WP-06.md](reviews/WP-06.md) | требуется | требуется |  |
-| WP-07 | LED (led_fx, композитор, вывод) + кнопки, hw_probe (LED/ввод) | ~1500 | WP-00 | — | в работе | Morvex885 (агент WP-07) | [reviews/WP-07.md](reviews/WP-07.md) | требуется | требуется |  |
+| WP-07 | LED (led_fx, композитор, вывод) + кнопки, hw_probe (LED/ввод) | ~1500 | WP-00 | — | влит | Morvex885 (агент WP-07) | [reviews/WP-07.md](reviews/WP-07.md) | да | да |  |
 | WP-08 | Часы + clock_fx + датчик света, hw_probe целиком | ~1380 | WP-00 | WP-07 | в работе | Morvex885 (агент WP-08) | [reviews/WP-08.md](reviews/WP-08.md) | требуется | требуется |  |
 | WP-09 | Zigbee: линк, координатор, роутер, прошивальщик | ~1440 | WP-00 | — | в работе | Morvex885 (агент WP-09) | [reviews/WP-09.md](reviews/WP-09.md) | требуется | — |  |
 | WP-10 | Zigbee: deCONZ-сервер, сервис ролей, zigbee_probe | ~1180 | WP-09 | — | свободен |  | [reviews/WP-10.md](reviews/WP-10.md) | требуется | — |  |
@@ -105,3 +105,4 @@ git ls-files 'satellite/src/*' 'satellite/tools/*.cpp' | xargs wc -l
 
 - WP-00: `rust-port-base` = `5059a8d` (до тега `origin/main` ушёл вперёд на коммит смены лицензии на AGPL-3.0; `satellite/` в нём не менялся). `VERSION` в Makefile — `git describe --tags --match 'v*' --always --dirty`: иначе ближайшим тегом был бы `rust-port-base`, и updater не разобрал бы версию.
 - Lite 2: ssh включён владельцем (dropbear, как на Midi); station.sh работает на обеих станциях. WP-00 на Lite 2 проверялся через adb до включения ssh.
+- WP-07: armhf собирается с `-C target-cpu=cortex-a53` (`RUSTFLAGS` в Makefile), как C++ `-mcpu=cortex_a53`: `mul_add` — аппаратный `vfma`, FMA-паритет с C++ (ARCHITECTURE.md, рецепт линковки). sysfs `brightness` кольца Lite 2 ограничен 63 (reviews/WP-07.md).
