@@ -127,8 +127,10 @@ binary: $(SS_STAMP) FORCE
 	cp $(OUT)/pulsar $(BUILD)/pulsar.debug
 	$(ZIG) objcopy --strip-all $(BUILD)/pulsar.debug $(BUILD)/pulsar
 
-# Without pulsar: `make binary tools` copies target/.../pulsar outside cargo's lock.
-tools: $(SS_STAMP) FORCE
+# Without pulsar: `make binary tools` copies target/.../pulsar outside cargo's lock. After binary
+# when both are asked for: two cargo-zigbuild starting at once race on creating their zig wrapper
+# files ("File exists (os error 17)" on a fresh CI runner); cargo serialized them on target/ anyway.
+tools: $(SS_STAMP) FORCE | $(filter binary,$(MAKECMDGOALS))
 	+$(ZIGBUILD) --workspace --exclude pulsar --bins
 	@mkdir -p $(BUILD)/tools
 	for t in $(TOOLS); do $(ZIG) objcopy --strip-all $(OUT)/$$t $(BUILD)/tools/$$t || exit 1; done
