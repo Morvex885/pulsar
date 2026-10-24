@@ -288,6 +288,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulsar-audio"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "libloading",
+ "log",
+ "pulsar-alsa",
+ "pulsar-core",
+ "tokio",
+]
+
+[[package]]
 name = "pulsar-core"
 version = "0.0.0"
 dependencies = [

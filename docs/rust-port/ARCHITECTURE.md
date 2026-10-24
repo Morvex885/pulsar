@@ -288,8 +288,20 @@ pub enum FrontendEvent { Wake { phrase: String, level_db: f32 }, Command { word:
 pub fn spawn(model: &'static pulsar_core::model::Model, wake_model_dir: std::path::PathBuf, command_model_dir: Option<std::path::PathBuf>)
     -> (FrontendHandle, tokio::sync::mpsc::UnboundedReceiver<FrontendEvent>); // ошибка dlopen/VQE/спотера логируется, handle деградированный (событий нет), как C++ после неудачного start()
 impl FrontendHandle { pub fn set_model(&self, dir: std::path::PathBuf); pub fn set_detection(&self, on: bool); pub fn set_commands(&self, on: bool);
-                      pub fn set_streaming(&self, on: bool); pub fn set_music_analysis(&self, on: bool); }
+                      pub fn set_streaming(&self, on: bool); pub fn set_music_analysis(&self, on: bool);
+                      pub fn stats(&self) -> FrontendStats; pub fn set_raw_tap(&self, tap: Option<tokio::sync::mpsc::UnboundedSender<Vec<i16>>>); }
+// stats()/set_raw_tap() — только для frontend_probe (контроллер их не вызывает): счётчики потоков и сырой захват (блоки ALSA как есть) для --record.
+// PCM, который не открылся, не считается ошибкой старта: поток захвата пишет ошибку и повторяет открытие каждые 2 с (как C++).
+// Потоки останавливаются в Drop последнего клона handle (флаг + join).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrontendStats { pub captured_frames: u64, pub chunks: u64, pub fifo_frames: u64, pub dropped_frames: u64 }
 pub struct SpectrumAnalyzer;                                 // pub: new(rate, chunk_frames), ok(), reset(), process(&[f32], nspk, &mut MusicFrame) -> bool
+pub mod engine;  // безопасные обёртки C API libyandex_evil.so (Lib, Vqe, SpotterConf, Spotter), spotter_layout и типы каналов VQE — для ww_offline
+// Плавающая арифметика повторяет станционную C++-сборку: zig c++ (clang, -ffp-contract=on) сливает `a ± b * c` внутри одного выражения
+// в fused multiply-add на aarch64 и armhf (cortex-a53); в этих местах (окно Ханна, std::norm, среднее баса, сумма квадратов уровня wake,
+// энергии ww_offline) Rust использует mul_add, проверено по ассемблеру эталона.
+// sinf/cosf/log10f: C++-бинари zig несут свои из compiler_rt, Rust armhf тоже, Rust aarch64 берёт glibc libm — расхождения до 1 ulp
+// (на golden-данных значения полос в 47 из 456 чанков, биты beat не меняются).
 ```
 
 ## `pulsar-media` (WP-05)

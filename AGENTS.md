@@ -41,7 +41,7 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 | `satellite/src/arbiter.*` | `WakeArbiter`: wake word claims between stations (UDP broadcast :6054, 250 ms window), best claim answers |
 | `satellite/deploy/` | `dist.sh` (release archives, host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
 | `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install (incl. `/etc/init.d/S99zpulsar`), health check |
-| `satellite/tools/` | C++ probes not yet ported (built from a `rust-port-base` worktree): `hw_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `zigbee_probe` (Zigbee coordinator, either firmware, + deCONZ server on another port, without the daemon; `flash <image>` writes a radio image). Ported tools live in `satellite/crates/*/src/bin/`: `alsa_abi_probe` (`pulsar-alsa`; ALSA hw-params ABI on the `null` PCM, no sound), `update_probe` (`pulsar-update`; HTTPS client, release check, install into a scratch dir), `player_probe` (`pulsar-media`; music / announce / http / 404 / https scenario at volume ≤ 0.2, original raw restored), `sendspin_probe` (`pulsar-sendspin`; Sendspin player without the daemon on another port, Master volume capped at 0.2, for `docs/rust-port/tools/sendspin_server.py`) |
+| `satellite/tools/` | C++ probes not yet ported (built from a `rust-port-base` worktree): `hw_probe`, `api_selftest`, `zigbee_probe` (Zigbee coordinator, either firmware, + deCONZ server on another port, without the daemon; `flash <image>` writes a radio image). Ported tools live in `satellite/crates/*/src/bin/`: `alsa_abi_probe` (`pulsar-alsa`; ALSA hw-params ABI on the `null` PCM, no sound), `update_probe` (`pulsar-update`; HTTPS client, release check, install into a scratch dir), `player_probe` (`pulsar-media`; music / announce / http / 404 / https scenario at volume ≤ 0.2, original raw restored), `sendspin_probe` (`pulsar-sendspin`; Sendspin player without the daemon on another port, Master volume capped at 0.2, for `docs/rust-port/tools/sendspin_server.py`), `ww_offline` (`pulsar-audio`; offline spotter test on a raw capture WAV), `frontend_probe` (`pulsar-audio`; microphone front-end without the daemon: events, rates, `--record` of the raw capture) |
 | `satellite/third_party/` | `fetch.sh` (pinned deps), CMake glue, zig toolchain wrappers (sendspin-cpp only) |
 | `ssh/` | `build.sh` (static dropbear + sftp-server), `start.sh` (device side) |
 | `radio/` | Zigbee firmware for the Midi radio on the Telink Zigbee SDK: `build.sh` (pinned SDK + toolchain, `sdk.patch`), `Makefile`, `coordinator/` and `router/` (apps), `ybl.c` (host tool: binary → `.ybl`) |
@@ -192,7 +192,7 @@ device whose HA already holds a key cannot talk to HA until the key is removed t
   audio must cap volume.
 - `/tmp` is tmpfs (1 GB RAM on the Midi, 237 MB on the Lite 2): remove test files afterwards.
 
-## Yandex libraries (reverse-engineered C API, see `src/audio/frontend.cpp`)
+## Yandex libraries (reverse-engineered C API, see `satellite/crates/pulsar-audio/src/engine/`)
 
 From `/system/vendor/quasar/libyandex_evil.so`:
 
