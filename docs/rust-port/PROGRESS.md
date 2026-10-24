@@ -27,7 +27,7 @@
 | WP-06 | Sendspin: C-шим над sendspin-cpp, сервис, ALSA-sink | ~840 + шим | WP-00 | — | свободен |  | [reviews/WP-06.md](reviews/WP-06.md) | требуется | требуется |  |
 | WP-07 | LED (led_fx, композитор, вывод) + кнопки, hw_probe (LED/ввод) | ~1500 | WP-00 | — | свободен |  | [reviews/WP-07.md](reviews/WP-07.md) | требуется | требуется |  |
 | WP-08 | Часы + clock_fx + датчик света, hw_probe целиком | ~1380 | WP-00 | WP-07 | свободен |  | [reviews/WP-08.md](reviews/WP-08.md) | требуется | требуется |  |
-| WP-09 | Zigbee: линк, координатор, роутер, прошивальщик | ~1440 | WP-00 | — | свободен |  | [reviews/WP-09.md](reviews/WP-09.md) | требуется | — |  |
+| WP-09 | Zigbee: линк, координатор, роутер, прошивальщик | ~1440 | WP-00 | — | в работе | Morvex885 (агент WP-09) | [reviews/WP-09.md](reviews/WP-09.md) | требуется | — |  |
 | WP-10 | Zigbee: deCONZ-сервер, сервис ролей, zigbee_probe | ~1180 | WP-09 | — | свободен |  | [reviews/WP-10.md](reviews/WP-10.md) | требуется | — |  |
 | WP-11 | Обновления: HTTPS (rustls), updater, update_probe | ~880 | WP-00 | — | свободен |  | [reviews/WP-11.md](reviews/WP-11.md) | требуется | требуется |  |
 | WP-12 | Контроллер целиком + тестовый режим портов | ~1650 | WP-02, WP-03, WP-04, WP-05, WP-06, WP-07, WP-08, WP-10, WP-11 | — | свободен |  | [reviews/WP-12.md](reviews/WP-12.md) | требуется | требуется |  |
