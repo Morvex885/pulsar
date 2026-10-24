@@ -19,7 +19,7 @@
 | ID | Пакет | C++ строк | Старт после | Влить после | Статус | Исполнитель | Ревью | Midi | Lite 2 | Заметки |
 |---|---|---|---|---|---|---|---|---|---|---|
 | WP-00 | Скелет: workspace, сборка, CI, core, alsa, main, документы | ~1000 + инфра | — | — | влит | Morvex885 (агент) | [reviews/WP-00.md](reviews/WP-00.md) | да | да (через adb: на станции нет ssh) |  |
-| WP-01 | ESPHome: транспорт, Noise, клиенты, voice-владелец | ~1490 | WP-00 | — | свободен |  | [reviews/WP-01.md](reviews/WP-01.md) | — | — |  |
+| WP-01 | ESPHome: транспорт, Noise, клиенты, voice-владелец | ~1490 | WP-00 | — | в работе | Morvex885 (агент WP-01) | [reviews/WP-01.md](reviews/WP-01.md) | — | — |  |
 | WP-02 | ESPHome: сообщения, сущности, команды, api_selftest | ~1190 | WP-01 | — | свободен |  | [reviews/WP-02.md](reviews/WP-02.md) | требуется | требуется |  |
 | WP-03 | mDNS + арбитраж wake word, lan_probe | ~850 | WP-00 | — | свободен |  | [reviews/WP-03.md](reviews/WP-03.md) | требуется | требуется |  |
 | WP-04 | Аудио-фронтенд: VQE/спотер, захват, спектр, ww_offline | ~890 | WP-00 | — | свободен |  | [reviews/WP-04.md](reviews/WP-04.md) | требуется | требуется |  |
