@@ -1,0 +1,12 @@
+[package]
+name = "pulsar-alsa"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc = { workspace = true }
+libloading = { workspace = true }
+log = { workspace = true }
+pulsar-core = { path = "../pulsar-core" }

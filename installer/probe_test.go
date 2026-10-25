@@ -2,47 +2,24 @@ package main
 
 import "testing"
 
-// The devicetree compatible list as `tr '\0' '\n'` leaves it, for every supported model.
-func TestStationCode(t *testing.T) {
-	cases := []struct {
-		compat, code string
-		supported    bool
+func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
+	tests := []struct {
+		name, code string
+		loaders    []string
+		want       string
 	}{
-		// Board-specific variants come first; only the exact supported codename may win.
-		{"yandex,cucumber-dvt2\nyandex,cucumber\namlogic, a5", "cucumber", true},
-		{"yandex,plum\namlogic, axg", "plum", true},
-		// Mini 2: the codename contains a hyphen.
-		{"yandex,station-mini2\namlogic, axg", "station-mini2", true},
-		// The old separator (spaces) works too.
-		{"yandex,cucumber-dvt2 yandex,cucumber amlogic, a5", "cucumber", true},
-		// Some other station: named from its codename, then skipped as unsupported.
-		{"yandex,station\namlogic, axg", "station", false},
-		{"yandex,cucumber-dvt2\namlogic, a5", "cucumber-dvt2", false},
-		{"amlogic, axg", "", false},
+		{"cucumber prefers aarch64", "cucumber", []string{"aarch64", "armhf"}, "aarch64"},
+		{"cucumber falls back to armhf userspace", "cucumber", []string{"armhf"}, "armhf"},
+		{"plum stays armhf", "plum", []string{"aarch64", "armhf"}, "armhf"},
+		{"plum without its loader is skipped", "plum", []string{"aarch64"}, ""},
+		{"no compatible loader", "cucumber", nil, ""},
+		{"unsupported model", "unknown", []string{"aarch64", "armhf"}, ""},
 	}
-	for _, c := range cases {
-		code, supported := stationCode(c.compat)
-		if code != c.code || supported != c.supported {
-			t.Errorf("%q: got (%q, %v), want (%q, %v)", c.compat, code, supported, c.code, c.supported)
-		}
-	}
-}
-
-func TestSupportedModels(t *testing.T) {
-	cases := []struct{ code, arch, name string }{
-		{"cucumber", "aarch64", "Yandex Station Midi"},
-		{"plum", "armhf", "Yandex Station Lite 2"},
-		{"station-mini2", "armhf", "Yandex Station Mini 2"},
-	}
-	for _, c := range cases {
-		if got := archOf(c.code); got != c.arch {
-			t.Errorf("archOf(%q) = %q, want %q", c.code, got, c.arch)
-		}
-		if got := modelName(c.code); got != c.name {
-			t.Errorf("modelName(%q) = %q, want %q", c.code, got, c.name)
-		}
-	}
-	if archOf("station") != "" || modelName("station") != "" {
-		t.Error(`"station" must stay unsupported`)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := archOf(tt.code, tt.loaders); got != tt.want {
+				t.Fatalf("archOf(%q, %v) = %q, want %q", tt.code, tt.loaders, got, tt.want)
+			}
+		})
 	}
 }

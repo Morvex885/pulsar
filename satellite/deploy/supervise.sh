@@ -10,6 +10,15 @@
 # remove `enabled` and give the speaker back to the Yandex stack (same as `ctl.sh disable`).
 # Only a run of >= LONG seconds resets the count. Restart delay after a crash: 3 s, doubling up
 # to 30 s.
+#
+# Stale ALSA dmix lock: the firmware's alsa-lib (patched by Yandex, Midi and Lite 2) does not start
+# the dmix slave PCM on open; the first client to start does, and the dmix shm segment (ipc_key
+# 1024 = 0x400 from the firmware's asound config, 0x401 = its mix buffer, semaphore 0x400) counts
+# the running clients. A client that dies while playing (crash, SIGKILL, a test's kill -SEGV) never
+# decrements the count, and nobody removes the segment: every later open reuses it, the slave stays
+# PREPARED (never triggered) and writers block forever on the dmix timer, i.e. silence until a
+# reboot. Before each launch (no pulsar running) segments nobody is attached to are removed.
+#
 # PULSAR_DIR, PULSAR_LOG, PULSAR_Q override the device paths (local dry runs).
 D=${PULSAR_DIR:-/data/pulsar}
 LOG=${PULSAR_LOG:-/tmp/pulsar.log}
@@ -41,6 +50,23 @@ give_back() { # Yandex stack again, like ctl.sh disable
   exit 1
 }
 
+clear_dmix() {
+  segs=$(ipcs -m 2>/dev/null) || return 0
+  removed= busy=0
+  for k in 400 401; do
+    n=$(echo "$segs" | awk -v k="0x00000$k" '$1 == k { print $6; exit }')
+    if [ "$n" = 0 ]; then
+      ipcrm -M "0x$k" && removed="$removed shm 0x$k"
+    elif [ -n "$n" ]; then
+      busy=1
+    fi
+  done
+  if [ $busy = 0 ] && ipcs -s 2>/dev/null | awk '$1 == "0x00000400" { f = 1 } END { exit !f }'; then
+    ipcrm -S 0x400 && removed="$removed sem 0x400"
+  fi
+  [ -z "$removed" ] || echo "=== alsa: removed stale dmix lock (${removed# }) $(date)" >> "$LOG"
+}
+
 ( while sleep 60; do rotate; done ) &
 ROT=$!
 # busybox ash does not run an EXIT trap on SIGTERM: clean up in the signal traps themselves.
@@ -57,6 +83,7 @@ while [ -f "$D/enabled" ]; do
     fi
     give_back "no usable binary"
   fi
+  clear_dmix
   echo "=== start $(date)" >> "$LOG"
   t0=$(uptime_s)
   "$BIN" "$D/state.conf" >> "$LOG" 2>&1

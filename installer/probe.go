@@ -2,30 +2,47 @@ package main
 
 import (
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 )
 
-// Devicetree codename -> name / userland ABI (build/<arch>/). Only models listed in archOf get
-// installed: the daemon drives model-specific hardware (mic array + VQE preset, LEDs, clock, inputs).
+// Devicetree codename -> name. Only models listed in abis get installed: the daemon drives
+// model-specific hardware (mic array + VQE preset, LEDs, clock, inputs).
 func modelName(code string) string {
 	switch code {
 	case "cucumber":
 		return "Yandex Station Midi"
 	case "plum":
 		return "Yandex Station Lite 2"
-	case "station-mini2":
-		return "Yandex Station Mini 2"
 	}
 	return ""
 }
 
-// archOf: devicetree codename -> userland ABI (build/<arch>/); "" = not supported.
-func archOf(code string) string {
+// abis lists the userspace ABIs a model's firmware runs, its usual one first; nil = model not
+// supported. The installed binary is build/<arch>/pulsar for the first ABI whose dynamic loader
+// is on the station. A second ABI is only for a userspace actually seen on that model: some Midi
+// images run a 32-bit userspace on the 64-bit kernel (#13) and need the armhf build (its ALSA
+// ABI is the one in audio/alsa_abi.h, #14). Lite 2 stays armhf-only: no 64-bit plum firmware has
+// been seen, and the aarch64 binary needs glibc 2.34 — on a miss it would crash-loop back to
+// the Yandex stack (no .prev on a first install).
+func abis(code string) []string {
 	switch code {
 	case "cucumber":
-		return "aarch64"
-	case "plum", "station-mini2":
-		return "armhf"
+		return []string{"aarch64", "armhf"}
+	case "plum":
+		return []string{"armhf"}
+	}
+	return nil
+}
+
+// archOf picks the model's first ABI whose loader is on the station (loaders: the words the
+// loader probe printed). "" = none of the model's ABIs: skip the station.
+func archOf(code string, loaders []string) string {
+	for _, a := range abis(code) {
+		if slices.Contains(loaders, a) {
+			return a
+		}
 	}
 	return ""
 }
@@ -42,26 +59,7 @@ type station struct {
 // found: installable stations, in the order printed by probe.
 var found []station
 
-// stationCode picks the model from the NUL-separated devicetree compatible list (one entry per
-// line here). The first entry with a supported codename wins: the list starts with board-specific
-// variants, e.g. "yandex,cucumber-dvt2" before "yandex,cucumber" on the Midi. The first codename
-// is returned even when nothing is supported, so that probe can name the unknown device.
-func stationCode(compat string) (string, bool) {
-	var first string
-	for _, entry := range strings.Fields(compat) {
-		code, ok := strings.CutPrefix(entry, "yandex,")
-		if !ok || code == "" {
-			continue
-		}
-		if first == "" {
-			first = code
-		}
-		if archOf(code) != "" {
-			return code, true
-		}
-	}
-	return first, false
-}
+var codename = regexp.MustCompile(`yandex,([a-z0-9_]*)`)
 
 // probe prints one status line for s and records it in found if it is installable. A device we
 // connected to ourselves is disconnected again when it is not.
@@ -72,27 +70,40 @@ func probe(s string, ours bool) {
 			disconnect(s)
 		}
 	}
-	compat, err := sh(s, `tr '\0' '\n' </proc/device-tree/compatible`)
+	compat, err := sh(s, `tr '\0' ' ' </proc/device-tree/compatible`)
 	if err != nil {
 		skip("adb not usable (unauthorized or offline)")
 		return
 	}
-	code, supported := stationCode(compat)
-	if code == "" {
+	m := codename.FindStringSubmatch(compat)
+	if m == nil || m[1] == "" {
 		skip("not a Yandex Station")
 		return
 	}
+	code := m[1]
 	name := modelName(code)
 	if name == "" {
 		name = "unknown Yandex device"
 	}
 	name += " (" + code + ")"
-	if !supported {
+	if abis(code) == nil {
 		skip(name + " — not supported yet, skipped")
 		return
 	}
 	if uid, _ := sh(s, "id -u"); uid != "0" {
 		skip(name + " — adb is not root, skipped")
+		return
+	}
+	// `; true`: a missing loader is not an error. Without it the last [ -x ] exits 1 on a
+	// normal Midi (no armhf loader) and sh() reports a failure that is not an adb failure.
+	loaders, err := sh(s, `[ -x /lib/ld-linux-aarch64.so.1 ] && echo aarch64; [ -x /lib/ld-linux-armhf.so.3 ] && echo armhf; true`)
+	if err != nil {
+		skip("adb not usable (unauthorized or offline)")
+		return
+	}
+	arch := archOf(code, strings.Fields(loaders))
+	if arch == "" {
+		skip(name + " — unsupported userland ABI, skipped")
 		return
 	}
 	var state string
@@ -103,6 +114,10 @@ func probe(s string, ours bool) {
 	} else {
 		state = "stock Yandex"
 	}
-	found = append(found, station{s, archOf(code), hasZigbee(code)})
-	fmt.Printf("  [%d] %s: %s — %s\n", len(found), s, name, state)
+	found = append(found, station{s, arch, hasZigbee(code)})
+	note := ""
+	if arch != abis(code)[0] {
+		note = ", " + arch + " build"
+	}
+	fmt.Printf("  [%d] %s: %s — %s%s\n", len(found), s, name, state, note)
 }

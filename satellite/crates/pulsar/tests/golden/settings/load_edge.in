@@ -1,0 +1,13 @@
+volume2=1e40
+volume=-3
+zigbee_flash_failed=-1
+led_speed=10
+clock_scroll_ms=99999
+zigbee_role=router
+music_viz=Disco
+clock_brightness=1e-5
+light_brightness=-0
+light_b=inf
+led_case_color=sky blue
+light_on=1
+clock_music=Off
