@@ -12,6 +12,8 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 		{"cucumber falls back to armhf userspace", "cucumber", []string{"armhf"}, "armhf"},
 		{"plum stays armhf", "plum", []string{"aarch64", "armhf"}, "armhf"},
 		{"plum without its loader is skipped", "plum", []string{"aarch64"}, ""},
+		{"station-mini2 is armhf", "station-mini2", []string{"aarch64", "armhf"}, "armhf"},
+		{"station-mini2 without its loader is skipped", "station-mini2", []string{"aarch64"}, ""},
 		{"no compatible loader", "cucumber", nil, ""},
 		{"unsupported model", "unknown", []string{"aarch64", "armhf"}, ""},
 	}
@@ -21,5 +23,32 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 				t.Fatalf("archOf(%q, %v) = %q, want %q", tt.code, tt.loaders, got, tt.want)
 			}
 		})
+	}
+}
+
+// The devicetree compatible list as `tr '\0' '\n'` leaves it.
+func TestStationCode(t *testing.T) {
+	cases := []struct {
+		compat, code string
+		supported    bool
+	}{
+		// Board-specific variants come first; only the exact supported codename may win.
+		{"yandex,cucumber-dvt2\nyandex,cucumber\namlogic, a5", "cucumber", true},
+		{"yandex,plum\namlogic, axg", "plum", true},
+		// Mini 2: the codename contains a hyphen.
+		{"yandex,station-mini2\namlogic, axg", "station-mini2", true},
+		// adb's pty line ends and the old separator (spaces) work too.
+		{"yandex,station-mini2\r\namlogic, axg\r\n", "station-mini2", true},
+		{"yandex,cucumber-dvt2 yandex,cucumber amlogic, a5", "cucumber", true},
+		// Some other station: named from its codename, then skipped as unsupported.
+		{"yandex,station\namlogic, axg", "station", false},
+		{"yandex,cucumber-dvt2\namlogic, a5", "cucumber-dvt2", false},
+		{"amlogic, axg", "", false},
+	}
+	for _, c := range cases {
+		code, supported := stationCode(c.compat)
+		if code != c.code || supported != c.supported {
+			t.Errorf("%q: got (%q, %v), want (%q, %v)", c.compat, code, supported, c.code, c.supported)
+		}
 	}
 }

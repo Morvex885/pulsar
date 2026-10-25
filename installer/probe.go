@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 )
@@ -15,6 +14,8 @@ func modelName(code string) string {
 		return "Yandex Station Midi"
 	case "plum":
 		return "Yandex Station Lite 2"
+	case "station-mini2":
+		return "Yandex Station Mini 2"
 	}
 	return ""
 }
@@ -23,14 +24,14 @@ func modelName(code string) string {
 // supported. The installed binary is build/<arch>/pulsar for the first ABI whose dynamic loader
 // is on the station. A second ABI is only for a userspace actually seen on that model: some Midi
 // images run a 32-bit userspace on the 64-bit kernel (#13) and need the armhf build (its ALSA
-// ABI is the one in audio/alsa_abi.h, #14). Lite 2 stays armhf-only: no 64-bit plum firmware has
-// been seen, and the aarch64 binary needs glibc 2.34 — on a miss it would crash-loop back to
-// the Yandex stack (no .prev on a first install).
+// ABI is the one in audio/alsa_abi.h, #14). Lite 2 and Mini 2 stay armhf-only: no 64-bit
+// userspace has been seen on them, and the aarch64 binary needs glibc 2.34 — on a miss it would
+// crash-loop back to the Yandex stack (no .prev on a first install).
 func abis(code string) []string {
 	switch code {
 	case "cucumber":
 		return []string{"aarch64", "armhf"}
-	case "plum":
+	case "plum", "station-mini2":
 		return []string{"armhf"}
 	}
 	return nil
@@ -59,7 +60,27 @@ type station struct {
 // found: installable stations, in the order printed by probe.
 var found []station
 
-var codename = regexp.MustCompile(`yandex,([a-z0-9_]*)`)
+// stationCode picks the model from the devicetree compatible list (NUL-separated, one entry per
+// line or space-separated here). The first entry with a supported codename wins: the list starts
+// with board-specific variants, e.g. "yandex,cucumber-dvt2" before "yandex,cucumber" on the Midi.
+// The first codename is returned even when nothing is supported, so that probe can name the
+// unknown device.
+func stationCode(compat string) (string, bool) {
+	var first string
+	for _, entry := range strings.Fields(compat) {
+		code, ok := strings.CutPrefix(entry, "yandex,")
+		if !ok || code == "" {
+			continue
+		}
+		if first == "" {
+			first = code
+		}
+		if abis(code) != nil {
+			return code, true
+		}
+	}
+	return first, false
+}
 
 // probe prints one status line for s and records it in found if it is installable. A device we
 // connected to ourselves is disconnected again when it is not.
@@ -70,23 +91,22 @@ func probe(s string, ours bool) {
 			disconnect(s)
 		}
 	}
-	compat, err := sh(s, `tr '\0' ' ' </proc/device-tree/compatible`)
+	compat, err := sh(s, `tr '\0' '\n' </proc/device-tree/compatible`)
 	if err != nil {
 		skip("adb not usable (unauthorized or offline)")
 		return
 	}
-	m := codename.FindStringSubmatch(compat)
-	if m == nil || m[1] == "" {
+	code, supported := stationCode(compat)
+	if code == "" {
 		skip("not a Yandex Station")
 		return
 	}
-	code := m[1]
 	name := modelName(code)
 	if name == "" {
 		name = "unknown Yandex device"
 	}
 	name += " (" + code + ")"
-	if abis(code) == nil {
+	if !supported {
 		skip(name + " — not supported yet, skipped")
 		return
 	}

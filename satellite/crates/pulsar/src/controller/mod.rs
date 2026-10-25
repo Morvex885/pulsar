@@ -33,9 +33,6 @@ use logic::{HaTimer, Phase, RunBinding};
 const MODELS: &str = "/system/vendor/quasar/spotter_models/activation/";
 const COMMAND_MODEL: &str = "/system/vendor/quasar/spotter_models/command";
 const SOUNDS: &str = "/system/vendor/quasar/sounds/";
-const SND_WAKE: &str = "/system/vendor/quasar/sounds/common/spotter_start.mp3";
-const SND_CANCEL: &str = "/system/vendor/quasar/sounds/common/spotter_cancel.mp3";
-const SND_TIMER: &str = "/system/vendor/quasar/sounds/common/timer.wav";
 const DUCK_GAIN: f32 = 0.15;
 const TIMER_RING_MAX_MS: i64 = 15 * 60 * 1000;
 // Longest wait for the next pipeline event before the dialog is given up locally. HA's voice
@@ -324,6 +321,8 @@ impl Controller {
                     .collect()
             },
             key_path: Some(logic::in_dir(&dir, "api_key")),
+            has_clock: model.has_clock || pulsar_clock::panel_present(model),
+            has_lux: model.has_lux,
         };
         // The C++ server bound its port last (ApiServer::start); here the bind comes first, so
         // a failure exits before the hardware starts. Nothing reaches the server before `run`.
@@ -331,7 +330,7 @@ impl Controller {
             .map_err(|_| "ESPHome API server failed to start".to_owned())?;
         // Before any other thread exists: the player's spawn sets SSL_CERT_FILE (set_var), which
         // C code on another thread could be reading.
-        let (player, player_rx) = pulsar_media::spawn();
+        let (player, player_rx) = pulsar_media::spawn(model.playback_pcm);
         let (arbiter, arbiter_rx) = arbiter::spawn(id.name.clone(), ports.arbiter);
 
         // Hardware first: UI feedback should work even if HA is not connected.
@@ -414,7 +413,11 @@ impl Controller {
             }
         };
         let hw_mic_muted = input.as_ref().is_some_and(InputHandle::hw_muted);
-        let lux_rx = pulsar_clock::spawn_light_sensor(LUX_PERIOD_MS).ok();
+        let lux_rx = if model.has_lux {
+            pulsar_clock::spawn_light_sensor(LUX_PERIOD_MS).ok()
+        } else {
+            None
+        };
         let (mic, mic_rx) = pulsar_audio::spawn(
             model,
             model_dir(&st.wake_word),
@@ -428,6 +431,7 @@ impl Controller {
             software_version: id.project_version.clone(),
             mac: id.mac.to_ascii_lowercase(),
             state_dir: logic::in_dir(&dir, "sendspin"),
+            playback_pcm: model.playback_pcm,
             port: ports.sendspin,
         };
         let (sendspin, sendspin_rx) = match pulsar_sendspin::spawn(ss_cfg, st.volume, st.muted) {

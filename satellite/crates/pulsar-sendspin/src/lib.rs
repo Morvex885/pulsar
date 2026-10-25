@@ -1,6 +1,6 @@
 //! Native Sendspin player (Music Assistant's synchronized streaming protocol) on the official
 //! sendspin-cpp client library, through the C shim in `shim/`. Roles: player (own ALSA sink on
-//! the `speakers` dmix), metadata, controller (transport commands), visualizer (8 log bands
+//! the playback dmix), metadata, controller (transport commands), visualizer (8 log bands
 //! 40 Hz–7.6 kHz, loudness, beats → `MusicFrame`).
 //!
 //! sendspin-cpp is only linked in the station builds of the Makefile (cfg `sendspin_ffi`, set by
@@ -48,6 +48,9 @@ pub struct SendspinConfig {
     pub mac: String,
     /// Identity / pairing persistence directory (created 0700 if missing, not recursively).
     pub state_dir: PathBuf,
+    /// ALSA PCM of the player sink (`Model::playback_pcm`), mixed with the GStreamer channels by
+    /// its dmix.
+    pub playback_pcm: &'static str,
     pub port: u16,
 }
 
@@ -131,6 +134,7 @@ mod tests {
             software_version: String::new(),
             mac: String::new(),
             state_dir: PathBuf::from("/nonexistent"),
+            playback_pcm: "speakers",
             port: 0,
         };
         match spawn(cfg, 0.2, false) {

@@ -302,6 +302,8 @@ async fn run(port: u16, name: String, run_s: i64, key_path: Option<PathBuf>) -> 
         case_colors: strings(&["None", "blue"]),
         clock_music_styles: strings(&["Off", "Levels"]),
         zigbee_modes: strings(&["Coordinator", "Router"]),
+        has_clock: true,
+        has_lux: true,
         key_path,
     };
     let Ok((api, mut events)) = spawn(id, cfg) else {

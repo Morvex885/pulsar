@@ -321,3 +321,28 @@ fn event_device_by_name() {
     assert_eq!(find_event_dev_in(devices, "no-handler"), None);
     assert_eq!(find_event_dev_in(devices, "aw9610"), None);
 }
+
+#[test]
+fn mute_gpio_is_an_active_low_input() {
+    let dir = std::env::temp_dir().join(format!("pulsar-hw-gpio-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let line = dir.join("gpio414");
+    std::fs::create_dir_all(&line).unwrap();
+    let d = dir.to_str().unwrap();
+    // Neither the line nor an export file: nothing.
+    assert!(open_mute_gpio(d, 415, true).is_none());
+    // An output is never taken over (nor reconfigured).
+    std::fs::write(line.join("value"), "0\n").unwrap();
+    std::fs::write(line.join("direction"), "out\n").unwrap();
+    assert!(open_mute_gpio(d, 414, true).is_none());
+    assert_eq!(
+        std::fs::read_to_string(line.join("direction")).unwrap(),
+        "out\n"
+    );
+    std::fs::write(line.join("direction"), "in\n").unwrap();
+    let f = open_mute_gpio(d, 414, true).unwrap();
+    assert!(gpio_muted(&f).unwrap());
+    std::fs::write(line.join("value"), "1\n").unwrap();
+    assert!(!gpio_muted(&f).unwrap());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

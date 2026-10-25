@@ -1,5 +1,5 @@
 //! Playback through the firmware's GStreamer (channels Music / Announce) and the master volume
-//! (ALSA "Master Playback Volume", softvol of the `speakers` PCM).
+//! (ALSA "Master Playback Volume", softvol of the model's playback PCM).
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]

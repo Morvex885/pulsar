@@ -1,8 +1,9 @@
-//! Master output volume: the softvol "Master Playback Volume" of the "speakers" PCM on card 0
-//! (2 values, 0..255, linear in dB, Midi -60 dB..0 dB; TLV mute=0, i.e. raw 0 is the bottom of
-//! the range, not silence), on the stock curve of the model (`Model::volume_map`): volume v is
-//! platform level v * top level. The control is a user control that alsa-lib creates the first
-//! time the "speakers" PCM is opened, so [`Mixer::open`] instantiates it if missing.
+//! Master output volume: the softvol "Master Playback Volume" of the model's playback PCM
+//! (`Model::playback_pcm`) on card 0 (2 values, 0..255, linear in dB, Midi -60 dB..0 dB; TLV
+//! mute=0, i.e. raw 0 is the bottom of the range, not silence), on the stock curve of the model
+//! (`Model::volume_map`): volume v is platform level v * top level. The control is a user control
+//! that alsa-lib creates the first time the playback PCM is opened, so [`Mixer::open`]
+//! instantiates it if missing.
 //!
 //! The curves repeat the C++ arithmetic step by step (f32 / f64 / int as there): state.conf
 //! values written by one binary are read by the other (`.prev`).
@@ -14,8 +15,8 @@ use pulsar_core::model::Model;
 const MASTER: &str = "Master Playback Volume";
 
 /// Raw control value of volume `v` (0..1). Level p = v * top level, piecewise linear through the
-/// map. Any audible volume is at least the lowest stock step (level 1): the stock firmware never
-/// sets the raw values between it and 0.
+/// map. With `Model::volume_min_step` any audible volume is at least the lowest stock step (the
+/// map's second point): the stock firmware never sets the raw values between it and 0.
 pub fn to_raw(model: &Model, v: f32) -> i64 {
     let m = model.volume_map;
     if v <= 0.0 || m.len() < 2 {
@@ -23,10 +24,10 @@ pub fn to_raw(model: &Model, v: f32) -> i64 {
     }
     // A float product in C++ (std::min(1.0f, v) * int), widened afterwards.
     let p = f64::from(v.min(1.0) * m[m.len() - 1].level as f32);
-    if p <= f64::from(m[1].level) {
+    if model.volume_min_step && p <= f64::from(m[1].level) {
         return i64::from(m[1].raw);
     }
-    for w in m[1..].windows(2) {
+    for w in m.windows(2) {
         let (a, b) = (w[0], w[1]);
         if p <= f64::from(b.level) {
             // No fused multiply-add here in the station builds: the product is divided first.
@@ -118,7 +119,7 @@ impl Mixer {
         };
         if !ctl.mixer_exists(MASTER) {
             // Opening the softvol PCM once creates the control.
-            drop(Pcm::open("speakers", Stream::Playback, true));
+            drop(Pcm::open(model.playback_pcm, Stream::Playback, true));
             if !ctl.mixer_exists(MASTER) {
                 error!("mixer: control '{MASTER}' not found");
                 return mixer;

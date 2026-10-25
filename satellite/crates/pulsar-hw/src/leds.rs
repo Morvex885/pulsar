@@ -632,6 +632,9 @@ fn trigger_is(led: &str, trig: &str) -> bool {
 
 /// Opens one strip's framebuffer if its trigger is active and the fb has the expected name.
 fn open_strip_fb(model: &Model, s: &LedStrip) -> Option<Framebuffer> {
+    if s.fb_dev.is_empty() {
+        return None; // sysfs-only ring (Mini 2)
+    }
     let red0 = led_name(model, s, "red", 0);
     if !trigger_is(&red0, s.trigger) {
         warn!("leds: trigger {} not active on {red0}", s.trigger);

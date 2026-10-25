@@ -1,6 +1,8 @@
 //! Buttons via evdev (devices matched by name in /proc/bus/input/devices, names per Model).
 //! Station Midi: touch keys "awinic_sar", mute switch "mute"; Station Lite 2: touch keys
-//! "aw9610x", mute switch "gpio-keys". Both use the same key codes and switch:
+//! "aw9610x", mute switch "gpio-keys"; Station Mini 2: touch keys "sar0_pad0", no mute switch
+//! device: the latched mute line is a GPIO (`Model::mute_gpio`, low = muted), sampled every
+//! 100 ms. All use the same key codes and switch:
 //!
 //! touch keys (capacitive, EV_KEY only; Midi KEY bitmap "40 0 0 0 0 0 0 0 c000000000000 0"):
 //!   KEY_VOICECOMMAND (582) -> Action     (maind: "ACTIVATE")
@@ -17,8 +19,11 @@
 //! resync.
 
 use std::cell::Cell;
+use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::FileExt as _;
+use std::path::Path;
 use std::rc::Rc;
 
 use log::{debug, error, info, warn};
@@ -49,6 +54,9 @@ const REPEAT_MS: u64 = 200;
 const MAX_HOLD_MS: u64 = 10000;
 /// Retry period for missing/vanished input devices.
 const REOPEN_MS: u64 = 3000;
+const GPIO_DIR: &str = "/sys/class/gpio";
+/// Sampling period of the mute GPIO (maind polls it too).
+const GPIO_POLL_MS: u64 = 100;
 // maind's buttonsClickLimiter for "activate" (quasar.cfg): touches shorter than 56 ms and clicks
 // closer than 300 ms to the previous one are dropped.
 const MIN_ACTION_PRESS_MS: i64 = 56;
@@ -89,30 +97,55 @@ impl InputHandle {
     }
 }
 
-/// Opens the touch keys (`Model::keys_input`) and the mute switch (`Model::mute_input`); Err
-/// when neither opened. Missing or vanished devices are looked up again every 3 s.
+/// Opens the touch keys (`Model::keys_input`) and the mute switch (`Model::mute_input`, or the
+/// GPIO `Model::mute_gpio`); Err when none opened. Missing or vanished devices are looked up
+/// again every 3 s.
 pub fn spawn_input(
     model: &'static Model,
 ) -> Result<(InputHandle, UnboundedReceiver<InputEvent>), String> {
     let keys = open_dev(model.keys_input, false);
-    let mute = open_dev(model.mute_input, false);
-    if keys.is_none() && mute.is_none() {
+    let mute = if model.mute_input.is_empty() {
+        None
+    } else {
+        open_dev(model.mute_input, false)
+    };
+    let mute_gpio = if model.mute_gpio == 0 {
+        None
+    } else {
+        open_mute_gpio(GPIO_DIR, model.mute_gpio, false)
+    };
+    if keys.is_none() && mute.is_none() && mute_gpio.is_none() {
         return Err("input devices unavailable".to_owned());
     }
     let muted = Rc::new(Cell::new(false));
     let (tx, rx) = unbounded_channel();
     let mut m = Machine::new(Rc::clone(&muted), tx);
+    // The state the controller starts from: no event for it.
     if let Some(fd) = &mute {
-        // The state the controller starts from: no event for it.
         m.read_mute_state(fd.get_ref().switch_state(), false);
+    }
+    if let Some(f) = &mute_gpio
+        && let Ok(v) = gpio_muted(f)
+    {
+        m.set_muted(v, false);
+    }
+    if mute.is_some() || mute_gpio.is_some() {
         info!(
             "input: initial hardware mute {}",
             if muted.get() { "on" } else { "off" }
         );
     }
     m.arm_repeating(Tick::Reopen, REOPEN_MS, REOPEN_MS);
+    if mute_gpio.is_some() {
+        m.arm_repeating(Tick::MuteGpio, GPIO_POLL_MS, GPIO_POLL_MS);
+    }
     let (alive_tx, alive_rx) = unbounded_channel();
-    let devs = Devices { model, keys, mute };
+    let devs = Devices {
+        model,
+        keys,
+        mute,
+        mute_gpio,
+    };
     pulsar_core::actors::spawn_actor("input", run(m, devs, alive_rx));
     Ok((
         InputHandle {
@@ -170,6 +203,49 @@ fn open_dev(name: &str, quiet: bool) -> Option<AsyncFd<Evdev>> {
     }
 }
 
+/// The value file of mute line `gpio` under `dir` (/sys/class/gpio), exported if nobody did. A
+/// global GPIO number only names this pin on the kernel it was read from (on the Midi, 475 is
+/// Wi-Fi SDIO), so the line is never configured: no `direction`, no `edge` write, and it is used
+/// only when it already is an input.
+fn open_mute_gpio(dir: &str, gpio: u32, quiet: bool) -> Option<File> {
+    let line = format!("{dir}/gpio{gpio}");
+    if !Path::new(&line).exists() {
+        pulsar_core::sysfs::write_file(&format!("{dir}/export"), &gpio.to_string());
+    }
+    let direction = pulsar_core::sysfs::read_file(&format!("{line}/direction")).unwrap_or_default();
+    let direction = pulsar_core::sysfs::trim(&direction);
+    if direction != "in" {
+        if !quiet {
+            warn!("input: gpio{gpio} is not an input ('{direction}'), no mute switch");
+        }
+        return None;
+    }
+    let path = format!("{line}/value");
+    // A value file that opens but cannot be read is no switch either.
+    let opened = File::open(&path).and_then(|f| gpio_muted(&f).map(|_| f));
+    match opened {
+        Ok(f) => {
+            info!("input: mute switch on gpio{gpio}");
+            Some(f)
+        }
+        Err(e) => {
+            if !quiet {
+                error!("input: {path}: {}", crate::errstr(&e));
+            }
+            None
+        }
+    }
+}
+
+/// Mute line level: pulled up, held low by the mic circuit while the microphones are cut.
+fn gpio_muted(f: &File) -> io::Result<bool> {
+    let mut b = [0u8; 1];
+    if f.read_at(&mut b, 0)? == 0 {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(b[0] == b'0')
+}
+
 fn test_bit(bits: &[u8], n: u16) -> bool {
     bits.get(usize::from(n / 8))
         .is_some_and(|b| (b >> (n % 8)) & 1 == 1)
@@ -183,6 +259,8 @@ enum Tick {
     RepeatDelay,
     Repeat,
     Reopen,
+    /// Sampling of the mute GPIO.
+    MuteGpio,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,7 +286,7 @@ struct Machine {
     keys_dropped: bool,
     mute_dropped: bool,
     /// Per `Tick`: bumped whenever the timer is armed or cancelled.
-    generation: [u64; 4],
+    generation: [u64; 5],
 }
 
 fn volume_button(code: u16) -> Button {
@@ -233,7 +311,7 @@ impl Machine {
             repeat_since: 0,
             keys_dropped: false,
             mute_dropped: false,
-            generation: [0; 4],
+            generation: [0; 5],
         }
     }
 
@@ -338,7 +416,7 @@ impl Machine {
         }
     }
 
-    /// Handles a key timer (`Tick::Reopen` belongs to the actor).
+    /// Handles a key timer (`Tick::Reopen` and `Tick::MuteGpio` belong to the actor).
     fn on_timer(&mut self, t: Tick) {
         match t {
             Tick::Action => {
@@ -373,7 +451,7 @@ impl Machine {
                 }
                 self.emit(volume_button(code), Press::Short);
             }
-            Tick::Reopen => {}
+            Tick::Reopen | Tick::MuteGpio => {}
         }
     }
 
@@ -468,6 +546,8 @@ struct Devices {
     model: &'static Model,
     keys: Option<AsyncFd<Evdev>>,
     mute: Option<AsyncFd<Evdev>>,
+    /// Value file of `Model::mute_gpio`.
+    mute_gpio: Option<File>,
 }
 
 impl Devices {
@@ -495,11 +575,37 @@ impl Devices {
             self.keys = open_dev(self.model.keys_input, true);
             m.keys_dropped = false;
         }
-        if self.mute.is_none() {
+        if self.mute.is_none() && !self.model.mute_input.is_empty() {
             self.mute = open_dev(self.model.mute_input, true);
             m.mute_dropped = false;
             if let Some(fd) = &self.mute {
                 m.read_mute_state(fd.get_ref().switch_state(), true);
+            }
+        }
+        if self.mute_gpio.is_none() && self.model.mute_gpio != 0 {
+            self.mute_gpio = open_mute_gpio(GPIO_DIR, self.model.mute_gpio, true);
+            if self.mute_gpio.is_some() {
+                m.arm_repeating(Tick::MuteGpio, GPIO_POLL_MS, GPIO_POLL_MS);
+                self.poll_mute_gpio(m);
+            }
+        }
+    }
+
+    /// Samples the mute line (sysfs value files are always readable: waiting for POLLPRI would
+    /// need an `edge` written to the pin, which stays as found). A read error drops the file and
+    /// stops the sampling until the reopen timer finds the line readable again.
+    fn poll_mute_gpio(&mut self, m: &mut Machine) {
+        let Some(f) = &self.mute_gpio else { return };
+        match gpio_muted(f) {
+            Ok(v) => m.set_muted(v, true),
+            Err(e) => {
+                error!(
+                    "input: read gpio{}: {}",
+                    self.model.mute_gpio,
+                    crate::errstr(&e)
+                );
+                self.mute_gpio = None;
+                m.disarm(Tick::MuteGpio);
             }
         }
     }
@@ -521,6 +627,7 @@ async fn run(mut m: Machine, mut devs: Devices, mut alive: UnboundedReceiver<()>
             biased;
             t = m.timers.next() => match t {
                 Tick::Reopen => devs.reopen_missing(&mut m),
+                Tick::MuteGpio => devs.poll_mute_gpio(&mut m),
                 t => m.on_tick(t, |m| {
                     drain(m, &mut devs, Dev::Keys, &mut buf, Read::Now);
                     drain(m, &mut devs, Dev::Mute, &mut buf, Read::Now);

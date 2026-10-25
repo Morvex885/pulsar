@@ -55,8 +55,9 @@ struct VolumeCap {
 }
 
 impl VolumeCap {
-    /// Ok(None): no such control (a host without the station's softvol), nothing to cap.
-    fn apply() -> Result<Option<Self>, String> {
+    /// Ok(None): no such control (a host without the station's softvol), nothing to cap. `pcm`:
+    /// the softvol PCM opened to create the control.
+    fn apply(pcm: &str) -> Result<Option<Self>, String> {
         let ctl = match Ctl::open("hw:0") {
             Ok(ctl) => ctl,
             Err(e) => {
@@ -66,7 +67,7 @@ impl VolumeCap {
         };
         if !ctl.mixer_exists(MASTER) {
             // Opening the softvol PCM once creates the control.
-            drop(Pcm::open("speakers", Stream::Playback, true));
+            drop(Pcm::open(pcm, Stream::Playback, true));
             if !ctl.mixer_exists(MASTER) {
                 println!("volume: no '{MASTER}' on hw:0, not capped");
                 return Ok(None);
@@ -122,7 +123,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let cap = match VolumeCap::apply() {
+    // The station's playback PCM; off a station the stock name, as the cap finds no control
+    // (read directly: detect_model would log an error on a host).
+    let pcm = std::fs::read("/proc/device-tree/compatible")
+        .ok()
+        .and_then(|raw| pulsar_core::model::model_from_compatible(&raw))
+        .map_or("speakers", |m| m.playback_pcm);
+    let cap = match VolumeCap::apply(pcm) {
         Ok(cap) => cap,
         Err(e) => {
             eprintln!("{e}");
@@ -141,7 +148,7 @@ fn main() -> ExitCode {
         }
     };
     let local = tokio::task::LocalSet::new();
-    let result = local.block_on(&rt, run(&args));
+    let result = local.block_on(&rt, run(&args, pcm));
     local.block_on(&rt, actors::join_all(Duration::from_secs(3)));
     drop(local);
     rt.shutdown_timeout(Duration::from_secs(1));
@@ -170,7 +177,7 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run(args: &Args) -> Result<Counts, String> {
+async fn run(args: &Args, pcm: &'static str) -> Result<Counts, String> {
     if let Some(parent) = args.state_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
@@ -181,6 +188,7 @@ async fn run(args: &Args) -> Result<Counts, String> {
         software_version: "probe".into(),
         mac: String::new(),
         state_dir: args.state_dir.clone(),
+        playback_pcm: pcm,
         port: args.port,
     };
     let (handle, mut events) = pulsar_sendspin::spawn(cfg, 0.2, false)?;

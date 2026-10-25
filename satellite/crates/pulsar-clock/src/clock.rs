@@ -539,18 +539,25 @@ impl Leds {
         let mut found = 0;
         let seg = std::array::from_fn(|d| {
             std::array::from_fn(|s| {
-                let name = Self::seg_name(model, d, s);
-                let f = Self::open_led(model, &name);
-                match f {
-                    Some(_) => found += 1,
-                    None => warn!("clock: missing segment {name}"),
+                let f = Self::open_led(model, &Self::seg_name(model, d, s));
+                if f.is_some() {
+                    found += 1;
                 }
                 f
             })
         });
+        let total = DIGITS * SEGS;
         if found == 0 {
-            error!("clock: no clock segments found");
+            // The whole panel is absent: one line, not one per LED.
+            if model.has_clock {
+                error!("clock: no clock segments under {}", model.clock_dir);
+            } else {
+                info!("clock: no clock segments under {}", model.clock_dir);
+            }
             return None;
+        }
+        if found < total {
+            warn!("clock: {} of {total} segments missing", total - found);
         }
         let colon: Vec<File> = model
             .clock_colon
@@ -795,6 +802,21 @@ impl Clock {
     }
 }
 
+/// Whether any clock segment of `model` exists in sysfs (decides the clock entities of a model
+/// whose panel may be missing, `Model::has_clock` false).
+pub fn panel_present(model: &Model) -> bool {
+    (0..DIGITS).any(|d| {
+        (0..SEGS).any(|s| {
+            let led = format!(
+                "{}{}/brightness",
+                model.clock_dir,
+                Leds::seg_name(model, d, s)
+            );
+            std::path::Path::new(&led).exists()
+        })
+    })
+}
+
 /// Clock control; every method queues a command for the clock actor and returns at once. The
 /// handle of a clock that could not be opened does nothing.
 #[derive(Clone)]
@@ -807,7 +829,9 @@ pub struct ClockHandle {
 /// unavailable"), the handle is a no-op.
 pub fn spawn(model: &'static Model) -> ClockHandle {
     let Some(leds) = Leds::open(model) else {
-        warn!("clock unavailable");
+        if model.has_clock {
+            warn!("clock unavailable");
+        }
         return ClockHandle { tx: None };
     };
     let mut clock = Clock {

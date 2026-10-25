@@ -279,13 +279,15 @@ impl Server {
             "mdi:microphone-off",
             None,
         ));
-        out.push(switch(
-            "clock_display",
-            key::SW_CLOCK,
-            "Clock display",
-            "mdi:clock-digital",
-            None,
-        ));
+        if self.cfg.has_clock {
+            out.push(switch(
+                "clock_display",
+                key::SW_CLOCK,
+                "Clock display",
+                "mdi:clock-digital",
+                None,
+            ));
+        }
         let cfg = Some(ENTITY_CATEGORY_CONFIG);
         out.push(switch(
             "auto_update",
@@ -356,14 +358,16 @@ impl Server {
             &self.cfg.case_colors,
             cfg,
         ));
-        out.push(select(
-            "clock_music",
-            key::SELECT_CLOCK_MUSIC,
-            "Clock music",
-            "mdi:equalizer-outline",
-            &self.cfg.clock_music_styles,
-            cfg,
-        ));
+        if self.cfg.has_clock {
+            out.push(select(
+                "clock_music",
+                key::SELECT_CLOCK_MUSIC,
+                "Clock music",
+                "mdi:equalizer-outline",
+                &self.cfg.clock_music_styles,
+                cfg,
+            ));
+        }
         let mut w = Writer::new();
         entity_head(&mut w, "firmware", key::UPDATE, "Firmware");
         w.u32(7, ENTITY_CATEGORY_CONFIG, false);
@@ -379,21 +383,25 @@ impl Server {
         w.str(8, "mdi:microphone-off", false);
         w.u32(9, ENTITY_CATEGORY_DIAGNOSTIC, false);
         out.push((msg::LIST_BINARY_SENSOR, w));
-        let mut w = Writer::new();
-        entity_head(&mut w, "illuminance", key::SENSOR_LUX, "Illuminance");
-        w.str(6, "lx", false);
-        w.i32(7, 0, false);
-        w.str(9, "illuminance", false);
-        w.u32(10, STATE_CLASS_MEASUREMENT, false);
-        out.push((msg::LIST_SENSOR, w));
-        out.push(number(
-            "clock_brightness",
-            key::NUMBER_CLOCK_BRI,
-            "Clock brightness",
-            "mdi:brightness-6",
-            (0.0, 100.0, 1.0),
-            "%",
-        ));
+        if self.cfg.has_lux {
+            let mut w = Writer::new();
+            entity_head(&mut w, "illuminance", key::SENSOR_LUX, "Illuminance");
+            w.str(6, "lx", false);
+            w.i32(7, 0, false);
+            w.str(9, "illuminance", false);
+            w.u32(10, STATE_CLASS_MEASUREMENT, false);
+            out.push((msg::LIST_SENSOR, w));
+        }
+        if self.cfg.has_clock {
+            out.push(number(
+                "clock_brightness",
+                key::NUMBER_CLOCK_BRI,
+                "Clock brightness",
+                "mdi:brightness-6",
+                (0.0, 100.0, 1.0),
+                "%",
+            ));
+        }
         let mut w = Writer::new();
         entity_head(&mut w, "ring", key::LIGHT_RING, "Ring");
         w.str(11, "None", true);
@@ -455,27 +463,29 @@ impl Server {
             "mdi:ip-network",
         ));
         out.push(text("version", key::TEXT_VERSION, "Version", "mdi:new-box"));
-        out.push(number(
-            "clock_text_speed",
-            key::NUMBER_CLOCK_SCROLL,
-            "Clock text speed",
-            "mdi:speedometer",
-            (100.0, 2000.0, 50.0),
-            "ms",
-        ));
-        let mut w = Writer::new();
-        entity_head(&mut w, "clock_text", key::TEXT_CLOCK, "Clock text");
-        w.str(5, "mdi:form-textbox", false);
-        w.u32(9, CLOCK_TEXT_MAX as u32, false); // max_length
-        out.push((msg::LIST_TEXT, w));
-        out.push(select(
-            "clock_face",
-            key::SELECT_CLOCK_FACE,
-            "Clock face",
-            "mdi:emoticon-outline",
-            &self.cfg.clock_faces,
-            None,
-        ));
+        if self.cfg.has_clock {
+            out.push(number(
+                "clock_text_speed",
+                key::NUMBER_CLOCK_SCROLL,
+                "Clock text speed",
+                "mdi:speedometer",
+                (100.0, 2000.0, 50.0),
+                "ms",
+            ));
+            let mut w = Writer::new();
+            entity_head(&mut w, "clock_text", key::TEXT_CLOCK, "Clock text");
+            w.str(5, "mdi:form-textbox", false);
+            w.u32(9, CLOCK_TEXT_MAX as u32, false); // max_length
+            out.push((msg::LIST_TEXT, w));
+            out.push(select(
+                "clock_face",
+                key::SELECT_CLOCK_FACE,
+                "Clock face",
+                "mdi:emoticon-outline",
+                &self.cfg.clock_faces,
+                None,
+            ));
+        }
         if !self.cfg.zigbee_modes.is_empty() {
             out.push(select(
                 "zigbee_role",
@@ -519,16 +529,18 @@ impl Server {
             }
             (msg::LIST_SERVICES, w)
         };
-        out.push(action(
-            "clock_show_text",
-            key::ACTION_CLOCK_TEXT,
-            &[("text", SERVICE_ARG_STRING), ("seconds", SERVICE_ARG_INT)],
-        ));
-        out.push(action(
-            "clock_show_face",
-            key::ACTION_CLOCK_FACE,
-            &[("face", SERVICE_ARG_STRING), ("seconds", SERVICE_ARG_INT)],
-        ));
+        if self.cfg.has_clock {
+            out.push(action(
+                "clock_show_text",
+                key::ACTION_CLOCK_TEXT,
+                &[("text", SERVICE_ARG_STRING), ("seconds", SERVICE_ARG_INT)],
+            ));
+            out.push(action(
+                "clock_show_face",
+                key::ACTION_CLOCK_FACE,
+                &[("face", SERVICE_ARG_STRING), ("seconds", SERVICE_ARG_INT)],
+            ));
+        }
         out.push(action(
             "led_show",
             key::ACTION_LED_SHOW,
@@ -665,6 +677,7 @@ impl Server {
 
     pub(super) fn send_all_states(&mut self, id: u64) {
         let to = Some(id);
+        let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
         let c = &self.cache;
         let (mic, clock, auto, nearest, voice, hw) = (
             c.sw_mic_mute,
@@ -677,14 +690,20 @@ impl Server {
         let (lux, bri, scroll, speed) = (c.lux, c.clock_bri, c.clock_scroll, c.led_speed);
         self.send_media(to);
         self.send_bool(msg::SWITCH_STATE, key::SW_MIC_MUTE, mic, to);
-        self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK, clock, to);
+        if has_clock {
+            self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK, clock, to);
+        }
         self.send_bool(msg::SWITCH_STATE, key::SW_AUTO_UPDATE, auto, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_NEAREST_ANSWERS, nearest, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_VOICE_INDICATION, voice, to);
         self.send_update(to);
         self.send_bool(msg::BINARY_SENSOR_STATE, key::BS_HW_MIC_MUTE, hw, to);
-        self.send_float(msg::SENSOR_STATE, key::SENSOR_LUX, lux, to);
-        self.send_float(msg::NUMBER_STATE, key::NUMBER_CLOCK_BRI, bri, to);
+        if has_lux {
+            self.send_float(msg::SENSOR_STATE, key::SENSOR_LUX, lux, to);
+        }
+        if has_clock {
+            self.send_float(msg::NUMBER_STATE, key::NUMBER_CLOCK_BRI, bri, to);
+        }
         self.send_light(to);
         let rssi = self.cache.rssi;
         self.send_float(msg::SENSOR_STATE, key::SENSOR_RSSI, rssi, to);
@@ -698,14 +717,16 @@ impl Server {
             true,
             to,
         );
-        self.send_float(msg::NUMBER_STATE, key::NUMBER_CLOCK_SCROLL, scroll, to);
-        self.send_cached_str(msg::TEXT_STATE, key::TEXT_CLOCK, |c| &c.clock_text, to);
-        self.send_cached_str(
-            msg::SELECT_STATE,
-            key::SELECT_CLOCK_FACE,
-            |c| &c.clock_face,
-            to,
-        );
+        if has_clock {
+            self.send_float(msg::NUMBER_STATE, key::NUMBER_CLOCK_SCROLL, scroll, to);
+            self.send_cached_str(msg::TEXT_STATE, key::TEXT_CLOCK, |c| &c.clock_text, to);
+            self.send_cached_str(
+                msg::SELECT_STATE,
+                key::SELECT_CLOCK_FACE,
+                |c| &c.clock_face,
+                to,
+            );
+        }
         self.send_float(msg::NUMBER_STATE, key::NUMBER_LED_SPEED, speed, to);
         self.send_cached_str(
             msg::SELECT_STATE,
@@ -719,12 +740,14 @@ impl Server {
             |c| &c.case_color,
             to,
         );
-        self.send_cached_str(
-            msg::SELECT_STATE,
-            key::SELECT_CLOCK_MUSIC,
-            |c| &c.clock_music,
-            to,
-        );
+        if has_clock {
+            self.send_cached_str(
+                msg::SELECT_STATE,
+                key::SELECT_CLOCK_MUSIC,
+                |c| &c.clock_music,
+                to,
+            );
+        }
         if !self.cfg.zigbee_modes.is_empty() {
             self.send_cached_str(
                 msg::SELECT_STATE,
@@ -775,6 +798,8 @@ impl Server {
 
     pub(super) fn publish(&mut self, p: Publish) {
         let on = self.states_on();
+        // Entities the device does not list get no states; their caches are kept all the same.
+        let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
         let c = &mut self.cache;
         match p {
             Publish::Media(st, volume, muted) => {
@@ -799,7 +824,7 @@ impl Server {
                 };
                 *s = BoolState { has: true, v };
                 let s = *s;
-                if on {
+                if on && (has_clock || !matches!(id, SwitchId::Clock)) {
                     self.send_bool(msg::SWITCH_STATE, key, s, None);
                 }
             }
@@ -813,7 +838,7 @@ impl Server {
             Publish::Sensor(SensorId::Illuminance, v) => {
                 c.lux = FloatState { has: true, v };
                 let s = c.lux;
-                if on {
+                if on && has_lux {
                     self.send_float(msg::SENSOR_STATE, key::SENSOR_LUX, s, None);
                 }
             }
@@ -825,12 +850,12 @@ impl Server {
                 };
                 *s = FloatState { has: true, v };
                 let s = *s;
-                if on {
+                if on && (has_clock || matches!(id, NumberId::LedSpeed)) {
                     self.send_float(msg::NUMBER_STATE, key, s, None);
                 }
             }
             Publish::Text(TextId::ClockText, v) => {
-                if on {
+                if on && has_clock {
                     self.send_str(msg::TEXT_STATE, key::TEXT_CLOCK, &v, true, None);
                 }
                 self.cache.clock_text = StrState { has: true, v };
@@ -843,7 +868,7 @@ impl Server {
                     SelectId::CaseColor => key::SELECT_CASE_COLOR,
                     SelectId::ClockMusic => key::SELECT_CLOCK_MUSIC,
                 };
-                if on {
+                if on && (has_clock || !matches!(id, SelectId::ClockFace | SelectId::ClockMusic)) {
                     self.send_str(msg::SELECT_STATE, key, &v, true, None);
                 }
                 let c = &mut self.cache;

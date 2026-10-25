@@ -1,5 +1,5 @@
-//! Audio playback through the GStreamer build bundled with the Yandex firmware into the ALSA
-//! "speakers" PCM (dmix + softvol). Two independent channels:
+//! Audio playback through the GStreamer build bundled with the Yandex firmware into the model's
+//! ALSA playback PCM (`Model::playback_pcm`: dmix + softvol). Two independent channels:
 //!   Music    - media_player content, can be paused / ducked.
 //!   Announce - TTS, announcements, earcons; plays over (ducked) music.
 //!
@@ -820,9 +820,9 @@ impl Drop for GlibThread {
     }
 }
 
-fn new_pipeline(api: &'static Api, ch: Channel) -> Option<Pipeline> {
+fn new_pipeline(api: &'static Api, ch: Channel, pcm: &str) -> Option<Pipeline> {
     let desc = format!(
-        "playbin name=ch{} audio-sink=\"alsasink device=speakers\"",
+        "playbin name=ch{} audio-sink=\"alsasink device={pcm}\"",
         ch.index()
     );
     let mut p = Pipeline::launch(api, &CString::new(desc).ok()?)?;
@@ -836,7 +836,7 @@ fn new_pipeline(api: &'static Api, ch: Channel) -> Option<Pipeline> {
 }
 
 /// dlopen + gst_init + static plugin registration + the GLib thread (C++ Player::init).
-fn start(shared: &Arc<Shared>) -> Option<GlibThread> {
+fn start(shared: &Arc<Shared>, pcm: &str) -> Option<GlibThread> {
     // One player per process: its GLib thread owns the default main context.
     static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::Relaxed) {
@@ -851,8 +851,8 @@ fn start(shared: &Arc<Shared>) -> Option<GlibThread> {
         return None;
     }
     let pipes = [
-        new_pipeline(api, Channel::Music)?,
-        new_pipeline(api, Channel::Announce)?,
+        new_pipeline(api, Channel::Music, pcm)?,
+        new_pipeline(api, Channel::Announce, pcm)?,
     ];
     let main_loop = Arc::new(MainLoop::new(api)?);
     let machine = Machine::new(Box::new(GstBackend { api, pipes }), Arc::clone(shared));
@@ -892,12 +892,13 @@ pub struct PlayerHandle {
     inner: Rc<Inner>,
 }
 
-/// Starts the player. A failed dlopen / gst_init is logged ("player init failed") and gives a
-/// degraded handle: every play() ends with Done(false) at once and state() stays Idle.
-pub fn spawn() -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
+/// Starts the player on ALSA PCM `pcm` (`Model::playback_pcm`). A failed dlopen / gst_init is
+/// logged ("player init failed") and gives a degraded handle: every play() ends with Done(false)
+/// at once and state() stays Idle.
+pub fn spawn(pcm: &str) -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
     let (tx, rx) = unbounded_channel();
     let shared = Arc::new(Shared::new(tx));
-    let exec = start(&shared).map(|t| Box::new(t) as Box<dyn Exec>);
+    let exec = start(&shared, pcm).map(|t| Box::new(t) as Box<dyn Exec>);
     if exec.is_none() {
         error!("player init failed");
     }
@@ -1717,7 +1718,7 @@ mod tests {
     #[test]
     fn degraded_player_fails_every_play_at_once() {
         // No firmware GStreamer on the host: spawn() gives the degraded handle.
-        let (h, mut rx) = spawn();
+        let (h, mut rx) = spawn("speakers");
         let a = h.play(Music, urls(&["/a.mp3"]));
         assert_eq!(rx.try_recv().unwrap(), Done { id: a, ok: false });
         h.pause(Music);

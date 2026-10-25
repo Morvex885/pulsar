@@ -500,12 +500,14 @@ fn missing_leds_and_chip_current_dedup() {
     let (m, root) = temp_model!("dedup", b"yandex,cucumber\0", "clock-");
     // No segment at all: unavailable.
     assert!(Leds::open(m).is_none());
+    assert!(!panel_present(m));
 
     for d in 0..DIGITS {
         for s in 0..SEGS {
             root.led("clock-", &Leds::seg_name(m, d, s));
         }
     }
+    assert!(panel_present(m));
     let chip_a = root.0.join("chip-a");
     let chip_b = root.0.join("chip-b");
     for c in [&chip_a, &chip_b] {

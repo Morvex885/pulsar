@@ -112,3 +112,15 @@ fn stock_curve_landmarks() {
     assert_eq!(mixer::from_raw(m, 255), 1.0);
     assert_eq!(mixer::from_raw(m, 49), 0.05);
 }
+
+#[test]
+fn mini2_curve_has_no_lowest_step() {
+    // Linear in percent, no jump to a lowest step: low HA volumes stay low (the C++ curve made
+    // any volume of a two-point map full volume).
+    let m = model_from_compatible(b"yandex,station-mini2\0").unwrap();
+    assert_eq!(mixer::to_raw(m, 0.01), 3);
+    assert_eq!(mixer::to_raw(m, 0.05), 13);
+    assert_eq!(mixer::to_raw(m, 0.2), 51);
+    assert_eq!(mixer::to_raw(m, 1.0), 255);
+    assert_eq!(mixer::from_raw(m, 51), 0.2);
+}

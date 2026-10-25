@@ -1,7 +1,7 @@
 # Cross-build for Yandex Stations with cargo-zigbuild: one binary per userland ABI.
 #   ARCH=aarch64  64-bit userspace (Station Midi, glibc 2.36)
-#   ARCH=armhf    32-bit userspace (Station Lite 2, glibc 2.30; also Midi images with an armhf
-#                  userland)
+#   ARCH=armhf    32-bit userspace (Station Lite 2 and Mini 2, glibc 2.30; also Midi images with
+#                  an armhf userland)
 # `make` builds both daemons; `make ARCH=armhf` one of them. Output: build/<arch>/pulsar (stripped,
 # the one deployed) and build/<arch>/pulsar.debug (line tables, for `addr2line -f -e` on the crash
 # report; non-PIE, so the addresses in it are absolute). `make ARCH=armhf tools` builds every tool
@@ -121,7 +121,8 @@ TOOLS     := $(basename $(notdir $(wildcard crates/*/src/bin/*.rs)))
 
 # cargo always runs (FORCE) and decides itself what is out of date; `+` hands it make's jobserver.
 # Builds of both arches share target/ and wait for each other on its lock. The deployed binary is
-# stripped (the Lite 2 has ~80 MB of /data for the binary, its .prev and the upload).
+# stripped (/data holds the binary, its .prev and the upload: ~80 MB on the Lite 2, ~20 MB on the
+# Mini 2).
 binary: $(SS_STAMP) FORCE
 	+$(ZIGBUILD) -p pulsar --bin pulsar
 	@mkdir -p $(BUILD)

@@ -35,6 +35,8 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         case_colors: s(&["None", "blue"]),
         clock_music_styles: s(&["Off", "Levels"]),
         zigbee_modes: s(&["Coordinator", "Router"]),
+        has_clock: true,
+        has_lux: true,
         key_path: None,
     };
     (id, cfg)
@@ -658,6 +660,72 @@ async fn states_go_to_subscribers_and_zigbee_entities_need_modes() {
             p.send(msg::BUTTON_CMD, &kv(key::BUTTON_ZIGBEE_JOIN, |_| {}))
                 .await;
             assert!(drain(&mut p, &mut rx).await.is_empty());
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn clock_and_lux_entities_need_the_hardware() {
+    local()
+        .run_until(async {
+            let (id, mut cfg) = selftest("now");
+            cfg.has_clock = false;
+            cfg.has_lux = false;
+            let (h, mut rx, port) = start_with(id, cfg);
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            event(&mut rx).await;
+            publish_selftest_states(&h);
+            h.publish_sensor(SensorId::Illuminance, 7.0);
+            let gone = [
+                key::SW_CLOCK,
+                key::SELECT_CLOCK_MUSIC,
+                key::NUMBER_CLOCK_BRI,
+                key::NUMBER_CLOCK_SCROLL,
+                key::TEXT_CLOCK,
+                key::SELECT_CLOCK_FACE,
+                key::ACTION_CLOCK_TEXT,
+                key::ACTION_CLOCK_FACE,
+                key::SENSOR_LUX,
+            ];
+            p.send(msg::LIST_ENTITIES_REQ, &Writer::new()).await;
+            let mut keys = Vec::new();
+            loop {
+                let (t, m) = p.recv().await.unwrap();
+                if t == msg::LIST_DONE {
+                    break;
+                }
+                keys.push(field(&m, 2).unwrap().u32());
+            }
+            assert!(keys.contains(&key::NUMBER_LED_SPEED));
+            for k in gone {
+                assert!(!keys.contains(&k), "entity {k} listed");
+            }
+            p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+            let states = p.sync().await;
+            assert!(
+                states
+                    .iter()
+                    .any(|(_, m)| state_key(m) == Some(key::NUMBER_LED_SPEED))
+            );
+            for k in gone {
+                assert!(
+                    !states.iter().any(|(_, m)| state_key(m) == Some(k)),
+                    "state {k} sent"
+                );
+            }
+            // Subscribed: only the LED speed of these publishes reaches the client.
+            h.publish_switch(SwitchId::Clock, false);
+            h.publish_number(NumberId::ClockScroll, 300.0);
+            h.publish_text(TextId::ClockText, "x");
+            h.publish_select(SelectId::ClockFace, "Smiley");
+            h.publish_select(SelectId::ClockMusic, "Levels");
+            h.publish_sensor(SensorId::Illuminance, 3.0);
+            h.publish_number(NumberId::LedSpeed, 2.0);
+            let got = p.sync().await;
+            assert_eq!(got.len(), 1);
+            assert_eq!(got[0].0, msg::NUMBER_STATE);
+            assert_eq!(state_key(&got[0].1), Some(key::NUMBER_LED_SPEED));
         })
         .await;
 }

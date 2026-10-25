@@ -228,7 +228,7 @@ pub fn spawn(
     let (tx, rx) = unbounded_channel();
     let ctx = Arc::new(Ctx {
         events: Mutex::new(Vec::new()),
-        sink: Sink::new(),
+        sink: Sink::new(cfg.playback_pcm),
         state_dir: cfg.state_dir.clone(),
         tx,
         hooks: AtomicBool::new(true),
@@ -572,7 +572,7 @@ mod tests {
         let (tx, rx) = unbounded_channel();
         let ctx = Ctx {
             events: Mutex::new(Vec::new()),
-            sink: Sink::new(),
+            sink: Sink::new("speakers"),
             state_dir: PathBuf::from("/nonexistent"),
             tx,
             hooks: AtomicBool::new(true),

@@ -1,4 +1,4 @@
-//! ALSA output of the Sendspin player on PCM "speakers" (dmix, mixed with the GStreamer
+//! ALSA output of the Sendspin player on the model's playback PCM (dmix, mixed with the GStreamer
 //! channels). `configure` / `release` run on the runtime thread (stream start / end), `write` on
 //! the library's sync task; the PCM is opened lazily by `write`, so the runtime thread never
 //! blocks on it. `io` is held by `write` for its whole duration, including the snd_pcm_wait
@@ -16,7 +16,6 @@ use pulsar_alsa::{Format, HwRequest, Pcm, Stream};
 use crate::ffi::now_us;
 use crate::gain;
 
-const PCM: &str = "speakers";
 /// Longest snd_pcm_wait() slice inside one write.
 const WAIT_SLICE_MS: i64 = 20;
 const STATS_PERIOD_US: i64 = 10_000_000;
@@ -40,6 +39,8 @@ pub(crate) struct Sink {
 
 /// Audio thread state (under `Sink::io`).
 struct Io {
+    /// ALSA PCM name (`Model::playback_pcm`).
+    device: &'static str,
     pcm: Option<Pcm>,
     active: bool,
     want_rate: u32,
@@ -71,9 +72,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Sink {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(device: &'static str) -> Self {
         Self {
             io: Mutex::new(Io {
+                device,
                 pcm: None,
                 active: false,
                 want_rate: 0,
@@ -354,8 +356,9 @@ impl Io {
                 return false;
             }
         };
+        let device = self.device;
         let mut opened = false;
-        let res = Pcm::open(PCM, Stream::Playback, false)
+        let res = Pcm::open(device, Stream::Playback, false)
             .map_err(|e| ("open", e))
             .and_then(|mut pcm| {
                 opened = true;
@@ -386,7 +389,7 @@ impl Io {
             Err((step, err)) => {
                 if !self.open_failed_logged {
                     error!(
-                        "sendspin: ALSA '{PCM}' {step} failed for {} Hz/{} ch/{} bit: {}",
+                        "sendspin: ALSA '{device}' {step} failed for {} Hz/{} ch/{} bit: {}",
                         self.want_rate,
                         self.want_channels,
                         self.want_bits,
@@ -395,7 +398,7 @@ impl Io {
                 }
                 self.open_failed_logged = true;
                 if opened {
-                    info!("sendspin: ALSA '{PCM}' closed");
+                    info!("sendspin: ALSA '{device}' closed");
                 }
                 self.next_open_us = now + REOPEN_RETRY_US;
                 return false;
@@ -414,7 +417,7 @@ impl Io {
         self.delay_max = 0;
         self.stats_us = now;
         info!(
-            "sendspin: ALSA '{PCM}' open {} Hz/{} ch/{} bit (period {period}, buffer {buffer} frames = {:.0} ms)",
+            "sendspin: ALSA '{device}' open {} Hz/{} ch/{} bit (period {period}, buffer {buffer} frames = {:.0} ms)",
             self.rate,
             self.channels,
             self.bits,
@@ -425,7 +428,7 @@ impl Io {
 
     fn close(&mut self) {
         if self.pcm.take().is_some() {
-            info!("sendspin: ALSA '{PCM}' closed");
+            info!("sendspin: ALSA '{}' closed", self.device);
         }
     }
 

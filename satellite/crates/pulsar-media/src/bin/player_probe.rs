@@ -327,7 +327,7 @@ fn main() -> ExitCode {
         }
     }
 
-    let (player, mut rx) = pulsar_media::spawn();
+    let (player, mut rx) = pulsar_media::spawn(model.playback_pcm);
     let mut probe = Probe {
         t0,
         music: args[1].clone(),
