@@ -118,23 +118,167 @@ fn load_then_save_matches_cxx() {
     }
 }
 
+/// A fresh directory under the system temp dir, removed on drop.
+struct TmpDir(std::path::PathBuf);
+
+impl TmpDir {
+    fn new() -> Self {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "pulsar-settings-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        Self(p)
+    }
+}
+
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn save_is_atomic_and_load_reads_it_back() {
-    let dir = std::env::temp_dir().join(format!("pulsar-settings-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("state.conf");
+    let t = TmpDir::new();
+    let path = t.0.join("state.conf");
     let mut missing = Settings::default();
     assert!(!missing.load(&path));
-    values().save(&path);
-    assert!(!dir.join("state.conf.tmp").exists());
+    assert!(values().save(&path));
+    assert!(!t.0.join("state.conf.tmp").exists());
     assert_eq!(std::fs::read(&path).unwrap(), golden("save_values.conf"));
     let mut s = Settings::default();
     assert!(s.load(&path));
     assert_eq!(s.update_attempt, "v1.2.3");
     // Missing directory: the temporary file cannot be created (logged), nothing written.
-    values().save(&dir.join("no/state.conf"));
-    assert!(!dir.join("no").exists());
-    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(!values().save(&t.0.join("no/state.conf")));
+    assert!(!t.0.join("no").exists());
+}
+
+#[test]
+fn stale_tmp_is_replaced() {
+    // A power cut mid-write leaves `state.conf.tmp`; the next write truncates it.
+    let t = TmpDir::new();
+    let path = t.0.join("state.conf");
+    std::fs::write(t.0.join("state.conf.tmp"), vec![b'x'; 4096]).unwrap();
+    assert!(values().save(&path));
+    assert_eq!(std::fs::read(&path).unwrap(), golden("save_values.conf"));
+    assert!(!t.0.join("state.conf.tmp").exists());
+}
+
+// A write that fails half-way (here ENOSPC from /dev/full behind the temporary name) must not
+// be renamed over the good file.
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_write_keeps_the_old_file() {
+    let t = TmpDir::new();
+    let path = t.0.join("state.conf");
+    let tmp = t.0.join("state.conf.tmp");
+    assert!(values().save(&path));
+    std::os::unix::fs::symlink("/dev/full", &tmp).unwrap();
+    let mut s = values();
+    s.led_speed = 2.0;
+    assert!(!s.save(&path));
+    assert_eq!(std::fs::read(&path).unwrap(), golden("save_values.conf"));
+    assert!(std::fs::symlink_metadata(&tmp).is_err());
+}
+
+/// The file's bytes, None when absent.
+fn on_disk(path: &Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
+}
+
+const NEVER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+#[tokio::test(start_paused = true)]
+async fn changes_coalesce_into_one_write_after_the_last() {
+    use tokio::time::{Duration, Instant, advance, timeout};
+    let t = TmpDir::new();
+    let path = t.0.join("state.conf");
+    let mut sf = StateFile::new(path.clone());
+    let mut st = values();
+    let start = Instant::now();
+    for i in 0..20 {
+        st.led_speed = 0.5 + 0.1 * i as f32;
+        sf.changed();
+        if i < 19 {
+            advance(Duration::from_millis(50)).await;
+        }
+    }
+    // Nothing written before SAVE_DELAY_MS after the last change.
+    assert!(
+        timeout(Duration::from_millis(SAVE_DELAY_MS - 1), sf.due())
+            .await
+            .is_err()
+    );
+    assert_eq!(on_disk(&path), None);
+    sf.due().await;
+    assert_eq!((Instant::now() - start).as_millis(), 19 * 50 + 1000);
+    sf.flush(&st);
+    assert_eq!(on_disk(&path).unwrap(), st.serialize().as_bytes());
+    assert!(st.serialize().contains("\nled_speed=2.4\n"));
+    // One write: nothing else pending.
+    assert!(timeout(NEVER, sf.due()).await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn write_now_bypasses_and_cancels_the_debounce() {
+    let t = TmpDir::new();
+    let path = t.0.join("state.conf");
+    let mut sf = StateFile::new(path.clone());
+    let mut st = values();
+    st.led_speed = 3.0;
+    sf.changed();
+    st.zigbee_flash_failed = 0x5101_0203;
+    sf.write_now(&st);
+    // At once, with the change pending before it.
+    assert_eq!(on_disk(&path).unwrap(), st.serialize().as_bytes());
+    // The delayed write is no longer due, and flush has nothing to write.
+    assert!(tokio::time::timeout(NEVER, sf.due()).await.is_err());
+    std::fs::remove_file(&path).unwrap();
+    sf.flush(&st);
+    assert_eq!(on_disk(&path), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn flush_writes_the_latest_value_once() {
+    let t = TmpDir::new();
+    let path = t.0.join("state.conf");
+    let mut sf = StateFile::new(path.clone());
+    let mut st = values();
+    // Nothing changed: nothing written.
+    sf.flush(&st);
+    assert_eq!(on_disk(&path), None);
+    st.led_speed = 1.5;
+    sf.changed();
+    st.led_speed = 2.5;
+    sf.changed();
+    // The exit flush, before the delay ran out.
+    sf.flush(&st);
+    assert_eq!(on_disk(&path).unwrap(), st.serialize().as_bytes());
+    assert!(tokio::time::timeout(NEVER, sf.due()).await.is_err());
+    std::fs::remove_file(&path).unwrap();
+    sf.flush(&st);
+    assert_eq!(on_disk(&path), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_flush_is_retried() {
+    let t = TmpDir::new();
+    let dir = t.0.join("later");
+    let path = dir.join("state.conf");
+    let mut sf = StateFile::new(path.clone());
+    let st = values();
+    sf.changed();
+    sf.due().await;
+    sf.flush(&st); // the directory is missing: logged, still pending
+    assert_eq!(on_disk(&path), None);
+    std::fs::create_dir(&dir).unwrap();
+    sf.flush(&st);
+    assert_eq!(on_disk(&path).unwrap(), golden("save_values.conf"));
 }
 
 // glibc strtoul(s, nullptr, 16) with a 64-bit unsigned long (the Midi; the host).

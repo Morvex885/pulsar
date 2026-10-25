@@ -158,7 +158,12 @@ impl Controller {
             }
         }
         self.api.publish_switch(id, state);
-        self.persist();
+        if id == SwitchId::MicMute {
+            // Privacy: a mute must not be undone by a power cut right after it.
+            self.persist_now();
+        } else {
+            self.persist();
+        }
         if id == SwitchId::AutoUpdate {
             self.maybe_auto_update();
         }
@@ -222,7 +227,8 @@ impl Controller {
                 );
                 self.st.zigbee_role = role;
                 self.st.zigbee_flash_failed = 0;
-                self.persist();
+                // Before the restart: the next start acts on the role.
+                self.persist_now();
                 self.api.publish_select(id, pulsar_zigbee::role(role).label);
                 self.exit = Some(ExitReason::ZigbeeRoleChanged);
             }
@@ -413,7 +419,8 @@ impl Controller {
                     return;
                 }
                 self.st.zigbee_flash_failed = failed_version;
-                self.persist();
+                // An image the radio refused is not written again after a crash or restart.
+                self.persist_now();
             }
         }
     }
@@ -494,7 +501,9 @@ impl Controller {
         };
         warn!("installing release {} ({why})", r.version);
         self.st.update_attempt.clone_from(&r.version);
-        self.persist();
+        // On disk before the updater can replace the binary: still set under another version
+        // after a restart, it tells that the release was rolled back.
+        self.persist_now();
         self.update_installing = true;
         self.clock.set_updating(true);
         self.update_progress = 0.0;
@@ -563,7 +572,8 @@ impl Controller {
                         if !fatal {
                             // A network failure: the next check tries again.
                             self.st.update_attempt.clear();
-                            self.persist();
+                            // Left set by a crash, it would make automatic updates skip it.
+                            self.persist_now();
                         }
                         self.publish_update();
                     }

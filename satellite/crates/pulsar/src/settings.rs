@@ -2,15 +2,26 @@
 //! `Settings`), so a binary rolled back by supervise.sh, or rolled forward, reads what the other
 //! wrote: numbers as C++ ostream writes them (`%g`, 6 significant digits) and reads them
 //! (`strtof`), booleans `0` / `1`, `zigbee_flash_failed` in lowercase hex without `0x`.
+//!
+//! Writes are atomic and durable (tmp, fsync, rename, fsync of the directory): /data on the
+//! Lite 2 is ubifs, where a rename reaches the flash long before unsynced data, so a power cut
+//! could leave an empty file and reset every setting. `StateFile` writes a change
+//! `SAVE_DELAY_MS` after the last one (a slider or a held volume key is one write, not dozens of
+//! flash writes); keys that matter across a restart or a binary swap are written at once.
 
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use log::warn;
+use pulsar_core::Timers;
 use pulsar_core::fmt::{g6, parse_f32_prefix};
 use pulsar_esphome::LightState;
 use pulsar_zigbee::Mode;
+
+/// A change is written this long after the last one.
+pub const SAVE_DELAY_MS: u64 = 1000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -202,21 +213,84 @@ impl Settings {
         )
     }
 
-    /// Written to `<path>.tmp`, then renamed over `path`. As in C++, a failed write is not
-    /// checked (only a file that cannot be created is logged) and nothing is synced.
-    pub fn save(&self, path: &Path) {
+    /// Atomic and durable: written to `<path>.tmp` (the C++ daemon's name; a leftover one is
+    /// truncated) and fsynced, renamed over `path`, then the directory fsynced. A failed write
+    /// is logged, its temporary file removed and `path` left as it was. False on failure.
+    pub fn save(&self, path: &Path) -> bool {
         let mut tmp = OsString::from(path.as_os_str());
         tmp.push(".tmp");
-        let mut f = match std::fs::File::create(&tmp) {
+        let tmp = PathBuf::from(tmp);
+        let mut f = match File::create(&tmp) {
             Ok(f) => f,
-            Err(_) => {
-                warn!("cannot write {}", Path::new(&tmp).display());
-                return;
+            Err(e) => {
+                warn!("cannot write {}: {e}", tmp.display());
+                return false;
             }
         };
-        let _ = f.write_all(self.serialize().as_bytes());
+        let written = f
+            .write_all(self.serialize().as_bytes())
+            .and_then(|()| f.sync_all());
+        // close(2) is not checked: fsync has already reported any write-back error.
         drop(f);
-        let _ = std::fs::rename(&tmp, path);
+        if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
+            warn!("cannot write {}: {e}", path.display());
+            let _ = std::fs::remove_file(&tmp);
+            return false;
+        }
+        // The rename survives a power cut only once the directory is synced. Not a failure:
+        // the new file is in place.
+        let dir = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        if let Err(e) = File::open(dir).and_then(|d| d.sync_all()) {
+            warn!("cannot sync {}: {e}", dir.display());
+        }
+        true
+    }
+}
+
+/// The `state.conf` writer: `changed` writes `SAVE_DELAY_MS` after the last change (when `due`
+/// completes, the owner calls `flush`), `write_now` at once. Every write is the whole file, so
+/// one write covers every change pending until then. A failed write stays pending: the next
+/// change or `flush` tries again.
+pub struct StateFile {
+    path: PathBuf,
+    dirty: bool,
+    timer: Timers<()>,
+}
+
+impl StateFile {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            dirty: false,
+            timer: Timers::new(),
+        }
+    }
+
+    /// `st` changed: written `SAVE_DELAY_MS` after the last change.
+    pub fn changed(&mut self) {
+        self.dirty = true;
+        self.timer.set((), SAVE_DELAY_MS);
+    }
+
+    /// Writes `st` now; a pending delayed write is no longer needed.
+    pub fn write_now(&mut self, st: &Settings) {
+        self.timer.cancel(());
+        self.dirty = !st.save(&self.path);
+    }
+
+    /// Writes `st` if a change is pending.
+    pub fn flush(&mut self, st: &Settings) {
+        if self.dirty {
+            self.write_now(st);
+        }
+    }
+
+    /// Completes when the delayed write is due; pending while none is. Cancel-safe.
+    pub async fn due(&mut self) {
+        self.timer.next().await;
     }
 }
 

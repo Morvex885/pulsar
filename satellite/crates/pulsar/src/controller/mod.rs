@@ -26,7 +26,7 @@ use pulsar_zigbee::{ZigbeeConfig, ZigbeeEvent, ZigbeeHandle};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::settings::Settings;
+use crate::settings::{Settings, StateFile};
 use crate::version::{BUILD_TIME, VERSION};
 use logic::{HaTimer, Phase, RunBinding};
 
@@ -151,7 +151,7 @@ pub struct Controller {
     int: Signal,
 
     model: &'static Model,
-    state_path: PathBuf,
+    state: StateFile,
     st: Settings,
     timers: Timers<Tk>,
     /// Completion of each `play()` whose end matters.
@@ -255,12 +255,6 @@ fn light_rgb(l: &pulsar_esphome::LightState) -> Rgb {
         g: (l.g * 255.0) as u8,
         b: (l.b * 255.0) as u8,
     }
-}
-
-/// `volume=` follows `volume2=` on the curve of earlier builds.
-fn persist(st: &mut Settings, model: &Model, path: &std::path::Path) {
-    st.volume_legacy = pulsar_media::mixer::to_legacy(model, st.volume);
-    st.save(path);
 }
 
 impl Controller {
@@ -372,17 +366,19 @@ impl Controller {
             |v| pulsar_media::mixer::from_legacy(model, v),
         );
         st.volume = volume;
+        // Changes made while starting are written like any other (StateFile, 1 s later).
+        let mut changed = false;
         if migrated {
             info!(
                 "volume {:.3} from an earlier build -> {:.3}",
                 st.volume_legacy, st.volume
             );
-            persist(&mut st, model, &state_path);
+            changed = true;
         }
         mixer.set_volume(st.volume);
         mixer.set_muted(st.muted);
         if !st.led_case_color.is_empty() {
-            // After the volume: persist() writes it too.
+            // After the volume: the write covers it too.
             let listed = case_colors.contains(&st.led_case_color);
             if !listed {
                 warn!(
@@ -393,14 +389,14 @@ impl Controller {
             // Leds logs an unreadable file.
             if !listed || !leds.set_case_color(&st.led_case_color) {
                 st.led_case_color.clear();
-                persist(&mut st, model, &state_path);
+                changed = true;
             }
         }
         if !st.update_attempt.is_empty() {
             if st.update_attempt == VERSION {
                 info!("updated to {VERSION}");
                 st.update_attempt.clear();
-                persist(&mut st, model, &state_path);
+                changed = true;
             } else {
                 warn!(
                     "update to {} did not stay installed (rolled back?); automatic updates skip it",
@@ -539,7 +535,7 @@ impl Controller {
             term,
             int,
             model,
-            state_path,
+            state: StateFile::new(state_path),
             st,
             timers: Timers::new(),
             pending: HashMap::new(),
@@ -603,6 +599,9 @@ impl Controller {
         c.apply_gains(); // a saved mute
         c.update_ui();
         c.clock.play(ClockShot::Boot);
+        if changed {
+            c.persist();
+        }
         Ok(c)
     }
 
@@ -610,7 +609,8 @@ impl Controller {
     /// installs: the updater cancels the install when its handle goes (the binary stays as it
     /// was, whereas C++ finished it), so `update_attempt` is cleared; left set, automatic
     /// updates would skip that release. An install that already succeeded (its `Installed` still
-    /// queued) keeps it: the new binary clears it.
+    /// queued) keeps it: the new binary clears it. A settings change still pending is written by
+    /// `flush_settings` afterwards.
     pub async fn run(&mut self) -> ExitReason {
         let reason = loop {
             if let Some(r) = self.exit.take() {
@@ -621,6 +621,7 @@ impl Controller {
             tokio::select! {
                 biased;
                 k = self.timers.next() => self.on_timer(k),
+                () = self.state.due() => self.state.flush(&self.st),
                 _ = self.term.recv() => {
                     info!("signal {}, exiting", libc::SIGTERM);
                     break ExitReason::Signal;
@@ -739,8 +740,24 @@ impl Controller {
         }
     }
 
+    /// `st` changed: written a moment after the last change (`StateFile`). `volume=` follows
+    /// `volume2=` on the curve of earlier builds.
     fn persist(&mut self) {
-        persist(&mut self.st, self.model, &self.state_path);
+        self.st.volume_legacy = pulsar_media::mixer::to_legacy(self.model, self.st.volume);
+        self.state.changed();
+    }
+
+    /// `st` changed in a way that must survive a power cut or a crash right away: before a
+    /// restart or a binary swap, or the microphone mute.
+    fn persist_now(&mut self) {
+        self.st.volume_legacy = pulsar_media::mixer::to_legacy(self.model, self.st.volume);
+        self.state.write_now(&self.st);
+    }
+
+    /// Writes a pending change now: main calls it once after `run`, when nothing changes any
+    /// more.
+    pub fn flush_settings(&mut self) {
+        self.state.flush(&self.st);
     }
 
     fn mic_muted(&self) -> bool {

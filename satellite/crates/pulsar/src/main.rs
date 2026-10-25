@@ -85,8 +85,12 @@ fn main() -> ExitCode {
             model.model_name, model.codename
         );
         ctl.run().await;
-        // The services stop as their handles go (the front-end joins its threads here).
         arm_teardown_watchdog(0);
+        // Nothing changes the settings after run: a change still pending is written once, here.
+        // Inside the watchdog, so a hung fsync cannot keep the daemon from exiting (a write cut
+        // short leaves the previous state.conf).
+        ctl.flush_settings();
+        // The services stop as their handles go (the front-end joins its threads here).
         drop(ctl);
         0
     });
