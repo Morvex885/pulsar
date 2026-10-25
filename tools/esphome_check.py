@@ -28,10 +28,11 @@ Scenarios against the daemon (a test instance: PULSAR_PORT_OFFSET, service stopp
   scenario-media     play --media-url, pause, resume, volume 0.1, mute, unmute, volume back (at
                      most 0.2), stop; each checked on the media player state.
   scenario-entities  every switch, number, select, the text, the light and the actions, each
-                     checked on its echo state, then the previous states restored. The Zigbee
-                     role select only gets its current option (another one restarts the daemon
-                     and writes the radio), the Zigbee buttons are not pressed, auto update is
-                     only set to its current state.
+                     checked on its echo state, then the previous states restored. Under the
+                     mute button's mute "microphones" only gets "on", which must come back off.
+                     The Zigbee role select only gets its current option (another one restarts
+                     the daemon and writes the radio), the Zigbee buttons are not pressed, auto
+                     update is only set to its current state.
   scenario-persist   --count N (default 20) commands to the number --entity (led_speed or
                      clock_text_speed), --interval-ms apart (default 50), each checked on its
                      echo; the last value is printed and left set (state.conf debounce: one
@@ -171,8 +172,8 @@ async def cmd_commands(client, args):
             if expect:
                 FAILURES.append(f"{name}: no echo")
 
-    await echo("switch", "mute_microphones", lambda k: client.switch_command(k, True))
-    await echo("switch", "mute_microphones", lambda k: client.switch_command(k, False))
+    await echo("switch", "microphones", lambda k: client.switch_command(k, False))
+    await echo("switch", "microphones", lambda k: client.switch_command(k, True))
     await echo("number", "clock_brightness", lambda k: client.number_command(k, 150))
     await echo("number", "led_speed", lambda k: client.number_command(k, 1.5))
     await echo("select", "clock_face", lambda k: client.select_command(k, ents["clock_face"].options[-1]))
@@ -445,7 +446,12 @@ async def cmd_scenario_entities(client, args):
     def st(oid):
         return orig[oid].state if orig.get(oid) is not None else None
 
-    for oid in ["mute_microphones", "clock_display", "nearest_station_answers", "voice_indication"]:
+    switches = ["microphones", "clock_display", "nearest_station_answers", "voice_indication"]
+    if st("hardware_mic_mute"):
+        # Under the mute button's mute "on" is refused: the switch comes back off.
+        await expect(w, "switch microphones -> True (refused: mute button)", k["microphones"], lambda: client.switch_command(k["microphones"], True), lambda s: not s.state)
+        switches.remove("microphones")
+    for oid in switches:
         cur = bool(st(oid))
         await expect(w, f"switch {oid} -> {not cur}", k[oid], lambda o=oid, v=not cur: client.switch_command(k[o], v), lambda s, v=not cur: s.state == v)
         restore.append((f"switch {oid} -> {cur}", k[oid], lambda o=oid, v=cur: client.switch_command(k[o], v), lambda s, v=cur: s.state == v))

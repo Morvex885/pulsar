@@ -558,3 +558,30 @@ fn run_binding_table() {
         }
     }
 }
+
+#[test]
+fn microphones_mutes() {
+    // (on, software mute, button mute) -> software mute
+    for (on, sw, hw, want) in [
+        (false, false, false, true),
+        (false, true, false, true),
+        (false, false, true, true),
+        (false, true, true, true),
+        (true, true, false, false),
+        (true, false, false, false),
+        // The button's mute: HA's "on" changes nothing.
+        (true, true, true, true),
+        (true, false, true, false),
+    ] {
+        assert_eq!(
+            sw_mute_after_switch(on, sw, hw),
+            want,
+            "on={on} sw={sw} hw={hw}"
+        );
+    }
+    // Muted from HA only: the first press adds the button's mute, the second lifts both.
+    assert!(sw_mute_after_button(true, true));
+    assert!(!sw_mute_after_button(true, false));
+    // The button never sets the software mute.
+    assert!(!sw_mute_after_button(false, true));
+}

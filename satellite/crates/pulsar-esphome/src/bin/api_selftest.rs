@@ -308,7 +308,7 @@ async fn run(port: u16, name: String, run_s: i64, key_path: Option<PathBuf>) -> 
         return ExitCode::from(1);
     };
     api.publish_media(MediaState::Idle, 0.5, false);
-    api.publish_switch(SwitchId::MicMute, false);
+    api.publish_switch(SwitchId::Microphones, true);
     api.publish_switch(SwitchId::Clock, true);
     api.publish_switch(SwitchId::VoiceIndication, true);
     api.publish_number(NumberId::LedSpeed, 1.0);

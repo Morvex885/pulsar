@@ -240,7 +240,7 @@ impl Default for LightState {
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SwitchId {
-    MicMute = 1,
+    Microphones = 1,
     Clock = 2,
     AutoUpdate = 3,
     NearestAnswers = 4,

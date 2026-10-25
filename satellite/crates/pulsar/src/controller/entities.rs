@@ -64,8 +64,8 @@ impl Controller {
         info!("Home Assistant connected: {client_info}");
         self.error_shown = false;
         self.publish_media();
+        self.publish_microphones();
         let api = &self.api;
-        api.publish_switch(SwitchId::MicMute, self.st.mic_muted);
         api.publish_switch(SwitchId::Clock, self.st.clock_on);
         api.publish_switch(SwitchId::AutoUpdate, self.st.auto_update);
         api.publish_switch(SwitchId::NearestAnswers, self.st.nearest_answers);
@@ -133,16 +133,23 @@ impl Controller {
 
     fn on_switch(&mut self, id: SwitchId, state: bool) {
         match id {
-            SwitchId::MicMute => {
-                self.st.mic_muted = state;
-                if state {
+            SwitchId::Microphones => {
+                self.st.mic_muted =
+                    logic::sw_mute_after_switch(state, self.st.mic_muted, self.hw_mic_muted);
+                if !state {
                     self.cancel_arbitration();
-                }
-                if state && self.phase == logic::Phase::Listening {
-                    self.finish_interaction();
+                    if self.phase == logic::Phase::Listening {
+                        self.finish_interaction();
+                    }
                 }
                 self.update_detection();
                 self.update_ui();
+                // The actual state, not the command: "on" under the button mute comes back off.
+                self.publish_microphones();
+                // Privacy: a mute must not be undone by a power cut right after it. A failed
+                // write is logged and stays pending; the mute itself is in effect either way.
+                let _ = self.persist_now();
+                return;
             }
             SwitchId::Clock => {
                 self.st.clock_on = state;
@@ -158,16 +165,17 @@ impl Controller {
             }
         }
         self.api.publish_switch(id, state);
-        if id == SwitchId::MicMute {
-            // Privacy: a mute must not be undone by a power cut right after it. A failed write
-            // is logged and stays pending; the mute itself is in effect either way.
-            let _ = self.persist_now();
-        } else {
-            self.persist();
-        }
+        self.persist();
         if id == SwitchId::AutoUpdate {
             self.maybe_auto_update();
         }
+    }
+
+    /// "Microphones" is on while the speaker listens: neither the mute from HA nor the mute
+    /// button's.
+    fn publish_microphones(&self) {
+        self.api
+            .publish_switch(SwitchId::Microphones, !self.mic_muted());
     }
 
     fn on_number(&mut self, id: NumberId, value: f32) {
@@ -353,6 +361,14 @@ impl Controller {
                 self.hw_mic_muted = m;
                 info!("hardware mic mute: {}", u8::from(m));
                 self.api.publish_binary_sensor(BinarySensorId::HwMicMute, m);
+                let sw_muted = logic::sw_mute_after_button(self.st.mic_muted, m);
+                if sw_muted != self.st.mic_muted {
+                    info!("mute button lifted the mute from Home Assistant");
+                    self.st.mic_muted = sw_muted;
+                    // A lost write leaves the speaker muted after a restart (the safe side).
+                    self.persist();
+                }
+                self.publish_microphones();
                 if m && self.phase == logic::Phase::Listening {
                     self.finish_interaction();
                 }

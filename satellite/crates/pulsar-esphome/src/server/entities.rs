@@ -15,7 +15,7 @@ use crate::types::{
 /// Entity keys (fixed32), stable across restarts: HA keys its entities by them.
 pub(super) mod key {
     pub const MEDIA: u32 = 1;
-    pub const SW_MIC_MUTE: u32 = 2;
+    pub const SW_MICROPHONES: u32 = 2;
     pub const SW_CLOCK: u32 = 3;
     pub const BS_HW_MIC_MUTE: u32 = 4;
     pub const SENSOR_LUX: u32 = 5;
@@ -115,7 +115,7 @@ pub(super) struct Cache {
     media_state: MediaState,
     media_volume: f32,
     media_muted: bool,
-    sw_mic_mute: BoolState,
+    sw_microphones: BoolState,
     sw_clock: BoolState,
     sw_auto_update: BoolState,
     sw_nearest_answers: BoolState,
@@ -146,7 +146,7 @@ impl Cache {
             media_state: MediaState::Idle,
             media_volume: 0.0,
             media_muted: false,
-            sw_mic_mute: BoolState::default(),
+            sw_microphones: BoolState::default(),
             sw_clock: BoolState::default(),
             sw_auto_update: BoolState::default(),
             sw_nearest_answers: BoolState::default(),
@@ -273,10 +273,10 @@ impl Server {
             (msg::LIST_SWITCH, w)
         };
         out.push(switch(
-            "mute_microphones",
-            key::SW_MIC_MUTE,
-            "Mute microphones",
-            "mdi:microphone-off",
+            "microphones",
+            key::SW_MICROPHONES,
+            "Microphones",
+            "mdi:microphone",
             None,
         ));
         out.push(switch(
@@ -667,7 +667,7 @@ impl Server {
         let to = Some(id);
         let c = &self.cache;
         let (mic, clock, auto, nearest, voice, hw) = (
-            c.sw_mic_mute,
+            c.sw_microphones,
             c.sw_clock,
             c.sw_auto_update,
             c.sw_nearest_answers,
@@ -676,7 +676,7 @@ impl Server {
         );
         let (lux, bri, scroll, speed) = (c.lux, c.clock_bri, c.clock_scroll, c.led_speed);
         self.send_media(to);
-        self.send_bool(msg::SWITCH_STATE, key::SW_MIC_MUTE, mic, to);
+        self.send_bool(msg::SWITCH_STATE, key::SW_MICROPHONES, mic, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK, clock, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_AUTO_UPDATE, auto, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_NEAREST_ANSWERS, nearest, to);
@@ -787,7 +787,7 @@ impl Server {
             }
             Publish::Switch(id, v) => {
                 let (s, key) = match id {
-                    SwitchId::MicMute => (&mut c.sw_mic_mute, key::SW_MIC_MUTE),
+                    SwitchId::Microphones => (&mut c.sw_microphones, key::SW_MICROPHONES),
                     SwitchId::Clock => (&mut c.sw_clock, key::SW_CLOCK),
                     SwitchId::AutoUpdate => (&mut c.sw_auto_update, key::SW_AUTO_UPDATE),
                     SwitchId::NearestAnswers => {

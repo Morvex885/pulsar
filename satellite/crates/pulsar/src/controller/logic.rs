@@ -341,6 +341,19 @@ pub fn want_volume_click(
         && !closing_earcon
 }
 
+/// The software mute (`mic_muted=`) after HA sets the "Microphones" switch (`on` = listening).
+/// The mute button's mute does not depend on the network or HA, so HA cannot lift it: "on"
+/// under it leaves the software mute as it was.
+pub fn sw_mute_after_switch(on: bool, sw_muted: bool, hw_muted: bool) -> bool {
+    if on && hw_muted { sw_muted } else { !on }
+}
+
+/// The software mute after the mute button switched to `hw_muted`: lifting the button's mute
+/// also lifts the mute from HA, so the button alone always brings the microphones back.
+pub fn sw_mute_after_button(sw_muted: bool, hw_muted: bool) -> bool {
+    sw_muted && hw_muted
+}
+
 /// Restarting cuts off whatever plays: automatic installs wait for silence.
 pub fn idle_for_update(
     phase: Phase,

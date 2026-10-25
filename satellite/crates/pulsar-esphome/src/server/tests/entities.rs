@@ -42,7 +42,7 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
 
 fn publish_selftest_states(h: &ApiHandle) {
     h.publish_media(MediaState::Idle, 0.5, false);
-    h.publish_switch(SwitchId::MicMute, false);
+    h.publish_switch(SwitchId::Microphones, true);
     h.publish_switch(SwitchId::Clock, true);
     h.publish_switch(SwitchId::VoiceIndication, true);
     h.publish_number(NumberId::LedSpeed, 1.0);
@@ -607,7 +607,7 @@ async fn states_go_to_subscribers_and_zigbee_entities_need_modes() {
             p.hello("HA").await;
             event(&mut rx).await;
             // Without a state subscription nothing is pushed, events are dropped.
-            h.publish_switch(SwitchId::MicMute, true);
+            h.publish_switch(SwitchId::Microphones, true);
             h.fire_event(EventId::Button, "action");
             assert!(p.sync().await.is_empty());
             // No Zigbee entities, states or buttons.
@@ -628,7 +628,7 @@ async fn states_go_to_subscribers_and_zigbee_entities_need_modes() {
             // Cached value replayed; no Zigbee states.
             let mic = states
                 .iter()
-                .find(|(t, m)| *t == msg::SWITCH_STATE && state_key(m) == Some(key::SW_MIC_MUTE))
+                .find(|(t, m)| *t == msg::SWITCH_STATE && state_key(m) == Some(key::SW_MICROPHONES))
                 .unwrap();
             assert!(field(&mic.1, 2).unwrap().boolean());
             assert!(
