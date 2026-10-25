@@ -136,7 +136,8 @@ tools: $(SS_STAMP) FORCE | $(filter binary,$(MAKECMDGOALS))
 	@mkdir -p $(BUILD)/tools
 	for t in $(TOOLS); do $(ZIG) objcopy --strip-all $(OUT)/$$t $(BUILD)/tools/$$t || exit 1; done
 
-$(BUILD)/tools/%: $(SS_STAMP) FORCE
+# Same ordering for a single tool asked together with binary.
+$(BUILD)/tools/%: $(SS_STAMP) FORCE | $(filter binary,$(MAKECMDGOALS))
 	+$(ZIGBUILD) --bin $*
 	@mkdir -p $(dir $@)
 	$(ZIG) objcopy --strip-all $(OUT)/$* $@
