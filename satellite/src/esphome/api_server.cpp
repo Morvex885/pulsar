@@ -1329,7 +1329,7 @@ struct ApiServer::Impl {
       w.str(5, icon);
       send_msg(c, LIST_SWITCH, w);
     };
-    sw("mute_microphones", K_SW_MIC_MUTE, "Mute microphones", "mdi:microphone-off");
+    sw("microphones", K_SW_MIC_MUTE, "Microphones", "mdi:microphone");
     sw("clock_display", K_SW_CLOCK, "Clock display", "mdi:clock-digital");
     {
       pb::Writer w;

@@ -256,6 +256,13 @@ bool Controller::start() {
       hw_mic_muted_ = m;
       LOGI("hardware mic mute: %d", m);
       api_->publish_binary_sensor(BinarySensorId::HW_MIC_MUTE, m);
+      // Moving the body control to "microphones on" also lifts a software mute set from Home
+      // Assistant; otherwise the microphones could only be re-enabled from Home Assistant.
+      if (!m && st_.mic_muted) {
+        st_.mic_muted = false;
+        api_->publish_switch(SwitchId::MIC_MUTE, true);  // "Microphones": on = listening
+        persist();
+      }
       if (m && phase_ == Phase::LISTENING) {
         finish_interaction();
       }
@@ -343,7 +350,7 @@ void Controller::on_client_connected(const std::string &client_info) {
   LOGI("Home Assistant connected: %s", client_info.c_str());
   error_shown_ = false;
   publish_media();
-  api_->publish_switch(SwitchId::MIC_MUTE, st_.mic_muted);
+  api_->publish_switch(SwitchId::MIC_MUTE, !st_.mic_muted);  // on = listening
   api_->publish_switch(SwitchId::CLOCK, st_.clock_on);
   api_->publish_switch(SwitchId::AUTO_UPDATE, st_.auto_update);
   api_->publish_switch(SwitchId::NEAREST_ANSWERS, st_.nearest_answers);
@@ -1048,9 +1055,11 @@ void Controller::on_restart() {
 
 void Controller::on_switch(SwitchId id, bool state) {
   if (id == SwitchId::MIC_MUTE) {
-    st_.mic_muted = state;
-    if (state) cancel_arbitration();
-    if (state && phase_ == Phase::LISTENING) {
+    // The HA switch is "Microphones": on = listening, so the software mute is its inverse.
+    const bool muted = !state;
+    st_.mic_muted = muted;
+    if (muted) cancel_arbitration();
+    if (muted && phase_ == Phase::LISTENING) {
       finish_interaction();
     }
     update_detection();
