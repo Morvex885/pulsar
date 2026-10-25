@@ -38,6 +38,8 @@ Scenarios against the daemon (a test instance: PULSAR_PORT_OFFSET, service stopp
                      write ~1 s after the last change). No volume or mute command is sent.
                      --install: then an update check and the install of the release offered,
                      waited for up to --install-s (default 300); the daemon exits after it.
+                     Refused on the live API port 6053 (it would replace the installed daemon)
+                     unless --allow-live-port is given; use a test instance (16053).
 The LED ring and clock states (LISTENING, THINKING, SPEAKING, TIMER_RING, the timer) are read on
 the station meanwhile (sysfs); the --*-s pauses leave time for that.
 
@@ -580,6 +582,10 @@ COMMANDS = {
 }
 
 
+# The running daemon's ESPHome API port (a test instance listens at PULSAR_PORT_OFFSET + 6053).
+LIVE_API_PORT = 6053
+
+
 async def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--host", required=True)
@@ -607,7 +613,11 @@ async def main():
     p.add_argument("--interval-ms", type=int, default=50)
     p.add_argument("--install", action="store_true", help="scenario-persist: then check and install an update")
     p.add_argument("--install-s", type=float, default=300.0)
+    p.add_argument("--allow-live-port", action="store_true", help="scenario-persist --install against port 6053")
     args = p.parse_args()
+    if args.command == "scenario-persist" and args.install and args.port == LIVE_API_PORT and not args.allow_live_port:
+        p.error(f"--install on the live API port {LIVE_API_PORT} replaces the installed daemon; "
+                "use a test instance or pass --allow-live-port")
     if args.seconds is None:
         args.seconds = {"scenario-timer": 70, "scenario-voice": 30}.get(args.command, 10)
     client = await connect(args)
