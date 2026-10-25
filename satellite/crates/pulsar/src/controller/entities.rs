@@ -66,20 +66,24 @@ impl Controller {
         self.publish_media();
         let api = &self.api;
         api.publish_switch(SwitchId::MicMute, self.st.mic_muted);
-        api.publish_switch(SwitchId::Clock, self.st.clock_on);
+        if self.model.has_clock() {
+            api.publish_switch(SwitchId::Clock, self.st.clock_on);
+        }
         api.publish_switch(SwitchId::AutoUpdate, self.st.auto_update);
         api.publish_switch(SwitchId::NearestAnswers, self.st.nearest_answers);
         api.publish_switch(SwitchId::VoiceIndication, self.st.voice_indication);
         self.publish_update();
         let api = &self.api;
         api.publish_binary_sensor(BinarySensorId::HwMicMute, self.hw_mic_muted);
-        api.publish_number(NumberId::ClockBrightness, self.st.clock_brightness * 100.0);
-        api.publish_number(NumberId::ClockScroll, self.st.clock_scroll_ms as f32);
-        api.publish_text(TextId::ClockText, &self.clock_text);
-        api.publish_select(SelectId::ClockFace, &self.clock_face);
+        if self.model.has_clock() {
+            api.publish_number(NumberId::ClockBrightness, self.st.clock_brightness * 100.0);
+            api.publish_number(NumberId::ClockScroll, self.st.clock_scroll_ms as f32);
+            api.publish_text(TextId::ClockText, &self.clock_text);
+            api.publish_select(SelectId::ClockFace, &self.clock_face);
+            api.publish_select(SelectId::ClockMusic, &self.st.clock_music);
+        }
         api.publish_number(NumberId::LedSpeed, self.st.led_speed);
         api.publish_select(SelectId::MusicViz, &self.st.music_viz);
-        api.publish_select(SelectId::ClockMusic, &self.st.clock_music);
         api.publish_select(SelectId::CaseColor, self.case_color_option());
         if let Some(z) = &self.zigbee {
             api.publish_select(

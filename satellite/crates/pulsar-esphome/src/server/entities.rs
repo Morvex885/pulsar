@@ -279,13 +279,15 @@ impl Server {
             "mdi:microphone-off",
             None,
         ));
-        out.push(switch(
-            "clock_display",
-            key::SW_CLOCK,
-            "Clock display",
-            "mdi:clock-digital",
-            None,
-        ));
+        if self.cfg.has_clock {
+            out.push(switch(
+                "clock_display",
+                key::SW_CLOCK,
+                "Clock display",
+                "mdi:clock-digital",
+                None,
+            ));
+        }
         let cfg = Some(ENTITY_CATEGORY_CONFIG);
         out.push(switch(
             "auto_update",
@@ -356,14 +358,16 @@ impl Server {
             &self.cfg.case_colors,
             cfg,
         ));
-        out.push(select(
-            "clock_music",
-            key::SELECT_CLOCK_MUSIC,
-            "Clock music",
-            "mdi:equalizer-outline",
-            &self.cfg.clock_music_styles,
-            cfg,
-        ));
+        if self.cfg.has_clock {
+            out.push(select(
+                "clock_music",
+                key::SELECT_CLOCK_MUSIC,
+                "Clock music",
+                "mdi:equalizer-outline",
+                &self.cfg.clock_music_styles,
+                cfg,
+            ));
+        }
         let mut w = Writer::new();
         entity_head(&mut w, "firmware", key::UPDATE, "Firmware");
         w.u32(7, ENTITY_CATEGORY_CONFIG, false);
@@ -386,16 +390,23 @@ impl Server {
         w.str(9, "illuminance", false);
         w.u32(10, STATE_CLASS_MEASUREMENT, false);
         out.push((msg::LIST_SENSOR, w));
-        out.push(number(
-            "clock_brightness",
-            key::NUMBER_CLOCK_BRI,
-            "Clock brightness",
-            "mdi:brightness-6",
-            (0.0, 100.0, 1.0),
-            "%",
-        ));
+        if self.cfg.has_clock {
+            out.push(number(
+                "clock_brightness",
+                key::NUMBER_CLOCK_BRI,
+                "Clock brightness",
+                "mdi:brightness-6",
+                (0.0, 100.0, 1.0),
+                "%",
+            ));
+        }
         let mut w = Writer::new();
-        entity_head(&mut w, "ring", key::LIGHT_RING, "Ring");
+        let (light_oid, light_name) = if self.cfg.is_panel {
+            ("panel", "Panel")
+        } else {
+            ("ring", "Ring")
+        };
+        entity_head(&mut w, light_oid, key::LIGHT_RING, light_name);
         w.str(11, "None", true);
         for e in &self.cfg.light_effects {
             w.str(11, e, true);
@@ -455,27 +466,29 @@ impl Server {
             "mdi:ip-network",
         ));
         out.push(text("version", key::TEXT_VERSION, "Version", "mdi:new-box"));
-        out.push(number(
-            "clock_text_speed",
-            key::NUMBER_CLOCK_SCROLL,
-            "Clock text speed",
-            "mdi:speedometer",
-            (100.0, 2000.0, 50.0),
-            "ms",
-        ));
-        let mut w = Writer::new();
-        entity_head(&mut w, "clock_text", key::TEXT_CLOCK, "Clock text");
-        w.str(5, "mdi:form-textbox", false);
-        w.u32(9, CLOCK_TEXT_MAX as u32, false); // max_length
-        out.push((msg::LIST_TEXT, w));
-        out.push(select(
-            "clock_face",
-            key::SELECT_CLOCK_FACE,
-            "Clock face",
-            "mdi:emoticon-outline",
-            &self.cfg.clock_faces,
-            None,
-        ));
+        if self.cfg.has_clock {
+            out.push(number(
+                "clock_text_speed",
+                key::NUMBER_CLOCK_SCROLL,
+                "Clock text speed",
+                "mdi:speedometer",
+                (100.0, 2000.0, 50.0),
+                "ms",
+            ));
+            let mut w = Writer::new();
+            entity_head(&mut w, "clock_text", key::TEXT_CLOCK, "Clock text");
+            w.str(5, "mdi:form-textbox", false);
+            w.u32(9, CLOCK_TEXT_MAX as u32, false); // max_length
+            out.push((msg::LIST_TEXT, w));
+            out.push(select(
+                "clock_face",
+                key::SELECT_CLOCK_FACE,
+                "Clock face",
+                "mdi:emoticon-outline",
+                &self.cfg.clock_faces,
+                None,
+            ));
+        }
         if !self.cfg.zigbee_modes.is_empty() {
             out.push(select(
                 "zigbee_role",
@@ -519,16 +532,18 @@ impl Server {
             }
             (msg::LIST_SERVICES, w)
         };
-        out.push(action(
-            "clock_show_text",
-            key::ACTION_CLOCK_TEXT,
-            &[("text", SERVICE_ARG_STRING), ("seconds", SERVICE_ARG_INT)],
-        ));
-        out.push(action(
-            "clock_show_face",
-            key::ACTION_CLOCK_FACE,
-            &[("face", SERVICE_ARG_STRING), ("seconds", SERVICE_ARG_INT)],
-        ));
+        if self.cfg.has_clock {
+            out.push(action(
+                "clock_show_text",
+                key::ACTION_CLOCK_TEXT,
+                &[("text", SERVICE_ARG_STRING), ("seconds", SERVICE_ARG_INT)],
+            ));
+            out.push(action(
+                "clock_show_face",
+                key::ACTION_CLOCK_FACE,
+                &[("face", SERVICE_ARG_STRING), ("seconds", SERVICE_ARG_INT)],
+            ));
+        }
         out.push(action(
             "led_show",
             key::ACTION_LED_SHOW,

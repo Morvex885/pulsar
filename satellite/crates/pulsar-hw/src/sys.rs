@@ -50,6 +50,10 @@ impl Framebuffer {
         Ok(Self { file, var })
     }
 
+    pub fn bits_per_pixel(&self) -> u32 {
+        self.var.0[6]
+    }
+
     /// pwrite(2) at offset 0.
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         self.file.write_at(buf, 0)

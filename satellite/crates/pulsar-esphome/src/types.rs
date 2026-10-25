@@ -54,6 +54,10 @@ pub struct ApiConfig {
     pub clock_music_styles: Vec<String>,
     /// Select «Zigbee role» options; empty: no Zigbee entities (no radio).
     pub zigbee_modes: Vec<String>,
+    /// Whether the device has a 7-segment clock display. False: no clock entities.
+    pub has_clock: bool,
+    /// Whether the device has an LED panel instead of a ring.
+    pub is_panel: bool,
     /// File holding the Noise encryption key (base64 of 32 bytes, as ESPHome's `api: encryption:
     /// key`). Missing or empty file: plaintext (and provisioning with the all-zeros key). HA may
     /// set or rotate it with NoiseEncryptionSetKeyRequest. None: encryption unsupported.
@@ -72,6 +76,8 @@ impl Default for ApiConfig {
             case_colors: Vec::new(),
             clock_music_styles: Vec::new(),
             zigbee_modes: Vec::new(),
+            has_clock: true,
+            is_panel: false,
             key_path: None,
         }
     }

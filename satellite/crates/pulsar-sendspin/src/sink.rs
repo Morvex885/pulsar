@@ -16,7 +16,9 @@ use pulsar_alsa::{Format, HwRequest, Pcm, Stream};
 use crate::ffi::now_us;
 use crate::gain;
 
-const PCM: &str = "speakers";
+fn pcm() -> &'static str {
+    pulsar_core::model::detect_model().map(|m| m.playback_pcm).unwrap_or("speakers")
+}
 /// Longest snd_pcm_wait() slice inside one write.
 const WAIT_SLICE_MS: i64 = 20;
 const STATS_PERIOD_US: i64 = 10_000_000;
@@ -355,7 +357,7 @@ impl Io {
             }
         };
         let mut opened = false;
-        let res = Pcm::open(PCM, Stream::Playback, false)
+        let res = Pcm::open(pcm(), Stream::Playback, false)
             .map_err(|e| ("open", e))
             .and_then(|mut pcm| {
                 opened = true;

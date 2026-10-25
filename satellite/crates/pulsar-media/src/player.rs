@@ -821,9 +821,11 @@ impl Drop for GlibThread {
 }
 
 fn new_pipeline(api: &'static Api, ch: Channel) -> Option<Pipeline> {
+    let pcm = pulsar_core::model::detect_model().map(|m| m.playback_pcm).unwrap_or("speakers");
     let desc = format!(
-        "playbin name=ch{} audio-sink=\"alsasink device=speakers\"",
-        ch.index()
+        "playbin name=ch{} audio-sink=\"alsasink device={}\"",
+        ch.index(),
+        pcm,
     );
     let mut p = Pipeline::launch(api, &CString::new(desc).ok()?)?;
     p.set_flags(PLAY_FLAGS);

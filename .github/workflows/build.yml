@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [main, rust]
+    branches: [main, rust, 'feat/**']
     tags: ['v*']
   pull_request:
   workflow_dispatch:

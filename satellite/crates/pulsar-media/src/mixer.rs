@@ -118,7 +118,7 @@ impl Mixer {
         };
         if !ctl.mixer_exists(MASTER) {
             // Opening the softvol PCM once creates the control.
-            drop(Pcm::open("speakers", Stream::Playback, true));
+            drop(Pcm::open(model.playback_pcm, Stream::Playback, true));
             if !ctl.mixer_exists(MASTER) {
                 error!("mixer: control '{MASTER}' not found");
                 return mixer;

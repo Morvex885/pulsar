@@ -15,6 +15,8 @@ func modelName(code string) string {
 		return "Yandex Station Midi"
 	case "plum":
 		return "Yandex Station Lite 2"
+	case "station-midi":
+		return "Yandex Station 2"
 	}
 	return ""
 }
@@ -30,7 +32,7 @@ func abis(code string) []string {
 	switch code {
 	case "cucumber":
 		return []string{"aarch64", "armhf"}
-	case "plum":
+	case "plum", "station-midi":
 		return []string{"armhf"}
 	}
 	return nil
@@ -59,7 +61,7 @@ type station struct {
 // found: installable stations, in the order printed by probe.
 var found []station
 
-var codename = regexp.MustCompile(`yandex,([a-z0-9_]*)`)
+var codename = regexp.MustCompile(`yandex,([a-z0-9_-]*)`)
 
 // probe prints one status line for s and records it in found if it is installable. A device we
 // connected to ourselves is disconnected again when it is not.
@@ -75,12 +77,22 @@ func probe(s string, ours bool) {
 		skip("adb not usable (unauthorized or offline)")
 		return
 	}
-	m := codename.FindStringSubmatch(compat)
-	if m == nil || m[1] == "" {
+	matches := codename.FindAllStringSubmatch(compat, -1)
+	if len(matches) == 0 {
 		skip("not a Yandex Station")
 		return
 	}
-	code := m[1]
+	var code string
+	for _, m := range matches {
+		c := m[1]
+		if abis(c) != nil {
+			code = c
+			break
+		}
+	}
+	if code == "" {
+		code = matches[0][1]
+	}
 	name := modelName(code)
 	if name == "" {
 		name = "unknown Yandex device"

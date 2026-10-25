@@ -297,6 +297,8 @@ impl Controller {
         let with_none = |l: Vec<String>| std::iter::once("None".to_owned()).chain(l).collect();
         let cfg = ApiConfig {
             port: ports.api,
+            has_clock: model.has_clock(),
+            is_panel: model.is_panel,
             wake_words: vec![
                 WakeWordInfo {
                     id: "alisa".into(),

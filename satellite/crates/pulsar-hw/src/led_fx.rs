@@ -526,6 +526,113 @@ impl Default for EffectState {
 
 /// t: effect phase in s (speed-scaled), dt: its step since the previous frame. bri scales the
 /// result. Returns true if the content moves (needs further frames).
+fn panel_effect(name: &str, c: Col, bri: f32, t: f64, out: &mut [Col]) -> bool {
+    const W: usize = 7;
+    const H: usize = 12;
+    const GRID: usize = W * H;
+    let sat = c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b);
+    let plain = sat < 0.1;
+    let base = if plain {
+        hsv(((t / 12.0) % 1.0) as f32, 1.0, 1.0)
+    } else {
+        c
+    };
+    let hash = |v: i32| -> f32 {
+        let mut h = (v as u32).wrapping_mul(2654435761u32);
+        h ^= h >> 15;
+        (h & 0xffff) as f32 / 65535.0
+    };
+    let n = out.len().min(GRID);
+    for (i, o) in out.iter_mut().take(n).enumerate() {
+        let x = (i % W) as f32 - 3.0;
+        let y = (i / W) as f32 - 5.5;
+        let r = (x * x + y * y).sqrt();
+        let a = y.atan2(x);
+        let col = match name {
+            "Radar" => {
+                let d = ((((t * 0.55) % 1.0) as f32 * TAU - a + 2.0 * TAU) % TAU);
+                let k = if d < 3.0 { (-d * 1.4).exp() } else { 0.0 };
+                let mut c = base * k;
+                if r < 0.9 {
+                    c = cmax(c, base * 0.5);
+                }
+                c
+            }
+            "Ripple" => {
+                let tr = (t % 2200.0) as f32;
+                let k = 0.5 + 0.5 * (TAU * (r / 3.2 - tr / 2.2)).cos();
+                let b = if plain {
+                    hsv(((t / 14.0 + f64::from(r / 12.0)) % 1.0) as f32, 1.0, 1.0)
+                } else {
+                    base
+                };
+                b * (k * k * k)
+            }
+            "Rain" | "Matrix" => {
+                let cx = (i % W) as i32;
+                let ry = (i / W) as f32;
+                let speed = 2.5 + 3.0 * hash(cx);
+                let head = (((t * f64::from(speed) + f64::from(20.0 * hash(cx + 9)))
+                    % f64::from(H as f32 + 7.0)) as f32)
+                    - 3.0;
+                let behind = head - ry;
+                let k = if !(0.0..=5.0).contains(&behind) {
+                    0.0
+                } else {
+                    (-behind * 0.75).exp()
+                };
+                if name == "Matrix" {
+                    if behind >= 0.0 && behind < 0.8 {
+                        stock(0xc8ffd0, k)
+                    } else {
+                        stock(0x00ff30, k * 0.9)
+                    }
+                } else {
+                    base * k
+                }
+            }
+            "Plasma" => {
+                let tt = (t % 3600.0) as f32;
+                let v = (x * 0.9 + tt * 0.7).sin()
+                    + (y * 0.6 + tt * 0.5).sin()
+                    + ((x + y) * 0.5 + tt * 0.3).sin()
+                    + (r * 0.8 - tt * 0.6).sin();
+                hsv(((f64::from(v / 8.0 + 0.5) + t / 30.0) % 1.0) as f32, 1.0, 1.0)
+            }
+            "Waves" => {
+                let tw = (t % 3000.0) as f32;
+                let k = 0.5 + 0.5 * (TAU * (y / 6.0 - tw / 3.0) + x * 0.45).sin();
+                let b = if plain {
+                    hsv(0.55 + 0.1 * k, 1.0, 1.0)
+                } else {
+                    base
+                };
+                b * (0.1 + 0.9 * k * k)
+            }
+            "Spiral" => {
+                let ts = (t % 2000.0) as f32;
+                let k = 0.5 + 0.5 * (a * 2.0 + r * 1.3 - ts * 2.5).cos();
+                let b = if plain {
+                    hsv(((t / 10.0 + f64::from(r / 10.0)) % 1.0) as f32, 1.0, 1.0)
+                } else {
+                    base
+                };
+                b * (k * k)
+            }
+            "Heartbeat" => {
+                let p = (t % 1.4) as f32;
+                let env = (-p * 7.0).exp().max(0.8 * (-(p - 0.28).abs() * 9.0).exp());
+                let s = 1.2 + env * 3.2;
+                let b = if plain { stock(0xff1030, 1.0) } else { base };
+                b * ((-r * r / (2.0 * s * s)).exp() * (0.15 + 0.85 * env))
+            }
+            _ => return false,
+        };
+        *o = col * bri;
+    }
+    true
+}
+
 pub fn effect(
     name: &str,
     c: Col,
@@ -536,6 +643,9 @@ pub fn effect(
     out: &mut [Col],
 ) -> bool {
     let n = out.len();
+    if n >= 84 && panel_effect(name, c, bri, t, out) {
+        return true;
+    }
     let nf = n as f32;
     match name {
         "Rainbow" => {

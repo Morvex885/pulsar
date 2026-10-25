@@ -20,6 +20,8 @@ pub struct Model {
     pub mic_channels: &'static [u32],
     pub spk_channels: &'static [u32],
     pub vqe_preset: &'static str,
+    pub playback_pcm: &'static str,
+    pub is_panel: bool,
 
     /// Prefix of the per-channel sysfs LEDs "<led_prefix>:<color>:<ring|logo><index>".
     pub led_prefix: &'static str,
@@ -63,6 +65,12 @@ pub struct Model {
     pub zigbee_tty: &'static str,
     pub zigbee_reset: &'static str,
     pub zigbee_boot: &'static str,
+}
+
+impl Model {
+    pub fn has_clock(&self) -> bool {
+        !self.clock_dir.is_empty()
+    }
 }
 
 /// An Nx1 BGR framebuffer behind an ledfb trigger, with per-channel sysfs LEDs as fallback.
@@ -120,6 +128,8 @@ static MIDI: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5, 6, 7],
     vqe_preset: "cucumber",
+    playback_pcm: "speakers",
+    is_panel: false,
     led_prefix: "cucumber",
     ring: LedStrip {
         count: 24,
@@ -174,6 +184,8 @@ static LITE2: Model = Model {
     mic_channels: &[0, 2],
     spk_channels: &[6],
     vqe_preset: "plum",
+    playback_pcm: "speakers",
+    is_panel: false,
     led_prefix: "plum",
     ring: LedStrip {
         count: 3,
@@ -202,6 +214,47 @@ static LITE2: Model = Model {
 };
 
 /// The model of this device, read once; None (logged) on unsupported hardware.
+/// Station 2: 32-bit userland on aarch64 kernel, 4 mics + 2 spk loopback on hw:0,2 at 48 kHz (16 ch),
+/// 88-LED screen on /dev/fb0 (32 bpp BGRW), midi_touch input, gpio-keys mute.
+static STATION2: Model = Model {
+    codename: "station-midi",
+    host_prefix: "yandex-station2-",
+    friendly_name: "Яндекс Станция 2",
+    model_name: "Yandex Station 2",
+    capture_pcm: "hw:0,2",
+    capture_rate: 48000,
+    capture_channels: 16,
+    mic_channels: &[0, 2, 4, 7],
+    spk_channels: &[8, 9],
+    vqe_preset: "yandexmidi",
+    playback_pcm: "soft_volume",
+    is_panel: true,
+    led_prefix: "",
+    ring: LedStrip {
+        count: 88,
+        first_index: 0,
+        fb_dev: "/dev/fb0",
+        fb_name: "YNDX LED screen",
+        trigger: "",
+        sysfs_kind: "ring",
+    },
+    logo: NO_STRIP,
+    clock_dir: "",
+    clock_seg_base: 'a',
+    clock_pos_base: 0,
+    clock_colon: &[],
+    clock_aux: &[],
+    clock_center: "",
+    clock_chip_current: false,
+    keys_input: "midi_touch",
+    mute_input: "gpio-keys",
+    error_sound: "ru-RU/playback_error.mp3",
+    volume_map: STOCK_VOLUME,
+    zigbee_tty: "",
+    zigbee_reset: "",
+    zigbee_boot: "",
+};
+
 pub fn detect_model() -> Option<&'static Model> {
     static MODEL: LazyLock<Option<&'static Model>> = LazyLock::new(|| {
         let raw = std::fs::read("/proc/device-tree/compatible").unwrap_or_default();
@@ -221,6 +274,7 @@ pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
     raw.split(|&b| b == 0).find_map(|entry| match entry {
         b"yandex,cucumber" => Some(&MIDI),
         b"yandex,plum" => Some(&LITE2),
+        b"yandex,station-midi" => Some(&STATION2),
         _ => None,
     })
 }
@@ -237,6 +291,16 @@ mod tests {
         assert_eq!(m.capture_rate, 96000);
         assert_eq!(m.logo.count, 6);
         assert_eq!(m.zigbee_tty, "/dev/ttyS2");
+    }
+
+    #[test]
+    fn station_midi_is_station2() {
+        let m = model_from_compatible(b"yandex,station-midi\0amlogic, axg\0").unwrap();
+        assert_eq!(m.codename, "station-midi");
+        assert_eq!(m.ring.count, 88);
+        assert_eq!(m.capture_rate, 48000);
+        assert_eq!(m.playback_pcm, "soft_volume");
+        assert!(m.is_panel);
     }
 
     #[test]

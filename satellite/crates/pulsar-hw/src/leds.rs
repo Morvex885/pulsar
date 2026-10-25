@@ -62,7 +62,7 @@ pub struct Rgb {
     pub b: u8,
 }
 
-const EFFECT_NAMES: [&str; 10] = [
+const EFFECT_NAMES: [&str; 18] = [
     "Rainbow",
     "Breathe",
     "Color loop",
@@ -73,6 +73,14 @@ const EFFECT_NAMES: [&str; 10] = [
     "Lava lamp",
     "Candle",
     "Night light",
+    "Radar",
+    "Ripple",
+    "Rain",
+    "Matrix",
+    "Plasma",
+    "Waves",
+    "Spiral",
+    "Heartbeat",
 ];
 
 /// After "Off" and "All styles", in `fx::Style` order.
@@ -589,8 +597,15 @@ fn write_fb(
     now: i64,
 ) {
     bgr.clear();
-    for p in px.as_chunks::<3>().0 {
-        bgr.extend_from_slice(&[p[2], p[1], p[0]]);
+    if fb.bits_per_pixel() == 32 {
+        for p in px.as_chunks::<3>().0 {
+            // Station 2 panel takes R,G,B byte order
+            bgr.extend_from_slice(&[p[0], p[1], p[2], 0]);
+        }
+    } else {
+        for p in px.as_chunks::<3>().0 {
+            bgr.extend_from_slice(&[p[2], p[1], p[0]]);
+        }
     }
     match fb.write(bgr) {
         Ok(k) if k == bgr.len() => {}
@@ -633,7 +648,7 @@ fn trigger_is(led: &str, trig: &str) -> bool {
 /// Opens one strip's framebuffer if its trigger is active and the fb has the expected name.
 fn open_strip_fb(model: &Model, s: &LedStrip) -> Option<Framebuffer> {
     let red0 = led_name(model, s, "red", 0);
-    if !trigger_is(&red0, s.trigger) {
+    if !s.trigger.is_empty() && !trigger_is(&red0, s.trigger) {
         warn!("leds: trigger {} not active on {red0}", s.trigger);
         return None;
     }
@@ -669,6 +684,9 @@ fn open_fb(model: &Model, nlogo: usize) -> Option<Sink> {
 }
 
 fn open_sysfs(model: &Model, n: usize, nlogo: usize) -> Option<Vec<File>> {
+    if model.led_prefix.is_empty() {
+        return None;
+    }
     let mut files = Vec::with_capacity((n + nlogo) * 3);
     for i in 0..n + nlogo {
         for c in ["red", "green", "blue"] {
