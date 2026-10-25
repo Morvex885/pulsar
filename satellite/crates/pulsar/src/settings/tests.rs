@@ -233,7 +233,7 @@ async fn write_now_bypasses_and_cancels_the_debounce() {
     st.led_speed = 3.0;
     sf.changed();
     st.zigbee_flash_failed = 0x5101_0203;
-    sf.write_now(&st);
+    assert!(sf.write_now(&st));
     // At once, with the change pending before it.
     assert_eq!(on_disk(&path).unwrap(), st.serialize().as_bytes());
     // The delayed write is no longer due, and flush has nothing to write.
@@ -279,6 +279,24 @@ async fn failed_flush_is_retried() {
     std::fs::create_dir(&dir).unwrap();
     sf.flush(&st);
     assert_eq!(on_disk(&path).unwrap(), golden("save_values.conf"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_write_now_reports_false_and_stays_pending() {
+    // The install path refuses to replace the binary when update_attempt is not on disk.
+    let t = TmpDir::new();
+    let dir = t.0.join("later");
+    let path = dir.join("state.conf");
+    let mut sf = StateFile::new(path.clone());
+    let st = values();
+    assert!(!sf.write_now(&st)); // the directory is missing: nothing written
+    assert_eq!(on_disk(&path), None);
+    // No delayed write is armed; the change stays pending for the next flush.
+    assert!(tokio::time::timeout(NEVER, sf.due()).await.is_err());
+    std::fs::create_dir(&dir).unwrap();
+    sf.flush(&st);
+    assert_eq!(on_disk(&path).unwrap(), golden("save_values.conf"));
+    assert!(sf.write_now(&st));
 }
 
 // glibc strtoul(s, nullptr, 16) with a 64-bit unsigned long (the Midi; the host).

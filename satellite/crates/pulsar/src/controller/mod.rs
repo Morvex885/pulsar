@@ -748,10 +748,12 @@ impl Controller {
     }
 
     /// `st` changed in a way that must survive a power cut or a crash right away: before a
-    /// restart or a binary swap, or the microphone mute.
-    fn persist_now(&mut self) {
+    /// restart or a binary swap, or the microphone mute. True = on disk; on false the change
+    /// stays pending (`StateFile`).
+    #[must_use = "a write that must be on disk has to check it"]
+    fn persist_now(&mut self) -> bool {
         self.st.volume_legacy = pulsar_media::mixer::to_legacy(self.model, self.st.volume);
-        self.state.write_now(&self.st);
+        self.state.write_now(&self.st)
     }
 
     /// Writes a pending change now: main calls it once after `run`, when nothing changes any

@@ -275,16 +275,20 @@ impl StateFile {
         self.timer.set((), SAVE_DELAY_MS);
     }
 
-    /// Writes `st` now; a pending delayed write is no longer needed.
-    pub fn write_now(&mut self, st: &Settings) {
+    /// Writes `st` now; a pending delayed write is no longer needed. True = on disk; false = the
+    /// change stays pending (the next change or `flush` tries again).
+    #[must_use = "a write that must be on disk has to check it"]
+    pub fn write_now(&mut self, st: &Settings) -> bool {
         self.timer.cancel(());
         self.dirty = !st.save(&self.path);
+        !self.dirty
     }
 
     /// Writes `st` if a change is pending.
     pub fn flush(&mut self, st: &Settings) {
         if self.dirty {
-            self.write_now(st);
+            // A failure is logged by save and stays pending for the next change or flush.
+            let _ = self.write_now(st);
         }
     }
 

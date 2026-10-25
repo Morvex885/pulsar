@@ -159,8 +159,9 @@ impl Controller {
         }
         self.api.publish_switch(id, state);
         if id == SwitchId::MicMute {
-            // Privacy: a mute must not be undone by a power cut right after it.
-            self.persist_now();
+            // Privacy: a mute must not be undone by a power cut right after it. A failed write
+            // is logged and stays pending; the mute itself is in effect either way.
+            let _ = self.persist_now();
         } else {
             self.persist();
         }
@@ -227,8 +228,9 @@ impl Controller {
                 );
                 self.st.zigbee_role = role;
                 self.st.zigbee_flash_failed = 0;
-                // Before the restart: the next start acts on the role.
-                self.persist_now();
+                // Before the restart: the next start acts on the role. A failed write stays
+                // pending for the exit flush after run().
+                let _ = self.persist_now();
                 self.api.publish_select(id, pulsar_zigbee::role(role).label);
                 self.exit = Some(ExitReason::ZigbeeRoleChanged);
             }
@@ -419,8 +421,9 @@ impl Controller {
                     return;
                 }
                 self.st.zigbee_flash_failed = failed_version;
-                // An image the radio refused is not written again after a crash or restart.
-                self.persist_now();
+                // An image the radio refused is not written again after a crash or restart. A
+                // failed write stays pending (logged).
+                let _ = self.persist_now();
             }
         }
     }
@@ -500,10 +503,19 @@ impl Controller {
             return;
         };
         warn!("installing release {} ({why})", r.version);
-        self.st.update_attempt.clone_from(&r.version);
+        let previous = std::mem::replace(&mut self.st.update_attempt, r.version.clone());
         // On disk before the updater can replace the binary: still set under another version
-        // after a restart, it tells that the release was rolled back.
-        self.persist_now();
+        // after a restart, it tells that the release was rolled back. Without it a bad release
+        // would carry no marker and automatic updates would install it again.
+        if !self.persist_now() {
+            warn!(
+                "update to {}: update_attempt not written to state.conf, install refused",
+                r.version
+            );
+            self.st.update_attempt = previous;
+            self.install_failed();
+            return;
+        }
         self.update_installing = true;
         self.clock.set_updating(true);
         self.update_progress = 0.0;
@@ -567,18 +579,25 @@ impl Controller {
                     }
                     Err((err, fatal)) => {
                         error!("update to {version} failed: {err}");
-                        self.update_installing = false;
-                        self.clock.set_updating(false);
                         if !fatal {
                             // A network failure: the next check tries again.
                             self.st.update_attempt.clear();
-                            // Left set by a crash, it would make automatic updates skip it.
-                            self.persist_now();
+                            // Left set by a crash, it would make automatic updates skip it. A
+                            // failed write stays pending (logged).
+                            let _ = self.persist_now();
                         }
-                        self.publish_update();
+                        self.install_failed();
                     }
                 }
             }
         }
+    }
+
+    /// An install that ended without a new binary, or never started: HA sees the update entity
+    /// idle again, the clock shows the time.
+    fn install_failed(&mut self) {
+        self.update_installing = false;
+        self.clock.set_updating(false);
+        self.publish_update();
     }
 }

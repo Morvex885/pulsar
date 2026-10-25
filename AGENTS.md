@@ -369,9 +369,11 @@ B,G,R bytes).
   `.prev` (possibly an older build) reads the same file after a rollback, so existing keys keep
   their format (`pulsar_core::fmt`: `%g` numbers, `strtof` parsing, C locale). Writes
   (`settings.rs`): `persist()` writes the whole file 1 s after the last change (`StateFile`);
-  `persist_now()` writes at once and is used for `update_attempt` (set when an install starts,
-  cleared after a non-fatal install failure), `zigbee_role` / `zigbee_flash_failed` and the
-  `mic_muted` switch. Each write is `<path>.tmp`, fsync, rename, fsync of the directory; a failed
+  `persist_now()` writes at once, returns whether the file is on disk and is used for
+  `update_attempt` (set when an install starts, cleared after a non-fatal install failure),
+  `zigbee_role` / `zigbee_flash_failed` and the `mic_muted` switch. An install is refused (reported
+  to HA like a failed one, `update_attempt` restored in memory) when the marker cannot be written.
+  Each write is `<path>.tmp`, fsync, rename, fsync of the directory; a failed
   write leaves the old file and stays pending until the next change or flush. `main` flushes a
   pending change once after `run()` returns (inside the teardown watchdog); a crash or SIGKILL
   loses up to 1 s of changes. A new key that must survive a restart, a crash or a binary swap
