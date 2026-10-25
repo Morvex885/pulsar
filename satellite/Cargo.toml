@@ -1,0 +1,32 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+# Every external dependency of the port is declared here, pinned exactly; crates use
+# `dep = { workspace = true }` (dev-dependencies add `features = ["test-util"]` to tokio).
+[workspace.dependencies]
+tokio = { version = "=1.54.1", default-features = false, features = ["rt", "net", "time", "sync", "macros", "signal", "process", "io-util", "fs"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "=1.15.1", features = ["std"] }
+ring = "=0.17.14"
+log = { version = "=0.4.34", features = ["std"] }
+libc = "=0.2.191"
+libloading = "=0.9.0"
+snow = { version = "=0.10.0", default-features = false, features = ["use-chacha20poly1305", "use-sha2", "use-curve25519", "use-getrandom"] }
+socket2 = { version = "=0.6.5", features = ["all"] }
+cc = "=1.10.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+debug = "line-tables-only"
+# The Makefile strips: build/<arch>/pulsar.debug keeps the line tables for addr2line.
+strip = false

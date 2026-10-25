@@ -1,0 +1,2 @@
+aioesphomeapi==46.22.0
+aiosendspin[server]==10.2.1

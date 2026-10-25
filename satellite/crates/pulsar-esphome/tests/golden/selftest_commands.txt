@@ -1,0 +1,17 @@
+# esphome_check.py commands against the C++ api_selftest (rust-port-base, host build)
+switch: SwitchState device_id=0 key=2 missing_state=False state=True
+switch: SwitchState device_id=0 key=2 missing_state=False state=False
+number: NumberState device_id=0 key=6 missing_state=False state=100
+number: NumberState device_id=0 key=27 missing_state=False state=1.5
+select: SelectState device_id=0 key=15 missing_state=False state='Smiley'
+select: no echo
+text: TextState device_id=0 key=14 missing_state=False state='Привет'
+media: MediaPlayerEntityState device_id=0 key=1 muted=False state=MediaPlayerState.IDLE volume=0.3
+media: MediaPlayerEntityState device_id=0 key=1 muted=False state=MediaPlayerState.PAUSED volume=0.3
+light: LightState blue=0 brightness=0.5 cold_white=0 color_brightness=1 color_mode=35 color_temperature=0 device_id=0 effect='None' green=0.5 key=7 red=1 state=True warm_white=0 white=0
+light: LightState blue=0 brightness=0.5 cold_white=0 color_brightness=1 color_mode=35 color_temperature=0 device_id=0 effect='Pulse' green=0.5 key=7 red=1 state=True warm_white=0 white=0
+button: TextSensorState device_id=0 key=24 missing_state=False state='router: joining'
+update: check sent
+action: clock_show_text sent
+action: led_show sent
+voice config: VoiceAssistantConfigurationResponse active_wake_words=['alisa'] available_wake_words=[{id='alisa', trained_languages=['ru'], wake_word='Алиса'}, {id='yandex', trained_languages=['ru'], wake_word='Яндекс'}] max_active_wake_words=1

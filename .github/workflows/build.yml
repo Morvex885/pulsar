@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [main]
+    branches: [main, rust]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -31,15 +31,31 @@ jobs:
         with:
           version: 0.14.1 # 0.13 builds armhf C++ binaries that crash before main
       - run: sudo apt-get update -q && sudo apt-get install -yq ninja-build
+      - name: rust toolchain (rust-toolchain.toml; rustup >= 1.28 no longer installs it on `rustup show`)
+        working-directory: satellite
+        run: rustup toolchain install
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            satellite/target
+          key: rust-${{ matrix.arch }}-${{ hashFiles('satellite/Cargo.lock', 'satellite/rust-toolchain.toml') }}
+          restore-keys: rust-${{ matrix.arch }}-
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-zigbuild
+          key: cargo-zigbuild-0.24.0-${{ runner.os }}-${{ matrix.arch }}
+      - run: |
+          cargo-zigbuild --version 2>/dev/null | grep -qx 'cargo-zigbuild 0.24.0' ||
+            cargo install cargo-zigbuild --locked --force --version 0.24.0
       - uses: actions/cache@v6
         with:
           path: satellite/third_party/src
-          key: third-party-${{ hashFiles('satellite/third_party/fetch.sh', 'satellite/third_party/sysroot.sh') }}
+          key: third-party-${{ hashFiles('satellite/third_party/fetch.sh') }}
       - name: daemon + tools
         working-directory: satellite
-        run: |
-          tools=$(for t in tools/*.cpp; do t=${t#tools/}; printf 'build/%s/tools/%s ' "${{ matrix.arch }}" "${t%.cpp}"; done)
-          make ARCH=${{ matrix.arch }} -j"$(nproc)" binary $tools
+        run: make ARCH=${{ matrix.arch }} -j"$(nproc)" binary tools
       - uses: actions/upload-artifact@v7
         with:
           name: pulsar-${{ matrix.arch }}
@@ -47,6 +63,36 @@ jobs:
             satellite/build/${{ matrix.arch }}/pulsar
             satellite/build/${{ matrix.arch }}/pulsar.debug
           if-no-files-found: error
+
+  check:
+    # Host: cargo fmt --check, clippy -D warnings (host + both stations, the latter through
+    # cargo-zigbuild: ring's build script compiles C for the target), tests (without sendspin-cpp).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+      - name: rust toolchain (rust-toolchain.toml)
+        working-directory: satellite
+        run: rustup toolchain install
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            satellite/target
+          key: rust-host-${{ hashFiles('satellite/Cargo.lock', 'satellite/rust-toolchain.toml') }}
+          restore-keys: rust-host-
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-zigbuild
+          key: cargo-zigbuild-0.24.0-${{ runner.os }}-check
+      - run: |
+          cargo-zigbuild --version 2>/dev/null | grep -qx 'cargo-zigbuild 0.24.0' ||
+            cargo install cargo-zigbuild --locked --force --version 0.24.0
+      - run: make -C satellite check
 
   radio:
     # Zigbee firmware (router, coordinator) for the Midi's radio (Telink B91), installed next to the daemon.

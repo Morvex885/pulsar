@@ -1,0 +1,8 @@
+latest v1.2.4   current v1.2.3               newer=1 current_known=1
+latest v1.2.3   current v1.2.3               newer=0 current_known=1
+latest v1.2.3   current v1.2.3-4-gabc1234    newer=0 current_known=1
+latest v1.3.0   current v1.2.3-4-gabc        newer=1 current_known=1
+latest v1.2.3   current v1.10.0              newer=0 current_known=1
+latest v1.2.3   current 6ac30be              newer=1 current_known=0
+latest v2.0.0   current v1.9.9-dirty         newer=1 current_known=1
+latest junk     current v1.0.0               newer=0 current_known=1

@@ -1,0 +1,25 @@
+500	Internal Server Error (500), URL: http://192.168.1.50:8000/a.mp3, Redirect to: (NULL)
+404	gstsouphttpsrc.c(1471): gst_soup_http_src_parse_status (): /GstPlayBin:ch0/GstURIDecodeBin:uridecodebin0/GstSoupHTTPSrc:source:\nNot Found (404), URL: http://192.168.1.50:8000/missing.flac, Redirect to: (NULL)
+2	Could not resolve host (2), URL: http://nowhere.invalid/x.mp3, Redirect to: (NULL)
+7	Cannot connect to destination (7), URL: https://192.168.1.50/x, Redirect to: (NULL)
+408	Request Timeout (408), URL: http://x/
+429	Too Many Requests (429), URL: http://x/
+503	Service Unavailable (503), URL: http://x/
+403	Forbidden (403), URL: http://x/
+500	(500), URL: x
+-1	500), URL: x
+-1	abc (), URL: x
+-1	abc 500), URL: x
+-1	abc (x500), URL: x
+-1	abc (500) , URL: x
+-1	abc (500), URL:x
+-1	
+-1	no status here
+503	a (12) b (503), URL: c (404), URL: d
+0	x (0), URL: y
+7	x (007), URL: y
+99999	x (99999), URL: y
+200	x ((200), URL: y
+-1	(), URL: 
+-1	), URL: 
+-1	<null>

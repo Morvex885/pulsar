@@ -1,0 +1,647 @@
+> new
+send 0a04 01040105000001000000
+send 0a04 025ec040080001000000
+send 0a04 f2e0a1610000012100012100
+send 0a00 -
+client_connected 0
+> radio 8a00 02000f621adddddddddddddddd04030201004b1200000003070707070707070707070707070707070088130000
+client_connected 0
+> client
+client_connected 1
+> req 0d 00000000
+client c00d010009000009782642ffc0
+client_connected 1
+> req 07 000000
+client c00702000800220000cdffc0
+client_connected 1
+> req 0d -
+client c00d030009000009782640ffc0
+client_connected 1
+> req 07 -
+client c00704000800220000cbffc0
+client_connected 1
+> req 20 0000
+client_connected 1
+> raw c00d0300090000000000e5ffc0
+client_connected 1
+> raw c00d040009000000000000c0
+client_connected 1
+> raw c0c0c0
+client_connected 1
+> req 0a 010000
+client c00a06040800010000e3ffc0
+client_connected 1
+> req 0a 010001
+client c00a0700100009000104030201004b12006effc0
+client_connected 1
+> req 0a 010002
+client c00a08040800010002dfffc0
+client_connected 1
+> req 0a 010003
+client c00a09040800010003ddffc0
+client_connected 1
+> req 0a 010004
+client c00a0a040800010004dbddffc0
+client_connected 1
+> req 0a 010005
+client c00a0b000a00030005621a5dffc0
+client_connected 1
+> req 0a 010006
+client c00a0c040800010006d7ffc0
+client_connected 1
+> req 0a 010007
+client c00a0d000a000300070000d5ffc0
+client_connected 1
+> req 0a 010008
+client c00a0e001000090008dddddddddddddddddff8c0
+client_connected 1
+> req 0a 010009
+client c00a0f00090002000901d2ffc0
+client_connected 1
+> req 0a 01000a
+client c00a10000c0005000a008000004bffc0
+client_connected 1
+> req 0a 01000b
+client c00a1100100009000bddddddddddddddddd9f8c0
+client_connected 1
+> req 0a 01000c
+client c00a1204080001000ccbffc0
+client_connected 1
+> req 0a 01000d
+client c00a1304080001000dc9ffc0
+client_connected 1
+> req 0a 01000e
+client c00a1400100009000e04030201004b120054ffc0
+client_connected 1
+> req 0a 01000f
+client c00a1504080001000fc5ffc0
+client_connected 1
+> req 0a 010010
+client c00a1600090002001003c2ffc0
+client_connected 1
+> req 0a 010011
+client c00a17040800010011c1ffc0
+client_connected 1
+> req 0a 010012
+client c00a18040800010012bfffc0
+client_connected 1
+> req 0a 010013
+client c00a19040800010013bdffc0
+client_connected 1
+> req 0a 02001300
+client c00a1a0013000c001300010401050000010000009effc0
+client_connected 1
+> req 0a 02001301
+client c00a1b0013000c001301025edbdc400800010000003ffec0
+client_connected 1
+> req 0a 02001302
+client c00a1c0015000e001302f2e0a16100000121000121008afcc0
+client_connected 1
+> req 0a 02001303
+client c00a1d0011000a0013030000000000000000a8ffc0
+client_connected 1
+> req 0a 02001304
+client c00a1e040800010013b8ffc0
+client_connected 1
+> req 0a 010014
+client c00a1f040800010014b6ffc0
+client_connected 1
+> req 0a 010015
+client c00a2000090002001501b5ffc0
+client_connected 1
+> req 0a 010016
+client c00a21040800010016b2ffc0
+client_connected 1
+> req 0a 010017
+client c00a22040800010017b0ffc0
+client_connected 1
+> req 0a 010018
+client c00a23001900120018000707070707070707070707070707070720ffc0
+client_connected 1
+> req 0a 02001801
+client c00a2400190012001801070707070707070707070707070707071effc0
+client_connected 1
+> req 0a 010019
+client c00a25070800010019a8ffc0
+client_connected 1
+> req 0a 0900190102030405060708
+client c00a2600200019001901020304050607085a6967426565416c6c69616e63653039a2f9c0
+client_connected 1
+> req 0a 080019010203040506
+client c00a27070800010019a6ffc0
+client_connected 1
+> req 0a 01001a
+client c00a2804080001001aa7ffc0
+client_connected 1
+> req 0a 01001b
+client c00a2904080001001ba5ffc0
+client_connected 1
+> req 0a 01001c
+client c00a2a00090002001c0f96ffc0
+client_connected 1
+> req 0a 01001d
+client c00a2b04080001001da1ffc0
+client_connected 1
+> req 0a 01001e
+client c00a2c04080001001e9fffc0
+client_connected 1
+> req 0a 01001f
+client c00a2d04080001001f9dffc0
+client_connected 1
+> req 0a 010020
+client c00a2e0408000100209bffc0
+client_connected 1
+> req 0a 010021
+client c00a2f000900020021009bffc0
+client_connected 1
+> req 0a 010022
+client c00a30000a00030022060190ffc0
+client_connected 1
+> req 0a 010023
+client c00a3104080001002395ffc0
+client_connected 1
+> req 0a 010024
+client c00a320009000200240392ffc0
+client_connected 1
+> req 0a 010025
+client c00a3304080001002591ffc0
+client_connected 1
+> req 0a 010026
+client c00a340408000100268fffc0
+client_connected 1
+> req 0a 010027
+client c00a35000c0005002788130000eefec0
+client_connected 1
+> req 0a 010028
+client c00a36000a0003002800008bffc0
+client_connected 1
+> req 0a 010029
+client c00a3704080001002989ffc0
+client_connected 1
+> req 0a 0100
+client_connected 1
+> req 0a 01
+client_connected 1
+> req 0a -
+client_connected 1
+> req 0b 0900010403020100004b1200
+client c00b3b000800010001b0ffc0
+client_connected 1
+> req 0b 080001040302010000
+client c00b3c070800010001a8ffc0
+client_connected 1
+> req 0b 0300070000
+client c00b3d000800010007a8ffc0
+client_connected 1
+> req 0b 0300070100
+client c00b3e040800010007a3ffc0
+client_connected 1
+> req 0b 02000700
+client c00b3f0708000100079fffc0
+client_connected 1
+> req 0b 02000901
+client c00b40000800010009a3ffc0
+client_connected 1
+> req 0b 02000900
+client c00b410408000100099effc0
+client_connected 1
+> req 0b 0100
+client_connected 1
+> req 0b 05002788130000
+client c00b4300080001002782ffc0
+client_connected 1
+> req 0b 0400278813
+client c00b440708000100277affc0
+client_connected 1
+> req 0b 0300051a62
+client c00b45000800010005a2ffc0
+client_connected 1
+> req 0b 0900088ddddddddddddddd
+client c00b460008000100089effc0
+client_connected 1
+> req 0b 09000bdddddddddddddddd
+client c00b4700080001000b9affc0
+client_connected 1
+> req 0b 1200180007070707070707070707070707070707
+client c00b480008000100188cffc0
+client_connected 1
+> req 0b 110018000707070707070707070707070707
+client c00b4907080001001884ffc0
+client_connected 1
+> req 0b 05000a00800000
+client c00b4a00080001000a98ffc0
+client_connected 1
+> req 0b 04000a008000
+client c00b4b07080001000a90ffc0
+client_connected 1
+> req 0b 0200240300
+client c00b4c0008000100247cffc0
+client_connected 1
+> req 0b 02002403
+client c00b4d0008000100247bffc0
+client_connected 1
+> req 0b 190019ffffffffffffffff5a6967426565416c6c69616e63653039
+client c00b4e00080001001985ffc0
+client_connected 1
+> req 0b 190019ffffffffffffffff7a6967426565416c6c69616e63653039
+client c00b4f04080001001980ffc0
+client_connected 1
+> req 0b 180019ffffffffffffffff5a6967426565416c6c69616e636530
+client c00b500708000100197cffc0
+client_connected 1
+> req 0b 0b001301030401000100010000
+client c00b5107080001001381ffc0
+client_connected 1
+> req 0b 02001300
+client c00b5207080001001380ffc0
+client_connected 1
+> req 0b 0b001304030401000100010000
+client c00b530708000100137fffc0
+client_connected 1
+> req 0b 0b0013000a0401000100010000
+client c00b540708000100137effc0
+client_connected 1
+> req 0b 02000e00
+client c00b5500080001000e89ffc0
+client_connected 1
+> req 0b 02001003
+client c00b5600080001001086ffc0
+client_connected 1
+> req 0b 02001501
+client c00b5700080001001580ffc0
+client_connected 1
+> req 0b 02002600
+client c00b580008000100266effc0
+client_connected 1
+> req 0b 0300280000
+client c00b590008000100286bffc0
+client_connected 1
+> req 0b 02001c0b
+client c00b5a04080001001c72ffc0
+client_connected 1
+> req 0b 0200990b
+client c00b5b040800010099f4fec0
+client_connected 1
+> req 0b 02002100
+send 0a03 00
+client c00b5c0008000100216fffc0
+client_connected 1
+> req 0b 01002100
+send 0a03 00
+client c00b5d0008000100216effc0
+client_connected 1
+> req 0a 010013
+client c00a5e04080001001378ffc0
+client_connected 1
+> req 0a 010024
+client c00a5f0009000200240365ffc0
+client_connected 1
+> req 0a 01000a
+client c00a60000c0005000a00800000fbfec0
+client_connected 1
+> req 08 02
+send 0a02 -
+client c00861000600028fffc0c00e000007002100caffc0
+client_connected 1
+> req 07 000000
+client c007620008002100006effc0
+client_connected 1
+> new
+send 0a04 01040105000001000000
+send 0a04 025ec040080001000000
+send 0a04 f2e0a1610000012100012100
+send 0a00 -
+client_connected 0
+> radio 8a00 00030fffff000000000000000004030201004b1200feff00000000000000000000000000000000000000000000
+client_connected 0
+> client
+client_connected 1
+> req 07 000000
+client c00701000800200000d0ffc0
+client_connected 1
+> req 0a 010001
+client c00a0200100009000104030201004b120073ffc0
+client_connected 1
+> req 0a 010005
+client c00a03000a00030005ffffe3fdc0
+client_connected 1
+> req 0a 010007
+client c00a04000a00030007ffffe0fdc0
+client_connected 1
+> req 0a 010008
+client c00a05001000090008ffffffffffffffffd8f7c0
+client_connected 1
+> req 0a 01000a
+client c00a06000c0005000a00000000d5ffc0
+client_connected 1
+> req 0a 01000b
+client c00a0700100009000bffffffffffffffffd3f7c0
+client_connected 1
+> req 0a 01000e
+client c00a0800100009000e04030201004b120060ffc0
+client_connected 1
+> req 0a 02001805
+client c00a0900190012001805ffffffffffffffffffffffffffffffffb5efc0
+client_connected 1
+> req 0a 01001c
+client c00a0a00090002001c00c5ffc0
+client_connected 1
+> req 0a 010024
+client c00a0b00090002002400bcffc0
+client_connected 1
+> req 0a 010027
+client c00a0c000c0005002700000000b2ffc0
+client_connected 1
+> req 0b 05000a00001000
+client c00b0d00080001000ad5ffc0
+client_connected 1
+> req 0a 01000a
+client c00a0e000c0005000a00001000bdffc0
+client_connected 1
+> req 0b 0200240900
+client c00b0f000800010024b9ffc0
+client_connected 1
+> req 0a 010024
+client c00a1000090002002409aeffc0
+client_connected 1
+> req 08 02
+send 0a01 14ffff00000000000000000000000000000000000000000000000004030201004b12000000000009
+client c0081100060002dfffc0c00e000007002100caffc0
+client_connected 1
+> req 08 00
+client c0081200060000e0ffc0c00e000007002000cbffc0
+client_connected 1
+> req 07 000000
+client c00713000800200000beffc0
+client_connected 1
+> new
+send 0a04 01040105000001000000
+send 0a04 025ec040080001000000
+send 0a04 f2e0a1610000012100012100
+send 0a00 -
+client_connected 0
+> radio 8a00 02000f621adddddddddddddddd04030201004b1200000003070707070707070707070707070707070088130000
+client_connected 0
+> client
+client_connected 1
+> req 0a 010001
+client c00a0100100009000104030201004b120074ffc0
+client_connected 1
+> req 08 00
+client c0080200060000f0ffc0c00e000007002000cbffc0
+client_connected 1
+> req 07 000000
+client c00703000800200000ceffc0
+client_connected 1
+> req 0b 0300051f2e
+client c00b04000800010005e3ffc0
+client_connected 1
+> req 0b 0900080102030405060708
+client c00b05000800010008dfffc0
+client_connected 1
+> req 0b 1200180011223344556677889900aabbccddeeff
+client c00b06000800010018ceffc0
+client_connected 1
+> req 0b 0900018877665544332211
+client c00b07000800010001e4ffc0
+client_connected 1
+> req 0b 05000a00001000
+client c00b0800080001000adaffc0
+client_connected 1
+> req 0b 0200240500
+client c00b09000800010024bfffc0
+client_connected 1
+> req 0b 05002700010000
+client c00b0a000800010027bbffc0
+client_connected 1
+> req 08 02
+send 0a02 -
+client c0080b00060002e5ffc0c00e000007002100caffc0
+client_connected 1
+> radio 8a00 00000fffff00000000000000008877665544332211feff00000000000000000000000000000000000000000000
+send 0a01 141f2e010203040506070811223344556677889900aabbccddeeff88776655443322118817000005
+client_connected 1
+> radio 8a00 0100141f2e0102030405060708887766554433221100000500112233445566778899aabbccddeeff0000010000
+client_connected 1
+> radio 8a00 0200141f2e0102030405060708887766554433221100000500112233445566778899aabbccddeeff0000010000
+client c00e000007002200c9ffc0
+client_connected 1
+> req 07 000000
+client c0070c000800220000c3ffc0
+client_connected 1
+> req 0a 010005
+client c00a0d000a000300051f2e8affc0
+client_connected 1
+> req 0a 010008
+client c00a0e0010000900080102030405060708a3ffc0
+client_connected 1
+> req 0a 01001c
+client c00a0f00090002001c14acffc0
+client_connected 1
+> req 0a 010024
+client c00a1000090002002405b2ffc0
+client_connected 1
+> req 0a 010027
+client c00a11000c0005002700010000acffc0
+client_connected 1
+> new
+send 0a04 01040105000001000000
+send 0a04 025ec040080001000000
+send 0a04 f2e0a1610000012100012100
+send 0a00 -
+client_connected 0
+> radio 8a00 02000f621adddddddddddddddd04030201004b1200000003070707070707070707070707070707070088130000
+client_connected 0
+> client
+client_connected 1
+> req 0b 030005ffff
+client c00b01000800010005e6ffc0
+client_connected 1
+> req 08 02
+send 0a02 -
+client c0080200060002eeffc0c00e000007002200c9ffc0
+client_connected 1
+> radio 8a00 00000fffff000000000000000004030201004b1200feff00000000000000000000000000000000000000000000
+client c00e000007002000cbffc0
+client_connected 1
+> req 07 000000
+client c00703000800200000ceffc0
+client_connected 1
+> radio 8907 -
+send 0a04 01040105000001000000
+send 0a04 025ec040080001000000
+send 0a04 f2e0a1610000012100012100
+send 0a00 -
+client_connected 0
+> req 07 000000
+client_connected 0
+> new
+send 0a04 01040105000001000000
+send 0a04 025ec040080001000000
+send 0a04 f2e0a1610000012100012100
+send 0a00 -
+client_connected 0
+> radio 8a00 02000f621adddddddddddddddd04030201004b1200000003070707070707070707070707070707070088130000
+client_connected 0
+> client
+client_connected 1
+> req 0b 0c001301f2e0a16100000000012100
+send 0a04 02ff
+send 0a04 f2e0a16100000000
+client c00b01000800010013d8ffc0
+client_connected 1
+> req 0a 02001301
+client c00a020011000a001301f2e0a16100000000f1fcc0
+client_connected 1
+> req 0a 02001302
+client c00a030015000e001302f2e0a1610000012100012100a3fcc0
+client_connected 1
+> req 0b 0c001302030401000100010000
+client c00b04070800010013ceffc0
+client_connected 1
+> req 0b 02002178
+send 0a03 78
+client c00b05000800010021c6ffc0
+client_connected 1
+> req 12 1100010002341201040106000101000202aa040f
+send 0a10 0002341201040106000100aa0102
+client c0120600090002002201baffc0
+client_connected 1
+> req 12 17000200030f0e0d0c0b0a090801040106000101000101cc0605
+send 0a10 01030f0e0d0c0b0a090801040106000101cc0101
+client c0120700090002002202b8ffc0
+client_connected 1
+> req 12 0d0003000105000401080001010001dd
+send 0a10 02010500040108000100000101
+client c0120800090002002203b6ffc0
+client_connected 1
+> ack 2
+client_connected 1
+> req 12 11000400023412010401060001010001ee0000
+send 0a10 030234120104010600010c000101
+client c0120900090002002204b4ffc0c00e000007002600c5ffc0
+client_connected 1
+> req 12 0f0005000278563412000000000000000005000000000101007a
+send 0a10 04027856341200000000000000
+client c0120a00090002002605aeffc0
+client_connected 1
+> req 12 0f000600040102030405060708090a0b0c0d0e
+client c0120b07090002002606a5ffc0
+client_connected 1
+> req 12 0c00070002341201040106000108
+client c0120c07090002002607a3ffc0
+client_connected 1
+> req 12 0100
+client c0120d07090002002600a9ffc0
+client_connected 1
+> req 12 -
+client_connected 1
+> radio 8a10 0000
+client_connected 1
+> radio 8a10 01e9
+client_connected 1
+> radio 8a10 02a7
+client_connected 1
+> radio 8a10 0300
+client_connected 1
+> req 04 0000
+client c0040f0013000c0026040234120101a700000000b3fec0
+client_connected 1
+> req 04 0000
+client c004100013000c002601023412010100000000005cffc0
+client_connected 1
+> req 04 0000
+client c0041100190012002602030f0e0d0c0b0a09080101e9000000004efec0
+client_connected 1
+> req 04 0000
+client c004120012000b00220301050001a700000000fafec0
+client_connected 1
+> req 04 0000
+client c004130107000000e1ffc0
+client_connected 1
+> radio 8a11 0200000102341201040106004cc400033132c0
+client c00e000007002a00c1ffc0
+client_connected 1
+> radio 8a11 010500ff027856020401080010800000
+client_connected 1
+> req 17 0000
+client c017140021001a002a02000001023412010401060003003132dbdc00004c00000000c4e3fcc0
+client_connected 1
+> req 17 0000
+client c01715001e00170022010500ff02785602040108000000000010000000008009fdc0
+client_connected 1
+> req 17 0000
+client c017160107000000cbffc0
+client_connected 1
+> req 08 00
+client c0081700060000dbddffc0c00e000007002000cbffc0
+client_connected 1
+> radio 8a11 0200000102341201040106004cc4000133
+client_connected 1
+> req 17 0000
+client c017180107000000c9ffc0
+client_connected 1
+> req 08 02
+client c0081900060002d7ffc0c00e000007002200c9ffc0
+client_connected 1
+> client
+client_connected 1
+> radio 8a10 0400
+client_connected 1
+> req 04 0000
+client c0041a0107000000daffc0
+client_connected 1
+> new
+send 0a04 01040105000001000000
+send 0a04 025ec040080001000000
+send 0a04 f2e0a1610000012100012100
+send 0a00 -
+client_connected 0
+> radio 8a00 02000f621adddddddddddddddd04030201004b1200000003070707070707070707070707070707070088130000
+client_connected 0
+> client
+client_connected 1
+> req 0b 05000a00000002
+client c00b0100080001000ae1ffc0
+client_connected 1
+> req 0b 0200240700
+client c00b02000800010024c6ffc0
+client_connected 1
+> req 08 02
+send 0a05 1907
+client c0080300060002edffc0c00e000007002200c9ffc0
+client_connected 1
+> req 0a 01000a
+client c00a04000c0005000a00000002d5ffc0
+client_connected 1
+> new
+send 0a04 01040105000001000000
+send 0a04 025ec040080001000000
+send 0a04 f2e0a1610000012100012100
+send 0a00 -
+client_connected 0
+> radio 8a00 00030fffff000000000000000004030201004b1200feff00000000000000000000000000000000000000000000
+client_connected 0
+> client
+client_connected 1
+> req 0b 05000a00001000
+client c00b0100080001000ae1ffc0
+client_connected 1
+> req 08 02
+send 0a01 14ffff00000000000000000000000000000000000000000000000004030201004b12000000000000
+client c0080200060002eeffc0c00e000007002100caffc0
+client_connected 1
+> radio 8a00 010014ffff000000000000000004030201004b1200000000000000000000000000000000000000000000000000
+client_connected 1
+> req 07 000000
+client c00703000800210000cdffc0
+client_connected 1
+> radio 8907 -
+send 0a04 01040105000001000000
+send 0a04 025ec040080001000000
+send 0a04 f2e0a1610000012100012100
+send 0a00 -
+client c00e000007002000cbffc0
+client_connected 0
+> req 07 000000
+client_connected 0

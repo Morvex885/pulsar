@@ -1,0 +1,57 @@
+# esphome_check.py dump --mask against the C++ api_selftest (rust-port-base, host build)
+DeviceInfo api_encryption_provisionable=False api_encryption_supported=False api_outgoing_connection_supported=False area={area_id=0, name=''} areas=[] bluetooth_mac_address='' bluetooth_proxy_feature_flags=0 compilation_time=* devices=[] esphome_version='2026.9.0' friendly_name='Яндекс Станция Миди (selftest)' has_deep_sleep=False legacy_bluetooth_proxy_version=0 legacy_voice_assistant_version=0 mac_address=* manufacturer='Yandex' model='Yandex Station Midi' name='pulsar-selftest' project_name='pulsar.satellite' project_version=* serial_proxies=[] suggested_area='' uses_password=False voice_assistant_feature_flags=61 webserver_port=0 zwave_home_id=0 zwave_proxy_feature_flags=0
+MediaPlayerInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE feature_flags=1070605 icon='' key=1 name='Media Player' object_id='media_player' supported_formats=[{bitrate=0, format='flac', num_channels=2, purpose=MediaPlayerFormatPurpose.DEFAULT, sample_bytes=2, sample_rate=48000}, {bitrate=0, format='flac', num_channels=1, purpose=MediaPlayerFormatPurpose.ANNOUNCEMENT, sample_bytes=2, sample_rate=48000}] supports_pause=True
+SwitchInfo assumed_state=False device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE icon='mdi:microphone-off' key=2 name='Mute microphones' object_id='mute_microphones'
+SwitchInfo assumed_state=False device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE icon='mdi:clock-digital' key=3 name='Clock display' object_id='clock_display'
+SwitchInfo assumed_state=False device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:update' key=20 name='Auto update' object_id='auto_update'
+SwitchInfo assumed_state=False device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:speaker-multiple' key=25 name='Nearest station answers' object_id='nearest_station_answers'
+SwitchInfo assumed_state=False device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:led-on' key=28 name='Voice indication' object_id='voice_indication'
+NumberInfo device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:speedometer' key=27 max_value=4 min_value=0.25 mode=NumberMode.SLIDER name='LED speed' object_id='led_speed' step=0.05 unit_of_measurement='×'
+SelectInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:equalizer' key=26 name='Music visualization' object_id='music_visualization' options=['Off', 'All styles', 'Spectrum']
+SelectInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:palette' key=29 name='Case color' object_id='case_color' options=['None', 'blue']
+SelectInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:equalizer-outline' key=31 name='Clock music' object_id='clock_music' options=['Off', 'Levels']
+UpdateInfo device_class='firmware' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='' key=19 name='Firmware' object_id='firmware'
+BinarySensorInfo device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.DIAGNOSTIC icon='mdi:microphone-off' is_status_binary_sensor=False key=4 name='Hardware mic mute' object_id='hardware_mic_mute'
+SensorInfo accuracy_decimals=0 device_class='illuminance' device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE force_update=False icon='' key=5 legacy_last_reset_type=LastResetType.NONE name='Illuminance' object_id='illuminance' state_class=SensorStateClass.MEASUREMENT unit_of_measurement='lx'
+NumberInfo device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:brightness-6' key=6 max_value=100 min_value=0 mode=NumberMode.SLIDER name='Clock brightness' object_id='clock_brightness' step=1 unit_of_measurement='%'
+LightInfo device_id=0 disabled_by_default=False effects=['None', 'Rainbow', 'Pulse'] entity_category=EntityCategory.NONE icon='mdi:led-strip-variant' key=7 legacy_supports_brightness=False legacy_supports_color_temperature=False legacy_supports_rgb=False legacy_supports_white_value=False max_mireds=0 min_mireds=0 name='Ring' object_id='ring' supported_color_modes=[ColorMode.RGB]
+EventInfo device_class='button' device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE event_types=['action', 'action_long', 'volume_up', 'volume_down'] icon='mdi:gesture-tap-button' key=8 name='Button' object_id='button'
+ButtonInfo device_class='restart' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='' key=9 name='Restart' object_id='restart'
+SensorInfo accuracy_decimals=0 device_class='signal_strength' device_id=0 disabled_by_default=False entity_category=EntityCategory.DIAGNOSTIC force_update=False icon='' key=10 legacy_last_reset_type=LastResetType.NONE name='Wi-Fi signal' object_id='wifi_signal' state_class=SensorStateClass.MEASUREMENT unit_of_measurement='dBm'
+SensorInfo accuracy_decimals=0 device_class='duration' device_id=0 disabled_by_default=False entity_category=EntityCategory.DIAGNOSTIC force_update=False icon='' key=11 legacy_last_reset_type=LastResetType.NONE name='Uptime' object_id='uptime' state_class=SensorStateClass.TOTAL_INCREASING unit_of_measurement='s'
+TextSensorInfo device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.DIAGNOSTIC icon='mdi:ip-network' key=12 name='IP address' object_id='ip_address'
+TextSensorInfo device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.DIAGNOSTIC icon='mdi:new-box' key=13 name='Version' object_id='version'
+NumberInfo device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:speedometer' key=16 max_value=2000 min_value=100 mode=NumberMode.SLIDER name='Clock text speed' object_id='clock_text_speed' step=50 unit_of_measurement='ms'
+TextInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE icon='mdi:form-textbox' key=14 max_length=64 min_length=0 mode=TextMode.TEXT name='Clock text' object_id='clock_text' pattern=''
+SelectInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE icon='mdi:emoticon-outline' key=15 name='Clock face' object_id='clock_face' options=['None', 'Smiley']
+SelectInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:zigbee' key=21 name='Zigbee role' object_id='zigbee_role' options=['Coordinator', 'Router']
+ButtonInfo device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:link-variant' key=22 name='Zigbee join network' object_id='zigbee_join'
+ButtonInfo device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:link-variant-off' key=23 name='Zigbee leave network' object_id='zigbee_leave'
+TextSensorInfo device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.DIAGNOSTIC icon='mdi:zigbee' key=24 name='Zigbee' object_id='zigbee'
+UserService args=[{default_value='', description='', example='', name='text', optional=False, type=UserServiceArgType.STRING}, {default_value='', description='', example='', name='seconds', optional=False, type=UserServiceArgType.INT}] description='' key=17 name='clock_show_text' supports_response=SupportsResponseType.NONE
+UserService args=[{default_value='', description='', example='', name='face', optional=False, type=UserServiceArgType.STRING}, {default_value='', description='', example='', name='seconds', optional=False, type=UserServiceArgType.INT}] description='' key=18 name='clock_show_face' supports_response=SupportsResponseType.NONE
+UserService args=[{default_value='', description='', example='', name='effect', optional=False, type=UserServiceArgType.STRING}, {default_value='', description='', example='', name='color', optional=False, type=UserServiceArgType.STRING}, {default_value='', description='', example='', name='seconds', optional=False, type=UserServiceArgType.INT}] description='' key=30 name='led_show' supports_response=SupportsResponseType.NONE
+media_player: MediaPlayerEntityState device_id=0 key=1 muted=False state=MediaPlayerState.IDLE volume=0.5
+mute_microphones: SwitchState device_id=0 key=2 missing_state=False state=False
+clock_display: SwitchState device_id=0 key=3 missing_state=False state=True
+auto_update: SwitchState device_id=0 key=20 missing_state=True state=False
+nearest_station_answers: SwitchState device_id=0 key=25 missing_state=True state=False
+voice_indication: SwitchState device_id=0 key=28 missing_state=False state=True
+firmware: UpdateState current_version='' device_id=0 has_progress=False in_progress=False key=19 latest_version='' missing_state=True progress=0 release_summary='' release_url='' title=''
+hardware_mic_mute: BinarySensorState device_id=0 key=4 missing_state=False state=False
+illuminance: SensorState device_id=0 key=5 missing_state=True state=*
+clock_brightness: NumberState device_id=0 key=6 missing_state=False state=50
+ring: LightState blue=1 brightness=0.8 cold_white=0 color_brightness=1 color_mode=35 color_temperature=0 device_id=0 effect='None' green=0.5 key=7 red=0 state=True warm_white=0 white=0
+wifi_signal: SensorState device_id=0 key=10 missing_state=* state=*
+uptime: SensorState device_id=0 key=11 missing_state=False state=*
+ip_address: TextSensorState device_id=0 key=12 missing_state=* state=*
+version: TextSensorState device_id=0 key=13 missing_state=False state=*
+clock_text_speed: NumberState device_id=0 key=16 missing_state=False state=400
+clock_text: TextState device_id=0 key=14 missing_state=False state=''
+clock_face: SelectState device_id=0 key=15 missing_state=False state='None'
+led_speed: NumberState device_id=0 key=27 missing_state=False state=1
+music_visualization: SelectState device_id=0 key=26 missing_state=False state='All styles'
+case_color: SelectState device_id=0 key=29 missing_state=False state='None'
+clock_music: SelectState device_id=0 key=31 missing_state=False state='Off'
+zigbee_role: SelectState device_id=0 key=21 missing_state=False state='Coordinator'
+zigbee: TextSensorState device_id=0 key=24 missing_state=False state='coordinator: PAN 0x1234, channel 15'
