@@ -32,6 +32,12 @@ Scenarios against the daemon (a test instance: PULSAR_PORT_OFFSET, service stopp
                      role select only gets its current option (another one restarts the daemon
                      and writes the radio), the Zigbee buttons are not pressed, auto update is
                      only set to its current state.
+  scenario-persist   --count N (default 20) commands to the number --entity (led_speed or
+                     clock_text_speed), --interval-ms apart (default 50), each checked on its
+                     echo; the last value is printed and left set (state.conf debounce: one
+                     write ~1 s after the last change). No volume or mute command is sent.
+                     --install: then an update check and the install of the release offered,
+                     waited for up to --install-s (default 300); the daemon exits after it.
 The LED ring and clock states (LISTENING, THINKING, SPEAKING, TIMER_RING, the timer) are read on
 the station meanwhile (sysfs); the --*-s pauses leave time for that.
 
@@ -44,6 +50,7 @@ import asyncio
 import dataclasses
 import enum
 import sys
+import time
 
 from aioesphomeapi import (
     APIClient,
@@ -501,6 +508,63 @@ async def cmd_scenario_entities(client, args):
         await expect(w, name, key, send, pred)
 
 
+# Values the daemon keeps as sent (inside its clamp, clock_text_speed in steps of 50).
+PERSIST_VALUES = {
+    "led_speed": [round(0.5 + 0.1 * i, 1) for i in range(36)],
+    "clock_text_speed": [100.0 + 50 * i for i in range(39)],
+}
+
+
+async def cmd_scenario_persist(client, args):
+    w = Watch(client)
+    ents, _ = await entities_of(client)
+    await asyncio.sleep(0.8)
+    key = ents[args.entity].key
+    values = PERSIST_VALUES[args.entity]
+    v = None
+    for i in range(args.count):
+        v = values[i % len(values)]
+        await expect(
+            w,
+            f"number {args.entity} #{i + 1} -> {v:g}",
+            key,
+            lambda x=v: client.number_command(key, x),
+            lambda s, x=v: abs(s.state - x) < 1e-3,
+        )
+        await asyncio.sleep(args.interval_ms / 1000)
+    if v is not None:
+        print(f"last {args.entity}={v:g} echoed at {time.strftime('%H:%M:%S')}")
+    if not args.install:
+        return
+    # update_attempt=<tag> is written at once when the install starts; the install ends with the
+    # daemon's exit (a test instance is not restarted: no supervisor).
+    fw = ents["firmware"].key
+    offer = await expect(
+        w,
+        "update: check",
+        fw,
+        lambda: client.update_command(fw, UpdateCommand.CHECK),
+        lambda s: s.latest_version and s.latest_version != s.current_version,
+        30,
+    )
+    if offer is None:
+        return
+    started = await expect(
+        w,
+        f"update: install {offer.latest_version} at {time.strftime('%H:%M:%S')}",
+        fw,
+        lambda: client.update_command(fw, UpdateCommand.INSTALL),
+        lambda s: s.in_progress,
+        10,
+    )
+    if started is None:
+        return
+    done = await w.until(fw, lambda s: not s.in_progress or s.progress >= 100, args.install_s, after=w.seq[fw])
+    print(f"update: {line(done) if done else f'no end within {args.install_s} s'} at {time.strftime('%H:%M:%S')}")
+    if done is None or not done.in_progress:
+        FAILURES.append("update install")
+
+
 COMMANDS = {
     "dump": cmd_dump,
     "commands": cmd_commands,
@@ -512,6 +576,7 @@ COMMANDS = {
     "scenario-timer": cmd_scenario_timer,
     "scenario-media": cmd_scenario_media,
     "scenario-entities": cmd_scenario_entities,
+    "scenario-persist": cmd_scenario_persist,
 }
 
 
@@ -537,6 +602,11 @@ async def main():
     p.add_argument("--speak-s", type=float, default=8.0)
     p.add_argument("--hold-s", type=float, default=5.0)
     p.add_argument("--ring-s", type=float, default=5.0)
+    p.add_argument("--entity", default="led_speed", choices=sorted(PERSIST_VALUES))
+    p.add_argument("--count", type=int, default=20)
+    p.add_argument("--interval-ms", type=int, default=50)
+    p.add_argument("--install", action="store_true", help="scenario-persist: then check and install an update")
+    p.add_argument("--install-s", type=float, default=300.0)
     args = p.parse_args()
     if args.seconds is None:
         args.seconds = {"scenario-timer": 70, "scenario-voice": 30}.get(args.command, 10)
