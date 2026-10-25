@@ -22,7 +22,7 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 | Path | Content |
 |---|---|
 | `satellite/Cargo.toml` | Cargo workspace (edition 2024, every external dependency pinned in `[workspace.dependencies]`), `rust-toolchain.toml`, `Makefile` (cargo-zigbuild cross builds, `make check`) |
-| `satellite/crates/pulsar/` | the daemon: `main.rs` (runtime, teardown watchdog), `crash.rs` (crash report), `controller/` (all satellite logic: voice pipeline state machine, entities, local commands, updates; `logic.rs` holds its pure decisions), `settings.rs` (`state.conf`; its format stays readable by the binary kept as `.prev`, see Conventions); `PULSAR_PORT_OFFSET=<n>` adds n to the ESPHome, Sendspin, deCONZ and arbiter ports and turns mDNS off (test instance next to the running daemon) |
+| `satellite/crates/pulsar/` | the daemon: `main.rs` (runtime, teardown watchdog, final settings flush), `crash.rs` (crash report), `controller/` (all satellite logic: voice pipeline state machine, entities, local commands, updates; `logic.rs` holds its pure decisions), `settings.rs` (`state.conf`: format readable by the binary kept as `.prev`, durable writes, `StateFile` debounce; see Conventions); `PULSAR_PORT_OFFSET=<n>` adds n to the ESPHome, Sendspin, deCONZ and arbiter ports and turns mDNS off (test instance next to the running daemon) |
 | `satellite/crates/pulsar-core/` | logging (stderr + ESPHome log sink), `Timers` (per-actor timers, firing order in `timers.rs`), actor registry (`spawn_actor`, `join_all`), sysfs / network / TZ helpers, `Model` (per-model hardware description: capture layout, VQE preset, LEDs, clock, inputs, sounds, Zigbee lines; detected from `/proc/device-tree/compatible`), `AmbientDimmer`, `MusicFrame`, `UiState`, `ClockShot`, `fmt` (`state.conf` number format) |
 | `satellite/crates/pulsar-alsa/` | libasound loaded at runtime (dlopen), PCM / ctl wrappers, the versioned hw-params ABI of armhf alsa-lib (`__snd_pcm_hw_params_*` first); bin `alsa_abi_probe` |
 | `satellite/crates/pulsar-esphome/` | ESPHome API server: transport (plaintext / Noise), clients and the voice owner (`server.rs`), entities and states (`server/entities.rs`), commands and voice assistant messages (`server/commands.rs`), hand-written protobuf (`proto.rs`), Noise key (`key.rs`); bin `api_selftest`; client `tools/esphome_check.py` |
@@ -367,7 +367,15 @@ B,G,R bytes).
 - Keep the ESPHome API server pending until a valid `HelloRequest`; probes must not displace HA.
 - State persisted in `state.conf` (key=value); add new keys with safe defaults. The binary kept as
   `.prev` (possibly an older build) reads the same file after a rollback, so existing keys keep
-  their format (`pulsar_core::fmt`: `%g` numbers, `strtof` parsing, C locale).
+  their format (`pulsar_core::fmt`: `%g` numbers, `strtof` parsing, C locale). Writes
+  (`settings.rs`): `persist()` writes the whole file 1 s after the last change (`StateFile`);
+  `persist_now()` writes at once and is used for `update_attempt` (set when an install starts,
+  cleared after a non-fatal install failure), `zigbee_role` / `zigbee_flash_failed` and the
+  `mic_muted` switch. Each write is `<path>.tmp`, fsync, rename, fsync of the directory; a failed
+  write leaves the old file and stays pending until the next change or flush. `main` flushes a
+  pending change once after `run()` returns (inside the teardown watchdog); a crash or SIGKILL
+  loses up to 1 s of changes. A new key that must survive a restart, a crash or a binary swap
+  right after it changes needs `persist_now()`.
 - Comments explain device facts and constraints, not what the code does.
 - Floating point: `mul_add` sits exactly where the station builds' rounding requires a fused
   multiply-add; golden tests pin it (`pulsar-audio` `spectrum_golden.rs`, `pulsar-clock`
