@@ -189,6 +189,7 @@ pub(crate) enum Cmd {
     VoiceRequestStop,
     VoiceSendAudio(Vec<i16>),
     VoiceAnnounceFinished(bool),
+    VoiceAnswerFinished(bool),
     SetActiveWakeWords(Vec<String>),
     Publish(Publish),
 }
@@ -1412,10 +1413,13 @@ impl Server {
         match cmd {
             Cmd::VoiceRequestStart { run, phrase } => self.voice_request_start(run, &phrase),
             // Stale: meant for the run of the previous owner.
-            Cmd::VoiceRequestStop | Cmd::VoiceSendAudio(_) if self.voice_stale => {}
+            Cmd::VoiceRequestStop | Cmd::VoiceSendAudio(_) | Cmd::VoiceAnswerFinished(_)
+                if self.voice_stale => {}
             Cmd::VoiceRequestStop => self.voice_request_stop(),
             Cmd::VoiceSendAudio(pcm) => self.voice_send_audio(&pcm),
-            Cmd::VoiceAnnounceFinished(success) => self.voice_announce_finished(success),
+            Cmd::VoiceAnnounceFinished(success) | Cmd::VoiceAnswerFinished(success) => {
+                self.voice_announce_finished(success);
+            }
             Cmd::SetActiveWakeWords(ids) => self.cfg.active_wake_words = ids,
             Cmd::Publish(p) => self.publish(p),
         }

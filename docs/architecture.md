@@ -328,8 +328,8 @@ println!("cargo:rustc-link-lib=c++");
 - Без sendspin-cpp (host-сборка, cfg `sendspin_ffi` не задан) `spawn` отдаёт
   `Err("sendspin: built without sendspin-cpp")`.
 - Конец потока без `stopped` в состоянии группы удерживается 1 с (sink освобождается сразу):
-  перезапуск потока сервером (seek / skip) не дёргает состояние медиаплеера в HA, командный
-  спотер и музыкальные дисплеи. `stopped` завершает удерживаемый конец сразу.
+  перезапуск потока сервером (seek / skip) не дёргает состояние медиаплеера в HA и музыкальные
+  дисплеи. `stopped` завершает удерживаемый конец сразу.
 - `yield_to_local()` только шлёт `client/leave`, `streaming` синхронно не меняет.
 
 ### `pulsar-hw` и `pulsar-clock`

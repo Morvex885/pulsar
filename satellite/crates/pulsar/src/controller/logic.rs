@@ -14,6 +14,11 @@ use pulsar_media::PlayState;
 /// within this window; the HA pipeline is then cancelled.
 pub const COMMAND_AFTER_WAKE_MS: i64 = 2500;
 
+/// Music paused on this station, or whose Sendspin stream ended (pause or stop in Music
+/// Assistant), stays its own this long: without the wake word the transport and volume words
+/// still act on it.
+pub const PAUSED_MUSIC_MS: i64 = 2 * 60 * 60 * 1000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Idle,
@@ -232,21 +237,58 @@ pub fn command_of(word: &str) -> Option<VoiceCommand> {
     })
 }
 
-/// Within the window after the wake word that opened this LISTENING phase.
+/// Within the window after the wake word that opened this dialog: HA may end the speech of a
+/// short "Алиса, громче" (PROCESSING) before the command spotter confirms the word.
 pub fn after_wake(phase: Phase, now: i64, listen_started_ms: i64) -> bool {
-    phase == Phase::Listening && now - listen_started_ms < COMMAND_AFTER_WAKE_MS
+    matches!(phase, Phase::Listening | Phase::Processing)
+        && now - listen_started_ms < COMMAND_AFTER_WAKE_MS
 }
 
-/// The command spotter runs without the wake word while something plays (music, Sendspin,
-/// announcement, timer ring, answer), right after the wake word and while arbitrating; never
-/// while a microphone is muted.
-pub fn commands_enabled(
-    mic_muted: bool,
-    playing: bool,
-    after_wake: bool,
-    arbitrating: bool,
+/// Music of this station: playing or loading on the HA media channel or as a Sendspin stream, or
+/// paused / ended less than PAUSED_MUSIC_MS ago (Sendspin: its server still connected).
+/// `*_since`: when the media channel paused / the Sendspin stream ended; None = not since start.
+pub fn owns_music(
+    now: i64,
+    music: PlayState,
+    music_paused_since: Option<i64>,
+    sendspin_streaming: bool,
+    sendspin_connected: bool,
+    sendspin_ended_since: Option<i64>,
 ) -> bool {
-    !mic_muted && (playing || after_wake || arbitrating)
+    let recent = |t: Option<i64>| t.is_some_and(|t| now - t < PAUSED_MUSIC_MS);
+    matches!(music, PlayState::Playing | PlayState::Loading)
+        || (music == PlayState::Paused && recent(music_paused_since))
+        || sendspin_streaming
+        || (sendspin_connected && recent(sendspin_ended_since))
+}
+
+/// Command words have no arbitration between stations: every station that hears one acts on it.
+/// Without the wake word a station takes "стоп" (it stops only what it plays itself), the volume
+/// words while it sounds (answer, announcement, timer ring) or owns music, and transport only for
+/// its own music. After the wake word (the dialog's window, or a word held through an arbitration
+/// this station won) every command goes. In a dialog past that window (`in_dialog`: LISTENING /
+/// PROCESSING after `after_wake` ended) only "стоп" goes and cancels the dialog: the other words
+/// belong to the request.
+pub fn command_allowed(
+    c: VoiceCommand,
+    wake: bool,
+    in_dialog: bool,
+    sounding: bool,
+    owns_music: bool,
+) -> bool {
+    if wake {
+        return true;
+    }
+    if in_dialog {
+        return c == VoiceCommand::Stop;
+    }
+    match c {
+        VoiceCommand::Stop => true,
+        VoiceCommand::Louder | VoiceCommand::Quieter => sounding || owns_music,
+        VoiceCommand::Pause | VoiceCommand::Resume | VoiceCommand::Next | VoiceCommand::Prev => {
+            owns_music
+        }
+    }
 }
 
 /// HA media player state. ANNOUNCING only for HA announcements, not for earcons, timer alarms or
@@ -273,6 +315,43 @@ pub fn want_duck(
     closing_earcon: bool,
 ) -> bool {
     phase != Phase::Idle || announcing || timer_ringing || closing_earcon
+}
+
+/// A local volume change clicks on ANNOUNCE, which also carries the answer, announcements, the
+/// timer ring, closing earcons and the wake earcon: a new play() there cuts whatever plays. In
+/// LISTENING and while arbitrating the microphone audio goes to HA's speech-to-text. A level
+/// that stayed put (held key at 0 or 1) does not click; levels compare in whole percent, since
+/// f32 5 % steps down from 0.15..0.3 end at 7.45e-9, one step short of 0. `before` / `after`:
+/// (volume, muted).
+pub fn want_volume_click(
+    before: (f32, bool),
+    after: (f32, bool),
+    phase: Phase,
+    arbitrating: bool,
+    announcing: bool,
+    timer_ringing: bool,
+    closing_earcon: bool,
+) -> bool {
+    let percent = |v: f32| (v * 100.0).round() as i32;
+    (percent(before.0), before.1) != (percent(after.0), after.1)
+        && matches!(phase, Phase::Idle | Phase::Processing)
+        && !arbitrating
+        && !announcing
+        && !timer_ringing
+        && !closing_earcon
+}
+
+/// The software mute (`mic_muted=`) after HA sets the "Microphones" switch (`on` = listening).
+/// The mute button's mute does not depend on the network or HA, so HA cannot lift it: "on"
+/// under it leaves the software mute as it was.
+pub fn sw_mute_after_switch(on: bool, sw_muted: bool, hw_muted: bool) -> bool {
+    if on && hw_muted { sw_muted } else { !on }
+}
+
+/// The software mute after the mute button switched to `hw_muted`: lifting the button's mute
+/// also lifts the mute from HA, so the button alone always brings the microphones back.
+pub fn sw_mute_after_button(sw_muted: bool, hw_muted: bool) -> bool {
+    sw_muted && hw_muted
 }
 
 /// Restarting cuts off whatever plays: automatic installs wait for silence.

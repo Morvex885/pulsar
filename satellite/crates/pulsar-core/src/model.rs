@@ -59,6 +59,10 @@ pub struct Model {
     pub wake_sound: &'static str,
     pub cancel_sound: &'static str,
     pub timer_sound: &'static str,
+    /// maind plays it (sound 45, SimpleVolumeTonePlayer) for every change except those from its
+    /// muted sources "other" (app / remote) and "smart_tts" (smart volume); keys and voice words
+    /// click.
+    pub volume_sound: &'static str,
 
     /// ALSA playback PCM (dmix + the softvol "Master Playback Volume"): GStreamer's alsasink,
     /// the Sendspin sink, and the PCM the mixer opens to create the control.
@@ -173,6 +177,7 @@ static MIDI: Model = Model {
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
     timer_sound: "common/timer.wav",
+    volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
@@ -226,6 +231,7 @@ static LITE2: Model = Model {
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
     timer_sound: "common/timer.wav",
+    volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
@@ -292,6 +298,7 @@ static MINI2: Model = Model {
     wake_sound: "common/spotter_start.opus",
     cancel_sound: "common/spotter_cancel.opus",
     timer_sound: "common/timer.opus",
+    volume_sound: "common/volume_sound.opus",
     playback_pcm: "default",
     volume_map: MINI2_VOLUME,
     volume_min_step: false,

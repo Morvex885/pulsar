@@ -229,7 +229,7 @@ impl Server {
             }
         }
         let id = match k {
-            key::SW_MIC_MUTE => SwitchId::MicMute,
+            key::SW_MICROPHONES => SwitchId::Microphones,
             key::SW_CLOCK => SwitchId::Clock,
             key::SW_AUTO_UPDATE => SwitchId::AutoUpdate,
             key::SW_NEAREST_ANSWERS => SwitchId::NearestAnswers,

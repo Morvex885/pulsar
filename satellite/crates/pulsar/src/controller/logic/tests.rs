@@ -187,16 +187,96 @@ fn command_words() {
 
 #[test]
 fn command_gating() {
-    // The window after the wake word: 2.5 s of LISTENING.
+    // The window after the wake word: 2.5 s of LISTENING / PROCESSING.
     assert!(after_wake(Phase::Listening, 12_499, 10_000));
     assert!(!after_wake(Phase::Listening, 12_500, 10_000));
-    assert!(!after_wake(Phase::Processing, 10_001, 10_000));
+    assert!(after_wake(Phase::Processing, 12_499, 10_000));
+    assert!(!after_wake(Phase::Processing, 12_500, 10_000));
     assert!(!after_wake(Phase::Idle, 10_001, 10_000));
-    assert!(!commands_enabled(false, false, false, false));
-    assert!(commands_enabled(false, true, false, false));
-    assert!(commands_enabled(false, false, true, false));
-    assert!(commands_enabled(false, false, false, true));
-    assert!(!commands_enabled(true, true, true, true));
+    assert!(!after_wake(Phase::Speaking, 10_001, 10_000));
+}
+
+#[test]
+fn music_ownership() {
+    use PlayState as P;
+    let now = 10 * PAUSED_MUSIC_MS;
+    let own = |m, paused, ss, conn, ended| owns_music(now, m, paused, ss, conn, ended);
+    assert!(own(P::Playing, None, false, false, None));
+    assert!(own(P::Loading, None, false, false, None));
+    assert!(own(P::Idle, None, true, true, None));
+    assert!(!own(P::Idle, None, false, true, None));
+    // Paused / ended music stays this station's for PAUSED_MUSIC_MS.
+    assert!(own(
+        P::Paused,
+        Some(now - PAUSED_MUSIC_MS + 1),
+        false,
+        false,
+        None
+    ));
+    assert!(!own(
+        P::Paused,
+        Some(now - PAUSED_MUSIC_MS),
+        false,
+        false,
+        None
+    ));
+    assert!(!own(P::Paused, None, false, false, None));
+    assert!(own(
+        P::Idle,
+        None,
+        false,
+        true,
+        Some(now - PAUSED_MUSIC_MS + 1)
+    ));
+    assert!(!own(
+        P::Idle,
+        None,
+        false,
+        true,
+        Some(now - PAUSED_MUSIC_MS)
+    ));
+    // An ended Sendspin stream counts only while its server is connected.
+    assert!(!own(P::Idle, None, false, false, Some(now - 1000)));
+    // A pause time does not make a stopped player's music its own.
+    assert!(!own(P::Idle, Some(now - 1000), false, false, None));
+}
+
+#[test]
+fn command_permission() {
+    use VoiceCommand::*;
+    for c in [Stop, Pause, Resume, Louder, Quieter, Next, Prev] {
+        assert!(
+            command_allowed(c, true, false, false, false),
+            "{c:?} after the wake word"
+        );
+        assert!(
+            command_allowed(c, false, false, false, true),
+            "{c:?} with own music"
+        );
+        // Silent, no music of its own: only "стоп".
+        assert_eq!(
+            command_allowed(c, false, false, false, false),
+            c == Stop,
+            "{c:?} silent"
+        );
+        // Answer / announcement / ring, no music: "стоп" and volume.
+        assert_eq!(
+            command_allowed(c, false, false, true, false),
+            matches!(c, Stop | Louder | Quieter),
+            "{c:?} sounding"
+        );
+        // A dialog past the window: only "стоп", whatever sounds or plays.
+        assert_eq!(
+            command_allowed(c, false, true, true, true),
+            c == Stop,
+            "{c:?} in a dialog"
+        );
+        assert_eq!(
+            command_allowed(c, false, true, false, false),
+            c == Stop,
+            "{c:?} in a silent dialog"
+        );
+    }
 }
 
 #[test]
@@ -232,6 +312,32 @@ fn ducking() {
     assert!(want_duck(Phase::Idle, true, false, false));
     assert!(want_duck(Phase::Idle, false, true, false));
     assert!(want_duck(Phase::Idle, false, false, true));
+}
+
+#[test]
+fn volume_click_gating() {
+    let click =
+        |before, after, phase| want_volume_click(before, after, phase, false, false, false, false);
+    let step = ((0.15, false), (0.1, false));
+    // Outside the microphone's STT window and with ANNOUNCE free.
+    for phase in [Phase::Idle, Phase::Processing] {
+        assert!(click(step.0, step.1, phase), "{phase:?}");
+    }
+    // LISTENING streams to STT (and plays the wake earcon), SPEAKING plays the answer.
+    for phase in [Phase::Listening, Phase::Speaking] {
+        assert!(!click(step.0, step.1, phase), "{phase:?}");
+    }
+    // A held key at the top or bottom; f32 5 % steps down end at 7.45e-9 before 0.
+    assert!(!click((1.0, false), (1.0, false), Phase::Idle));
+    assert!(!click((7.45e-9, false), (0.0, false), Phase::Idle));
+    // A key at 0 while muted unmutes: that is a change.
+    assert!(click((0.0, true), (0.0, false), Phase::Idle));
+    // Arbitrating, announcement, timer ring, closing earcon.
+    let (b, a, idle) = (step.0, step.1, Phase::Idle);
+    assert!(!want_volume_click(b, a, idle, true, false, false, false));
+    assert!(!want_volume_click(b, a, idle, false, true, false, false));
+    assert!(!want_volume_click(b, a, idle, false, false, true, false));
+    assert!(!want_volume_click(b, a, idle, false, false, false, true));
 }
 
 #[test]
@@ -451,4 +557,31 @@ fn run_binding_table() {
             assert_eq!(rb, *want, "{name}: step {i}");
         }
     }
+}
+
+#[test]
+fn microphones_mutes() {
+    // (on, software mute, button mute) -> software mute
+    for (on, sw, hw, want) in [
+        (false, false, false, true),
+        (false, true, false, true),
+        (false, false, true, true),
+        (false, true, true, true),
+        (true, true, false, false),
+        (true, false, false, false),
+        // The button's mute: HA's "on" changes nothing.
+        (true, true, true, true),
+        (true, false, true, false),
+    ] {
+        assert_eq!(
+            sw_mute_after_switch(on, sw, hw),
+            want,
+            "on={on} sw={sw} hw={hw}"
+        );
+    }
+    // Muted from HA only: the first press adds the button's mute, the second lifts both.
+    assert!(sw_mute_after_button(true, true));
+    assert!(!sw_mute_after_button(true, false));
+    // The button never sets the software mute.
+    assert!(!sw_mute_after_button(false, true));
 }

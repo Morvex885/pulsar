@@ -3,9 +3,9 @@
 //! frames, the captured rate and how far the processing thread is behind (FIFO).
 //! usage: frontend_probe [seconds=30] [--wake alisa|yandex] [--stream] [--music] [--commands]
 //!                       [--record <wav> <seconds>]
-//! Without --commands only the wake word spotter runs, as in the daemon while idle (the command
-//! spotter runs while something plays). --record writes the first <seconds> of the raw capture
-//! (all channels, S16) as a WAV for ww_offline. No sound is played.
+//! Without --commands only the wake word spotter runs (the daemon runs the command spotter too,
+//! unless the microphone is muted). --record writes the first <seconds> of the raw capture (all
+//! channels, S16) as a WAV for ww_offline. No sound is played.
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 

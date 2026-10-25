@@ -96,8 +96,16 @@ impl ApiHandle {
         self.send(Cmd::VoiceSendAudio(pcm));
     }
 
+    /// VoiceAssistantAnnounceFinished for an HA announcement.
     pub fn voice_announce_finished(&self, success: bool) {
         self.send(Cmd::VoiceAnnounceFinished(success));
+    }
+
+    /// The same message for the current run's TTS answer (HA stays "responding" from TTS_START
+    /// until it arrives). Like stop and audio, dropped once the voice owner changed until the
+    /// next `voice_request_start`: it belongs to the previous owner's run.
+    pub fn voice_answer_finished(&self, success: bool) {
+        self.send(Cmd::VoiceAnswerFinished(success));
     }
 
     /// The wake word ids reported as active to HA from now on.

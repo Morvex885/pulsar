@@ -14,12 +14,12 @@ use std::path::PathBuf;
 use log::{debug, error, info, warn};
 use pulsar_audio::FrontendEvent;
 use pulsar_core::model::Model;
-use pulsar_core::{ClockShot, Timers, UiState};
+use pulsar_core::{ClockShot, Timers, UiState, now_ms};
 use pulsar_esphome::{ApiConfig, ApiEvent, ApiHandle, WakeWordInfo};
 use pulsar_hw::{InputEvent, InputHandle, LedsHandle, Rgb};
 use pulsar_lan::arbiter::{self, ArbiterEvent, ArbiterHandle};
 use pulsar_lan::mdns::{self, MdnsHandle, MdnsService};
-use pulsar_media::{Mixer, PlayId, PlayerEvent, PlayerHandle};
+use pulsar_media::{Channel, Mixer, PlayId, PlayState, PlayerEvent, PlayerHandle};
 use pulsar_sendspin::{SendspinConfig, SendspinEvent, SendspinHandle};
 use pulsar_update::{Release, UpdateEvent, UpdaterHandle};
 use pulsar_zigbee::{ZigbeeConfig, ZigbeeEvent, ZigbeeHandle};
@@ -33,6 +33,7 @@ use logic::{HaTimer, Phase, RunBinding};
 const MODELS: &str = "/system/vendor/quasar/spotter_models/activation/";
 const COMMAND_MODEL: &str = "/system/vendor/quasar/spotter_models/command";
 const SOUNDS: &str = "/system/vendor/quasar/sounds/";
+
 const DUCK_GAIN: f32 = 0.15;
 const TIMER_RING_MAX_MS: i64 = 15 * 60 * 1000;
 // Longest wait for the next pipeline event before the dialog is given up locally. HA's voice
@@ -65,13 +66,10 @@ pub enum ExitReason {
 
 /// Loop timers of the C++ controller. Intended difference: C++ armed an independent timer on
 /// every call, so with two error rings pending update_ui ran at the earlier deadline (and again
-/// at the later one); here a re-arm of `UiAfterNotSubscribed` / `UiAfterError` (or
-/// `CommandsWindow`) moves the deadline. Each firing runs the same idempotent update, so the
-/// final state is identical.
+/// at the later one); here a re-arm of `UiAfterNotSubscribed` / `UiAfterError` moves the
+/// deadline. Each firing runs the same idempotent update, so the final state is identical.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tk {
-    /// The command window after the wake word closes.
-    CommandsWindow,
     /// The error ring of a wake word without a voice subscriber ends.
     UiAfterNotSubscribed,
     /// The error ring of a failed dialog ends.
@@ -182,6 +180,9 @@ pub struct Controller {
     voice_run: u64,
     tts_url: String,
     tts_played: bool,
+    /// A run's TTS_START left HA's assist satellite "responding" until AnnounceFinished, also
+    /// when nothing plays here, and that report is still to be sent (`send_tts_report`).
+    tts_report_owed: bool,
     continue_conversation: bool,
     /// An HA announcement (assist or media player) plays on ANNOUNCE.
     announcing: bool,
@@ -196,6 +197,10 @@ pub struct Controller {
     /// The ring gave the ANNOUNCE channel to speech; resume_ring() continues it.
     ring_yielded: bool,
     timer_ring_started_ms: i64,
+    /// When the HA media channel last paused (logic::owns_music).
+    music_paused_ms: Option<i64>,
+    /// When the Sendspin stream last ended: pause or stop in Music Assistant (logic::owns_music).
+    sendspin_ended_ms: Option<i64>,
     /// HA timers by TimerInfo::id.
     ha_timers: BTreeMap<String, HaTimer>,
     /// Id on the clock, "" = none.
@@ -561,6 +566,7 @@ impl Controller {
             voice_run: 0,
             tts_url: String::new(),
             tts_played: false,
+            tts_report_owed: false,
             continue_conversation: false,
             announcing: false,
             ducked: false,
@@ -571,6 +577,8 @@ impl Controller {
             timer_ringing: false,
             ring_yielded: false,
             timer_ring_started_ms: 0,
+            music_paused_ms: None,
+            sendspin_ended_ms: None,
             ha_timers: BTreeMap::new(),
             shown_timer: String::new(),
             shown: HaTimer {
@@ -701,7 +709,6 @@ impl Controller {
 
     fn on_timer(&mut self, k: Tk) {
         match k {
-            Tk::CommandsWindow => self.update_commands(),
             Tk::UiAfterNotSubscribed | Tk::UiAfterError => self.update_ui(),
             Tk::Watchdog => self.abort_dialog("no progress from Home Assistant, giving up"),
             Tk::TimerTick => self.show_timers(),
@@ -716,7 +723,18 @@ impl Controller {
     fn on_player(&mut self, ev: PlayerEvent) {
         match ev {
             // HA media state follows playback (C++ Player::on_state hook).
-            PlayerEvent::State(..) => self.publish_media(),
+            PlayerEvent::State(ch, s) => {
+                if ch == Channel::Music {
+                    match s {
+                        PlayState::Paused => self.music_paused_ms = Some(now_ms()),
+                        // HA media took the speaker: an ended Sendspin stream is not this
+                        // station's music any more, whichever of the two events came first.
+                        PlayState::Loading | PlayState::Playing => self.sendspin_ended_ms = None,
+                        _ => {}
+                    }
+                }
+                self.publish_media();
+            }
             PlayerEvent::Done { id, ok } => {
                 if let Some(p) = self.pending.remove(&id) {
                     self.play_done(p, ok);
@@ -728,7 +746,7 @@ impl Controller {
     fn on_frontend(&mut self, ev: FrontendEvent) {
         match ev {
             FrontendEvent::Wake { phrase, level_db } => self.on_wake(&phrase, level_db),
-            FrontendEvent::Command { word } => self.on_command(&word),
+            FrontendEvent::Command { word } => self.on_command(&word, false),
             FrontendEvent::Audio(pcm) => {
                 if self.phase == Phase::Listening {
                     self.api.voice_send_audio(pcm);

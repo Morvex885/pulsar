@@ -1057,7 +1057,7 @@ async fn accept_errors_pause_accepting_without_starving_clients() {
 }
 
 #[tokio::test]
-async fn hand_over_drops_audio_and_stop_of_the_old_run() {
+async fn hand_over_drops_audio_stop_and_answer_report_of_the_old_run() {
     local()
         .run_until(async {
             let (h, mut rx, port) = start(None);
@@ -1077,9 +1077,13 @@ async fn hand_over_drops_audio_and_stop_of_the_old_run() {
             event(&mut rx).await;
             b.subscribe_voice(true).await;
             b.sync().await;
-            // The controller has not seen the hand-over yet: audio and stop of the old run.
+            // The controller has not seen the hand-over yet: audio, stop and answer report of the
+            // old run. An announcement's report still goes to the owner.
             h.voice_send_audio(vec![2]);
             h.voice_request_stop();
+            h.voice_answer_finished(true);
+            h.voice_announce_finished(false);
+            assert!(b.expect(msg::VA_ANNOUNCE_FINISHED).await.is_empty()); // success=false
             assert!(b.sync().await.is_empty());
             assert!(a.sync().await.is_empty());
             assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(false));
@@ -1090,6 +1094,9 @@ async fn hand_over_drops_audio_and_stop_of_the_old_run() {
             b.expect(msg::VA_REQUEST).await;
             h.voice_send_audio(vec![3]);
             b.expect(msg::VA_AUDIO).await;
+            h.voice_answer_finished(true);
+            let m = b.expect(msg::VA_ANNOUNCE_FINISHED).await;
+            assert!(field(&m, 1).unwrap().boolean());
             h.voice_request_stop();
             assert!(b.expect(msg::VA_REQUEST).await.is_empty());
         })

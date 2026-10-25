@@ -205,8 +205,27 @@ From `/system/vendor/quasar/libyandex_evil.so`:
 - Spotter type → VQE output: type 0 = main channel. The wake model (`spotter_models/activation/alisa`)
   needs `VQE_OMNI_WITH_GAIN` (9); the command model (`spotter_models/command`, single channel)
   only works with `VQE_OMNI` (6). Measured with `ww_offline`; re-measure when changing it.
-- The command spotter only runs while something plays, during TTS/announcements/timer ring, or
-  2.5 s after the wake word (as `maind` does), to avoid false positives from conversation.
+- The command spotter listens whenever a microphone is open (`update_commands`: off only while
+  muted), the dialog included. In LISTENING / PROCESSING every command word acts only for the
+  2.5 s after the wake word ("Алиса, громче"; `logic::after_wake`); past that window only "стоп" /
+  "хватит" act (`logic::command_allowed`), so the request's other words do not act as commands.
+  They cancel the dialog like the action button (`cancel_dialog`: cancel earcon,
+  `voice_request_stop`, music left playing; a ringing timer is stopped instead), and a stop word
+  inside the request ("хватит ли …") cancels it too. Stock maind stops the spotter at the wake
+  word and starts it again once Alice is IDLE (Midi 0.351: `stopCommandSpotter reason: external`
+  at the wake word, `startCommandSpotter … reason: aliceStateChanged` back in IDLE with nothing
+  playing); the 2.5 s window and the stop words in a dialog are pulsar's (stock leaves both to the
+  cloud). Stock treats "стоп", "хватит" and "пауза" as one music action ("Остановить / поставить
+  на паузу" in Yandex's command reference), so "стоп" pauses. Command words have no arbitration
+  between stations, so without the wake word a station acts only on what is its own
+  (`logic::command_allowed`): "стоп" / "хватит" everywhere, volume while it sounds (answer,
+  announcement, timer ring) or owns music, pause / resume / next / previous only for its own music
+  (`logic::owns_music`: playing or loading locally or over Sendspin, or paused / Sendspin stream
+  ended less than 2 h ago with the server still connected). A command word recognised before a
+  won arbitration ends is held and leaves the answer playing (no dialog starts); spoken "Алиса,
+  тише" during an answer can be recognised after it (seen on a Midi: 53 ms), when the barge-in has
+  already cut the answer: it then acts in the new dialog's window and cancels that dialog's HA
+  pipeline.
 - `GetOutputChannelData` always returns no error; an absent output type yields `n == 0`.
 - `YandexVqeC_Config_GetOutputChannelCount` takes `(cfg, type, int *out)`; the other `Config_Get*`
   getters return the value directly.
@@ -341,7 +360,7 @@ with NWK mode but an IEEE address (payload 6 bytes longer than declared): sent a
 | Light sensor | `ltr308als01` (iio) | same | none (`Model::has_lux` false: no Illuminance entity) |
 | Volume | "Master Playback Volume" softvol on `speakers` | same names; `speakers` comes from `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) | same control on `default`; `set_volume.sh` is `amixer set 'Master' <percent>%`, so the curve is linear in percent (`volume_min_step` false) |
 | alsa-lib | 1.2.10, versioned | 1.2.1.2, unversioned | 1.2.1.2, unversioned |
-| Earcons | `common/spotter_*.mp3`, `timer.wav`, `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` | `common/spotter_start.opus`, `common/spotter_cancel.opus`, `common/timer.opus`, `ru-RU/playback_error.opus` (no MP3 decoder in this GStreamer) |
+| Earcons | `common/spotter_*.mp3`, `common/volume_sound.mp3`, `timer.wav`, `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` | `common/spotter_start.opus`, `common/spotter_cancel.opus`, `common/volume_sound.opus` [inference: file not confirmed on the station], `common/timer.opus`, `ru-RU/playback_error.opus` (no MP3 decoder in this GStreamer) |
 | Boot | `S97quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh` | `S99quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh`; `q stop` available | same as the Lite 2 |
 | Zigbee | Telink B91 on `/dev/ttyS2`, reset/boot via `zb_control` (see Zigbee radio) | none | none (no `ttyS2`, no `zb_control`) |
 
@@ -421,10 +440,24 @@ port on the station.
 - Pipeline events carry no run id. Until the dialog's RUN_START every event belongs to the run it
   replaced (HA sends that run's RUN_END first) and is dropped; events while IDLE are dropped;
   `finish_interaction` sends `voice_request_stop` when the dialog's run is still active.
+- HA's assist satellite stays "responding" from a run's TTS_START until AnnounceFinished, also
+  when nothing plays (`send_tts_report`): sent once when the answer ends or is cut short, for a
+  TTS_START that arrives after the dialog ended, and always before the next
+  `voice_request_start` (HA applies it by forcing idle). Dropped while an assist announcement's
+  completion is pending (its own AnnounceFinished ends the wait; one more would end the
+  announcement's wait early); media player announcements send none. It belongs to the voice
+  owner's run: dropped when the link is lost, and the server drops one sent after an owner change
+  until the next `voice_request_start` (`voice_answer_finished`, like stop and audio), since the
+  next subscriber could be waiting for an announcement.
 - Volume: `Mixer` maps 0..1 to the stock curve in `Model::volume_map`. `state.conf` has
   `volume2=` (stock curve, authoritative) and `volume=` (same raw level on the pre-curve mapping, for
   binaries rolled back to `.prev`); without `volume2=`, `volume=` is converted once. Mute writes
-  softvol raw 0 (still -60 dB, not silence) and also zeroes the channel and Sendspin gains.
+  softvol raw 0 (still -60 dB, not silence) and also zeroes the channel and Sendspin gains. Local
+  changes (keys, voice words) play `Model::volume_sound` (`common/volume_sound.mp3`) on ANNOUNCE
+  (maind's SimpleVolumeTonePlayer: every change except its sources "other" and "smart_tts") when
+  the level (in whole percent) or mute changed, outside LISTENING / SPEAKING and arbitration and
+  never over an announcement, the timer ring or a closing earcon (`logic::want_volume_click`); HA
+  and Sendspin changes are silent; music is not ducked under it.
 - Wake arbitration (switch "Nearest station answers", `state.conf` `nearest_answers=`, default 1):
   the front-end's processing thread (`wake_level_db` in `pulsar-audio/src/frontend.rs`) reports
   the wake level as the mean of the 8 loudest of the last 47 `VQE_OMNI` frames (post-AEC, no AGC;
@@ -450,7 +483,7 @@ port on the station.
   speaker-reference analysis, which only runs while the visualization is shown.
 - Sendspin: `pulsar-sendspin` releases the sink at once on a stream end but reports the end 1 s
   late unless the group state says "stopped", so a server that restarts the stream on seek / skip
-  does not flap the HA media state, the command spotter and the music displays.
+  does not flap the HA media state and the music displays.
 - deCONZ server limits (`pulsar-zigbee/src/deconz.rs`): a client with more than 64 KB of unread
   replies is disconnected; an APS request gets FAILURE at ≥ 8 pending confirms or > 16 frames
   queued on the link; at most 4 reads of 1024 bytes per wake-up; accepting pauses 500 ms on

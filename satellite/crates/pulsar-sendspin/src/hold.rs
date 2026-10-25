@@ -1,8 +1,8 @@
 //! Reported stream state. Music Assistant ends and restarts the stream on every seek / skip
 //! (~10 ms apart); a stop or pause comes with group state "stopped" (just before or just after
 //! the stream end, seen on a Midi). A stream end without it is held this long, so a restart does
-//! not flap the HA media state, the command spotter and the music displays. The audio itself
-//! stops at once (the sink is released on every end).
+//! not flap the HA media state and the music displays. The audio itself stops at once (the sink
+//! is released on every end).
 
 use std::cell::Cell;
 use std::rc::Rc;
