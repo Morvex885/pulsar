@@ -189,7 +189,7 @@ int main(int argc, char **argv) {
   hooks.srv = &srv;
 
   srv.publish_media(MediaState::IDLE, 0.5f, false);
-  srv.publish_switch(SwitchId::MIC_MUTE, false);
+  srv.publish_switch(SwitchId::MICROPHONES, true);
   srv.publish_switch(SwitchId::CLOCK, true);
   srv.publish_switch(SwitchId::VOICE_INDICATION, true);
   srv.publish_number(NumberId::LED_SPEED, 1);

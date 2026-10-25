@@ -101,7 +101,7 @@ enum Msg : uint32_t {
 // Entity keys (fixed32), stable across restarts.
 enum Key : uint32_t {
   K_MEDIA = 1,
-  K_SW_MIC_MUTE = 2,
+  K_SW_MICROPHONES = 2,
   K_SW_CLOCK = 3,
   K_BS_HW_MIC_MUTE = 4,
   K_SENSOR_LUX = 5,
@@ -367,7 +367,7 @@ struct ApiServer::Impl {
   MediaState media_state = MediaState::IDLE;
   float media_volume = 0;
   bool media_muted = false;
-  BoolState sw_mic_mute, sw_clock, sw_auto_update, sw_nearest_answers, sw_voice_indication, bs_hw_mute;
+  BoolState sw_microphones, sw_clock, sw_auto_update, sw_nearest_answers, sw_voice_indication, bs_hw_mute;
   UpdateState update;
   bool update_has = false;
   FloatState lux, clock_bri, clock_scroll, led_speed;
@@ -1329,7 +1329,7 @@ struct ApiServer::Impl {
       w.str(5, icon);
       send_msg(c, LIST_SWITCH, w);
     };
-    sw("microphones", K_SW_MIC_MUTE, "Microphones", "mdi:microphone");
+    sw("microphones", K_SW_MICROPHONES, "Microphones", "mdi:microphone");
     sw("clock_display", K_SW_CLOCK, "Clock display", "mdi:clock-digital");
     {
       pb::Writer w;
@@ -1580,7 +1580,7 @@ struct ApiServer::Impl {
 
   void send_all_states(const ClientPtr &c) {
     send_media(c);
-    send_switch(K_SW_MIC_MUTE, sw_mic_mute, c);
+    send_switch(K_SW_MICROPHONES, sw_microphones, c);
     send_switch(K_SW_CLOCK, sw_clock, c);
     send_switch(K_SW_AUTO_UPDATE, sw_auto_update, c);
     send_switch(K_SW_NEAREST_ANSWERS, sw_nearest_answers, c);
@@ -1685,8 +1685,8 @@ struct ApiServer::Impl {
       if (f.num == 1) key = f.u32();
       if (f.num == 2) state = f.boolean();
     }
-    if (key == K_SW_MIC_MUTE)
-      hooks.on_switch(SwitchId::MIC_MUTE, state);
+    if (key == K_SW_MICROPHONES)
+      hooks.on_switch(SwitchId::MICROPHONES, state);
     else if (key == K_SW_CLOCK)
       hooks.on_switch(SwitchId::CLOCK, state);
     else if (key == K_SW_AUTO_UPDATE)
@@ -1964,7 +1964,7 @@ void ApiServer::publish_switch(SwitchId id, bool state) {
   BoolState *s = nullptr;
   uint32_t key = 0;
   switch (id) {
-    case SwitchId::MIC_MUTE: s = &impl_->sw_mic_mute; key = K_SW_MIC_MUTE; break;
+    case SwitchId::MICROPHONES: s = &impl_->sw_microphones; key = K_SW_MICROPHONES; break;
     case SwitchId::CLOCK: s = &impl_->sw_clock; key = K_SW_CLOCK; break;
     case SwitchId::AUTO_UPDATE: s = &impl_->sw_auto_update; key = K_SW_AUTO_UPDATE; break;
     case SwitchId::NEAREST_ANSWERS: s = &impl_->sw_nearest_answers; key = K_SW_NEAREST_ANSWERS; break;

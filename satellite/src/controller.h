@@ -112,6 +112,7 @@ class Controller : public ApiHooks {
   void update_ui();
   void show_ui(UiState s);  // ring and clock
   void update_detection();
+  void publish_microphones();
   void update_duck();
   void apply_gains();
   void set_volume(float v, bool feedback);
