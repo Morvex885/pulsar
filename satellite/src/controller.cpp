@@ -1069,6 +1069,8 @@ void Controller::on_switch(SwitchId id, bool state) {
     update_detection();
     update_ui();
     publish_microphones();
+    persist();
+    return;
   } else if (id == SwitchId::CLOCK) {
     st_.clock_on = state;
     clock_.set_enabled(state);
