@@ -364,30 +364,39 @@ pulsar отдаёт модуль по протоколу deCONZ (ConBee/RaspBee)
 
 ## Сборка из исходников
 
-Демон собирается на Linux или WSL2; установщику из копии репозитория нужен ещё
-[Go](https://go.dev/dl/) 1.27+:
+Демон написан на Rust и собирается на Linux или WSL2 (кросс-компиляция через
+[cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)); установщику из копии репозитория
+нужен ещё [Go](https://go.dev/dl/) 1.27+:
 
-- [zig 0.14.1](https://ziglang.org/download/) — кросс-компилятор (aarch64/glibc 2.36 — обычный
-  userspace Миди; 32-битный armhf/glibc 2.30 — Лайт 2 и образы Миди с 32-битным userspace).
-  zig 0.13 не подходит: собранные им 32-битные программы
-  падают при запуске. Другой zig можно указать как `ZIG=/путь/к/zig`;
-- `make`, `git`, `curl`, `cmake` ≥ 3.16, `ninja`, `patch`
-  (cmake и ninja можно поставить через `uv tool install cmake ninja`);
+- [rustup](https://rustup.rs/) — сам ставит нужную версию Rust и обе цели из
+  `satellite/rust-toolchain.toml`;
+- cargo-zigbuild 0.24.0: `cargo install cargo-zigbuild --locked --version 0.24.0`;
+- [zig 0.14.1](https://ziglang.org/download/) — компоновщик и C/C++-компилятор для колонок
+  (aarch64/glibc 2.36 — обычный userspace Миди; 32-битный armhf/glibc 2.30 — Лайт 2 и образы Миди
+  с 32-битным userspace). zig 0.13 не подходит: собранные им 32-битные программы падают при
+  запуске. Другой zig можно указать как `ZIG=/путь/к/zig`;
+- `make`, `git`, `curl`, `patch`, компилятор C для хоста (`cc`), а для библиотеки Sendspin
+  (sendspin-cpp, единственная C++-часть сборки) — `cmake` ≥ 3.16 и `ninja`
+  (их можно поставить через `uv tool install cmake ninja`);
 - `adb` из Android platform-tools.
 
 ```sh
 make -C satellite -j"$(nproc)"                       # zig 0.14.1 в PATH
 make -C satellite -j"$(nproc)" ZIG=~/opt/zig/zig     # или явно
+make -C satellite ARCH=armhf tools                   # диагностические утилиты → satellite/build/armhf/tools/
+make -C satellite check                              # проверки на компьютере: rustfmt, clippy, тесты
 go -C installer run . 192.168.1.50                  # установщик из копии репозитория; сам вызывает make
 ```
 
-Makefile отказывается работать с zig старше 0.14. Результат: `satellite/build/<arch>/pulsar`
+Makefile отказывается работать с zig 0.13 и более ранними. Результат: `satellite/build/<arch>/pulsar`
 (без отладочной информации — его и ставит установщик) и рядом `pulsar.debug` с
 символами для разбора отчётов о падениях. Версия берётся из `git describe` и видна в
 `pulsar --version` и в HA (сущность «Version»).
 
-При первой сборке скачиваются и собираются зависимости (sendspin-cpp и его библиотеки,
-заголовки alsa-lib), все версии зафиксированы. Собираются обе версии: `satellite/build/aarch64/`
+При первой сборке скачиваются зависимости: крейты Rust (версии зафиксированы в
+`satellite/Cargo.lock`) и sendspin-cpp с его библиотеками (`satellite/third_party/fetch.sh`, тоже
+закреплены), которые собираются для каждой архитектуры. alsa-lib не линкуется: демон загружает
+её с колонки при запуске. Собираются обе версии: `satellite/build/aarch64/`
 и `satellite/build/armhf/`. Установщик смотрит, какой из загрузчиков `/lib/ld-linux-aarch64.so.1`
 и `/lib/ld-linux-armhf.so.3` есть на станции, и ставит эту сборку. Для Миди обычен aarch64; если
 его нет, а armhf есть, ставится armhf (образы с 32-битным userspace). Лайт 2 — только armhf.
@@ -507,24 +516,27 @@ flowchart LR
 
 ```
 satellite/
-  src/core/       event loop, логирование
-  src/esphome/    ESPHome Native API (protobuf вручную), mDNS
-  src/audio/      захват, VQE и спотеры Яндекса (через dlopen)
-  src/media/      плеер на GStreamer прошивки, громкость
-  src/sendspin/   Sendspin-плеер (sendspin-cpp)
-  src/zigbee/     Zigbee-модуль Миди (протокол Telink zbhci): координатор deCONZ по TCP, роутер,
-                  прошивка модуля через его загрузчик
-  src/hw/         кольцо/логотип (framebuffer), их анимации, эффекты и светомузыка (led_fx),
-                  часы и их анимации (clock_fx), кнопки, датчик освещённости
-  src/model.*     описание железа каждой модели, определение модели по devicetree
-  src/controller.*  логика спутника и сущностей HA
-  src/arbiter.*   договорённость между колонками, кто отвечает на активационную фразу (UDP 6054)
-  deploy/         boot.sh / supervise.sh / ctl.sh (на колонке), dist.sh (архивы релиза)
-  tools/          диагностические утилиты (зонд железа, офлайн-тест спотера, тест API)
-  third_party/    закреплённые версии зависимостей и тулчейн zig для CMake
-installer/        установщик pulsar-install (Go): поиск колонок, adb, установка, миграция
-radio/            прошивки координатора и роутера для Zigbee-модуля Миди (Telink Zigbee SDK)
-ssh/              сборка и запуск dropbear
+  crates/pulsar/          демон: контроллер (логика спутника и сущностей HA), state.conf, отчёт о падении
+  crates/pulsar-core/     логирование, таймеры, акторы, описание железа моделей
+  crates/pulsar-esphome/  ESPHome Native API (protobuf вручную, Noise)
+  crates/pulsar-lan/      mDNS и договорённость между колонками, кто отвечает на активационную
+                          фразу (UDP 6054)
+  crates/pulsar-audio/    захват, VQE и спотеры Яндекса (через dlopen), анализ музыки
+  crates/pulsar-alsa/     ALSA (libasound через dlopen)
+  crates/pulsar-media/    плеер на GStreamer прошивки, громкость
+  crates/pulsar-sendspin/ Sendspin-плеер (sendspin-cpp через C-шим)
+  crates/pulsar-hw/       кольцо/логотип (framebuffer), их анимации, эффекты и светомузыка, кнопки
+  crates/pulsar-clock/    часы и их анимации, датчик освещённости
+  crates/pulsar-zigbee/   Zigbee-модуль Миди (протокол Telink zbhci): координатор deCONZ по TCP,
+                          роутер, прошивка модуля через его загрузчик
+  crates/pulsar-update/   обновление из GitHub Releases (HTTPS на rustls)
+  crates/*/src/bin/       диагностические утилиты (зонды железа, плеера, сети, API, Zigbee)
+  deploy/                 boot.sh / supervise.sh / ctl.sh (на колонке), dist.sh (архивы релиза)
+  third_party/            закреплённые версии sendspin-cpp и тулчейн zig для CMake
+installer/                установщик pulsar-install (Go): поиск колонок, adb, установка, миграция
+radio/                    прошивки координатора и роутера для Zigbee-модуля Миди (Telink Zigbee SDK)
+ssh/                      сборка и запуск dropbear
+docs/rust-port/           история переноса демона с C++ на Rust
 ```
 
 ## Лицензия

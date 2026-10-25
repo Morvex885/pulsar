@@ -13,7 +13,7 @@ set(FETCHCONTENT_SOURCE_DIR_IXWEBSOCKET ${_src}/IXWebSocket CACHE PATH "" FORCE)
 set(FETCHCONTENT_SOURCE_DIR_NOISE_C ${_src}/noise-c CACHE PATH "" FORCE)
 
 # Roles: player (with Opus), metadata, controller (transport commands) and visualizer (LED music
-# visualization). Keep in sync with SS_DEFS in the Makefile.
+# visualization). Keep in sync with ROLES in crates/pulsar-sendspin/build.rs.
 set(SENDSPIN_ENABLE_PLAYER ON CACHE BOOL "" FORCE)
 set(SENDSPIN_ENABLE_OPUS ON CACHE BOOL "" FORCE)
 set(SENDSPIN_ENABLE_METADATA ON CACHE BOOL "" FORCE)

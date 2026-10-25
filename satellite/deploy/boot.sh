@@ -14,7 +14,7 @@ D=/data/pulsar
 mkdir /tmp/pulsar-boot.lock 2>/dev/null || exit 0
 pidof pulsar >/dev/null 2>&1 && exit 0
 pidof supervise.sh >/dev/null 2>&1 && exit 0  # never two supervisors
-# Supported models only (see src/model.cpp); anything else keeps the Yandex stack.
+# Supported models only (see satellite/crates/pulsar-core/src/model.rs); anything else keeps the Yandex stack.
 tr '\0' '\n' </proc/device-tree/compatible | grep -qxE 'yandex,(cucumber|plum)' || exit 0
 
 # onboot.sh has started quasar in background before S99zpulsar runs; wait for it, then stop it.

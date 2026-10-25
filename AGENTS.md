@@ -2,9 +2,14 @@
 
 Guide for coding agents working on pulsar. User-facing docs: `README.md` (Russian).
 
+## Rust port
+
+The daemon and its tools were ported from C++ to Rust (complete; history, contracts and station
+protocol in `docs/rust-port/`, the C++ reference is tag `rust-port-base`).
+
 ## What this is
 
-A native C++ daemon replacing the Yandex stack (`maind` / `quasar_launcher2`) on rooted Yandex
+A native Rust daemon replacing the Yandex stack (`maind` / `quasar_launcher2`) on rooted Yandex
 Stations: Midi (`cucumber`: usually aarch64, glibc 2.36, 1 GB RAM; some images run a 32-bit
 armhf userland) and Lite 2 (`plum`: 32-bit armhf, glibc 2.30, 237 MB RAM). It exposes the speaker
 to Home Assistant over the ESPHome Native API (port 6053; plaintext until a Noise key is
@@ -19,23 +24,26 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 
 | Path | Content |
 |---|---|
-| `satellite/src/core/` | epoll event loop (`Loop`: fds, timers, cross-thread `post`), logging |
-| `satellite/src/esphome/` | ESPHome API server (hand-written protobuf in `proto.h`), mDNS responder |
-| `satellite/src/model.*` | per-model hardware description (capture layout, VQE preset, LEDs, clock, inputs, sounds), detected from `/proc/device-tree/compatible` |
-| `satellite/src/audio/` | `frontend.*`: capture thread (ALSA → FIFO) + processing thread: Yandex VQE → wake + command spotters → 16 kHz stream; `spectrum.*`: music features of the speaker reference (512-point FFT at 16 kHz → 8 bands, loudness, beats as `MusicFrame`, `music_frame.h`) while the visualization can be shown |
-| `satellite/src/media/player.*` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`), channels MUSIC / ANNOUNCE; `Mixer` = ALSA "Master Playback Volume" (softvol of the `speakers` PCM) |
-| `satellite/src/sendspin/` | Sendspin player on top of sendspin-cpp, own ALSA sink on the `speakers` dmix; roles player, metadata, controller, visualizer (8 log bands 40 Hz–7.6 kHz, loudness, beats → `MusicFrame`) |
-| `satellite/src/zigbee/` | Midi Zigbee radio: zbhci link to the Telink chip (`telink_link.*`), coordinator on pulsar's firmware + ZDO to the coordinator itself (`coordinator.*`), deCONZ-protocol TCP server for Zigbee2MQTT / ZHA (`deconz_server.*`), router control (`router.*`), `.ybl` parsing + XMODEM upload through the radio's bootloader (`flasher.*`), role / firmware orchestration (`service.*`), byte order helpers (`bytes.h`) |
-| `satellite/src/update/` | HA "Firmware" update entity backend: HTTPS on the firmware's OpenSSL (`https.*`, dlopen), GitHub release check / download / verify / swap (`updater.*`) |
-| `satellite/src/hw/` | LED ring / logo (framebuffers behind ledfb triggers; `leds.cpp`: output, case matrix, layer compositor, fades), pure rendering of voice states / one-shots / effects / music styles (`led_fx.*`), clock (sysfs segments, per-LED brightness; `clock.cpp`: layers), pure rendering of the clock's stock animations and music levels (`clock_fx.*`), input (touch keys, `SW_MUTE_DEVICE`), light sensor (`ltr308als01`) |
-| `satellite/src/controller.*` | all satellite logic: voice pipeline state machine, entities, local commands, persistence |
-| `satellite/src/arbiter.*` | `WakeArbiter`: wake word claims between stations (UDP broadcast :6054, 250 ms window), best claim answers |
+| `satellite/Cargo.toml` | Cargo workspace (edition 2024, every external dependency pinned in `[workspace.dependencies]`), `rust-toolchain.toml`, `Makefile` (cargo-zigbuild cross builds, `make check`) |
+| `satellite/crates/pulsar/` | the daemon: `main.rs` (runtime, teardown watchdog), `crash.rs` (crash report), `controller/` (all satellite logic: voice pipeline state machine, entities, local commands, updates; `logic.rs` holds its pure decisions), `settings.rs` (`state.conf`, byte-compatible with the C++ daemon); `PULSAR_PORT_OFFSET=<n>` adds n to the ESPHome, Sendspin, deCONZ and arbiter ports and turns mDNS off (test instance next to the running daemon) |
+| `satellite/crates/pulsar-core/` | logging (stderr + ESPHome log sink), `Timers` (the C++ loop's timer semantics), actor registry (`spawn_actor`, `join_all`), sysfs / network / TZ helpers, `Model` (per-model hardware description: capture layout, VQE preset, LEDs, clock, inputs, sounds, Zigbee lines; detected from `/proc/device-tree/compatible`), `AmbientDimmer`, `MusicFrame`, `UiState`, `ClockShot`, `fmt` (`state.conf` numbers as C++ wrote them) |
+| `satellite/crates/pulsar-alsa/` | libasound loaded at runtime (dlopen), PCM / ctl wrappers, the versioned hw-params ABI of armhf alsa-lib (`__snd_pcm_hw_params_*` first); bin `alsa_abi_probe` |
+| `satellite/crates/pulsar-esphome/` | ESPHome API server: transport (plaintext / Noise), clients and the voice owner (`server.rs`), entities and states (`server/entities.rs`), commands and voice assistant messages (`server/commands.rs`), hand-written protobuf (`proto.rs`), Noise key (`key.rs`); bin `api_selftest`; harness `docs/rust-port/tools/esphome_check.py` |
+| `satellite/crates/pulsar-lan/` | mDNS responder (`mdns.rs`) and the wake word arbiter between stations (`arbiter.rs`: claims over UDP broadcast :6054, 250 ms window, best claim answers); bin `lan_probe` |
+| `satellite/crates/pulsar-audio/` | microphone front-end (`frontend.rs`): capture thread (ALSA → FIFO) + processing thread: Yandex VQE → wake + command spotters → 16 kHz stream; music features of the speaker reference (`spectrum.rs`: 512-point FFT at 16 kHz → 8 bands, loudness, beats as `MusicFrame`) while the visualization can be shown; C API of libyandex_evil (`engine/`); bins `ww_offline`, `frontend_probe` |
+| `satellite/crates/pulsar-media/` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`, dlopen, `gst.rs`), channels Music / Announce on a GLib thread; `Mixer` = ALSA "Master Playback Volume" (softvol of the `speakers` PCM); bin `player_probe` |
+| `satellite/crates/pulsar-sendspin/` | Sendspin player on top of sendspin-cpp (C shim in `shim/`, linked statically by `build.rs` in the Makefile builds), own ALSA sink on the `speakers` dmix; roles player, metadata, controller, visualizer (8 log bands 40 Hz–7.6 kHz, loudness, beats → `MusicFrame`); bin `sendspin_probe` |
+| `satellite/crates/pulsar-hw/` | LED ring / logo (framebuffers behind ledfb triggers; `leds.rs`: output, case matrix, layer compositor, fades), pure rendering of voice states / one-shots / effects / music styles (`led_fx.rs`), input (touch keys, `SW_MUTE_DEVICE`; `input.rs`); bin `hw_probe` |
+| `satellite/crates/pulsar-clock/` | clock (sysfs segments, per-LED brightness; `clock.rs`: layers), pure rendering of the clock's stock animations and music levels (`clock_fx.rs`), font, light sensor (`ltr308als01`, `light_sensor.rs`) |
+| `satellite/crates/pulsar-zigbee/` | Midi Zigbee radio: zbhci link to the Telink chip (`link.rs`), coordinator on pulsar's firmware + ZDO to the coordinator itself (`coordinator.rs`), deCONZ-protocol TCP server for Zigbee2MQTT / ZHA (`deconz.rs`), router control (`router.rs`), `.ybl` parsing + XMODEM upload through the radio's bootloader (`flasher.rs`), role / firmware orchestration (`service.rs`), role table (`roles.rs`), byte order helpers (`bytes.rs`); bin `zigbee_probe [port] | info | flash <image>` (coordinator + deCONZ server on another port without the daemon; firmware identification; writing an image) |
+| `satellite/crates/pulsar-update/` | HA "Firmware" update entity backend: HTTPS with rustls + ring (`https.rs`), GitHub release check / download / verify / swap (`updater.rs`), version comparison (`version.rs`); bin `update_probe` |
+| `satellite/crates/*/src/bin/` | tools (`make ARCH=<arch> tools`): `alsa_abi_probe` (ALSA hw-params ABI on the `null` PCM, no sound), `api_selftest` (API server with printing handlers, `[port=16053] [name] [run_seconds=120] [key_file]`), `lan_probe` (mDNS / arbiter probes on alternative ports), `ww_offline` (offline spotter test on a raw capture WAV), `frontend_probe` (microphone front-end without the daemon: events, rates, `--record` of the raw capture), `player_probe` (music / announce / http / 404 / https scenario at volume ≤ 0.2, original raw restored), `sendspin_probe` (Sendspin player without the daemon on another port, Master volume capped at 0.2, for `docs/rust-port/tools/sendspin_server.py`), `hw_probe` (LEDs, clock, input, light sensor), `update_probe` (HTTPS client, release check, install into a scratch dir), `zigbee_probe` |
 | `satellite/deploy/` | `dist.sh` (release archives, host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
+| `satellite/third_party/` | `fetch.sh` (pinned deps), CMake glue, zig toolchain wrappers (sendspin-cpp only; with the shim in `crates/pulsar-sendspin/shim/` the only C++ in the build) |
 | `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install (incl. `/etc/init.d/S99zpulsar`), health check |
-| `satellite/tools/` | probes: `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `update_probe` (HTTPS client, release check, install into a scratch dir), `zigbee_probe` (Zigbee coordinator, either firmware, + deCONZ server on another port, without the daemon; `flash <image>` writes a radio image), `alsa_abi_probe` (ALSA hw-params ABI on the `null` PCM, no sound) |
-| `satellite/third_party/` | `fetch.sh` (pinned deps), `sysroot.sh` (alsa-lib link sysroot), CMake glue, zig toolchain wrappers |
 | `ssh/` | `build.sh` (static dropbear + sftp-server), `start.sh` (device side) |
-| `radio/` | Zigbee firmware for the Midi radio on the Telink Zigbee SDK: `build.sh` (pinned SDK + toolchain, `sdk.patch`), `Makefile`, `coordinator/` and `router/` (apps), `ybl.c` (host tool: binary → `.ybl`) |
+| `radio/` | Zigbee firmware for the Midi radio on the Telink Zigbee SDK (C): `build.sh` (pinned SDK + toolchain, `sdk.patch`), `Makefile`, `coordinator/` and `router/` (apps), `ybl.c` (host tool: binary → `.ybl`) |
+| `docs/rust-port/` | history of the C++ → Rust port: tracker, rules, contracts, station protocol (`station.sh`), reviews, test harnesses in `tools/` (`esphome_check.py`, `sendspin_server.py`, `deconz_read.py`, the C++ golden harness `deconz_golden/`) |
 
 Git-ignored and never to be published: `backup/` (full device backups), `dump/` (firmware binaries,
 logs), `re/` (Ghidra projects and decompiled Yandex code), `ref/` (upstream checkouts).
@@ -45,30 +53,38 @@ logs), `re/` (Ghidra projects and decompiled Yandex code), `ref/` (upstream chec
 ```sh
 make -C satellite -j"$(nproc)"                       # both: build/{aarch64,armhf}/pulsar
 make -C satellite ARCH=armhf                          # one architecture
-make -C satellite ARCH=armhf build/armhf/tools/ww_offline   # any tool in satellite/tools/
+make -C satellite ARCH=armhf tools                    # every tool → build/armhf/tools/
+make -C satellite ARCH=armhf build/armhf/tools/alsa_abi_probe   # one tool (crates/*/src/bin/<name>.rs)
+make -C satellite check                              # host: cargo fmt --check, clippy -D warnings (host + both targets via cargo-zigbuild, needs zig of any version), tests
+# C++ reference (e.g. to compare behaviour): a worktree of tag rust-port-base, e.g.
+#   git worktree add /tmp/pulsar-cxx rust-port-base && make -C /tmp/pulsar-cxx/satellite ARCH=armhf build/armhf/tools/zigbee_probe
 ssh/build.sh                                         # → ssh/out/{aarch64,armhf}/{dropbearmulti,sftp-server}
 radio/build.sh                                       # → radio/out/zigbee-{coordinator,router}.ybl (needs libc6:i386, unzip)
 go -C installer test ./...                           # installer unit tests
 go -C installer run . [args]                         # installer from a checkout (builds the daemon first)
 ```
 
-Host tools: **zig 0.14.1** (`ZIG=/path/to/zig` if not in PATH; the Makefile rejects ≤ 0.13, whose
-armhf C++ release builds crash before `main`), make, git, curl, cmake ≥ 3.16, ninja, patch; Go 1.27+
-(installer). The
-first build fetches pinned dependencies into `satellite/third_party/src/` and builds an ALSA
-sysroot per architecture into `satellite/build/<arch>/sysroot/` (Midi: versioned like the
-firmware's alsa-lib; Lite 2: unversioned, exporting only `snd_*`, otherwise the daemon would import
-zig's compiler-rt helpers from libasound). Outputs per arch: `pulsar` (stripped, the
-one deployed) and `pulsar.debug` (unstripped, line tables) for `addr2line -f -e` on the
-crash report `main.cpp` writes to the log (non-PIE: addresses are absolute; armhf reports pc/lr only:
-glibc's `backtrace()` there runs libgcc_s's unwinder into the binary's static zig personality
-routine and segfaults). The version is
-`git describe --tags --always --dirty` (`--version`, HA DeviceInfo and the "Version" entity). Host-side
-tests exist only for the installer (`go -C installer test ./...`); the daemon is verified on the
-device.
+Host tools: rustup (installs the toolchain pinned in `satellite/rust-toolchain.toml` with both
+targets), **cargo-zigbuild 0.24.0** (`cargo install cargo-zigbuild --locked --version 0.24.0`;
+also for `make check`), **zig 0.14.1** (`ZIG=/path/to/zig` if not in PATH; arch builds reject
+≤ 0.13, whose armhf C++ release builds (sendspin-cpp) crash before `main`; `make check` takes any zig: its
+station clippy only compiles ring's C), a host C compiler (`cc`, for `make check`), make, git, curl,
+patch; cmake ≥ 3.16 and ninja for sendspin-cpp only; Go 1.27+ (installer). The first build fetches
+pinned dependencies into `satellite/third_party/src/` and builds sendspin-cpp per architecture
+into `satellite/build/<arch>/third_party/`; cargo's output is in `satellite/target/`. libasound is
+loaded at runtime (`dlopen`, `pulsar-alsa`), nothing ALSA is linked. Outputs per arch: `pulsar`
+(stripped, the one deployed) and `pulsar.debug` (unstripped, line tables) for `addr2line -f -e` on
+the crash report the daemon writes to the log (`=== CRASH`; non-PIE, `-C relocation-model=static`:
+addresses are absolute; `handler=` is the address of `pulsar_crash_handler`; aarch64 adds an
+`fp:` frame-pointer chain, armhf reports pc/lr only). The version is `git describe --tags
+--match 'v*' --always --dirty` (`--version`, HA DeviceInfo and the "Version" entity; release tags
+only, so the updater can parse it).
+Host-side tests: `make -C satellite check` (Rust crates, x86_64, without sendspin-cpp) and the
+installer (`go -C installer test ./...`); hardware behaviour is verified on the device.
 
-CI (`.github/workflows/build.yml`) builds the daemon and every tool for both architectures and the
-radio firmware images (job `radio`) on each pull request and push to `main`; the binaries are
+CI (`.github/workflows/build.yml`) builds the daemon and every tool for both architectures, runs
+`make -C satellite check` (job `check`) and builds the radio firmware images (job `radio`) on each
+pull request and push to `main` or `rust`; the binaries are
 attached to the run as artifacts. Job `installer`
 vets the installer for linux/windows/darwin, runs its tests and cross-builds it for windows/amd64,
 darwin/{arm64,amd64} and linux/{amd64,arm64}. Pushing a tag `v*` additionally builds dropbear (job
@@ -111,8 +127,8 @@ ABI whose dynamic loader is on the station (`/lib/ld-linux-aarch64.so.1`,
 that loader (#13). A Lite 2 without the armhf loader is skipped (no 64-bit plum firmware has
 been seen, and the aarch64 binary needs glibc 2.34). Adding a model: hardware study first (ALSA
 capture layout, VQE preset, spotter channels, LEDs, clock, inputs, earcons), then a `Model` in
-`src/model.cpp` and `modelName()` / `abis()` entries. A second ABI in `abis()` is only for a
-userspace that has actually been seen on that model.
+`satellite/crates/pulsar-core/src/model.rs` and `modelName()` / `abis()` entries. A second ABI in
+`abis()` is only for a userspace that has actually been seen on that model.
 
 Manual binary update (e.g. over ssh):
 
@@ -136,24 +152,28 @@ boot: `/tmp/pulsar-boot.lock`) → waits for quasar, `q stop` → `supervise.sh`
 `enabled` exists. `ctl.sh reload` restarts the supervisor itself
 (needed after replacing `supervise.sh`; the installer does it when the script changed).
 
-Updates from HA (`src/update/`, entities "Firmware" + "Auto update"): the daemon checks
+Updates from HA (`pulsar-update`, entities "Firmware" + "Auto update"): the daemon checks
 `https://github.com/<repo>/releases/latest` (its redirect to `/releases/tag/<tag>`; the REST API
 is not used: its 60 requests/hour per public IP are exhausted behind shared VPN/CGNAT exits, seen
 on the test stations) a minute after start and every 6 h. Install: download over HTTPS (busybox
-`wget` has no TLS, there is no curl; `libssl.so.3` on the Midi, `libssl.so.1.1` on the Lite 2,
-CA bundle `/etc/ssl/certs/ca-certificates.crt`), sha256 against `SHA256SUMS`, `pulsar.new
+`wget` has no TLS, there is no curl; rustls + ring built into the binary, TLS 1.2 / 1.3, the
+firmware's CA bundle `/etc/ssl/certs/ca-certificates.crt`; nothing of the firmware's OpenSSL is
+used), sha256 against `SHA256SUMS`, `pulsar.new
 --version` must print `pulsar <tag>`, current binary copied to `.prev`, rename, exit 0.
 `state.conf` `update_attempt=<tag>` is set before the swap and cleared by the new binary; still
 set under another version = rolled back by `supervise.sh`, so auto-update skips that tag.
 Automatic installs need a parseable current version (`vX.Y.Z[-N-g<hash>]`) and an idle speaker.
 
 Supervisor contract (`supervise.sh` header has the details): daemon exit 0 = deliberate restart
-(SIGTERM from `ctl.sh`, the HA "Restart" button via `on_restart`), restarted after 1 s and not
+(SIGTERM from `ctl.sh`, the HA "Restart" button), restarted after 1 s and not
 counted as a crash. Anything else is a crash; backoff 3 s doubling to 30 s; 5 consecutive crashes
 each after < 300 s of uptime → swap in `.prev` (bad one kept as `.bad`); if that crash-loops too →
 remove `enabled` and start the Yandex stack. The installer additionally checks the log after a
 marker ~10 s post-restart and offers to restore `.prev`. A pre-Noise binary rolled back onto a
-device whose HA already holds a key cannot talk to HA until the key is removed there.
+device whose HA already holds a key cannot talk to HA until the key is removed there. Before every
+launch `supervise.sh` removes a stale ALSA dmix lock (see Model notes) and logs
+`=== alsa: removed stale dmix lock (…)` when there was one; the installer's health check does not
+treat that line as a failure (it precedes the new daemon's `=== start` and is not `=== supervise`).
 
 ## Device safety rules
 
@@ -180,7 +200,7 @@ device whose HA already holds a key cannot talk to HA until the key is removed t
   audio must cap volume.
 - `/tmp` is tmpfs (1 GB RAM on the Midi, 237 MB on the Lite 2): remove test files afterwards.
 
-## Yandex libraries (reverse-engineered C API, see `src/audio/frontend.cpp`)
+## Yandex libraries (reverse-engineered C API, see `satellite/crates/pulsar-audio/src/engine/`)
 
 From `/system/vendor/quasar/libyandex_evil.so`:
 
@@ -201,7 +221,7 @@ From `/system/vendor/quasar/libyandex_evil.so`:
 - `YandexVqeC_Config_GetOutputChannelCount` takes `(cfg, type, int *out)`; the other `Config_Get*`
   getters return the value directly.
 
-## Zigbee radio (Midi, `src/zigbee/`)
+## Zigbee radio (Midi, `satellite/crates/pulsar-zigbee/`)
 
 Telink B91 (RISC-V) on `/dev/ttyS2`, 115200 8N1, no flow control. It came with Yandex's
 `gateway.ybl` (`/system/vendor/quasar/zigbee/`; plain Telink image + zlib CRC-32 trailer, header
@@ -217,17 +237,17 @@ the application sends 0x8907 within ~0.3 s.
   `[type BE16][status][0]` (2 = unknown type) and the next may only follow the ACK.
 - Yandex's gateway firmware cannot read or set the network key, PAN ID or extended PAN ID, passes
   APS frames for endpoint 1 only and consumes ZDO responses; pulsar drove it as a ZHA coordinator
-  until its own firmware existed (git history: `src/zigbee/coordinator.cpp` before 3251a71).
+  until its own firmware existed (git history: `satellite/src/zigbee/coordinator.cpp` before 3251a71, C++).
   pulsar no longer runs it; `ctl.sh disable` hands the radio back to maind, which writes
   `gateway.ybl` again (its own update path, done when the 0x0900 version differs).
 
 ### Roles and radio firmware
 
 State `zigbee_role=off|pulsar-coordinator|router` (HA select "Zigbee role": "Off", "Coordinator",
-"Router"; `ZigbeeService::kRoles`). Default and anything else is off, including `coordinator`
+"Router"; `pulsar_zigbee::ROLES`). Default and anything else is off, including `coordinator`
 (the Yandex gateway role pulsar had before): pulsar does not touch the radio, so an install never
 writes it without a choice in HA. Choosing another role persists it and restarts the daemon.
-`ZigbeeService` opens the link and asks for 0x0900 before building the role object (the deCONZ
+The role service (`service.rs`) opens the link and asks for 0x0900 before building the role object (the deCONZ
 server listens only then); a firmware other than the role's image
 (`/data/pulsar/zigbee-{coordinator,router}.ybl`, which installs and updates bring), or a radio
 silent for 10 s (interrupted upload), gets the role's image, as maind does for the gateway. At most
@@ -335,7 +355,7 @@ carried over).
 
 | | Midi (`cucumber`) | Lite 2 (`plum`) |
 |---|---|---|
-| SoC / userland | Amlogic A5, aarch64, glibc 2.36, 1 GB RAM; some firmware images run a 32-bit armhf userland (the installer then deploys `build/armhf/`). That image's alsa-lib is versioned; the armhf build reaches its current ABI through `audio/alsa_abi.h` | Amlogic AXG, Cortex-A53, **32-bit armhf** userland, glibc 2.30, kernel 4.9, **237 MB RAM** |
+| SoC / userland | Amlogic A5, aarch64, glibc 2.36, 1 GB RAM; some firmware images run a 32-bit armhf userland (the installer then deploys `build/armhf/`). That image's alsa-lib is versioned; the armhf build reaches its current ABI through `pulsar-alsa` | Amlogic AXG, Cortex-A53, **32-bit armhf** userland, glibc 2.30, kernel 4.9, **237 MB RAM** |
 | Storage | `/data` partition (several GB) | `/data` → `/bkupgrade/data` (ubifs, ~81 MB free); rootfs ubifs ro, 87 % full |
 | Capture | `hw:0,2`, 8 ch @ 96 kHz: mics 0–3, speaker ref 4–7 | `hw:0,1`, 8 ch @ 48 kHz: mic 0 on ch 0 (= ch 1), mic 1 on ch 2 (= ch 3), speaker feedback on ch 6; ch 4/5 only carry a start-up transient. Max buffer 2048 frames (~42 ms) |
 | VQE preset | `cucumber`: 4 mics, 4 spk, chunk 3072 | `plum`: 2 mics, 1 spk, 48 kHz, chunk 1536 → 512 @ 16 kHz; outputs 1, 2, 4, 6, 8, 9 |
@@ -353,8 +373,22 @@ carried over).
 
 Lite 2 measurements: echo test (speech played through `speakers`, raw capture → `ww_offline`):
 speaker reference ch 6 gives ~25–30 dB lower VQE output than ch 4 and no false "алиса" hit from the
-played speech. Daemon: ~23 MB RSS, ~7 % CPU idle-listening. Capture overran the 42 ms device
-buffer when reading and VQE shared a thread; hence the separate capture thread with a FIFO.
+played speech. Daemon idle-listening (Rust, WP-13 measurement): ~25–27 MB RSS (C++ 25.8 MB),
+~35 % of one core, i.e. ~9 % of the four (C++ the same); Midi ~47–49 MB RSS, ~43 % of one core.
+Capture overran the 42 ms device buffer when reading and VQE shared a thread; hence the separate
+capture thread with a FIFO. It still overruns a few times an hour (`capture: Broken pipe,
+recovering`, 2–8/h, the same in C++ and Rust).
+
+Stale dmix lock (both models): the firmware's alsa-lib is patched by Yandex so that dmix does not
+start the slave PCM on open; the first client to start does, counted in the dmix shm segment
+(`ipc_key` 1024: shm `0x400`, mix buffer `0x401`, semaphore `0x400`). A process killed while
+playing (crash, SIGKILL, `kill -SEGV`) leaves the count set and the segment in place (nattch 0).
+From then on every player hangs: `/proc/asound/card0/pcm0p/sub0/status` stays `PREPARED` with
+`trigger_time: 0`, dmesg has `frddrs[0] registered` but no `fs2105_trigger(), start unmute`, the
+writer thread waits on `/dev/snd/timer` forever; silence (earcons, TTS, media, Sendspin) until a
+reboot or `ipcrm -M 0x400 -M 0x401 -S 0x400` with nothing attached (`ipcs -m`). A daemon restart
+alone does not help. `supervise.sh` clears it before each launch, `station.sh` in `stop`,
+`test-stop` and `cleanup`.
 
 Lite 2 LEDs: `led_ring_fb` scales each channel on its way to the LEDs; sysfs `brightness` reads
 the framebuffer value × ~0.36 (red), ~0.23 (green), ~0.2 (blue), so ring colours checked through
@@ -365,19 +399,29 @@ media playback, LED animations.
 
 ## Conventions
 
-- C++20, single-threaded controller: worker threads (capture, GStreamer, Sendspin) hand results to
-  the loop with `Loop::post`.
+- Rust, one current-thread tokio runtime with a `LocalSet` (`docs/rust-port/ARCHITECTURE.md`):
+  every service is an actor started with `pulsar_core::actors::spawn_actor`, driven through a
+  `Clone` handle (commands, never blocking) and reporting through an unbounded event channel; the
+  controller owns its state and serves all channels in one `select!`. Blocking and real-time work
+  (capture, VQE, GLib, the Sendspin sink, the radio upload) runs on named `std::thread`s that send
+  events through channels. `unsafe` and libc calls live only in `sys.rs` / `ffi.rs` / `gst.rs` and
+  the crash handler.
 - Keep the ESPHome API server pending until a valid `HelloRequest`; probes must not displace HA.
 - State persisted in `state.conf` (key=value); add new keys with safe defaults.
 - Comments explain device facts and constraints, not what the code does.
 - ESPHome API: up to 4 clients after a valid hello; states go to all subscribers, the voice
   pipeline to the most recent client still subscribed to it: when that one unsubscribes or
-  disconnects, the previous subscriber gets it back (`on_voice_subscribed(false)` then `(true)` on
-  every hand-over), so a probe never leaves HA without the pipeline.
-- `Player::play` done callback: called exactly once per `play()` on the Loop; `true` only if every
-  url played to its end; `stop()` or a replacing `play()` delivers `false` for the superseded list
-  (queued by that call, so it runs after the caller returns). Callers must check that the dialog /
-  announcement they belong to is still current (`dialog_`, `announce_seq_` in the controller).
+  disconnects, the previous subscriber gets it back (`ApiEvent::VoiceSubscribed(false)` then
+  `(true)` on every hand-over), so a probe never leaves HA without the pipeline.
+- Requests that can be replaced or cancelled return an id and are answered by an event carrying
+  it: `PlayerHandle::play` → `PlayId`, `PlayerEvent::Done { id, ok }` exactly once per `play()`
+  (`ok` only if every url played to its end; `stop()` or a replacing `play()` sends `false` for the
+  superseded list); `ArbiterHandle::claim` → `Decided { claim_id }`; `voice_request_start` → run id
+  of `VoiceStartFailed` / `VoiceAudioOverflow`. The controller ignores stale ids and checks that the
+  dialog / announcement an id belongs to is still current (`dialog`, `announce_seq`). Getters of a
+  handle right after a command still show the previous state, except the few that the handle
+  updates synchronously; which ones is listed in `docs/rust-port/ARCHITECTURE.md`, "Модель
+  исполнения", item 2.
 - Voice phases LISTENING/PROCESSING are bounded by a watchdog (30 s / 120 s without a pipeline
   event; ESPHome forwards INTENT_PROGRESS only once, so nothing arrives while the agent thinks);
   any new path into those phases must go through `start_pipeline`.
@@ -404,7 +448,7 @@ media playback, LED animations.
   level difference near/far (expected ≥ 6 dB at 0.5 m vs 3 m; otherwise switch the level source to
   `RAW_MAIN_MIC_SYNC`), Midi vs Lite 2 level offset, broadcast delivery through the firmware's
   iptables and the access point.
-- Clock layers (`Clock::Impl::refresh`): pairing code (ignores the "Clock display" switch) > volume
+- Clock layers (`pulsar-clock` `Clock::refresh`): pairing code (ignores the "Clock display" switch) > volume
   flash > voice state (TIMER_RING always, LISTENING / THINKING / SPEAKING with
   `voice_indication=1`) > update install (dark from `install_update` until exit, back on failure) >
   one-shot (boot on every start, player pause / next / previous) > timer > temporary layer
@@ -414,14 +458,14 @@ media playback, LED animations.
   kept per source and reset after 10 s without that source) > time. "Clock display" off keeps
   everything else dark.
   Persisted: scroll speed (`clock_scroll_ms=`) and `clock_music=`. The animations are the stock
-  Lite 2 `ledpatterns/clock` patterns re-drawn in `clock_fx.cpp` (envelopes measured, ≤ 10/255
+  Lite 2 `ledpatterns/clock` patterns re-drawn in `clock_fx.rs` (envelopes measured, ≤ 10/255
   off; NEXT's column 1 is drawn symmetric where the stock one decays early); the Midi firmware ships
   only `ringing`, pulsar shows the full set there too. Frames are per-LED brightness 0..255, scaled
   by the level on the Lite 2 (Midi: chip current). Moving content re-arms a one-shot frame timer on
   every refresh (20 ms animations, 40 ms meters); the 5 s full segment rewrite counts 250 ms ticks
   only. Player one-shots fire only when the command took effect (`music_pause()` returns whether
   something played; next / previous when Sendspin accepted the transport command).
-- LED layers (`Leds::Impl::active_layer`, first active wins): volume overlay (1.5 s) > voice state
+- LED layers (`pulsar-hw` `active_layer`, first active wins): volume overlay (1.5 s) > voice state
   (ERROR runs its 3.54 s to the end, TIMER_RING; LISTENING / THINKING / SPEAKING only with
   `voice_indication=1`) > one-shots (mute sweep 600 ms over the timer-started countdown 15 s,
   which goes on underneath) > `led_show` > Lite 2 mute (steady dim red) > Light «Ring» > music
@@ -429,16 +473,16 @@ media playback, LED animations.
   off. The Midi logo shows the voice state, else red while muted, else the ring's average. Layer
   changes crossfade 250 ms, Light «Ring» changes over their transition (ESPHome default 1 s,
   capped at 60 s). Voice states, one-shots and volume use the stock
-  patterns' colours and timings, re-drawn procedurally (`led_fx.cpp`); `fx::stock(raw, k)` gives
+  patterns' colours and timings, re-drawn procedurally (`led_fx.rs`); `led_fx::stock(rgb, k)` gives
   the stock raw value × k after the gamma-2 output. Output: `(v · ambient dim)²`, case matrix
   (`led_case_color=`, rows = output R, G, B [inference: orientation not confirmed by eye]), × 0.8.
   Effects and music move on a phase scaled by `led_speed=` (0.25–4). Music: Sendspin visualizer
-  frames win while they keep coming (`kSendspinFreshMs` 500 ms, `audio/music_frame.h`, shared with
+  frames win while they keep coming (`pulsar_core::SENDSPIN_FRESH_MS` 500 ms, shared with
   the clock), else the speaker-reference analysis, which only runs while the visualization is shown
   (the light off). Music Assistant 2.10.8 (aiosendspin 10.2.1) sends visualizer frames (seen on
   both stations), but ends and restarts the Sendspin stream on every seek / skip (its hidden
   `allow_legacy_clients` option, on by default, against the spec's `stream/clear`), ~0.7 s
-  without audio and frames. `SendspinService` releases the sink at once but holds the reported
+  without audio and frames. `pulsar-sendspin` releases the sink at once but holds the reported
   stream end 1 s unless the group state says "stopped" (pause / stop: just before or just after
   the stream end), so a restart does not flap the HA media state, the command spotter and the
   music displays.

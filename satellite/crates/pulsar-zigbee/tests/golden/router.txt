@@ -1,0 +1,64 @@
+step start
+send 0045 -
+step join-not-ready
+step leave-not-ready
+step info
+changed ready=1 joined=0 joining=0 pan=ffff nwk=fffe ch=11 error=""
+step join
+changed ready=1 joined=0 joining=1 pan=ffff nwk=fffe ch=11 error=""
+send 0002 -
+step join-again
+step join-failed
+changed ready=1 joined=0 joining=0 pan=ffff nwk=fffe ch=11 error="no open network found (allow joining on the coordinator)"
+changed ready=1 joined=0 joining=0 pan=ffff nwk=fffe ch=11 error="trust center key exchange failed"
+changed ready=1 joined=0 joining=0 pan=ffff nwk=fffe ch=11 error="join failed (BDB status 7)"
+step join-refused
+changed ready=1 joined=0 joining=1 pan=ffff nwk=fffe ch=11 error=""
+send 0002 -
+changed ready=1 joined=0 joining=0 pan=ffff nwk=fffe ch=11 error="radio refused the join command"
+step join-timeout
+changed ready=1 joined=0 joining=1 pan=ffff nwk=fffe ch=11 error=""
+send 0002 -
+changed ready=1 joined=0 joining=0 pan=ffff nwk=fffe ch=11 error="no network joined"
+step join-timeout-after-fail
+changed ready=1 joined=0 joining=1 pan=ffff nwk=fffe ch=11 error=""
+send 0002 -
+changed ready=1 joined=0 joining=0 pan=ffff nwk=fffe ch=11 error="no open network found (allow joining on the coordinator)"
+step join-retimed
+changed ready=1 joined=0 joining=1 pan=ffff nwk=fffe ch=11 error=""
+send 0002 -
+changed ready=1 joined=0 joining=0 pan=ffff nwk=fffe ch=11 error="no open network found (allow joining on the coordinator)"
+changed ready=1 joined=0 joining=1 pan=ffff nwk=fffe ch=11 error=""
+send 0002 -
+changed ready=1 joined=0 joining=0 pan=ffff nwk=fffe ch=11 error="no network joined"
+step joined
+changed ready=1 joined=0 joining=1 pan=ffff nwk=fffe ch=11 error=""
+send 0002 -
+send 0045 -
+changed ready=1 joined=1 joining=0 pan=1a62 nwk=4f21 ch=15 error=""
+step join-while-joined
+step left
+changed ready=1 joined=0 joining=0 pan=1a62 nwk=4f21 ch=15 error=""
+step started
+changed ready=1 joined=0 joining=0 pan=1a62 nwk=4f21 ch=15 error=""
+send 0045 -
+changed ready=1 joined=1 joining=0 pan=1a62 nwk=4f21 ch=15 error=""
+step other-events
+changed ready=1 joined=1 joining=0 pan=1a62 nwk=4f21 ch=15 error=""
+step short-info
+changed ready=1 joined=0 joining=0 pan=1234 nwk=5678 ch=15 error=""
+step leave
+changed ready=1 joined=0 joining=1 pan=1234 nwk=5678 ch=15 error=""
+send 0002 -
+send 0005 -
+send 0045 -
+step leave-twice
+send 0005 -
+send 0005 -
+send 0045 -
+send 0045 -
+step boot
+send 0045 -
+step leave-after-boot
+step boot-ready
+changed ready=1 joined=1 joining=0 pan=1a62 nwk=4f21 ch=15 error=""

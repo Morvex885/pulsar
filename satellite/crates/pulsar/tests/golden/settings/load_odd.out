@@ -1,0 +1,25 @@
+volume2=0.5
+volume=0.37
+muted=0
+mic_muted=1
+clock_on=0
+clock_brightness=1
+clock_scroll_ms=100
+light_on=0
+light_brightness=1
+light_r=0.25
+light_g=5
+light_b=1
+light_effect=Rainbow=x
+wake_word=yandex
+tz= MSK-3
+auto_update=1
+update_attempt=v9.9.9
+zigbee_role=off
+zigbee_flash_failed=5001abcd
+nearest_answers=0
+music_viz=All styles
+led_speed=1
+voice_indication=0
+led_case_color=
+clock_music=Levels

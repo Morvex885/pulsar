@@ -8,6 +8,7 @@
 
 # Build outputs and fetched dependencies.
 /satellite/build/
+/satellite/target/
 /satellite/third_party/src/
 /ssh/out/
 /installer/dist/
