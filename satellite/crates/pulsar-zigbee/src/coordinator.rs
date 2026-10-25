@@ -195,7 +195,7 @@ impl Default for NetworkConfig {
     }
 }
 
-/// The coordinator's owner (the deCONZ server and the service, WP-10). Every hook gets the
+/// The coordinator's owner (the deCONZ server and the service). Every hook gets the
 /// coordinator back and may call into it, as the C++ hooks called their `coord_` reference.
 pub trait Hooks {
     /// An APS indication, or a ZDO answer of the coordinator itself.

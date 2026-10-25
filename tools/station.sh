@@ -1,8 +1,9 @@
 #!/bin/sh
-# Station helper for the Rust port (docs/rust-port/STATIONS.md). Never commit station addresses.
+# Station helper (docs/stations.md). Never commit station addresses.
+# PULSAR_TAG: free-form tag of the work holding the lock (one word, no spaces).
 set -eu
 usage() {
-  echo "usage: PULSAR_WP=WP-XX $0 midi|lite2 lock MINUTES|unlock|break-lock|stop|start|push FILE...|test-start|test-stop|test-log [N]|swap-rust BINARY|restore-cxx|cleanup|status|log [N]" >&2
+  echo "usage: PULSAR_TAG=<tag> $0 midi|lite2 lock MINUTES|unlock|break-lock|stop|start|push FILE...|test-start|test-stop|test-log [N]|swap BINARY|restore|cleanup|status|log [N]" >&2
   exit 2
 }
 [ $# -ge 2 ] || usage
@@ -37,10 +38,10 @@ up() {
   [ "${2:-}" != none ] || echo "warning: no sha256sum on station, only size verified for $src" >&2
   r "chmod 755 '$dest.part' && mv '$dest.part' '$dest'"
 }
-# State-changing commands run only under this agent's own lock.
+# State-changing commands run only under this tag's own lock.
 own() {
-  wp=${PULSAR_WP:?PULSAR_WP is not set}
-  r "read o _ 2>/dev/null < $L/owner && [ \"\$o\" = '$wp' ]" || { echo "no lock held by $wp" >&2; exit 1; }
+  tag=${PULSAR_TAG:?PULSAR_TAG is not set}
+  r "read o _ 2>/dev/null < $L/owner && [ \"\$o\" = '$tag' ]" || { echo "no lock held by $tag" >&2; exit 1; }
 }
 # Remote snippet: remove a stale ALSA dmix lock (shm 0x400/0x401 nobody is attached to, then
 # semaphore 0x400) left by a process killed while playing; without it the station stays silent
@@ -60,11 +61,12 @@ EOF
 case "$cmd" in
   lock)
     [ $# -eq 1 ] || usage
-    wp=${PULSAR_WP:?PULSAR_WP is not set}
+    tag=${PULSAR_TAG:?PULSAR_TAG is not set}
+    case "$tag" in '' | *[[:space:]]*) echo "PULSAR_TAG must be one word" >&2; exit 2 ;; esac
     case "$1" in '' | *[!0-9]*) usage ;; esac
     { [ "$1" -ge 1 ] && [ "$1" -le 180 ]; } || usage
     # The owner file appears complete or not at all (a lock dir without one is a crashed lock).
-    r "mkdir $L 2>/dev/null && echo \"$wp \$(date +%s) $1\" > $L/owner.tmp && mv $L/owner.tmp $L/owner" \
+    r "mkdir $L 2>/dev/null && echo \"$tag \$(date +%s) $1\" > $L/owner.tmp && mv $L/owner.tmp $L/owner" \
       || { echo "station busy: $(r "cat $L/owner; echo now \$(date +%s)")" >&2; exit 1; } ;;
   unlock) own; r "rm -rf $L" ;;
   break-lock)
@@ -106,20 +108,22 @@ case "$cmd" in
        $DMIX
        echo stopped" ;;
   test-log) r "tail -n ${1:-50} $T/log" ;;
-  swap-rust)
+  swap)
     [ $# -eq 1 ] || usage
     own
+    # The installed binary is kept as pulsar.orig and serves as .prev meanwhile, so a rollback by
+    # supervise.sh lands on it; the owner's .prev waits in pulsar.prev.orig.
     r "[ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
        [ \$(df -Pk $D | awk 'NR==2 {print \$4}') -gt 30000 ] || { echo 'less than 30 MB free in $D' >&2; exit 1; }
-       cd $D && { [ -f pulsar.cxx ] || cp -p pulsar pulsar.cxx; } \
+       cd $D && { [ -f pulsar.orig ] || cp -p pulsar pulsar.orig; } \
          && { [ ! -f pulsar.prev ] || [ -f pulsar.prev.orig ] || cp -p pulsar.prev pulsar.prev.orig; }"
     up "$1" "$D/pulsar.new"
-    r "cd $D && ./pulsar.new --version && cp -p pulsar.cxx pulsar.prev \
+    r "cd $D && ./pulsar.new --version && cp -p pulsar.orig pulsar.prev \
        && mv pulsar.new pulsar && sync && ./ctl.sh restart" ;;
-  restore-cxx)
+  restore)
     own
-    r "cd $D && [ -f pulsar.cxx ] || { echo 'no pulsar.cxx' >&2; exit 1; }
-       cd $D && cp -p pulsar.cxx pulsar.tmp && mv pulsar.tmp pulsar && rm -f pulsar.cxx || exit 1
+    r "cd $D && [ -f pulsar.orig ] || { echo 'no pulsar.orig' >&2; exit 1; }
+       cd $D && cp -p pulsar.orig pulsar.tmp && mv pulsar.tmp pulsar && rm -f pulsar.orig || exit 1
        if [ -f pulsar.prev.orig ]; then mv pulsar.prev.orig pulsar.prev; fi
        sync
        if [ -f enabled ]; then ./ctl.sh restart; else ./ctl.sh enable; fi" ;;

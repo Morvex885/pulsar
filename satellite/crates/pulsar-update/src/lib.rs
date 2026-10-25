@@ -8,7 +8,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-/// For update_probe only, not part of the crate's contract (ARCHITECTURE.md, pulsar-update).
+/// For update_probe only, not part of the crate's public API.
 #[doc(hidden)]
 pub mod https;
 #[allow(unsafe_code)]

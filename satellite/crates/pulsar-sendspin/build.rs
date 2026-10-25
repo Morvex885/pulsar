@@ -66,9 +66,9 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", dir.display());
         println!("cargo:rustc-link-lib=static={lib}");
     }
-    // zig links its own libc++, libc++abi and libunwind statically (WP-00 recipe). cc already
-    // emits this lib right after the shim, i.e. before the sendspin libraries; repeated here
-    // after them, so the static link order holds whatever cc emits.
+    // zig links its own libc++, libc++abi and libunwind statically (docs/architecture.md). cc
+    // already emits this lib right after the shim, i.e. before the sendspin libraries; repeated
+    // here after them, so the static link order holds whatever cc emits.
     println!("cargo:rustc-link-lib=c++");
     println!("cargo:rustc-cfg=sendspin_ffi");
 }

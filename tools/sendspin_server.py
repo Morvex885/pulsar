@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sendspin test server for the pulsar Rust port (WP-06).
+"""Sendspin test server for pulsar.
 
 Drives a Sendspin *client* (the speaker, e.g. sendspin-cpp inside `sendspin_probe`) the way
 Music Assistant does: the server dials the client's WebSocket endpoint

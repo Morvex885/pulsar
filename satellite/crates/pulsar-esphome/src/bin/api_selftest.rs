@@ -1,5 +1,5 @@
 //! Self-test harness for the ESPHome API server: runs it with printing event handlers so a real
-//! client (aioesphomeapi, docs/rust-port/tools/esphome_check.py, Home Assistant) can be pointed
+//! client (aioesphomeapi, tools/esphome_check.py, Home Assistant) can be pointed
 //! at it. No mDNS: HA does not discover it.
 //!
 //! Usage: api_selftest [port=16053] [name=pulsar-selftest] [run_seconds=120] [key_file]

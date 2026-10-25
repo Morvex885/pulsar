@@ -1,11 +1,11 @@
-//! Sendspin player without the daemon, for docs/rust-port/tools/sendspin_server.py (run with the
+//! Sendspin player without the daemon, for tools/sendspin_server.py (run with the
 //! station's service stopped).
 //! usage: sendspin_probe [port=18928] [name=pulsar-test] [seconds=120] [state_dir=/tmp/pulsar-test/sendspin]
 //!
 //! Starts the service with player volume 0.2 and prints its events (stdout; the service logs to
 //! stderr). 3 s after a server connects it sends the transport command NEXT once. Server volume /
 //! mute are only printed: the device's "Master Playback Volume" is capped at raw 82 (0.2 on the
-//! Mixer scale, STATIONS.md) for the run and restored afterwards.
+//! Mixer scale, docs/stations.md) for the run and restored afterwards.
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 

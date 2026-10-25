@@ -36,7 +36,7 @@ The LED ring and clock states (LISTENING, THINKING, SPEAKING, TIMER_RING, the ti
 the station meanwhile (sysfs); the --*-s pauses leave time for that.
 
 Exit status 1 when an expected echo or the voice stop did not come.
-Never point it at a station Home Assistant is using (AGENTS.md, STATIONS.md).
+Never point it at a station Home Assistant is using (AGENTS.md, docs/stations.md).
 """
 
 import argparse

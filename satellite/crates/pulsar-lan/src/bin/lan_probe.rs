@@ -1,5 +1,5 @@
 //! Probe of the LAN services next to a running daemon: use alternative arbitration ports and the
-//! `_pulsartest._tcp` service type only (docs/rust-port/STATIONS.md).
+//! `_pulsartest._tcp` service type only (docs/stations.md).
 //!
 //!   lan_probe mdns <host> <service> <port> <seconds> [txt...]
 //!       responder for <host>.local with one service; prints every question it answered

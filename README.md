@@ -536,7 +536,8 @@ satellite/
 installer/                установщик pulsar-install (Go): поиск колонок, adb, установка, миграция
 radio/                    прошивки координатора и роутера для Zigbee-модуля Миди (Telink Zigbee SDK)
 ssh/                      сборка и запуск dropbear
-docs/rust-port/           история переноса демона с C++ на Rust
+docs/                     архитектура демона и протокол тестов на колонках (для разработчиков)
+tools/                    station.sh и тестовые клиенты ESPHome, Sendspin и deCONZ (Python)
 ```
 
 ## Лицензия

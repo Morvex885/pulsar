@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Read-only deCONZ client for pulsar's coordinator (STATIONS.md, "Радио Zigbee").
+"""Read-only deCONZ client for pulsar's coordinator (docs/stations.md, "Радио Zigbee").
 
 Raw SLIP over TCP, only these commands: 0x0D version, 0x07 device state, 0x0A read parameter
 (MAC address, PAN ID, extended PAN ID, current channel, NWK update id, protocol version). It never
 writes a parameter or changes the network state. Output: one "name=value" line each, stable for
-diff between the C++ and the Rust daemon.
+diff between two builds (e.g. a test instance and zigbee_probe).
 
 Connecting replaces the server's current deCONZ host (Zigbee2MQTT / ZHA get disconnected): use it
 only against the test instance (16638) or a zigbee_probe port with the service stopped, never

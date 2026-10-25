@@ -316,7 +316,7 @@ pub(crate) fn set_ssl_cert_file() {
         return;
     }
     // SAFETY: std's environment lock covers Rust readers. C code reading the environment
-    // (getenv) on another thread at this moment would race; the daemon (WP-12) calls
+    // (getenv) on another thread at this moment would race; the daemon calls
     // pulsar_media::spawn() before it starts any other service thread, so none exists yet.
     unsafe {
         std::env::set_var(

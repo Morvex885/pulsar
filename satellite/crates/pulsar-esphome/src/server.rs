@@ -1,6 +1,7 @@
 //! The API server actor: TCP transport (plaintext or Noise, chosen by the client's first
 //! byte), connection limits and keepalive, the voice pipeline owner among several clients, the
-//! log stream, the encryption key. WP-02 adds the entity messages to `handle`.
+//! log stream, the encryption key; entity messages are in `server/entities.rs` and
+//! `server/commands.rs`.
 
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
