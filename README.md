@@ -383,8 +383,16 @@ adb shell 'kill $(cat /run/dropbear.pid); /data/dropbear/start.sh'
 
 Если файл есть, `start.sh` сам ограничивает права на `/data/dropbear` (dropbear отвергает ключи,
 если каталог или его родители доступны на запись группе или всем) и запускает dropbear с `-D`.
-Пароль при этом остаётся пустым и разрешённым; чтобы пускать только по ключу, замените `-B` на
-`-s` в `ssh/start.sh`.
+Пустой пароль при этом остаётся разрешённым. Чтобы пускать только по ключу, создайте рядом файл
+`keys_only` (без ключа в `authorized_keys` он игнорируется, так что запереться нельзя) и
+перезапустите dropbear:
+
+```sh
+adb shell 'touch /data/dropbear/keys_only; kill $(pidof dropbear); /data/dropbear/start.sh'
+```
+
+Оба файла установщик не трогает, обновление их сохраняет. Вернуть вход без ключа:
+`adb shell rm /data/dropbear/keys_only` и тот же перезапуск.
 
 ## Windows и macOS
 
