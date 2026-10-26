@@ -1,6 +1,7 @@
 //! Music features from the speaker reference channels of the capture (what the station itself
-//! plays, after the softvol): 8 bands, loudness, beats. One VQE chunk (512 samples at 16 kHz
-//! after decimation) per call; runs on the front-end's processing thread.
+//! plays, after the softvol): 8 bands, loudness, beats. One VQE chunk (256 or 512 samples at
+//! 16 kHz after decimation) per call; accumulates 512 samples for each FFT on the front-end's
+//! processing thread.
 //!
 //! Rounding follows the C++ daemon as built for the stations: zig c++ (clang,
 //! -ffp-contract=on) fuses `a ± b * c` within one expression into a fused multiply-add on aarch64
@@ -78,6 +79,8 @@ impl C32 {
 
 pub struct SpectrumAnalyzer {
     decim: usize,
+    chunk_samples: usize,
+    buffered: usize,
     window: [f32; N],
     twiddle: [C32; N / 2],
     /// Band b = bins lo[b] ..= hi[b].
@@ -95,6 +98,8 @@ impl SpectrumAnalyzer {
     pub fn new(rate: u32, chunk_frames: usize) -> Self {
         let mut a = SpectrumAnalyzer {
             decim: 0,
+            chunk_samples: 0,
+            buffered: 0,
             window: [0.0; N],
             twiddle: [C32::default(); N / 2],
             lo: [0; BANDS],
@@ -109,10 +114,12 @@ impl SpectrumAnalyzer {
             return a;
         }
         let decim = (rate / 16000) as usize;
-        if chunk_frames / decim != N || !chunk_frames.is_multiple_of(decim) {
+        let chunk_samples = chunk_frames / decim;
+        if (chunk_samples != N && chunk_samples != N / 2) || !chunk_frames.is_multiple_of(decim) {
             return a;
         }
         a.decim = decim;
+        a.chunk_samples = chunk_samples;
         for (i, w) in a.window.iter_mut().enumerate() {
             *w = (-0.5f32).mul_add((2.0 * PI * i as f32 / N as f32).cos(), 0.5);
         }
@@ -133,33 +140,34 @@ impl SpectrumAnalyzer {
         a
     }
 
-    /// False when the chunk is not 512 samples at 16 kHz (rate a multiple of 16 kHz).
+    /// False when the chunk is not 256 or 512 samples at 16 kHz (rate a multiple of 16 kHz).
     pub fn ok(&self) -> bool {
         self.decim != 0
     }
 
     pub fn reset(&mut self) {
+        self.buffered = 0;
         self.ref_db = FLOOR_DB;
         self.bass_mean = 0.0;
         self.since_beat = 1000;
     }
 
     /// `spk`: the chunk's frames of `nspk` interleaved channels in [-1, 1]. True when `out` was
-    /// filled.
+    /// filled; 256-sample chunks produce a frame every second call.
     pub fn process(&mut self, spk: &[f32], nspk: usize, out: &mut MusicFrame) -> bool {
         if self.decim == 0 || nspk == 0 {
             return false;
         }
         let step = self.decim * nspk;
-        if spk.len() < N * step {
+        if spk.len() < self.chunk_samples * step {
             return false;
         }
+        let end = self.buffered + self.chunk_samples;
         let norm = 1.0 / step as f32;
-        for ((b, frame), w) in self
-            .buf
+        for ((b, frame), w) in self.buf[self.buffered..end]
             .iter_mut()
             .zip(spk.chunks_exact(step))
-            .zip(&self.window)
+            .zip(&self.window[self.buffered..end])
         {
             let mut s = 0.0f32;
             for &x in frame {
@@ -170,6 +178,12 @@ impl SpectrumAnalyzer {
                 im: 0.0,
             };
         }
+
+        self.buffered = end;
+        if self.buffered < N {
+            return false;
+        }
+        self.buffered = 0;
 
         // In-place iterative radix-2 FFT.
         let mut j = 0usize;
@@ -251,9 +265,10 @@ mod tests {
 
     #[test]
     fn supported_layouts() {
-        // Midi: 96 kHz, chunk 3072; Lite 2: 48 kHz, chunk 1536.
+        // Midi: 96 kHz, chunk 3072; Lite 2: 48 kHz, chunk 1536; Mini 3: 48 kHz, chunk 768.
         assert!(SpectrumAnalyzer::new(96000, 3072).ok());
         assert!(SpectrumAnalyzer::new(48000, 1536).ok());
+        assert!(SpectrumAnalyzer::new(48000, 768).ok());
         assert!(SpectrumAnalyzer::new(16000, 512).ok());
         assert!(!SpectrumAnalyzer::new(44100, 1536).ok());
         assert!(!SpectrumAnalyzer::new(0, 512).ok());
@@ -262,6 +277,55 @@ mod tests {
         let mut a = SpectrumAnalyzer::new(44100, 1536);
         let mut f = MusicFrame::default();
         assert!(!a.process(&[0.0; 1536], 1, &mut f));
+    }
+
+    fn assert_frame_bits_eq(got: &MusicFrame, want: &MusicFrame) {
+        assert_eq!(got.beat, want.beat);
+        assert_eq!(got.loudness.to_bits(), want.loudness.to_bits());
+        assert_eq!(got.bands.map(f32::to_bits), want.bands.map(f32::to_bits));
+    }
+
+    #[test]
+    fn mini3_reference_matches_lite2_at_the_same_32ms_cadence() {
+        // Microphones are not analyzer inputs: Mini 3's 3+1 and Lite 2's 2+1 share this reference.
+        let mut mini3 = SpectrumAnalyzer::new(48000, 768);
+        let mut lite2 = SpectrumAnalyzer::new(48000, 1536);
+        let mut got = MusicFrame::default();
+        let mut want = MusicFrame::default();
+        let mut audible = false;
+        let mut beats = 0;
+        for chunk in 0..64 {
+            let spk: Vec<f32> = (0..1536)
+                .map(|i| {
+                    let n = (chunk * 1536 + i) as f32;
+                    let amp = if chunk % 16 < 2 { 0.5 } else { 0.01 };
+                    amp * (2.0 * PI * 80.0 * n / 48000.0).sin()
+                })
+                .collect();
+            let previous = got;
+            assert!(!mini3.process(&spk[..768], 1, &mut got));
+            assert_frame_bits_eq(&got, &previous);
+            assert!(mini3.process(&spk[768..], 1, &mut got));
+            assert!(lite2.process(&spk, 1, &mut want));
+            assert_frame_bits_eq(&got, &want);
+            audible |= got.loudness > 0.0;
+            beats += usize::from(got.beat);
+        }
+        assert!(audible);
+        assert!(beats > 1);
+    }
+
+    #[test]
+    fn mini3_reset_discards_partial_fft_and_invalid_input_does_not_advance_it() {
+        let mut a = SpectrumAnalyzer::new(48000, 768);
+        let mut f = MusicFrame::default();
+        assert!(!a.process(&[0.5; 768], 1, &mut f));
+        a.reset();
+        assert!(!a.process(&[0.0; 768], 1, &mut f));
+        assert!(!a.process(&[0.0; 767], 1, &mut f));
+        assert!(!a.process(&[0.0; 768], 0, &mut f));
+        assert!(a.process(&[0.0; 768], 1, &mut f));
+        assert_frame_bits_eq(&f, &MusicFrame::default());
     }
 
     #[test]

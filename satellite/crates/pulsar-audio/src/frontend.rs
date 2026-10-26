@@ -24,11 +24,11 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::engine::{Engine, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
 use crate::spectrum::SpectrumAnalyzer;
 
-/// Wake word level window: 1.5 s of 32 ms VQE frames (512 samples @ 16 kHz on both models),
-/// long enough to cover the phrase when the spotter confirms; the loudest frames are the phrase
-/// itself.
+/// Wake word level window: 1.5 s in 32 ms blocks at 16 kHz, independent of VQE chunk size.
+/// Long enough to cover the phrase when the spotter confirms; the loudest blocks are the phrase.
 const LEVEL_CHUNKS: usize = 47;
 const LEVEL_TOP: usize = 8;
+const LEVEL_SAMPLES: usize = 512;
 
 /// ALSA buffer in VQE chunks.
 const BUFFER_CHUNKS: u64 = 8;
@@ -49,9 +49,9 @@ pub enum FrontendEvent {
     Command {
         word: String,
     },
-    /// 16 kHz mono, one VQE chunk (512 samples), while streaming is on.
+    /// 16 kHz mono, one VQE chunk (256 or 512 samples), while streaming is on.
     Audio(Vec<i16>),
-    /// One per VQE chunk (32 ms) while music analysis is on.
+    /// One per 32 ms FFT window while music analysis is on.
     Music(MusicFrame),
 }
 
@@ -514,6 +514,39 @@ fn mean_square(d: &[f32]) -> f32 {
     (sq / d.len() as f64) as f32
 }
 
+// У Мини 3 VQE выдаёт 16 мс: арбитраж должен сохранять окно 47 × 32 мс.
+struct LevelHistory {
+    values: [f32; LEVEL_CHUNKS],
+    pos: usize,
+    pending: [f32; LEVEL_SAMPLES],
+    used: usize,
+}
+
+impl LevelHistory {
+    fn new() -> Self {
+        Self {
+            values: [0.0; LEVEL_CHUNKS],
+            pos: 0,
+            pending: [0.0; LEVEL_SAMPLES],
+            used: 0,
+        }
+    }
+
+    fn push(&mut self, mut samples: &[f32]) {
+        while !samples.is_empty() {
+            let n = samples.len().min(LEVEL_SAMPLES - self.used);
+            self.pending[self.used..self.used + n].copy_from_slice(&samples[..n]);
+            self.used += n;
+            samples = &samples[n..];
+            if self.used == LEVEL_SAMPLES {
+                self.values[self.pos] = mean_square(&self.pending);
+                self.pos = (self.pos + 1) % LEVEL_CHUNKS;
+                self.used = 0;
+            }
+        }
+    }
+}
+
 fn processing(
     model: &'static Model,
     mut eng: Engine,
@@ -528,9 +561,7 @@ fn processing(
     let mut input = vec![0i16; period * nch];
     let mut mics = vec![0f32; period * mic_ch.len()];
     let mut spk = vec![0f32; period * nspk];
-    // Mean square per VQE frame.
-    let mut level_hist = [0f32; LEVEL_CHUNKS];
-    let mut level_pos = 0;
+    let mut level_hist = LevelHistory::new();
     let mut ana = SpectrumAnalyzer::new(model.capture_rate, period);
     if !ana.ok() {
         warn!("music analysis: unsupported capture layout");
@@ -578,8 +609,7 @@ fn processing(
         if let Some(d) = eng.output(VQE_OMNI)
             && !d.is_empty()
         {
-            level_hist[level_pos] = mean_square(d);
-            level_pos = (level_pos + 1) % LEVEL_CHUNKS;
+            level_hist.push(d);
         }
 
         if shared.stream.load(Relaxed)
@@ -592,7 +622,7 @@ fn processing(
         if shared.detect.load(Relaxed) {
             let phrases = eng.feed_wake();
             if !phrases.is_empty() {
-                let level_db = wake_level_db(&level_hist);
+                let level_db = wake_level_db(&level_hist.values);
                 for phrase in phrases {
                     let _ = tx.send(FrontendEvent::Wake { phrase, level_db });
                 }
@@ -637,10 +667,33 @@ mod tests {
     }
 
     #[test]
-    fn deinterleave_midi_and_lite2_layouts() {
+    fn level_window_is_independent_of_vqe_chunk_size() {
+        let mut full = LevelHistory::new();
+        let mut mini3 = LevelHistory::new();
+        let mut old = [0.0; LEVEL_CHUNKS];
+        for block in 0..LEVEL_CHUNKS + 5 {
+            let samples: Vec<f32> = (0..LEVEL_SAMPLES)
+                .map(|i| ((block * 17 + i * 3) % 97) as f32 / 128.0)
+                .collect();
+            let before = mini3.values.map(f32::to_bits);
+            mini3.push(&samples[..256]);
+            assert_eq!(mini3.values.map(f32::to_bits), before);
+            mini3.push(&samples[256..]);
+            full.push(&samples);
+            old[block % LEVEL_CHUNKS] = mean_square(&samples);
+            assert_eq!(full.values.map(f32::to_bits), old.map(f32::to_bits));
+            assert_eq!(mini3.values.map(f32::to_bits), old.map(f32::to_bits));
+            assert_eq!(mini3.pos, full.pos);
+            assert_eq!(wake_level_db(&mini3.values), wake_level_db(&old));
+        }
+    }
+
+    #[test]
+    fn deinterleave_supported_layouts() {
         let midi = model_from_compatible(b"yandex,cucumber\0").unwrap();
         let lite2 = model_from_compatible(b"yandex,plum\0").unwrap();
-        for m in [midi, lite2] {
+        let mini3 = model_from_compatible(b"yandex,bergamot\0").unwrap();
+        for m in [midi, lite2, mini3] {
             let nch = m.capture_channels as usize;
             let frames = 4;
             // Sample = frame * 100 + channel.

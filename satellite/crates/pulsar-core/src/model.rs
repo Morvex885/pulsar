@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
-    /// Devicetree codename: "cucumber", "plum", "station-mini2".
+    /// Devicetree-код модели: cucumber, plum, station-mini2, bergamot.
     pub codename: &'static str,
     /// ESPHome node name prefix; the MAC suffix is appended.
     pub host_prefix: &'static str,
@@ -308,6 +308,64 @@ static MINI2: Model = Model {
     zigbee_boot: "",
 };
 
+const MINI3_VOLUME: &[VolumePoint] = &[
+    VolumePoint { level: 0, raw: 0 },
+    VolumePoint { level: 1, raw: 33 },
+    VolumePoint {
+        level: 20,
+        raw: 255,
+    },
+];
+
+// Мини 3: физические каналы hw:0,1; логический multi выбирает микрофоны 0/1/2 и референс 6.
+static MINI3: Model = Model {
+    codename: "bergamot",
+    host_prefix: "yandex-mini3-",
+    friendly_name: "Яндекс Станция Мини 3",
+    model_name: "Yandex Station Mini 3",
+    capture_pcm: "hw:0,1",
+    capture_rate: 48000,
+    capture_channels: 8,
+    mic_channels: &[0, 1, 2],
+    spk_channels: &[6],
+    vqe_preset: "bergamot",
+    led_prefix: "bergamot",
+    // Драйвер называет шестисветодиодное кольцо logo; отдельного логотипа нет.
+    ring: LedStrip {
+        count: 6,
+        first_index: 0,
+        fb_dev: "/dev/fb0",
+        fb_name: "logo",
+        trigger: "ledfb-logo",
+        sysfs_kind: "logo",
+    },
+    logo: NO_STRIP,
+    clock_dir: "/sys/class/leds/bergamot:white:clock",
+    clock_seg_base: 'A',
+    clock_pos_base: 0,
+    clock_colon: &["DH", "DL"],
+    clock_aux: &["DEGREE"],
+    clock_center: "DM",
+    clock_chip_current: false,
+    // Панель опциональна: наличие сегментов проверяется при старте.
+    has_clock: false,
+    keys_input: "aw933xx",
+    mute_input: "gpio-keys",
+    mute_gpio: 0,
+    error_sound: "ru-RU/playback_error.mp3",
+    wake_sound: "common/spotter_start.mp3",
+    cancel_sound: "common/spotter_cancel.mp3",
+    timer_sound: "common/timer.wav",
+    volume_sound: "common/volume_sound.mp3",
+    playback_pcm: "speakers",
+    volume_map: MINI3_VOLUME,
+    volume_min_step: true,
+    has_lux: true,
+    zigbee_tty: "",
+    zigbee_reset: "",
+    zigbee_boot: "",
+};
+
 /// The model of this device, read once; None (logged) on unsupported hardware.
 pub fn detect_model() -> Option<&'static Model> {
     static MODEL: LazyLock<Option<&'static Model>> = LazyLock::new(|| {
@@ -322,13 +380,14 @@ pub fn detect_model() -> Option<&'static Model> {
     *MODEL
 }
 
-/// The model of the first "yandex,cucumber" / "yandex,plum" / "yandex,station-mini2" entry of a
-/// NUL-separated compatible list, e.g. "yandex,cucumber-dvt2\0yandex,cucumber\0amlogic, a5\0".
+/// Первая поддерживаемая точная запись yandex,<код> в NUL-разделённом compatible.
+/// Вариант платы (например, bergamot-evt1) сам по себе модель не определяет.
 pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
     raw.split(|&b| b == 0).find_map(|entry| match entry {
         b"yandex,cucumber" => Some(&MIDI),
         b"yandex,plum" => Some(&LITE2),
         b"yandex,station-mini2" => Some(&MINI2),
+        b"yandex,bergamot" => Some(&MINI3),
         _ => None,
     })
 }
@@ -371,6 +430,79 @@ mod tests {
         assert_eq!(m.mute_input, "");
         assert_ne!(m.mute_gpio, 0);
         assert!(!m.has_clock && !m.has_lux && !m.volume_min_step);
+    }
+
+    #[test]
+    fn bergamot_is_mini3() {
+        let m = model_from_compatible(b"yandex,bergamot-evt1\0yandex,bergamot\0amlogic, axg\0")
+            .unwrap();
+        assert_eq!(m.codename, "bergamot");
+        assert_eq!(m.host_prefix, "yandex-mini3-");
+        assert_eq!(m.friendly_name, "Яндекс Станция Мини 3");
+        assert_eq!(m.model_name, "Yandex Station Mini 3");
+        assert_eq!(m.capture_pcm, "hw:0,1");
+        assert_eq!(m.capture_rate, 48000);
+        assert_eq!(m.capture_channels, 8);
+        assert_eq!(m.mic_channels, &[0, 1, 2]);
+        assert_eq!(m.spk_channels, &[6]);
+        assert_eq!(m.vqe_preset, "bergamot");
+        assert_eq!(m.led_prefix, "bergamot");
+        assert_eq!(
+            m.ring,
+            LedStrip {
+                count: 6,
+                first_index: 0,
+                fb_dev: "/dev/fb0",
+                fb_name: "logo",
+                trigger: "ledfb-logo",
+                sysfs_kind: "logo",
+            }
+        );
+        assert_eq!(m.logo, NO_STRIP);
+        assert_eq!(m.clock_dir, "/sys/class/leds/bergamot:white:clock");
+        assert_eq!(m.clock_seg_base, 'A');
+        assert_eq!(m.clock_pos_base, 0);
+        assert_eq!(m.clock_colon, &["DH", "DL"]);
+        assert_eq!(m.clock_aux, &["DEGREE"]);
+        assert_eq!(m.clock_center, "DM");
+        assert!(!m.clock_chip_current && !m.has_clock);
+        assert_eq!(m.keys_input, "aw933xx");
+        assert_eq!(m.mute_input, "gpio-keys");
+        assert_eq!(m.mute_gpio, 0);
+        assert_eq!(m.error_sound, "ru-RU/playback_error.mp3");
+        assert_eq!(m.wake_sound, "common/spotter_start.mp3");
+        assert_eq!(m.cancel_sound, "common/spotter_cancel.mp3");
+        assert_eq!(m.timer_sound, "common/timer.wav");
+        assert_eq!(m.volume_sound, "common/volume_sound.mp3");
+        assert_eq!(m.playback_pcm, "speakers");
+        assert_eq!(
+            m.volume_map,
+            &[
+                VolumePoint { level: 0, raw: 0 },
+                VolumePoint { level: 1, raw: 33 },
+                VolumePoint {
+                    level: 20,
+                    raw: 255,
+                },
+            ]
+        );
+        assert!(m.volume_min_step && m.has_lux);
+        assert_eq!(m.zigbee_tty, "");
+        assert_eq!(m.zigbee_reset, "");
+        assert_eq!(m.zigbee_boot, "");
+    }
+
+    #[test]
+    fn bergamot_requires_exact_compatible() {
+        assert_eq!(model_from_compatible(b"yandex,bergamot"), Some(&MINI3));
+        for raw in [
+            b"yandex,bergamot-evt1\0amlogic, axg\0".as_slice(),
+            b"yandex,bergamot-extra\0".as_slice(),
+            b"xyandex,bergamot\0".as_slice(),
+            b"yandex,bergamot-evt1\0amlogic,bergamot\0".as_slice(),
+        ] {
+            assert!(model_from_compatible(raw).is_none(), "{raw:?}");
+        }
     }
 
     #[test]

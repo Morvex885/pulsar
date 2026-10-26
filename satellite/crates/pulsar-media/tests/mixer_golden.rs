@@ -114,6 +114,20 @@ fn stock_curve_landmarks() {
 }
 
 #[test]
+fn mini3_curve_landmarks() {
+    let m = model_from_compatible(b"yandex,bergamot\0").unwrap();
+    // Штатная карта Мини 3: 0 -> 0, 1 -> 33, 20 -> 255; не карта Лайт 2.
+    assert_eq!(mixer::to_raw(m, 0.0), 0);
+    assert_eq!(mixer::to_raw(m, 0.01), 33);
+    assert_eq!(mixer::to_raw(m, 0.05), 33);
+    assert_eq!(mixer::to_raw(m, 0.2), 68);
+    assert_eq!(mixer::to_raw(m, 1.0), 255);
+    assert_eq!(mixer::from_raw(m, 0), 0.0);
+    assert_eq!(mixer::from_raw(m, 33), 0.05);
+    assert_eq!(mixer::from_raw(m, 255), 1.0);
+}
+
+#[test]
 fn mini2_curve_has_no_lowest_step() {
     // Linear in percent, no jump to a lowest step: low HA volumes stay low (the C++ curve made
     // any volume of a two-point map full volume).
