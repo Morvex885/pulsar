@@ -14,6 +14,8 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 		{"plum without its loader is skipped", "plum", []string{"aarch64"}, ""},
 		{"station-mini2 is armhf", "station-mini2", []string{"aarch64", "armhf"}, "armhf"},
 		{"station-mini2 without its loader is skipped", "station-mini2", []string{"aarch64"}, ""},
+		{"bergamot is armhf", "bergamot", []string{"aarch64", "armhf"}, "armhf"},
+		{"bergamot without its loader is skipped", "bergamot", []string{"aarch64"}, ""},
 		{"no compatible loader", "cucumber", nil, ""},
 		{"unsupported model", "unknown", []string{"aarch64", "armhf"}, ""},
 	}
@@ -37,6 +39,10 @@ func TestStationCode(t *testing.T) {
 		{"yandex,plum\namlogic, axg", "plum", true},
 		// Mini 2: the codename contains a hyphen.
 		{"yandex,station-mini2\namlogic, axg", "station-mini2", true},
+		// Mini 3: the board variant comes first, the plain codename wins.
+		{"yandex,bergamot-evt1\nyandex,bergamot\namlogic, axg", "bergamot", true},
+		// A board variant alone is not a supported codename.
+		{"yandex,bergamot-evt1\namlogic, axg", "bergamot-evt1", false},
 		// adb's pty line ends and the old separator (spaces) work too.
 		{"yandex,station-mini2\r\namlogic, axg\r\n", "station-mini2", true},
 		{"yandex,cucumber-dvt2 yandex,cucumber amlogic, a5", "cucumber", true},

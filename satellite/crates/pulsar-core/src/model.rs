@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
-    /// Devicetree codename: "cucumber", "plum", "station-mini2".
+    /// Devicetree codename: "cucumber", "plum", "station-mini2", "bergamot".
     pub codename: &'static str,
     /// ESPHome node name prefix; the MAC suffix is appended.
     pub host_prefix: &'static str,
@@ -241,8 +241,8 @@ static LITE2: Model = Model {
     zigbee_boot: "",
 };
 
-// set_volume.sh on the Mini 2 is `amixer set 'Master' <percent>%`: raw = percent of 255, no dB
-// offset and no lowest step.
+// set_volume.sh on the Mini 2 and Mini 3 is `amixer set 'Master' <percent>%`: raw = percent of 255,
+// no dB offset and no lowest step.
 const MINI2_VOLUME: &[VolumePoint] = &[
     VolumePoint { level: 0, raw: 0 },
     VolumePoint {
@@ -308,6 +308,66 @@ static MINI2: Model = Model {
     zigbee_boot: "",
 };
 
+/// Station Mini 3 (`yandex,bergamot`, board variants such as `bergamot-evt1`): Amlogic AXG, aarch64
+/// kernel with a 32-bit armhf userland, firmware 3.21 (glibc 2.30, 500 MB RAM). Its Yandex
+/// libraries are the older split pair (`libyandex_vqe.so` + `libyandex_spotter.so`, see
+/// `pulsar_audio::engine::Abi`) and the preset is "bergamot": 3 PDM mics + the amplifier's TDM
+/// feedback as the speaker reference, the 4-channel "default" multi device of /etc/asound.conf
+/// (hw:0,1 channels 0 / 1 / 2 / 6) at 48 kHz. Playback goes to "default" (dmix over hw:0,0, softvol
+/// "Master"). The 6 RGB LEDs are named "logo0..5" and driven by the 6x1 BGR framebuffer /dev/fb0
+/// "logo" (trigger ledfb-logo, as the Midi's logo); there is no separate ring. The clock LEDs are
+/// named like the Lite 2's ("bergamot:white:clock<A..G><0..3>", colon DH + DL, DM centre dot,
+/// per-LED brightness). Touch keys "aw933xx" (same codes), mute switch `SW_MUTE_DEVICE` on
+/// "gpio-keys", light sensor `ltr308als01`, earcons straight under sounds/ (MP3 decodes: the
+/// GStreamer has libav).
+static MINI3: Model = Model {
+    codename: "bergamot",
+    host_prefix: "yandex-mini3-",
+    friendly_name: "Яндекс Станция Мини 3",
+    model_name: "Yandex Station Mini 3",
+    capture_pcm: "default",
+    capture_rate: 48000,
+    capture_channels: 4,
+    mic_channels: &[0, 1, 2],
+    spk_channels: &[3],
+    vqe_preset: "bergamot",
+    led_prefix: "bergamot",
+    ring: LedStrip {
+        count: 6,
+        first_index: 0,
+        fb_dev: "/dev/fb0",
+        fb_name: "logo",
+        trigger: "ledfb-logo",
+        sysfs_kind: "logo",
+    },
+    logo: NO_STRIP,
+    clock_dir: "/sys/class/leds/bergamot:white:clock",
+    clock_seg_base: 'A',
+    clock_pos_base: 0,
+    clock_colon: &["DH", "DL"],
+    clock_aux: &["H0", "H1", "H2", "H3", "DEGREE"],
+    clock_center: "DM",
+    clock_chip_current: false,
+    // The segments are registered in sysfs, but the panel is not confirmed by eye: the entities
+    // exist when `panel_present` finds a segment, as on the Mini 2.
+    has_clock: false,
+    keys_input: "aw933xx",
+    mute_input: "gpio-keys",
+    mute_gpio: 0,
+    error_sound: "ru-RU/vins_error.wav",
+    wake_sound: "spotter_start.mp3",
+    cancel_sound: "spotter_cancel.mp3",
+    timer_sound: "timer.wav",
+    volume_sound: "volume_sound.mp3",
+    playback_pcm: "default",
+    volume_map: MINI2_VOLUME,
+    volume_min_step: false,
+    has_lux: true,
+    zigbee_tty: "",
+    zigbee_reset: "",
+    zigbee_boot: "",
+};
+
 /// The model of this device, read once; None (logged) on unsupported hardware.
 pub fn detect_model() -> Option<&'static Model> {
     static MODEL: LazyLock<Option<&'static Model>> = LazyLock::new(|| {
@@ -322,13 +382,15 @@ pub fn detect_model() -> Option<&'static Model> {
     *MODEL
 }
 
-/// The model of the first "yandex,cucumber" / "yandex,plum" / "yandex,station-mini2" entry of a
-/// NUL-separated compatible list, e.g. "yandex,cucumber-dvt2\0yandex,cucumber\0amlogic, a5\0".
+/// The model of the first "yandex,cucumber" / "yandex,plum" / "yandex,station-mini2" /
+/// "yandex,bergamot" entry of a NUL-separated compatible list, e.g.
+/// "yandex,cucumber-dvt2\0yandex,cucumber\0amlogic, a5\0".
 pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
     raw.split(|&b| b == 0).find_map(|entry| match entry {
         b"yandex,cucumber" => Some(&MIDI),
         b"yandex,plum" => Some(&LITE2),
         b"yandex,station-mini2" => Some(&MINI2),
+        b"yandex,bergamot" => Some(&MINI3),
         _ => None,
     })
 }
@@ -371,6 +433,26 @@ mod tests {
         assert_eq!(m.mute_input, "");
         assert_ne!(m.mute_gpio, 0);
         assert!(!m.has_clock && !m.has_lux && !m.volume_min_step);
+    }
+
+    #[test]
+    fn bergamot_is_mini3() {
+        // The board variant comes first in the list; the plain codename after it wins.
+        let m = model_from_compatible(b"yandex,bergamot-evt1\0yandex,bergamot\0amlogic, axg\0")
+            .unwrap();
+        assert_eq!(m.codename, "bergamot");
+        assert_eq!(m.vqe_preset, "bergamot");
+        assert_eq!((m.mic_channels.len(), m.spk_channels.len()), (3, 1));
+        // Every capture channel the VQE needs is inside the capture frame.
+        let max = m.mic_channels.iter().chain(m.spk_channels).max().unwrap();
+        assert!(*max < m.capture_channels);
+        assert_eq!(
+            (m.ring.count, m.ring.sysfs_kind, m.logo.count),
+            (6, "logo", 0)
+        );
+        assert_eq!(m.mute_input, "gpio-keys");
+        assert_eq!(m.mute_gpio, 0);
+        assert!(m.has_lux && !m.volume_min_step && m.zigbee_tty.is_empty());
     }
 
     #[test]

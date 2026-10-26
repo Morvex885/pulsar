@@ -1,5 +1,5 @@
 #!/bin/sh
-# Starts dropbear SSH on port 22 (root, blank password allowed: -B).
+# Starts dropbear SSH on port 22 (root, blank password allowed: -B; keys: see authorized_keys below).
 # Installed to /data/dropbear; started at boot by /etc/init.d/S99zpulsar (written by pulsar-install).
 # Independent of adbd: never touches adb.
 D=/data/dropbear
@@ -11,5 +11,10 @@ for t in ed25519 ecdsa rsa; do
   [ -s "$D/host_$t" ] || "$D/dropbearkey" -t $t -f "$D/host_$t" >/dev/null 2>&1
 done
 pidof dropbear >/dev/null 2>&1 && exit 0
-exec "$D/dropbear" -B -p 22 -P /run/dropbear.pid \
+# Public keys: with $D/authorized_keys (0600, root) dropbear reads its keys from there instead of
+# /root/.ssh, which is on the read-only rootfs of the Lite 2, Mini 2 and Mini 3.
+AK=
+[ -s "$D/authorized_keys" ] && AK="-D $D"
+# shellcheck disable=SC2086  # AK is empty or two words
+exec "$D/dropbear" -B -p 22 -P /run/dropbear.pid $AK \
   -r "$D/host_ed25519" -r "$D/host_ecdsa" -r "$D/host_rsa"

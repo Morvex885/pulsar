@@ -1,7 +1,7 @@
 //! Microphone front-end of the daemon: ALSA capture -> Yandex VQE -> wake word and command
 //! spotters -> 16 kHz stream, and music features of the speaker reference. The Yandex engines
-//! come from the firmware's libyandex_evil.so (C API, loaded with dlopen; never copied into the
-//! repository).
+//! come from the firmware's libyandex_evil.so (Mini 3: libyandex_vqe.so + libyandex_spotter.so;
+//! C API, loaded with dlopen; never copied into the repository).
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]

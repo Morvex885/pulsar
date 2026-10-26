@@ -24,11 +24,22 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::engine::{Engine, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
 use crate::spectrum::SpectrumAnalyzer;
 
-/// Wake word level window: 1.5 s of 32 ms VQE frames (512 samples @ 16 kHz on both models),
-/// long enough to cover the phrase when the spotter confirms; the loudest frames are the phrase
-/// itself.
+/// Wake word level window: 1.5 s of 32 ms VQE frames (512 samples @ 16 kHz on the Midi, Lite 2
+/// and Mini 2), long enough to cover the phrase when the spotter confirms; the loudest frames are
+/// the phrase itself. [`level_window`] scales both counts to other frame lengths.
 const LEVEL_CHUNKS: usize = 47;
 const LEVEL_TOP: usize = 8;
+/// VQE output samples per chunk the two counts above are for.
+const LEVEL_FRAME: usize = 512;
+
+/// (frames in the level window, loudest frames counted) for VQE chunks of `frame` output samples
+/// (the Mini 3's are 256 = 16 ms): the same 1.5 s and 256 ms as with 32 ms frames, since stations
+/// compare the levels they report.
+fn level_window(frame: usize) -> (usize, usize) {
+    let scaled = |n: usize| (n * LEVEL_FRAME / frame.max(1)).max(1);
+    let n = scaled(LEVEL_CHUNKS);
+    (n, scaled(LEVEL_TOP).min(n))
+}
 
 /// ALSA buffer in VQE chunks.
 const BUFFER_CHUNKS: u64 = 8;
@@ -491,17 +502,19 @@ pub(crate) fn deinterleave(
     }
 }
 
-/// Mean of the 8 loudest of the last 47 frames (mean squares), in dBFS clamped to -100..0 and
-/// rounded to 0.1 dB: stations compare levels received as "%.1f" text, so ours must be the same
-/// number the peers see, or ties could resolve differently on each side.
-pub(crate) fn wake_level_db(h: &[f32; LEVEL_CHUNKS]) -> f32 {
-    let mut s = *h;
+/// Mean of the `top` loudest of the last frames `h` (mean squares; 8 of 47 for 32 ms frames), in
+/// dBFS clamped to -100..0 and rounded to 0.1 dB: stations compare levels received as "%.1f"
+/// text, so ours must be the same number the peers see, or ties could resolve differently on each
+/// side.
+pub(crate) fn wake_level_db(h: &[f32], top: usize) -> f32 {
+    let mut s = h.to_vec();
     s.sort_unstable_by(|a, b| b.total_cmp(a));
+    let top = top.clamp(1, s.len().max(1));
     let mut sum = 0.0f32;
-    for &v in &s[..LEVEL_TOP] {
+    for &v in s.iter().take(top) {
         sum += v;
     }
-    let db = (10.0 * (sum / LEVEL_TOP as f32 + 1e-10).log10()).clamp(-100.0, 0.0);
+    let db = (10.0 * (sum / top as f32 + 1e-10).log10()).clamp(-100.0, 0.0);
     (db * 10.0).round() / 10.0
 }
 
@@ -529,7 +542,8 @@ fn processing(
     let mut mics = vec![0f32; period * mic_ch.len()];
     let mut spk = vec![0f32; period * nspk];
     // Mean square per VQE frame.
-    let mut level_hist = [0f32; LEVEL_CHUNKS];
+    let (level_n, level_top) = level_window(eng.frame);
+    let mut level_hist = vec![0f32; level_n];
     let mut level_pos = 0;
     let mut ana = SpectrumAnalyzer::new(model.capture_rate, period);
     if !ana.ok() {
@@ -579,7 +593,7 @@ fn processing(
             && !d.is_empty()
         {
             level_hist[level_pos] = mean_square(d);
-            level_pos = (level_pos + 1) % LEVEL_CHUNKS;
+            level_pos = (level_pos + 1) % level_n;
         }
 
         if shared.stream.load(Relaxed)
@@ -592,7 +606,7 @@ fn processing(
         if shared.detect.load(Relaxed) {
             let phrases = eng.feed_wake();
             if !phrases.is_empty() {
-                let level_db = wake_level_db(&level_hist);
+                let level_db = wake_level_db(&level_hist, level_top);
                 for phrase in phrases {
                     let _ = tx.send(FrontendEvent::Wake { phrase, level_db });
                 }
@@ -614,26 +628,44 @@ mod tests {
 
     #[test]
     fn level_is_the_mean_of_the_8_loudest_rounded_to_a_tenth() {
-        assert_eq!(wake_level_db(&[0.0; LEVEL_CHUNKS]), -100.0);
+        assert_eq!(wake_level_db(&[0.0; LEVEL_CHUNKS], LEVEL_TOP), -100.0);
         // 8 frames at 0.01 (-20 dB) among quiet ones, anywhere in the ring.
         let mut h = [1e-6f32; LEVEL_CHUNKS];
         for i in [0, 5, 13, 20, 30, 40, 45, 46] {
             h[i] = 0.01;
         }
-        assert_eq!(wake_level_db(&h), -20.0);
+        assert_eq!(wake_level_db(&h, LEVEL_TOP), -20.0);
         // Only the top 8 count: a ninth loud frame changes nothing, a louder one does.
         h[1] = 0.01;
-        assert_eq!(wake_level_db(&h), -20.0);
+        assert_eq!(wake_level_db(&h, LEVEL_TOP), -20.0);
         h[2] = 0.09;
         // (0.09 + 7 * 0.01) / 8 = 0.02 -> -16.99 dB
-        assert_eq!(wake_level_db(&h), -17.0);
+        assert_eq!(wake_level_db(&h, LEVEL_TOP), -17.0);
         // Rounded half away from zero to 0.1 dB: -32.46 -> -32.5, -32.44 -> -32.4.
         let at = |db: f64| [10f64.powf(db / 10.0) as f32; LEVEL_CHUNKS];
-        assert_eq!(wake_level_db(&at(-32.46)), -32.5);
-        assert_eq!(wake_level_db(&at(-32.44)), -32.4);
+        assert_eq!(wake_level_db(&at(-32.46), LEVEL_TOP), -32.5);
+        assert_eq!(wake_level_db(&at(-32.44), LEVEL_TOP), -32.4);
         // Clamped to -100..0.
-        assert_eq!(wake_level_db(&at(3.0)), 0.0);
-        assert_eq!(wake_level_db(&at(-120.0)), -100.0);
+        assert_eq!(wake_level_db(&at(3.0), LEVEL_TOP), 0.0);
+        assert_eq!(wake_level_db(&at(-120.0), LEVEL_TOP), -100.0);
+    }
+
+    #[test]
+    fn level_window_covers_the_same_time_for_any_frame_length() {
+        // 32 ms frames (512 samples): the original 47 / 8.
+        assert_eq!(level_window(512), (LEVEL_CHUNKS, LEVEL_TOP));
+        // 16 ms frames (Mini 3): 94 / 16 = the same 1.5 s / 256 ms.
+        assert_eq!(level_window(256), (94, 16));
+        // Degenerate frames never give an empty window.
+        assert_eq!(level_window(0).0, LEVEL_CHUNKS * LEVEL_FRAME);
+        assert_eq!(level_window(100_000), (1, 1));
+        // The same sound in twice the frames measures the same level.
+        let (n, top) = level_window(256);
+        let mut h = vec![1e-6f32; n];
+        for i in (0..top).map(|i| i * 3) {
+            h[i] = 0.01;
+        }
+        assert_eq!(wake_level_db(&h, top), -20.0);
     }
 
     #[test]

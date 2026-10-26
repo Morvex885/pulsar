@@ -1,5 +1,6 @@
 //! Yandex VQE (echo cancellation, beamforming, noise reduction) and phrase spotters from the
-//! firmware's libyandex_evil.so. The safe wrappers ([`Lib`], [`Vqe`], [`SpotterConf`],
+//! firmware's libyandex_evil.so (or, on the Mini 3, libyandex_vqe.so + libyandex_spotter.so: see
+//! [`Abi`]). The safe wrappers ([`Lib`], [`Vqe`], [`SpotterConf`],
 //! [`Spotter`]) and [`spotter_layout`] are public for ww_offline; `Engine` is the daemon's use
 //! of them.
 
@@ -11,7 +12,7 @@ use std::path::Path;
 
 use log::{error, info, warn};
 
-pub use ffi::{Lib, LoadError, Spotter, SpotterConf, Vqe, VqeStep, preload_deps};
+pub use ffi::{Abi, Lib, LoadError, Spotter, SpotterConf, Vqe, VqeStep, preload_deps};
 
 pub const VQE_MODELS: &str = "/system/vendor/quasar/vqe_models";
 
@@ -234,7 +235,7 @@ pub(crate) struct Engine {
     /// Capture frames per VQE chunk.
     pub chunk: usize,
     /// VQE output samples per chunk.
-    frame: usize,
+    pub frame: usize,
 }
 
 impl Engine {
@@ -251,14 +252,15 @@ impl Engine {
         let lib = match Lib::load() {
             Ok(lib) => lib,
             Err(LoadError::Open(e)) => {
-                error!("dlopen libyandex_evil: {e}");
+                error!("dlopen Yandex VQE / spotter libraries: {e}");
                 return None;
             }
             Err(LoadError::Missing(name)) => {
-                error!("libyandex_evil: missing {name}");
+                error!("Yandex VQE / spotter libraries: missing {name}");
                 return None;
             }
         };
+        info!("Yandex libraries: {:?} ABI", lib.abi());
         let preset = model.vqe_preset;
         let (nmic, nspk) = (model.mic_channels.len(), model.spk_channels.len());
         let vqe = match Vqe::new(&lib, preset, Path::new(VQE_MODELS), nmic, nspk) {

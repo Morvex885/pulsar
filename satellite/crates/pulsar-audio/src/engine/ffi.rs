@@ -1,9 +1,18 @@
-//! libyandex_evil.so through dlopen: every symbol is resolved once into [`Lib`]; the wrappers
-//! below are the only callers of those pointers.
+//! The firmware's VQE and spotter libraries through dlopen: every symbol is resolved once into
+//! [`Lib`]; the wrappers below are the only callers of those pointers.
+//!
+//! Two generations of the libraries exist ([`Abi`]); the wrappers hide the difference:
+//! - [`Abi::Evil`] (Midi, Lite 2, Mini 2): one libyandex_evil.so (+ libtflite.so);
+//! - [`Abi::Split`] (Mini 3, firmware 3.21): libyandex_vqe.so + libyandex_spotter.so, an older API.
+//!   `YandexVqeC_Create` has no models directory argument (the models are built in), most spotter
+//!   calls have no error argument at all (an exception inside the library ends the process with
+//!   `quick_exit(1)`), and `spotter_conf_read` / `spotter_create_multichannel` report a failure
+//!   (null result) through a `const char*` message written to their error cell instead of a
+//!   `spotter_error*`.
 //!
 //! Signatures recovered by reverse engineering maind, verified on the device:
 //! - VQE functions return a `YandexVqeC_Error*` (null on success);
-//! - spotter functions take a trailing `spotter_error**`, set on failure;
+//! - spotter functions ([`Abi::Evil`]) take a trailing `spotter_error**`, set on failure;
 //! - VQE I/O is float in [-1, 1], frame-interleaved; Process consumes GetInputChunkSize() frames
 //!   (Midi: 3072 @ 96 kHz, Lite 2: 1536 @ 48 kHz) and yields GetProcessingFrame() samples
 //!   (512 @ 16 kHz) per output channel; output channel types follow
@@ -28,8 +37,74 @@ const MAX_CHANNEL_TYPE: i32 = 16;
 const ICONV: &str = "/system/vendor/quasar/libs/libiconv.so";
 const TFLITE: &str = "/system/vendor/quasar/libs/libtflite.so";
 const EVIL: &str = "/system/vendor/quasar/libs/libyandex_evil.so";
+const SPLIT_VQE: &str = "/system/vendor/quasar/libs/libyandex_vqe.so";
+const SPLIT_SPOTTER: &str = "/system/vendor/quasar/libs/libyandex_spotter.so";
 
 type P = *mut c_void;
+
+/// Which generation of the firmware's libraries the station has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Abi {
+    /// libyandex_evil.so: VQE and spotters in one library.
+    Evil,
+    /// libyandex_vqe.so + libyandex_spotter.so.
+    Split,
+}
+
+/// The generation on this station: libyandex_evil.so when it exists, the split pair when only
+/// that is there. Neither: [`Abi::Evil`], so the load error names the usual library.
+fn detect_abi() -> Abi {
+    if !Path::new(EVIL).exists() && Path::new(SPLIT_VQE).exists() {
+        Abi::Split
+    } else {
+        Abi::Evil
+    }
+}
+
+/// `YandexVqeC_Create`: the models directory argument exists only in [`Abi::Evil`].
+#[derive(Clone, Copy)]
+enum VqeCreate {
+    Models(unsafe extern "C" fn(P, *const c_char, usize, *const c_void, *mut P) -> P),
+    Builtin(unsafe extern "C" fn(P, usize, *const c_void, *mut P) -> P),
+}
+
+/// Spotter calls of [`Abi::Evil`]: a trailing `spotter_error**`.
+#[derive(Clone, Copy)]
+struct EvilSpotter {
+    conf_read: unsafe extern "C" fn(*const c_char, *mut P) -> P,
+    conf_free: unsafe extern "C" fn(P, *mut P),
+    conf_rate: unsafe extern "C" fn(P, *mut P) -> c_int,
+    conf_chans: unsafe extern "C" fn(P, c_long, *mut P) -> c_long,
+    create: unsafe extern "C" fn(P, c_int, c_int, *const c_int, bool, *mut P) -> P,
+    destroy: unsafe extern "C" fn(P, *mut P),
+    submit: unsafe extern "C" fn(P, *const c_void, usize, *mut P),
+    next: unsafe extern "C" fn(P, *mut P) -> c_int,
+    phrase: unsafe extern "C" fn(P, *mut P) -> *const c_char,
+    errmsg: unsafe extern "C" fn(P) -> *const c_char,
+    errfree: unsafe extern "C" fn(P),
+}
+
+/// Spotter calls of [`Abi::Split`]: only `conf_read` and `create` have an error cell (a
+/// `const char*` message on failure, null otherwise); the other calls have none. `create`'s two
+/// trailing arguments are zero in maind.
+#[derive(Clone, Copy)]
+struct SplitSpotter {
+    conf_read: unsafe extern "C" fn(*const c_char, *mut P) -> P,
+    conf_free: unsafe extern "C" fn(P),
+    conf_rate: unsafe extern "C" fn(P) -> c_int,
+    conf_chans: unsafe extern "C" fn(P, c_long) -> c_long,
+    create: unsafe extern "C" fn(P, c_int, c_int, *const c_int, *mut P, usize, usize) -> P,
+    destroy: unsafe extern "C" fn(P),
+    submit: unsafe extern "C" fn(P, *const c_void, usize),
+    next: unsafe extern "C" fn(P) -> c_int,
+    phrase: unsafe extern "C" fn(P) -> *const c_char,
+}
+
+#[derive(Clone, Copy)]
+enum Spotters {
+    Evil(EvilSpotter),
+    Split(SplitSpotter),
+}
 
 /// The library's C API as function pointers; the library is never unloaded, so they stay valid
 /// for the life of the process.
@@ -39,23 +114,13 @@ pub struct Lib {
     cfg_free: unsafe extern "C" fn(P),
     cfg_chunk: unsafe extern "C" fn(P) -> c_int,
     cfg_frame: unsafe extern "C" fn(P) -> c_int,
-    vqe_create: unsafe extern "C" fn(P, *const c_char, usize, *const c_void, *mut P) -> P,
+    vqe_create: VqeCreate,
     vqe_free: unsafe extern "C" fn(P),
     vqe_process: unsafe extern "C" fn(P, *const f32, usize, *const f32, usize) -> P,
     vqe_out: unsafe extern "C" fn(P, c_int, usize, *mut *const f32, *mut usize) -> P,
     vqe_errmsg: unsafe extern "C" fn(P) -> *const c_char,
     vqe_errfree: unsafe extern "C" fn(P),
-    sp_conf_read: unsafe extern "C" fn(*const c_char, *mut P) -> P,
-    sp_conf_free: unsafe extern "C" fn(P, *mut P),
-    sp_conf_rate: unsafe extern "C" fn(P, *mut P) -> c_int,
-    sp_conf_chans: unsafe extern "C" fn(P, c_long, *mut P) -> c_long,
-    sp_create: unsafe extern "C" fn(P, c_int, c_int, *const c_int, bool, *mut P) -> P,
-    sp_destroy: unsafe extern "C" fn(P, *mut P),
-    sp_submit: unsafe extern "C" fn(P, *const c_void, usize, *mut P),
-    sp_next: unsafe extern "C" fn(P, *mut P) -> c_int,
-    sp_phrase: unsafe extern "C" fn(P, *mut P) -> *const c_char,
-    sp_errmsg: unsafe extern "C" fn(P) -> *const c_char,
-    sp_errfree: unsafe extern "C" fn(P),
+    sp: Spotters,
     // Only ww_offline prints event names; the daemon does not need the symbol.
     event_name: Option<unsafe extern "C" fn(c_int) -> *const c_char>,
 }
@@ -111,9 +176,12 @@ fn open_global(path: &str) -> Result<(), String> {
 /// no LD_LIBRARY_PATH is needed. The C++ daemon found libiconv.so already loaded by GStreamer's
 /// GLib (the player started before the microphone); the Midi's library does not need it and
 /// its absence is not an error. Done once per process, like [`Lib::load`]. Err = dlerror text for
-/// libtflite.so.
+/// libtflite.so. The split libraries of [`Abi::Split`] need neither: nothing is loaded.
 pub fn preload_deps() -> Result<(), String> {
     static DEPS: LazyLock<Result<(), String>> = LazyLock::new(|| {
+        if detect_abi() == Abi::Split {
+            return Ok(());
+        }
         let _ = open_global(ICONV);
         open_global(TFLITE)
     });
@@ -121,28 +189,53 @@ pub fn preload_deps() -> Result<(), String> {
 }
 
 impl Lib {
-    /// dlopen("libyandex_evil.so", RTLD_NOW | RTLD_GLOBAL) and every symbol the daemon uses, once
-    /// per process (later calls return the same outcome); the library stays loaded for the life
-    /// of the process, as in the C++ daemon.
+    /// dlopen of the firmware's libraries (RTLD_NOW | RTLD_GLOBAL) and every symbol the daemon
+    /// uses, once per process (later calls return the same outcome); the libraries stay loaded for
+    /// the life of the process, as in the C++ daemon.
     pub fn load() -> Result<Lib, LoadError> {
         static LIB: LazyLock<Result<Lib, LoadError>> = LazyLock::new(Lib::open);
         LIB.clone()
     }
 
+    /// The generation of the libraries this Lib was loaded from.
+    pub fn abi(&self) -> Abi {
+        match self.sp {
+            Spotters::Evil(_) => Abi::Evil,
+            Spotters::Split(_) => Abi::Split,
+        }
+    }
+
     fn open() -> Result<Lib, LoadError> {
-        // SAFETY: the library's initialisers have no preconditions; it is never unloaded.
-        let lib = unsafe { Library::open(Some(EVIL), RTLD_NOW | RTLD_GLOBAL) }
-            .map_err(|e| LoadError::Open(dl_error(e)))?;
-        // SAFETY: `resolve` reads symbols of the library just opened.
-        let resolved = unsafe { Self::resolve(&lib) };
-        // Never unloaded, also after a missing symbol (as the C++ daemon).
-        let _handle = lib.into_raw();
-        resolved
+        match detect_abi() {
+            Abi::Evil => {
+                // SAFETY: the library's initialisers have no preconditions; it is never unloaded.
+                let lib = unsafe { Library::open(Some(EVIL), RTLD_NOW | RTLD_GLOBAL) }
+                    .map_err(|e| LoadError::Open(dl_error(e)))?;
+                // SAFETY: `resolve_evil` reads symbols of the library just opened.
+                let resolved = unsafe { Self::resolve_evil(&lib) };
+                // Never unloaded, also after a missing symbol (as the C++ daemon).
+                let _handle = lib.into_raw();
+                resolved
+            }
+            Abi::Split => {
+                // SAFETY: as above, for both libraries.
+                let vqe = unsafe { Library::open(Some(SPLIT_VQE), RTLD_NOW | RTLD_GLOBAL) }
+                    .map_err(|e| LoadError::Open(dl_error(e)))?;
+                // SAFETY: as above.
+                let spotter = unsafe { Library::open(Some(SPLIT_SPOTTER), RTLD_NOW | RTLD_GLOBAL) }
+                    .map_err(|e| LoadError::Open(dl_error(e)))?;
+                // SAFETY: `resolve_split` reads symbols of the libraries just opened.
+                let resolved = unsafe { Self::resolve_split(&vqe, &spotter) };
+                let _vqe = vqe.into_raw();
+                let _spotter = spotter.into_raw();
+                resolved
+            }
+        }
     }
 
     /// # Safety
     /// `lib` must be libyandex_evil.so and stay loaded for the life of the process.
-    unsafe fn resolve(lib: &Library) -> Result<Lib, LoadError> {
+    unsafe fn resolve_evil(lib: &Library) -> Result<Lib, LoadError> {
         // SAFETY: every type below is the prototype recovered from maind (module comment), with
         // size_t = usize, long = c_long, bool = C++ bool and the opaque handles as void*.
         unsafe {
@@ -151,24 +244,60 @@ impl Lib {
                 cfg_free: sym(lib, "YandexVqeC_Config_Free")?,
                 cfg_chunk: sym(lib, "YandexVqeC_Config_GetInputChunkSize")?,
                 cfg_frame: sym(lib, "YandexVqeC_Config_GetProcessingFrame")?,
-                vqe_create: sym(lib, "YandexVqeC_Create")?,
+                vqe_create: VqeCreate::Models(sym(lib, "YandexVqeC_Create")?),
                 vqe_free: sym(lib, "YandexVqeC_Free")?,
                 vqe_process: sym(lib, "YandexVqeC_Process")?,
                 vqe_out: sym(lib, "YandexVqeC_GetOutputChannelData")?,
                 vqe_errmsg: sym(lib, "YandexVqeC_Error_GetMessage")?,
                 vqe_errfree: sym(lib, "YandexVqeC_Error_Free")?,
-                sp_conf_read: sym(lib, "spotter_conf_read")?,
-                sp_conf_free: sym(lib, "spotter_conf_free")?,
-                sp_conf_rate: sym(lib, "spotter_conf_native_sample_rate")?,
-                sp_conf_chans: sym(lib, "spotter_conf_get_required_channel_count")?,
-                sp_create: sym(lib, "spotter_create_multichannel")?,
-                sp_destroy: sym(lib, "spotter_destroy")?,
-                sp_submit: sym(lib, "spotter_submit_raw_data")?,
-                sp_next: sym(lib, "spotter_get_next_event")?,
-                sp_phrase: sym(lib, "spotter_get_current_phrase")?,
-                sp_errmsg: sym(lib, "spotter_error_get_message")?,
-                sp_errfree: sym(lib, "spotter_error_free")?,
+                sp: Spotters::Evil(EvilSpotter {
+                    conf_read: sym(lib, "spotter_conf_read")?,
+                    conf_free: sym(lib, "spotter_conf_free")?,
+                    conf_rate: sym(lib, "spotter_conf_native_sample_rate")?,
+                    conf_chans: sym(lib, "spotter_conf_get_required_channel_count")?,
+                    create: sym(lib, "spotter_create_multichannel")?,
+                    destroy: sym(lib, "spotter_destroy")?,
+                    submit: sym(lib, "spotter_submit_raw_data")?,
+                    next: sym(lib, "spotter_get_next_event")?,
+                    phrase: sym(lib, "spotter_get_current_phrase")?,
+                    errmsg: sym(lib, "spotter_error_get_message")?,
+                    errfree: sym(lib, "spotter_error_free")?,
+                }),
                 event_name: sym(lib, "event_id_to_str").ok(),
+            })
+        }
+    }
+
+    /// # Safety
+    /// `vqe` must be libyandex_vqe.so and `spotter` libyandex_spotter.so; both stay loaded for the
+    /// life of the process.
+    unsafe fn resolve_split(vqe: &Library, spotter: &Library) -> Result<Lib, LoadError> {
+        // SAFETY: as in `resolve_evil`; the prototypes of this generation are in the module
+        // comment (maind's call sites on the Mini 3, firmware 3.21).
+        unsafe {
+            Ok(Lib {
+                cfg_create: sym(vqe, "YandexVqeC_Config_CreateFromPreset")?,
+                cfg_free: sym(vqe, "YandexVqeC_Config_Free")?,
+                cfg_chunk: sym(vqe, "YandexVqeC_Config_GetInputChunkSize")?,
+                cfg_frame: sym(vqe, "YandexVqeC_Config_GetProcessingFrame")?,
+                vqe_create: VqeCreate::Builtin(sym(vqe, "YandexVqeC_Create")?),
+                vqe_free: sym(vqe, "YandexVqeC_Free")?,
+                vqe_process: sym(vqe, "YandexVqeC_Process")?,
+                vqe_out: sym(vqe, "YandexVqeC_GetOutputChannelData")?,
+                vqe_errmsg: sym(vqe, "YandexVqeC_Error_GetMessage")?,
+                vqe_errfree: sym(vqe, "YandexVqeC_Error_Free")?,
+                sp: Spotters::Split(SplitSpotter {
+                    conf_read: sym(spotter, "spotter_conf_read")?,
+                    conf_free: sym(spotter, "spotter_conf_free")?,
+                    conf_rate: sym(spotter, "spotter_conf_native_sample_rate")?,
+                    conf_chans: sym(spotter, "spotter_conf_get_required_channel_count")?,
+                    create: sym(spotter, "spotter_create_multichannel")?,
+                    destroy: sym(spotter, "spotter_destroy")?,
+                    submit: sym(spotter, "spotter_submit_raw_data")?,
+                    next: sym(spotter, "spotter_get_next_event")?,
+                    phrase: sym(spotter, "spotter_get_current_phrase")?,
+                }),
+                event_name: sym(spotter, "event_id_to_str").ok(),
             })
         }
     }
@@ -195,17 +324,173 @@ impl Lib {
         Err(msg)
     }
 
-    /// Message of a spotter error (freed here); None for null.
-    fn sp_error(&self, err: P) -> Option<String> {
+    /// `YandexVqeC_Create(cfg, models, 0, NULL, out)`; [`Abi::Split`] has no `models` argument.
+    ///
+    /// # Safety
+    /// `cfg` is a live config, `models` a NUL-terminated directory, `out` valid for a write.
+    unsafe fn vqe_create(&self, cfg: P, models: *const c_char, out: *mut P) -> P {
+        // SAFETY: forwarded caller guarantee; no extra settings (0, NULL).
+        unsafe {
+            match self.vqe_create {
+                VqeCreate::Models(f) => f(cfg, models, 0, ptr::null(), out),
+                VqeCreate::Builtin(f) => f(cfg, 0, ptr::null(), out),
+            }
+        }
+    }
+
+    /// Message of a spotter error (freed here); None for null. `handle_null`: the call that set
+    /// `err` returned null: in [`Abi::Split`] a message next to a handle is not an error.
+    fn sp_error(&self, err: P, handle_null: bool) -> Option<String> {
         if err.is_null() {
             return None;
         }
-        // SAFETY: `err` is a live spotter_error set by the library; its message is copied before
-        // the error is freed, exactly once.
-        let msg = unsafe { text((self.sp_errmsg)(err)) };
-        // SAFETY: as above.
-        unsafe { (self.sp_errfree)(err) };
-        Some(msg)
+        match self.sp {
+            Spotters::Evil(t) => {
+                // SAFETY: `err` is a live spotter_error set by the library; its message is copied
+                // before the error is freed, exactly once.
+                let msg = unsafe { text((t.errmsg)(err)) };
+                // SAFETY: as above.
+                unsafe { (t.errfree)(err) };
+                Some(msg)
+            }
+            // SAFETY: the library stored a NUL-terminated message in the error cell; it is copied
+            // here and left to the library (ownership is not known: a failure ends the daemon's
+            // start-up anyway).
+            Spotters::Split(_) => handle_null.then(|| unsafe { text(err.cast_const().cast()) }),
+        }
+    }
+
+    /// spotter_conf_read.
+    ///
+    /// # Safety
+    /// `dir` is NUL-terminated; `err` valid for a write.
+    unsafe fn sp_conf_read(&self, dir: *const c_char, err: *mut P) -> P {
+        // SAFETY: forwarded caller guarantee.
+        unsafe {
+            match self.sp {
+                Spotters::Evil(t) => (t.conf_read)(dir, err),
+                Spotters::Split(t) => (t.conf_read)(dir, err),
+            }
+        }
+    }
+
+    /// spotter_conf_free.
+    ///
+    /// # Safety
+    /// `conf` is a live config, freed once; `err` valid for a write.
+    unsafe fn sp_conf_free(&self, conf: P, err: *mut P) {
+        // SAFETY: forwarded caller guarantee.
+        unsafe {
+            match self.sp {
+                Spotters::Evil(t) => (t.conf_free)(conf, err),
+                Spotters::Split(t) => (t.conf_free)(conf),
+            }
+        }
+    }
+
+    /// spotter_conf_native_sample_rate.
+    ///
+    /// # Safety
+    /// `conf` is a live config; `err` valid for a write.
+    unsafe fn sp_conf_rate(&self, conf: P, err: *mut P) -> c_int {
+        // SAFETY: forwarded caller guarantee.
+        unsafe {
+            match self.sp {
+                Spotters::Evil(t) => (t.conf_rate)(conf, err),
+                Spotters::Split(t) => (t.conf_rate)(conf),
+            }
+        }
+    }
+
+    /// spotter_conf_get_required_channel_count.
+    ///
+    /// # Safety
+    /// `conf` is a live config; `err` valid for a write.
+    unsafe fn sp_conf_chans(&self, conf: P, ty: c_long, err: *mut P) -> c_long {
+        // SAFETY: forwarded caller guarantee.
+        unsafe {
+            match self.sp {
+                Spotters::Evil(t) => (t.conf_chans)(conf, ty, err),
+                Spotters::Split(t) => (t.conf_chans)(conf, ty),
+            }
+        }
+    }
+
+    /// spotter_create_multichannel(conf, rate, n, types, ...).
+    ///
+    /// # Safety
+    /// `conf` is a live config, `types` holds `n` ints; `err` valid for a write.
+    unsafe fn sp_create(
+        &self,
+        conf: P,
+        rate: c_int,
+        n: c_int,
+        types: *const c_int,
+        err: *mut P,
+    ) -> P {
+        // SAFETY: forwarded caller guarantee.
+        unsafe {
+            match self.sp {
+                Spotters::Evil(t) => (t.create)(conf, rate, n, types, false, err),
+                Spotters::Split(t) => (t.create)(conf, rate, n, types, err, 0, 0),
+            }
+        }
+    }
+
+    /// spotter_destroy.
+    ///
+    /// # Safety
+    /// `sp` is a live spotter, destroyed once; `err` valid for a write.
+    unsafe fn sp_destroy(&self, sp: P, err: *mut P) {
+        // SAFETY: forwarded caller guarantee.
+        unsafe {
+            match self.sp {
+                Spotters::Evil(t) => (t.destroy)(sp, err),
+                Spotters::Split(t) => (t.destroy)(sp),
+            }
+        }
+    }
+
+    /// spotter_submit_raw_data.
+    ///
+    /// # Safety
+    /// `sp` is a live spotter, `data` holds `bytes` bytes; `err` valid for a write.
+    unsafe fn sp_submit(&self, sp: P, data: *const c_void, bytes: usize, err: *mut P) {
+        // SAFETY: forwarded caller guarantee.
+        unsafe {
+            match self.sp {
+                Spotters::Evil(t) => (t.submit)(sp, data, bytes, err),
+                Spotters::Split(t) => (t.submit)(sp, data, bytes),
+            }
+        }
+    }
+
+    /// spotter_get_next_event.
+    ///
+    /// # Safety
+    /// `sp` is a live spotter; `err` valid for a write.
+    unsafe fn sp_next(&self, sp: P, err: *mut P) -> c_int {
+        // SAFETY: forwarded caller guarantee.
+        unsafe {
+            match self.sp {
+                Spotters::Evil(t) => (t.next)(sp, err),
+                Spotters::Split(t) => (t.next)(sp),
+            }
+        }
+    }
+
+    /// spotter_get_current_phrase.
+    ///
+    /// # Safety
+    /// `sp` is a live spotter; `err` valid for a write.
+    unsafe fn sp_phrase(&self, sp: P, err: *mut P) -> *const c_char {
+        // SAFETY: forwarded caller guarantee.
+        unsafe {
+            match self.sp {
+                Spotters::Evil(t) => (t.phrase)(sp, err),
+                Spotters::Split(t) => (t.phrase)(sp),
+            }
+        }
     }
 }
 
@@ -254,7 +539,8 @@ pub struct Vqe {
 unsafe impl Send for Vqe {}
 
 impl Vqe {
-    /// YandexVqeC_Config_CreateFromPreset(preset) + YandexVqeC_Create(cfg, models, 0, NULL).
+    /// YandexVqeC_Config_CreateFromPreset(preset) + YandexVqeC_Create(cfg, models, 0, NULL); the
+    /// split libraries (Mini 3) have no `models` argument and ignore it.
     /// `nmic` / `nspk`: the preset's channel counts (the model's mic / speaker channels); every
     /// `process` call must bring exactly one chunk of them.
     pub fn new(
@@ -297,9 +583,9 @@ impl Vqe {
         let chunk = usize::try_from(v.chunk).unwrap_or(0);
         v.mic_samples = chunk * nmic;
         v.spk_samples = chunk * nspk;
-        // SAFETY: valid config, NUL-terminated models directory, no extra settings (0, NULL),
+        // SAFETY: valid config, NUL-terminated models directory (unused by the split libraries),
         // out-pointer to a field.
-        let err = unsafe { (lib.vqe_create)(v.cfg, models.as_ptr(), 0, ptr::null(), &mut v.vqe) };
+        let err = unsafe { lib.vqe_create(v.cfg, models.as_ptr(), &mut v.vqe) };
         lib.vqe_result(err).map_err(|e| (VqeStep::Create, e))?;
         if v.vqe.is_null() {
             return Err((VqeStep::Create, "no instance".into()));
@@ -391,8 +677,8 @@ impl SpotterConf {
         let dir = path_cstr(dir).map_err(Some)?;
         let mut err = ptr::null_mut();
         // SAFETY: NUL-terminated directory, out-pointer to a local.
-        let conf = unsafe { (lib.sp_conf_read)(dir.as_ptr(), &mut err) };
-        if let Some(e) = lib.sp_error(err) {
+        let conf = unsafe { lib.sp_conf_read(dir.as_ptr(), &mut err) };
+        if let Some(e) = lib.sp_error(err, conf.is_null()) {
             // A config returned together with an error is not trusted (nor freed: the C++
             // daemon did not touch it either).
             return Err(Some(e));
@@ -411,8 +697,8 @@ impl SpotterConf {
         let ty = ty as c_long;
         let mut err = ptr::null_mut();
         // SAFETY: valid config, out-pointer to a local.
-        let n = unsafe { (self.lib.sp_conf_chans)(self.conf.as_ptr(), ty, &mut err) };
-        match self.lib.sp_error(err) {
+        let n = unsafe { self.lib.sp_conf_chans(self.conf.as_ptr(), ty, &mut err) };
+        match self.lib.sp_error(err, true) {
             Some(e) => Err(e),
             None => Ok(from_long(n)),
         }
@@ -423,8 +709,8 @@ impl SpotterConf {
     pub fn native_rate(&self) -> (i32, Option<String>) {
         let mut err = ptr::null_mut();
         // SAFETY: valid config, out-pointer to a local.
-        let rate = unsafe { (self.lib.sp_conf_rate)(self.conf.as_ptr(), &mut err) };
-        (rate, self.lib.sp_error(err))
+        let rate = unsafe { self.lib.sp_conf_rate(self.conf.as_ptr(), &mut err) };
+        (rate, self.lib.sp_error(err, true))
     }
 }
 
@@ -432,8 +718,8 @@ impl Drop for SpotterConf {
     fn drop(&mut self) {
         let mut err = ptr::null_mut();
         // SAFETY: created by spotter_conf_read, freed once; out-pointer to a local.
-        unsafe { (self.lib.sp_conf_free)(self.conf.as_ptr(), &mut err) };
-        if let Some(e) = self.lib.sp_error(err) {
+        unsafe { self.lib.sp_conf_free(self.conf.as_ptr(), &mut err) };
+        if let Some(e) = self.lib.sp_error(err, true) {
             log::error!("spotter_conf_free: {e}");
         }
     }
@@ -449,8 +735,8 @@ pub struct Spotter {
 unsafe impl Send for Spotter {}
 
 impl Spotter {
-    /// spotter_create_multichannel(conf, rate, types.len(), types, false): the spotter (if the
-    /// library returned one) and the error (if it set one). Both can be present.
+    /// spotter_create_multichannel(conf, rate, types.len(), types, ...): the spotter (if the
+    /// library returned one) and the error (if it set one). Both can be present ([`Abi::Evil`]).
     pub fn create(
         conf: &SpotterConf,
         rate: i32,
@@ -469,12 +755,13 @@ impl Spotter {
         // SAFETY: valid config; `types` holds `n` ints and outlives the call; out-pointer to a
         // local.
         let sp = unsafe {
-            (conf.lib.sp_create)(conf.conf.as_ptr(), rate, n, types.as_ptr(), false, &mut err)
+            conf.lib
+                .sp_create(conf.conf.as_ptr(), rate, n, types.as_ptr(), &mut err)
         };
         let lib = conf.lib;
         (
             NonNull::new(sp).map(|sp| Spotter { lib, sp }),
-            lib.sp_error(err),
+            lib.sp_error(err, sp.is_null()),
         )
     }
 
@@ -484,29 +771,29 @@ impl Spotter {
         // SAFETY: valid spotter; the byte count is that of `pcm`, live for the call; out-pointer
         // to a local.
         unsafe {
-            (self.lib.sp_submit)(
+            self.lib.sp_submit(
                 self.sp.as_ptr(),
                 pcm.as_ptr().cast(),
                 size_of_val(pcm),
                 &mut err,
             )
         };
-        self.lib.sp_error(err).map_or(Ok(()), Err)
+        self.lib.sp_error(err, true).map_or(Ok(()), Err)
     }
 
     /// spotter_get_next_event.
     pub fn next_event(&mut self) -> Result<i32, String> {
         let mut err = ptr::null_mut();
         // SAFETY: valid spotter, out-pointer to a local.
-        let ev = unsafe { (self.lib.sp_next)(self.sp.as_ptr(), &mut err) };
-        self.lib.sp_error(err).map_or(Ok(ev), Err)
+        let ev = unsafe { self.lib.sp_next(self.sp.as_ptr(), &mut err) };
+        self.lib.sp_error(err, true).map_or(Ok(ev), Err)
     }
 
     /// spotter_get_current_phrase: the phrase (None for null) and the error, if any.
     pub fn phrase(&mut self) -> (Option<String>, Option<String>) {
         let mut err = ptr::null_mut();
         // SAFETY: valid spotter, out-pointer to a local.
-        let p = unsafe { (self.lib.sp_phrase)(self.sp.as_ptr(), &mut err) };
+        let p = unsafe { self.lib.sp_phrase(self.sp.as_ptr(), &mut err) };
         let phrase = if p.is_null() {
             None
         } else {
@@ -514,7 +801,7 @@ impl Spotter {
             // into it.
             Some(unsafe { text(p) })
         };
-        (phrase, self.lib.sp_error(err))
+        (phrase, self.lib.sp_error(err, true))
     }
 }
 
@@ -522,8 +809,8 @@ impl Drop for Spotter {
     fn drop(&mut self) {
         let mut err = ptr::null_mut();
         // SAFETY: created by spotter_create_multichannel, destroyed once; out-pointer to a local.
-        unsafe { (self.lib.sp_destroy)(self.sp.as_ptr(), &mut err) };
-        if let Some(e) = self.lib.sp_error(err) {
+        unsafe { self.lib.sp_destroy(self.sp.as_ptr(), &mut err) };
+        if let Some(e) = self.lib.sp_error(err, true) {
             log::error!("spotter_destroy: {e}");
         }
     }
