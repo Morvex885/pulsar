@@ -8,8 +8,9 @@ live stations: `docs/stations.md` (Russian) with `tools/station.sh`.
 
 A native Rust daemon replacing the Yandex stack (`maind` / `quasar_launcher2`) on rooted Yandex
 Stations: Midi (`cucumber`: usually aarch64, glibc 2.36, 1 GB RAM; some images run a 32-bit
-armhf userland), Lite 2 (`plum`: 32-bit armhf, glibc 2.30, 237 MB RAM) and Mini 2
-(`station-mini2`: 32-bit armhf userland on an aarch64 kernel, glibc 2.30, 238 MB RAM). It exposes
+armhf userland), Lite 2 (`plum`: 32-bit armhf, glibc 2.30, 237 MB RAM), Mini 2
+(`station-mini2`: 32-bit armhf userland on an aarch64 kernel, glibc 2.30, 238 MB RAM) and Mini 3
+(`bergamot`: same userland, glibc 2.30, 490 MB RAM, older split Yandex libraries). It exposes
 the speaker to Home Assistant over the ESPHome Native API (port 6053; plaintext until a Noise key is
 provisioned, then Noise) and to Music Assistant as a Sendspin player (port 8928); on the Midi
 its Zigbee radio runs pulsar's own firmware (`radio/`): a deCONZ-protocol network coordinator for
@@ -117,7 +118,7 @@ Models are identified by `/proc/device-tree/compatible` (`yandex,<codename>`) bo
 before probing its loaders. The binary is `build/<arch>/pulsar` for the model's first ABI in
 `abis()` whose dynamic loader is on the station (`/lib/ld-linux-aarch64.so.1`,
 `/lib/ld-linux-armhf.so.3`): its usual one, or for the Midi the armhf build on images with only
-that loader (#13). A Lite 2 or Mini 2 without the armhf loader is skipped (no 64-bit userspace
+that loader (#13). A Lite 2, Mini 2 or Mini 3 without the armhf loader is skipped (no 64-bit userspace
 has been seen on them, and the aarch64 binary needs glibc 2.34). Adding a model: hardware study
 first (ALSA capture layout, VQE preset, spotter channels, LEDs, clock, inputs, earcons), then a
 `Model` in `satellite/crates/pulsar-core/src/model.rs` and `modelName()` / `abis()` entries. A
@@ -139,7 +140,7 @@ plaintext (Noise with the all-zeros key is then accepted so HA can provision); c
 closed. `.bad`: binary replaced by the crash-loop rollback. Log: `/tmp/pulsar.log`
 (`ctl.sh log N`; rotated at 1 MB by `supervise.sh`, one `.1` kept). Boot chain: busybox init →
 `rcS` (runs `/etc/init.d/S??*` in order with `start`, waiting for each) → `S97quasar` (Midi) /
-`S99quasar` (Lite 2, Mini 2) → `onboot.sh` (adbd via `activate_adb.sh check`, quasar in
+`S99quasar` (Lite 2, Mini 2, Mini 3) → `onboot.sh` (adbd via `activate_adb.sh check`, quasar in
 background; returns); then `S99zpulsar` (sorts after `S99quasar`; `S99pulsar` would not) →
 `boot.sh` in background (once per boot: `/tmp/pulsar-boot.lock`) → waits for quasar, `q stop` →
 `supervise.sh` restart loop while `enabled` exists. `ctl.sh reload` restarts the supervisor itself
@@ -191,7 +192,8 @@ README, "Обновление из Home Assistant"). What must not break:
 
 ## Yandex libraries (reverse-engineered C API, see `satellite/crates/pulsar-audio/src/engine/`)
 
-From `/system/vendor/quasar/libyandex_evil.so`:
+From `/system/vendor/quasar/libyandex_evil.so` (the Mini 3's firmware has the older split
+libraries instead, see "Split ABI" below):
 
 - VQE: `YandexVqeC_Config_CreateFromPreset(<Model::vqe_preset>, &cfg)`,
   `YandexVqeC_Create(cfg, "/system/vendor/quasar/vqe_models", 0, nullptr, &vqe)`,
@@ -229,6 +231,26 @@ From `/system/vendor/quasar/libyandex_evil.so`:
 - `GetOutputChannelData` always returns no error; an absent output type yields `n == 0`.
 - `YandexVqeC_Config_GetOutputChannelCount` takes `(cfg, type, int *out)`; the other `Config_Get*`
   getters return the value directly.
+
+### Split ABI (Mini 3)
+
+Firmware `0.4.1.39…factory-4` has no `libyandex_evil.so`: `libs/libyandex_vqe.so` and
+`libs/libyandex_spotter.so` hold the same code under the older C API (`engine/ffi.rs`:
+`detect_abi()` picks `Abi::Split` when `libyandex_evil.so` is absent and `libyandex_vqe.so` is
+there; no `tflite` is loaded, the VQE models are inside the library). Recovered from the call sites
+in that firmware's `maind`:
+
+- `YandexVqeC_Config_CreateFromPreset(name, &cfg)` is unchanged; `YandexVqeC_Create(cfg, n,
+  types, &vqe)` has no models directory.
+- Spotter: `spotter_conf_read(path, const char **err)`, `spotter_conf_free(conf)`,
+  `spotter_conf_native_sample_rate(conf)`, `spotter_conf_get_required_channel_count(conf, type)`,
+  `spotter_create_multichannel(conf, rate, n, types, const char **err, 0, 0)`,
+  `spotter_destroy(sp)`, `spotter_submit_raw_data(sp, data, bytes)` (no error out),
+  `spotter_get_next_event(sp)`, `spotter_get_current_phrase(sp)`. A failure is a `const char *`
+  message left in the err cell (read it only when the returned handle is null); an exception
+  inside any call ends in `quick_exit(1)`.
+- Verified with `ww_offline` on the station: all VQE output types the spotters need (9, 2, 6)
+  exist, alisa takes 3 channels, yandex 2, command 1.
 
 ## Zigbee radio (Midi, `satellite/crates/pulsar-zigbee/`)
 
@@ -390,6 +412,21 @@ loading and capture, wake word → HA pipeline → TTS, playback through the fir
 GStreamer on `default`, Sendspin with Music Assistant, the LED ring, touch keys, volume, the GPIO
 mic mute and `pulsar-install` end to end. Not yet verified: the clock, spotter quality, the Rust
 port on the station.
+
+Mini 3 notes (firmware `0.4.1.39.2634333263.20241021.factory-4`): 3 PDM mics + 1 TDM speaker reference
+(preset `bergamot`; capture `default` = `multi` over `hw:0,1`, 4 ch @ 48 kHz, mics 0–2 on ch
+0/1/2, reference on ch 6 of the device = ch 3 of the stream). One VQE chunk is 768 frames (16 ms)
+and yields 256 samples @ 16 kHz, so the 512-sample assumptions (music analysis, the wake-level
+window; `frontend::level_window`) are scaled or off (`music analysis: unsupported capture
+layout`). Playback is `default` (dmix, softvol `Master`; `set_volume.sh` is `amixer set Master
+N%`, linear). Ring: 6 RGB LEDs `bergamot:<color>:logo0..5` on `/dev/fb0` (name `logo`, 6×1, 24 bpp),
+trigger `ledfb-logo`; clock LEDs `bergamot:white:clock<A..G><0..3>` (28 segments found, colon
+`DH`/`DL`, centre `DM`, `H0..3` / `DEGREE` dark), light sensor `ltr308als01`, inputs `gpio-keys`
+(event0: `KEY_MUTE`, `SW_MUTE_DEVICE`) and `aw933xx` (event1: 582 / 115 / 114), earcons directly
+under `sounds/` (`ru-RU/vins_error.wav`, `spotter_*.mp3`, `timer.wav`, `volume_sound.mp3`; this
+GStreamer has libav). No Zigbee. Root has an empty password. Verified on the station: loaders,
+VQE / spotter offline, installer, ESPHome / Sendspin; not verified by ear or eye: wake word, ring
+colours, clock layout, playback, keys.
 
 ## Conventions
 

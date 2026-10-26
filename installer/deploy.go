@@ -170,7 +170,10 @@ func deployFiles(s, bin, arch string, zigbee bool) (changed, supChanged, ok bool
 	}
 
 	if opts.ssh {
-		_ = shTo(os.Stdout, s, "pidof dropbear >/dev/null || /data/dropbear/start.sh </dev/null >/dev/null 2>&1 &")
+		// adb shell ends the session (SIGHUP to the pty's jobs) right after the command, so detach
+		// the way ctl.sh does.
+		_ = shTo(os.Stdout, s, "pidof dropbear >/dev/null || "+
+			"(trap '' HUP; exec setsid /data/dropbear/start.sh </dev/null >/dev/null 2>&1) &")
 	}
 	return changed, supChanged, true
 }

@@ -240,7 +240,7 @@ println!("cargo:rustc-link-lib=c++");
 - `tz::set_tz` вызывается только при изменении значения: `set_var("TZ")` гоняется с `getenv` на
   потоках GLib.
 - `model::detect_model` читает `/proc/device-tree/compatible` (NUL-разделённый список; первый
-  `yandex,cucumber`, `yandex,plum` или `yandex,station-mini2`).
+  `yandex,cucumber`, `yandex,plum`, `yandex,station-mini2` или `yandex,bergamot`).
 
 ### `state.conf` и откат на `.prev`
 
