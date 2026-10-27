@@ -853,6 +853,12 @@ pub fn spawn(model: &'static Model) -> ClockHandle {
 }
 
 impl ClockHandle {
+    /// A no-op handle for models without a clock (the Mini), so callers need no special cases
+    /// and the daemon does not log a missing display at every start.
+    pub fn none() -> Self {
+        Self { tx: None }
+    }
+
     fn send(&self, cmd: Cmd) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(cmd);

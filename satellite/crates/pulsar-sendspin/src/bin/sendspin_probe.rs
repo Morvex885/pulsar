@@ -2,10 +2,11 @@
 //! station's service stopped).
 //! usage: sendspin_probe [port=18928] [name=pulsar-test] [seconds=120] [state_dir=/tmp/pulsar-test/sendspin]
 //!
-//! Starts the service with player volume 0.2 and prints its events (stdout; the service logs to
-//! stderr). 3 s after a server connects it sends the transport command NEXT once. Server volume /
-//! mute are only printed: the device's "Master Playback Volume" is capped at raw 82 (0.2 on the
-//! Mixer scale, docs/stations.md) for the run and restored afterwards.
+//! Starts the service and prints its events (stdout; the service logs to stderr). 3 s after a
+//! server connects it sends the transport command NEXT once. On hardware-volume models the
+//! device's "Master Playback Volume" is capped at raw 82 (0.2 on the Mixer scale,
+//! docs/stations.md) for the run and restored afterwards; the Mini has no such control and uses
+//! the model's dmix sink at software volume 0.06.
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -14,6 +15,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use pulsar_alsa::{Ctl, Pcm, Stream};
+use pulsar_core::model::Model;
 use pulsar_core::{MusicFrame, actors};
 use pulsar_sendspin::{SendspinConfig, SendspinEvent, Transport};
 use tokio::signal::unix::{SignalKind, signal};
@@ -55,9 +57,12 @@ struct VolumeCap {
 }
 
 impl VolumeCap {
-    /// Ok(None): no such control (a host without the station's softvol), nothing to cap. `pcm`:
-    /// the softvol PCM opened to create the control.
-    fn apply(pcm: &str) -> Result<Option<Self>, String> {
+    /// Ok(None): no such control (the Mini's software volume), nothing to cap.
+    fn apply(model: &Model) -> Result<Option<Self>, String> {
+        if model.software_volume {
+            println!("volume: software (0.06)");
+            return Ok(None);
+        }
         let ctl = match Ctl::open("hw:0") {
             Ok(ctl) => ctl,
             Err(e) => {
@@ -67,7 +72,7 @@ impl VolumeCap {
         };
         if !ctl.mixer_exists(MASTER) {
             // Opening the softvol PCM once creates the control.
-            drop(Pcm::open(pcm, Stream::Playback, true));
+            drop(Pcm::open(model.playback_pcm, Stream::Playback, true));
             if !ctl.mixer_exists(MASTER) {
                 println!("volume: no '{MASTER}' on hw:0, not capped");
                 return Ok(None);
@@ -123,13 +128,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // The station's playback PCM; off a station the stock name, as the cap finds no control
-    // (read directly: detect_model would log an error on a host).
-    let pcm = std::fs::read("/proc/device-tree/compatible")
-        .ok()
-        .and_then(|raw| pulsar_core::model::model_from_compatible(&raw))
-        .map_or("speakers", |m| m.playback_pcm);
-    let cap = match VolumeCap::apply(pcm) {
+    let Some(model) = pulsar_core::model::detect_model() else {
+        return ExitCode::FAILURE;
+    };
+    let cap = match VolumeCap::apply(model) {
         Ok(cap) => cap,
         Err(e) => {
             eprintln!("{e}");
@@ -148,7 +150,7 @@ fn main() -> ExitCode {
         }
     };
     let local = tokio::task::LocalSet::new();
-    let result = local.block_on(&rt, run(&args, pcm));
+    let result = local.block_on(&rt, run(&args, model));
     local.block_on(&rt, actors::join_all(Duration::from_secs(3)));
     drop(local);
     rt.shutdown_timeout(Duration::from_secs(1));
@@ -177,7 +179,7 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run(args: &Args, pcm: &'static str) -> Result<Counts, String> {
+async fn run(args: &Args, model: &'static Model) -> Result<Counts, String> {
     if let Some(parent) = args.state_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
@@ -188,10 +190,14 @@ async fn run(args: &Args, pcm: &'static str) -> Result<Counts, String> {
         software_version: "probe".into(),
         mac: String::new(),
         state_dir: args.state_dir.clone(),
-        playback_pcm: pcm,
+        pcm: model.playback_pcm,
+        spk_mute_ctl: model.spk_mute_ctl,
+        amp_enable_paths: model.amp_enable_paths,
+        software_volume: model.software_volume,
         port: args.port,
     };
-    let (handle, mut events) = pulsar_sendspin::spawn(cfg, 0.2, false)?;
+    let volume = if model.software_volume { 0.06 } else { 0.2 };
+    let (handle, mut events) = pulsar_sendspin::spawn(cfg, volume, false)?;
     let mut term = signal(SignalKind::terminate()).map_err(|e| format!("signal: {e}"))?;
     let mut int = signal(SignalKind::interrupt()).map_err(|e| format!("signal: {e}"))?;
     println!(

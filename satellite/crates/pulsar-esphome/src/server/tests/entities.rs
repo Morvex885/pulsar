@@ -37,6 +37,9 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         zigbee_modes: s(&["Coordinator", "Router"]),
         has_clock: true,
         has_lux: true,
+        has_hw_mic_mute: true,
+        has_buttons: true,
+        has_action: true,
         key_path: None,
     };
     (id, cfg)
@@ -671,67 +674,74 @@ async fn states_go_to_subscribers_and_zigbee_entities_need_modes() {
 }
 
 #[tokio::test]
-async fn clock_and_lux_entities_need_the_hardware() {
+async fn mini_has_no_clock_lux_mute_case_or_talk_entities() {
     local()
         .run_until(async {
             let (id, mut cfg) = selftest("now");
             cfg.has_clock = false;
             cfg.has_lux = false;
+            cfg.has_hw_mic_mute = false;
+            cfg.has_action = false;
+            // The Mini's ledconfigs directory is empty; with_none() leaves just "None".
+            cfg.case_colors = ["None"].iter().map(|v| (*v).to_owned()).collect();
+            cfg.zigbee_modes.clear();
             let (h, mut rx, port) = start_with(id, cfg);
             let mut p = Peer::connect(port).await;
             p.hello("HA").await;
             event(&mut rx).await;
-            publish_selftest_states(&h);
-            h.publish_sensor(SensorId::Illuminance, 7.0);
-            let gone = [
-                key::SW_CLOCK,
-                key::SELECT_CLOCK_MUSIC,
-                key::NUMBER_CLOCK_BRI,
-                key::NUMBER_CLOCK_SCROLL,
-                key::TEXT_CLOCK,
-                key::SELECT_CLOCK_FACE,
-                key::ACTION_CLOCK_TEXT,
-                key::ACTION_CLOCK_FACE,
-                key::SENSOR_LUX,
-            ];
             p.send(msg::LIST_ENTITIES_REQ, &Writer::new()).await;
             let mut keys = Vec::new();
+            let mut event_types = Vec::new();
             loop {
                 let (t, m) = p.recv().await.unwrap();
                 if t == msg::LIST_DONE {
                     break;
                 }
-                keys.push(field(&m, 2).unwrap().u32());
+                let key = field(&m, 2).unwrap().u32();
+                keys.push(key);
+                if t == msg::LIST_EVENT {
+                    event_types = fields(&m)
+                        .into_iter()
+                        .filter(|f| f.num == 9)
+                        .map(|f| f.str())
+                        .collect();
+                }
             }
-            assert!(keys.contains(&key::NUMBER_LED_SPEED));
-            for k in gone {
-                assert!(!keys.contains(&k), "entity {k} listed");
+            // 16 entities plus the led_show service; no clock, Lux, hardware MUTE, case colour or
+            // TALK entities.
+            assert_eq!(keys.len(), 17, "keys: {keys:?}");
+            assert!(keys.contains(&key::ACTION_LED_SHOW));
+            for absent in [
+                key::SW_CLOCK,
+                key::NUMBER_CLOCK_BRI,
+                key::NUMBER_CLOCK_SCROLL,
+                key::TEXT_CLOCK,
+                key::SELECT_CLOCK_FACE,
+                key::SELECT_CLOCK_MUSIC,
+                key::ACTION_CLOCK_TEXT,
+                key::ACTION_CLOCK_FACE,
+                key::BS_HW_MIC_MUTE,
+                key::SENSOR_LUX,
+                key::SELECT_CASE_COLOR,
+            ] {
+                assert!(!keys.contains(&absent), "unexpected entity key {absent}");
             }
+            assert_eq!(event_types, ["volume_up", "volume_down"]);
+
+            // The controller may still publish these cache values; the server must drop them.
             p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
-            let states = p.sync().await;
-            assert!(
-                states
-                    .iter()
-                    .any(|(_, m)| state_key(m) == Some(key::NUMBER_LED_SPEED))
-            );
-            for k in gone {
-                assert!(
-                    !states.iter().any(|(_, m)| state_key(m) == Some(k)),
-                    "state {k} sent"
-                );
-            }
-            // Subscribed: only the LED speed of these publishes reaches the client.
-            h.publish_switch(SwitchId::Clock, false);
-            h.publish_number(NumberId::ClockScroll, 300.0);
+            let _ = p.sync().await;
+            h.publish_switch(SwitchId::Clock, true);
+            h.publish_number(NumberId::ClockBrightness, 50.0);
+            h.publish_number(NumberId::ClockScroll, 400.0);
             h.publish_text(TextId::ClockText, "x");
-            h.publish_select(SelectId::ClockFace, "Smiley");
-            h.publish_select(SelectId::ClockMusic, "Levels");
-            h.publish_sensor(SensorId::Illuminance, 3.0);
-            h.publish_number(NumberId::LedSpeed, 2.0);
-            let got = p.sync().await;
-            assert_eq!(got.len(), 1);
-            assert_eq!(got[0].0, msg::NUMBER_STATE);
-            assert_eq!(state_key(&got[0].1), Some(key::NUMBER_LED_SPEED));
+            h.publish_select(SelectId::ClockFace, "None");
+            h.publish_select(SelectId::ClockMusic, "Off");
+            h.publish_select(SelectId::CaseColor, "None");
+            h.publish_binary_sensor(BinarySensorId::HwMicMute, false);
+            h.publish_sensor(SensorId::Illuminance, 12.5);
+            h.fire_event(EventId::Button, "action");
+            assert!(p.sync().await.is_empty());
         })
         .await;
 }

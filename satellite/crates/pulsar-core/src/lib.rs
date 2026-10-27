@@ -6,6 +6,8 @@
 
 pub mod actors;
 mod ambient;
+#[allow(unsafe_code)]
+mod compat;
 pub mod fmt;
 mod logger;
 pub mod model;
@@ -15,6 +17,7 @@ mod sys;
 pub mod sysfs;
 mod timers;
 pub mod tz;
+pub mod volume;
 
 pub use ambient::AmbientDimmer;
 pub use logger::{

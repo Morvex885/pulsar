@@ -1,8 +1,11 @@
 //! SpectrumAnalyzer against the C++ analyzer (tests/golden/spectrum.txt): a sine scenario
 //! (three tones and noise, then a fade-out), silence (with a quiet tone fading through the
 //! silence threshold) and a beat sequence (80 Hz kicks, strong, weak and one too early), on the
-//! Lite 2 layout (48 kHz, chunk 1536, 1 speaker channel) and the Midi one (96 kHz, chunk 3072,
-//! 4 channels). The inputs are integer samples, generated here exactly as by the C++ generator.
+//! Lite 2 layout (48 kHz, chunk 1536, 1 speaker channel), the Midi one (96 kHz, chunk 3072,
+//! 4 channels) and the Mini one (48 kHz, chunk 768, 2 channels). The inputs are integer samples,
+//! generated here exactly as by the C++ generator. The Lite 2 and Midi rows are that binary's
+//! output; the Mini rows are the same scenario through the fixed analyzer, whose 16 ms time
+//! constants are derived from the 32 ms ones (the C++ daemon applies them per chunk).
 
 use std::f64::consts::PI;
 
@@ -18,7 +21,7 @@ struct Layout {
     nspk: usize,
 }
 
-const LAYOUTS: [Layout; 2] = [
+const LAYOUTS: [Layout; 3] = [
     Layout {
         name: "lite2",
         rate: 48000,
@@ -30,6 +33,12 @@ const LAYOUTS: [Layout; 2] = [
         rate: 96000,
         chunk: 3072,
         nspk: 4,
+    },
+    Layout {
+        name: "mini",
+        rate: 48000,
+        chunk: 768,
+        nspk: 2,
     },
 ];
 const SCENARIOS: [(&str, usize); 3] = [("sine", 60), ("silence", 40), ("beats", 128)];

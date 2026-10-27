@@ -24,6 +24,19 @@ D=${PULSAR_DIR:-/data/pulsar}
 LOG=${PULSAR_LOG:-/tmp/pulsar.log}
 Q=${PULSAR_Q:-/system/vendor/quasar/q}
 BIN=$D/pulsar
+# The first-generation Mini (board axg_s420_v03, no yandex,* compatible entry) keeps alsa-lib
+# only under /system/vendor/quasar/libs and needs its dmix PCM from /data/pulsar/asound.conf.
+# Do not change ALSA for the Midi / Lite 2: they have their own libs and asound.conf.
+if [ "$(tr -d '\0' </proc/device-tree/amlogic-dt-id 2>/dev/null)" = axg_s420_v03 ]; then
+  if [ -d /system/vendor/quasar/libs ]; then
+    LD_LIBRARY_PATH=/system/vendor/quasar/libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+    export LD_LIBRARY_PATH
+  fi
+  if [ -f "$D/asound.conf" ]; then
+    ALSA_CONFIG_PATH=$D/asound.conf
+    export ALSA_CONFIG_PATH
+  fi
+fi
 MAXLOG=1000000
 LONG=${PULSAR_LONG:-300}
 CRASHES=5
@@ -46,6 +59,7 @@ say() { echo "=== supervise: $* $(date)" >> "$LOG"; }
 give_back() { # Yandex stack again, like ctl.sh disable
   rm -f "$D/enabled"
   say "$1; disabled, starting the Yandex stack"
+  unset ALSA_CONFIG_PATH LD_LIBRARY_PATH
   pidof quasar_launcher2 >/dev/null 2>&1 || "$Q" start >/dev/null 2>&1
   exit 1
 }
@@ -53,7 +67,8 @@ give_back() { # Yandex stack again, like ctl.sh disable
 clear_dmix() {
   segs=$(ipcs -m 2>/dev/null) || return 0
   removed= busy=0
-  for k in 400 401; do
+  # 0x400/0x401: the firmware's speakers dmix; 0x8e5/0x8e6: the Mini's minidmix.
+  for k in 400 401 8e5 8e6; do
     n=$(echo "$segs" | awk -v k="0x00000$k" '$1 == k { print $6; exit }')
     if [ "$n" = 0 ]; then
       ipcrm -M "0x$k" && removed="$removed shm 0x$k"
@@ -61,9 +76,11 @@ clear_dmix() {
       busy=1
     fi
   done
-  if [ $busy = 0 ] && ipcs -s 2>/dev/null | awk '$1 == "0x00000400" { f = 1 } END { exit !f }'; then
-    ipcrm -S 0x400 && removed="$removed sem 0x400"
-  fi
+  for k in 400 8e5; do
+    if [ $busy = 0 ] && ipcs -s 2>/dev/null | awk -v k="0x00000$k" '$1 == k { f = 1 } END { exit !f }'; then
+      ipcrm -S "0x$k" && removed="$removed sem 0x$k"
+    fi
+  done
   [ -z "$removed" ] || echo "=== alsa: removed stale dmix lock (${removed# }) $(date)" >> "$LOG"
 }
 

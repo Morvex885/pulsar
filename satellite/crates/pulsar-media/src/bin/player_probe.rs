@@ -3,7 +3,9 @@
 //!  0. Mixer: set_volume(v) / mute / unmute with v = min(current volume, 0.2), each read back
 //!     with amixer; playback below runs at v (0.2 = raw 82 on the stock curve, the port's test
 //!     cap). Nothing plays while the master is muted (raw 0). The original raw values are
-//!     written back at the end, on SIGINT / SIGTERM / SIGHUP and on a panic.
+//!     written back at the end, on SIGINT / SIGTERM / SIGHUP and on a panic. On models with
+//!     software volume (the Mini) there is no ALSA master; the probe applies the same 60 dB
+//!     curve to the player channels and the amixer checks are skipped.
 //!  1. MUSIC plays <music_uri> (gain 0.3)
 //!  2. at +1.5 s ANNOUNCE plays [<announce_file>, <http_base>/announce.flac] (gain 0.3) with
 //!     MUSIC ducked to 0.08; restored when the announcement is done
@@ -17,13 +19,12 @@ use std::process::{Command, ExitCode};
 use std::sync::Mutex;
 
 use pulsar_core::Timers;
-use pulsar_media::{Channel, Mixer, PlayId, PlayState, PlayerEvent, mixer};
+use pulsar_media::{Channel, Mixer, PlayId, PlayState, PlayerEvent, mixer, spawn};
 use tokio::signal::unix::{SignalKind, signal};
 
 const MASTER: &str = "Master Playback Volume";
 /// Mixer scale: the port's cap for test sounds.
 const MAX_TEST_VOLUME: f32 = 0.2;
-
 /// The control and its original raw values, written back once (normal exit, signal, panic).
 static RESTORE: Mutex<Option<(pulsar_alsa::Ctl, [i64; 2])>> = Mutex::new(None);
 
@@ -95,6 +96,10 @@ struct Probe {
     timers: Timers<Key>,
     music_id: Option<PlayId>,
     announce_id: Option<PlayId>,
+    /// Channel gains: the master is already reduced by the mixer on hardware models, while
+    /// software-volume models need it here.
+    gain: f32,
+    duck: f32,
     tone_id: Option<PlayId>,
     missing_id: Option<PlayId>,
     https_id: Option<PlayId>,
@@ -114,8 +119,8 @@ impl Probe {
     }
 
     fn start(&mut self) {
-        self.player.set_channel_gain(Channel::Music, 0.3);
-        self.player.set_channel_gain(Channel::Announce, 0.3);
+        self.player.set_channel_gain(Channel::Music, self.gain);
+        self.player.set_channel_gain(Channel::Announce, self.gain);
         println!("[{:6.2}] == MUSIC {}", self.ts(), self.music);
         self.music_id = Some(self.player.play(Channel::Music, vec![self.music.clone()]));
         self.timers.set(Key::Announce, 1500);
@@ -147,7 +152,7 @@ impl Probe {
                     self.announce,
                     self.http
                 );
-                self.player.set_channel_gain(Channel::Music, 0.08);
+                self.player.set_channel_gain(Channel::Music, self.duck);
                 let urls = vec![
                     self.announce.clone(),
                     format!("{}/announce.flac", self.http),
@@ -210,7 +215,7 @@ impl Probe {
             self.phase_http();
         } else if id == self.announce_id {
             println!("[{:6.2}] announce done ok={ok}, unduck", self.ts());
-            self.player.set_channel_gain(Channel::Music, 0.3);
+            self.player.set_channel_gain(Channel::Music, self.gain);
             self.timers.set(Key::Pause, 500);
         } else if id == self.tone_id {
             println!("[{:6.2}] http mp3 done ok={ok}", self.ts());
@@ -247,18 +252,21 @@ fn main() -> ExitCode {
     };
     // Test sounds only with the volume capped: without the control there is no cap.
     let mut mx = Mixer::open(model);
-    let ctl = pulsar_alsa::Ctl::open("hw:0").ok();
+    let software = model.software_volume;
+    let ctl = (!software)
+        .then(|| pulsar_alsa::Ctl::open("hw:0").ok())
+        .flatten();
     let orig_raw = ctl.as_ref().and_then(read_raw);
-    let (true, Some(ctl), Some(orig_raw)) = (mx.available(), ctl, orig_raw) else {
+    if !mx.available() || (!software && (ctl.is_none() || orig_raw.is_none())) {
         println!("mixer unavailable: no volume cap, not playing");
         return ExitCode::FAILURE;
-    };
+    }
     println!(
         "[{:6.2}] mixer volume {:.3} raw={orig_raw:?}",
         ts(),
         mx.volume()
     );
-    if orig_raw.contains(&0) {
+    if orig_raw.is_some_and(|raw| raw.contains(&0)) {
         println!("master muted (raw 0): not playing");
         return ExitCode::SUCCESS;
     }
@@ -286,16 +294,22 @@ fn main() -> ExitCode {
         println!("cannot install signal handlers, not playing");
         return ExitCode::FAILURE;
     };
-    *RESTORE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((ctl, orig_raw));
+    if let (Some(ctl), Some(raw)) = (ctl, orig_raw) {
+        *RESTORE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((ctl, raw));
+    }
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore();
         default_hook(info);
     }));
 
-    let volume = mx.volume().min(MAX_TEST_VOLUME);
+    let volume = if software {
+        MAX_TEST_VOLUME
+    } else {
+        mx.volume().min(MAX_TEST_VOLUME)
+    };
     let cap = mixer::to_raw(model, MAX_TEST_VOLUME);
     let want = mixer::to_raw(model, volume);
     mx.set_volume(volume);
@@ -303,31 +317,51 @@ fn main() -> ExitCode {
         "[{:6.2}] set_volume({volume:.3}): expect values={want},{want}",
         ts()
     );
-    amixer();
+    if !software {
+        amixer();
+    }
     mx.set_muted(true);
     println!("[{:6.2}] set_muted(true): expect values=0,0", ts());
-    amixer();
+    if !software {
+        amixer();
+    }
     mx.set_muted(false);
     println!(
         "[{:6.2}] set_muted(false): expect values={want},{want}",
         ts()
     );
-    amixer();
+    if !software {
+        amixer();
+    }
     let now_raw = RESTORE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
         .and_then(|(ctl, _)| read_raw(ctl));
-    match now_raw {
-        Some(raw) if raw.iter().all(|&r| r <= cap) => {}
-        raw => {
-            println!("volume above the test cap ({raw:?} > {cap}), not playing");
-            restore();
-            return ExitCode::FAILURE;
+    if !software {
+        match now_raw {
+            Some(raw) if raw.iter().all(|&r| r <= cap) => {}
+            raw => {
+                println!("volume above the test cap ({raw:?} > {cap}), not playing");
+                restore();
+                return ExitCode::FAILURE;
+            }
         }
+    } else if volume > MAX_TEST_VOLUME {
+        println!("volume {volume} above the test cap ({MAX_TEST_VOLUME}), not playing");
+        return ExitCode::FAILURE;
     }
 
-    let (player, mut rx) = pulsar_media::spawn(model.playback_pcm);
+    let (player, mut rx) = spawn(model);
+    // The mixer's master is already in the signal on hardware models; a software master has to
+    // go into the channel gains the same way the controller does it.
+    let master = if software {
+        pulsar_core::volume::software_gain(volume)
+    } else {
+        1.0
+    };
+    let gain: f32 = master * 0.3;
+    let duck: f32 = master * 0.08;
     let mut probe = Probe {
         t0,
         music: args[1].clone(),
@@ -338,6 +372,8 @@ fn main() -> ExitCode {
         timers: Timers::new(),
         music_id: None,
         announce_id: None,
+        gain,
+        duck,
         tone_id: None,
         missing_id: None,
         https_id: None,
@@ -366,7 +402,9 @@ fn main() -> ExitCode {
     drop(probe);
     drop(rt);
     restore();
-    amixer();
+    if !software {
+        amixer();
+    }
     match step {
         Step::InitFailed => ExitCode::FAILURE,
         Step::Signal => {

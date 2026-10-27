@@ -150,7 +150,8 @@ satellite/
    repeated N times» (не чаще раза в 30 с); очередь sink — 512 строк, при переполнении первой
    идёт «N log lines dropped».
 8. `unsafe` и все вызовы `libc` (включая `std::env::set_var`) живут только в модулях
-   `sys.rs`/`ffi.rs` и в обработчике крашей.
+   `sys.rs`/`ffi.rs`, `pulsar-core/src/compat.rs` (getrandom для glibc 2.23) и в обработчике
+   крашей.
    - В каждом крейте `#![deny(unsafe_op_in_unsafe_fn)]`, у каждого блока комментарий `// SAFETY:`.
    - Символы dlopen резолвятся один раз в структуру указателей на функции.
    - `gst.rs` в `pulsar-media` — такой же FFI-модуль, как `ffi.rs` (dlopen GLib/GStreamer
@@ -163,7 +164,7 @@ satellite/
    AGENTS.md).
 10. `make -C satellite check` должен проходить: `cargo fmt --all --check`,
     `cargo clippy --workspace --all-targets --locked -- -D warnings` (host), тот же clippy для
-    станций через `cargo-zigbuild clippy … --target aarch64-unknown-linux-gnu.2.36 --target armv7-unknown-linux-gnueabihf.2.30`
+    станций через `cargo-zigbuild clippy … --target aarch64-unknown-linux-gnu.2.36 --target armv7-unknown-linux-gnueabihf.2.23`
     (цели ставит rustup по `rust-toolchain.toml`, линкер не нужен; build-скрипт `ring` компилирует
     C для цели, поэтому нужен zig — любой версии, в CI 0.14.1 — и cargo-zigbuild 0.24.0, с теми же
     `CARGO_ZIGBUILD_*`, что у arch-сборок), `cargo test --workspace --locked` (host x86_64, без
@@ -195,8 +196,9 @@ satellite/
   медленнее; в горячих циклах на каждый сэмпл (аудио, спектр) это заметно. На x86_64-хосте
   `mul_add` — тоже вызов libm.
 - `sinf`/`cosf`/`log10f`: armhf-сборка берёт их из compiler_rt zig, aarch64 — из glibc. Они
-  иногда расходятся на 1 ulp (5 из 512 значений окна Ханна; на golden-данных спектра — полосы в
-  47 из 456 чанков, биты beat не меняются), поэтому сравнение спектра идёт с допуском.
+  иногда расходятся на 1 ulp (несколько из 256/512 значений окна Ханна; на golden-данных
+  спектра — полосы в части чанков при обоих размерах окна, биты beat не меняются), поэтому
+  сравнение спектра идёт с допуском.
 
 ## Рецепт линковки C++ (sendspin-cpp)
 
@@ -218,7 +220,8 @@ println!("cargo:rustc-link-lib=c++");
   делает `mul_add` аппаратным `vfma` (см. «Плавающая точка»).
 - non-PIE: оба бинаря `EXEC`, адреса в отчёте о падении абсолютные. `NEEDED`: aarch64 — только
   `libc.so.6` (максимум `GLIBC_2.34`); armhf — `libpthread.so.0`, `libc.so.6`, `libdl.so.2`,
-  `ld-linux-armhf.so.3` (максимум `GLIBC_2.30`), `hard-float ABI`.
+  `ld-linux-armhf.so.3` (максимум `GLIBC_2.23`, включая собственный `getrandom` shim в
+  `pulsar-core` для Мини), `hard-float ABI`.
 - При компиляции `cc` печатает безвредные предупреждения проверки компилятора через обёртки
   cargo-zigbuild: aarch64 — `zig: error: version '.2.36' in target triple 'aarch64-unknown-linux-gnu.2.36' is invalid`,
   armhf — `…/cargo-zigbuild/0.24.0/aeabi_unaligned.c:1:1: error: FileNotFound`. Объект при этом
@@ -240,7 +243,8 @@ println!("cargo:rustc-link-lib=c++");
 - `tz::set_tz` вызывается только при изменении значения: `set_var("TZ")` гоняется с `getenv` на
   потоках GLib.
 - `model::detect_model` читает `/proc/device-tree/compatible` (NUL-разделённый список; первый
-  `yandex,cucumber`, `yandex,plum` или `yandex,station-mini2`).
+  `yandex,cucumber`, `yandex,plum` или `yandex,station-mini2`), затем для Мини —
+  `/proc/device-tree/amlogic-dt-id` (`axg_s420_v03`).
 
 ### `state.conf` и откат на `.prev`
 
@@ -308,7 +312,8 @@ println!("cargo:rustc-link-lib=c++");
   открылся, не считается ошибкой старта: поток захвата пишет ошибку и повторяет открытие каждые
   2 с. Потоки останавливаются в `Drop` последнего клона handle.
 - `stats()` / `set_raw_tap()` — только для `frontend_probe`: счётчики потоков и сырой захват для
-  `--record`.
+  `--record`. Захват бывает S16_LE (Миди, Лайт 2) и S32_LE с right-justified 24 битами (Мини,
+  `capture_shift=8`); перед VQE сэмпл приводится к i16 со сдвигом и насыщением.
 - Пре-ролл wake word (switch «Command right after wake word», `wake_preroll=` в `state.conf`, по
   умолчанию включён; `FrontendHandle::set_preroll`, выключенный даёт пустой `preroll`, удержание
   стрима остаётся): спотер подтверждает слово на несколько чанков позже, чем оно кончилось.
@@ -359,8 +364,15 @@ println!("cargo:rustc-link-lib=c++");
   паузе по буферизации, пауза длилась ~1,8 с), а с `sync=true` опоздавшие семплы выбрасываются;
   appsink API в библиотеке Midi не экспортирован. fd у `fdsink` меняется только в NULL.
 - `Mixer::open` берёт raw, только если чтение удалось и raw > 0, иначе громкость 0.5; без контрола
-  `available() = false`, громкость хранится в памяти. `set_volume`/`set_muted` сразу пишут контрол
-  и поля, геттеры читают поля.
+  у модели с `software_volume` (Мини) громкость хранится в памяти, `available() = true`, а
+  контроллер применяет её к каналам игрока и Sendspin. На остальных моделях без контрола
+  `available() = false`. `set_volume`/`set_muted` сразу пишут контрол и поля, геттеры читают поля.
+  Программная громкость идёт по той же 60-дБ кривой, что softvol остальных моделей
+  (`pulsar_core::volume::software_gain`: ступень 5 % = 2,55 дБ).
+- На Мини перед стартом игрока и Sendspin включаются `amp_table`/`aux_amp` и снимается ALSA
+  `SPK mute` (общий `pulsar_alsa::enable_output`); игрок ставит их ещё раз перед переходом
+  GStreamer в PLAYING, а писатель ANNOUNCE — прямо перед открытием PCM (`pcm_out::open`), потому
+  что открытие PCM может их сбросить. Sink — `mini` из `/data/pulsar/asound.conf` (dmix).
 
 ### `pulsar-sendspin`
 

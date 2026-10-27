@@ -42,10 +42,10 @@ const EV_SW: u16 = 0x05;
 const SYN_REPORT: u16 = 0;
 const SYN_DROPPED: u16 = 3;
 const SW_MUTE_DEVICE: u16 = 0x0e;
-/// KEY_VOICECOMMAND
-const KEY_ACTION: u16 = 582;
 const KEY_VOLUMEDOWN: u16 = 114;
 const KEY_VOLUMEUP: u16 = 115;
+#[cfg(test)]
+const KEY_ACTION: u16 = 582;
 
 const LONG_PRESS_MS: u64 = 800;
 const REPEAT_DELAY_MS: u64 = 500;
@@ -103,12 +103,12 @@ impl InputHandle {
 pub fn spawn_input(
     model: &'static Model,
 ) -> Result<(InputHandle, UnboundedReceiver<InputEvent>), String> {
-    let keys = open_dev(model.keys_input, false);
-    let mute = if model.mute_input.is_empty() {
-        None
-    } else {
-        open_dev(model.mute_input, false)
-    };
+    let keys = (!model.keys_input.is_empty())
+        .then(|| open_dev(model.keys_input, false))
+        .flatten();
+    let mute = (!model.mute_input.is_empty())
+        .then(|| open_dev(model.mute_input, false))
+        .flatten();
     let mute_gpio = if model.mute_gpio == 0 {
         None
     } else {
@@ -119,7 +119,7 @@ pub fn spawn_input(
     }
     let muted = Rc::new(Cell::new(false));
     let (tx, rx) = unbounded_channel();
-    let mut m = Machine::new(Rc::clone(&muted), tx);
+    let mut m = Machine::new(Rc::clone(&muted), tx, model.action_key);
     // The state the controller starts from: no event for it.
     if let Some(fd) = &mute {
         m.read_mute_state(fd.get_ref().switch_state(), false);
@@ -275,6 +275,8 @@ struct Machine {
     epoch: Instant,
     muted: Rc<Cell<bool>>,
     tx: UnboundedSender<InputEvent>,
+    /// KEY_VOICECOMMAND of this model; 0: no action button.
+    action_key: u16,
     /// Press time; None = not pressed.
     action_down: Option<i64>,
     last_action_ms: Option<i64>,
@@ -298,12 +300,13 @@ fn volume_button(code: u16) -> Button {
 }
 
 impl Machine {
-    fn new(muted: Rc<Cell<bool>>, tx: UnboundedSender<InputEvent>) -> Self {
+    fn new(muted: Rc<Cell<bool>>, tx: UnboundedSender<InputEvent>, action_key: u16) -> Self {
         Self {
             timers: Timers::new(),
             epoch: Instant::now(),
             muted,
             tx,
+            action_key,
             action_down: None,
             last_action_ms: None,
             action_long_sent: false,
@@ -370,7 +373,7 @@ impl Machine {
 
     fn on_key(&mut self, code: u16, value: i32) {
         let now = self.now();
-        if code == KEY_ACTION {
+        if self.action_key != 0 && code == self.action_key {
             if value == 1 && self.action_down.is_none() {
                 self.action_down = Some(now);
                 self.action_long_sent = false;
@@ -485,8 +488,8 @@ impl Machine {
                 return;
             }
         };
-        if self.action_down.is_some() && !test_bit(&b, KEY_ACTION) {
-            self.on_key(KEY_ACTION, 0);
+        if self.action_key != 0 && self.action_down.is_some() && !test_bit(&b, self.action_key) {
+            self.on_key(self.action_key, 0);
         }
         if let Some(code) = self.repeat_code
             && !test_bit(&b, code)

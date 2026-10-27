@@ -107,13 +107,20 @@ fn legacy_volume(raw: i64) -> f32 {
 }
 
 /// Volume on the curve of builds before the stock map (state.conf `volume=`) -> the volume giving
-/// the same raw level now (legacy levels below the lowest stock step rise to it).
+/// the same raw level now (legacy levels below the lowest stock step rise to it). Software-volume
+/// models store the volume itself, not a raw control value.
 pub fn from_legacy(model: &Model, v: f32) -> f32 {
+    if model.software_volume {
+        return clamp_unit(v);
+    }
     from_raw(model, legacy_raw(v))
 }
 
 /// Volume -> the volume on the legacy curve giving the same raw level.
 pub fn to_legacy(model: &Model, v: f32) -> f32 {
+    if model.software_volume {
+        return clamp_unit(v);
+    }
     legacy_volume(to_raw(model, v))
 }
 
@@ -138,9 +145,14 @@ impl Mixer {
         let mut mixer = Mixer {
             model,
             ctl: None,
-            volume: 0.5,
+            // No hardware master: the controller applies this gain to the player channels.
+            volume: if model.software_volume { 0.1 } else { 0.5 },
             muted: false,
         };
+        if model.software_volume {
+            info!("mixer: software volume");
+            return mixer;
+        }
         let ctl = match Ctl::open("hw:0") {
             Ok(ctl) => ctl,
             Err(rc) => {
@@ -167,7 +179,7 @@ impl Mixer {
     }
 
     pub fn available(&self) -> bool {
-        self.ctl.is_some()
+        self.model.software_volume || self.ctl.is_some()
     }
 
     /// 0..1

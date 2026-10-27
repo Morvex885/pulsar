@@ -68,7 +68,7 @@ func installOne(st station) (ok bool, note string, lost bool) {
 		return false, "", false
 	}
 	ts := time.Now().Format("20060102150405")
-	changed, supChanged, ok := deployFiles(s, bin, st.arch, st.zigbee)
+	changed, supChanged, ok := deployFiles(s, bin, st.arch, st.code, st.zigbee)
 	if !ok {
 		return false, "", false
 	}
@@ -101,7 +101,7 @@ func installOne(st station) (ok bool, note string, lost bool) {
 
 // deployFiles copies the daemon, scripts, the radio's firmware images (zigbee) and dropbear (--ssh).
 // changed: the binary was replaced; supChanged: supervise.sh differs from the installed one.
-func deployFiles(s, bin, arch string, zigbee bool) (changed, supChanged, ok bool) {
+func deployFiles(s, bin, arch, code string, zigbee bool) (changed, supChanged, ok bool) {
 	changed, supChanged = true, true
 	sshOut := filepath.Join(root, "ssh", "out", arch)
 	deploy := filepath.Join(root, "satellite", "deploy")
@@ -139,6 +139,26 @@ func deployFiles(s, bin, arch string, zigbee bool) (changed, supChanged, ok bool
 	if shTo(os.Stdout, s, "cd "+dataDir+" && chmod 755 boot.sh.new supervise.sh.new ctl.sh.new &&\n"+
 		"     mv boot.sh.new boot.sh && mv supervise.sh.new supervise.sh && mv ctl.sh.new ctl.sh") != nil {
 		return
+	}
+	if code == "yandexmini" {
+		// The Mini needs a dmix PCM over hw:0,0 so MUSIC, ANNOUNCE and Sendspin share the
+		// speaker; supervise.sh selects it through ALSA_CONFIG_PATH.
+		want := sha256File(filepath.Join(deploy, "asound.conf"))
+		have, _ := sh(s, "[ -f "+dataDir+"/asound.conf ] && sha256sum "+dataDir+"/asound.conf")
+		if want == "" || firstField(have) != want {
+			if push(s, filepath.Join(deploy, "asound.conf"), dataDir+"/asound.conf.new") != nil {
+				return
+			}
+			got, _ := sh(s, "sha256sum "+dataDir+"/asound.conf.new")
+			if want == "" || want != firstField(got) {
+				_ = shTo(os.Stdout, s, "rm -f "+dataDir+"/asound.conf.new")
+				fmt.Fprintf(os.Stderr, "%s: push corrupted (sha256 mismatch), asound.conf not replaced\n", s)
+				return
+			}
+			if shTo(os.Stdout, s, "cd "+dataDir+" && chmod 644 asound.conf.new && mv asound.conf.new asound.conf && sync") != nil {
+				return
+			}
+		}
 	}
 	if changed {
 		if shTo(os.Stdout, s, "cd "+dataDir+" && chmod 755 pulsar.new &&\n"+

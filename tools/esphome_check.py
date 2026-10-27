@@ -25,8 +25,9 @@ Scenarios against the daemon (a test instance: PULSAR_PORT_OFFSET, service stopp
   scenario-timer     timer STARTED (--seconds, default 70 here), --hold-s, then FINISHED and
                      --ring-s of ringing. Nothing in the API stops the ring (button, wake word or
                      "стоп" do; it ends by itself after 15 min): stop the instance afterwards.
-  scenario-media     play --media-url, pause, resume, volume 0.1, mute, unmute, volume back (at
-                     most 0.2), stop; each checked on the media player state.
+  scenario-media     play --media-url, pause, resume, volume --media-volume (default 0.1, at
+                     most 0.2), mute, unmute, volume back (at most 0.2), stop; each checked on
+                     the media player state.
   scenario-entities  every switch, number, select, the text, the light and the actions, each
                      checked on its echo state, then the previous states restored. Under the
                      mute button's mute "microphones" only gets "on", which must come back off.
@@ -174,14 +175,18 @@ async def cmd_commands(client, args):
 
     await echo("switch", "microphones", lambda k: client.switch_command(k, False))
     await echo("switch", "microphones", lambda k: client.switch_command(k, True))
-    await echo("number", "clock_brightness", lambda k: client.number_command(k, 150))
+    # Models without a clock (Mini 2 on current firmware, Mini) have no clock entities.
+    if "clock_brightness" in ents:
+        await echo("number", "clock_brightness", lambda k: client.number_command(k, 150))
     await echo("number", "led_speed", lambda k: client.number_command(k, 1.5))
-    await echo("select", "clock_face", lambda k: client.select_command(k, ents["clock_face"].options[-1]))
+    if "clock_face" in ents:
+        await echo("select", "clock_face", lambda k: client.select_command(k, ents["clock_face"].options[-1]))
     # Not an option of the select: refused, no echo expected.
     await echo(
         "select", "music_visualization", lambda k: client.select_command(k, "no such style"), 1.0, expect=False
     )
-    await echo("text", "clock_text", lambda k: client.text_command(k, "Привет"))
+    if "clock_text" in ents:
+        await echo("text", "clock_text", lambda k: client.text_command(k, "Привет"))
     await echo("media", "media_player", lambda k: client.media_player_command(k, volume=0.2))
     await echo("media", "media_player", lambda k: client.media_player_command(k, command=MediaPlayerCommand.PAUSE))
     await echo("light", "ring", lambda k: client.light_command(k, state=True, brightness=0.5, rgb=(1.0, 0.5, 0.0)))
@@ -420,6 +425,7 @@ async def cmd_scenario_media(client, args):
     restore = min(start.volume if start else 0.2, 0.2)
     S = MediaPlayerState
     C = MediaPlayerCommand
+    target = args.media_volume
 
     def cmd(**kw):
         return lambda: client.media_player_command(key, **kw)
@@ -428,7 +434,7 @@ async def cmd_scenario_media(client, args):
     await asyncio.sleep(args.hold_s)
     await expect(w, "media: pause", key, cmd(command=C.PAUSE), lambda s: s.state == S.PAUSED, 5)
     await expect(w, "media: resume", key, cmd(command=C.PLAY), lambda s: s.state == S.PLAYING, 5)
-    await expect(w, "media: volume 0.1", key, cmd(volume=0.1), lambda s: abs(s.volume - 0.1) < 0.01)
+    await expect(w, f"media: volume {target:g}", key, cmd(volume=target), lambda s: abs(s.volume - target) < 0.01)
     await expect(w, "media: mute", key, cmd(command=C.MUTE), lambda s: s.muted)
     await expect(w, "media: unmute", key, cmd(command=C.UNMUTE), lambda s: not s.muted)
     await expect(w, f"media: volume {restore:.2f}", key, cmd(volume=restore), lambda s: abs(s.volume - restore) < 0.01)
@@ -448,11 +454,13 @@ async def cmd_scenario_entities(client, args):
 
     switches = ["microphones", "clock_display", "nearest_station_answers", "voice_indication",
                 "command_right_after_wake_word"]
-    if st("hardware_mic_mute"):
+    if "hardware_mic_mute" in k and st("hardware_mic_mute"):
         # Under the mute button's mute "on" is refused: the switch comes back off.
         await expect(w, "switch microphones -> True (refused: mute button)", k["microphones"], lambda: client.switch_command(k["microphones"], True), lambda s: not s.state)
         switches.remove("microphones")
     for oid in switches:
+        if oid not in k:
+            continue
         cur = bool(st(oid))
         await expect(w, f"switch {oid} -> {not cur}", k[oid], lambda o=oid, v=not cur: client.switch_command(k[o], v), lambda s, v=not cur: s.state == v)
         restore.append((f"switch {oid} -> {cur}", k[oid], lambda o=oid, v=cur: client.switch_command(k[o], v), lambda s, v=cur: s.state == v))
@@ -466,6 +474,8 @@ async def cmd_scenario_entities(client, args):
         ("led_speed", 9.0, 4.0),
         ("led_speed", 1.5, 1.5),
     ]:
+        if oid not in k:
+            continue
         await expect(w, f"number {oid} {value} -> {want}", k[oid], lambda o=oid, v=value: client.number_command(k[o], v), lambda s, x=want: abs(s.state - x) < 1e-3)
     for oid in ["clock_brightness", "clock_text_speed", "led_speed"]:
         if st(oid) is not None:
@@ -473,6 +483,8 @@ async def cmd_scenario_entities(client, args):
             restore.append((f"number {oid} -> {v}", k[oid], lambda o=oid, x=v: client.number_command(k[o], x), lambda s, x=v: abs(s.state - x) < 1e-3))
 
     for oid in ["clock_face", "music_visualization", "case_color", "clock_music"]:
+        if oid not in k:
+            continue
         opts = ents[oid].options
         cur = st(oid)
         other = next((o for o in reversed(opts) if o != cur), cur)
@@ -485,9 +497,10 @@ async def cmd_scenario_entities(client, args):
         z = w.latest.get(k.get("zigbee"))
         print("text sensor zigbee: " + (line(z) if z else "none"))
 
-    text = st("clock_text") or ""
-    await expect(w, "text clock_text -> Тест", k["clock_text"], lambda: client.text_command(k["clock_text"], "Тест"), lambda s: s.state == "Тест")
-    restore.append((f"text clock_text -> {text!r}", k["clock_text"], lambda: client.text_command(k["clock_text"], text), lambda s: s.state == text))
+    if "clock_text" in k:
+        text = st("clock_text") or ""
+        await expect(w, "text clock_text -> Тест", k["clock_text"], lambda: client.text_command(k["clock_text"], "Тест"), lambda s: s.state == "Тест")
+        restore.append((f"text clock_text -> {text!r}", k["clock_text"], lambda: client.text_command(k["clock_text"], text), lambda s: s.state == text))
 
     ring = orig.get("ring")
     await expect(w, "light ring on", k["ring"], lambda: client.light_command(k["ring"], state=True, brightness=0.4, rgb=(0.0, 0.5, 1.0)), lambda s: s.state and abs(s.brightness - 0.4) < 0.01)
@@ -500,12 +513,14 @@ async def cmd_scenario_entities(client, args):
             lambda s: s.state == ring.state,
         ))
 
-    for name, data in [
-        ("clock_show_text", {"text": "Hi", "seconds": 3}),
-        ("clock_show_face", {"face": ents["clock_face"].options[-1], "seconds": 3}),
-        ("led_show", {"effect": "", "color": "#00ff00", "seconds": 3}),
-        ("led_show", {"effect": "", "color": "", "seconds": 0}),
+    for name, data, needs in [
+        ("clock_show_text", {"text": "Hi", "seconds": 3}, "clock_text"),
+        ("clock_show_face", {"face": ents["clock_face"].options[-1], "seconds": 3} if "clock_face" in ents else None, "clock_face"),
+        ("led_show", {"effect": "", "color": "#00ff00", "seconds": 3}, None),
+        ("led_show", {"effect": "", "color": "", "seconds": 0}, None),
     ]:
+        if needs is not None and needs not in k:
+            continue
         if name in svcs:
             await client.execute_service(svcs[name], data)
             print(f"action {name} {data} sent")
@@ -602,6 +617,7 @@ async def main():
     p.add_argument("--mask", action="store_true")
     p.add_argument("--tts-url", default="http://192.168.1.50:8123/api/tts_proxy/test.mp3")
     p.add_argument("--media-url", default="http://192.168.1.50:8123/local/test.mp3")
+    p.add_argument("--media-volume", type=float, default=0.1, help="scenario-media test volume, 0..0.2")
     p.add_argument("--text", default="")
     p.add_argument("--start-conversation", action="store_true")
     p.add_argument("--event", default="started", choices=["started", "updated", "cancelled", "finished"])
@@ -622,6 +638,8 @@ async def main():
     p.add_argument("--install-s", type=float, default=300.0)
     p.add_argument("--allow-live-port", action="store_true", help="scenario-persist --install against port 6053")
     args = p.parse_args()
+    if not 0.0 <= args.media_volume <= 0.2:
+        p.error("--media-volume must be between 0 and 0.2")
     if args.command == "scenario-persist" and args.install and args.port == LIVE_API_PORT and not args.allow_live_port:
         p.error(f"--install on the live API port {LIVE_API_PORT} replaces the installed daemon; "
                 "use a test instance or pass --allow-live-port")

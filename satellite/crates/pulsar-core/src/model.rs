@@ -1,11 +1,12 @@
 //! Per-model hardware description of the supported Yandex Stations, detected once from the
-//! devicetree ("yandex,<codename>" in /proc/device-tree/compatible).
+//! devicetree ("yandex,<codename>" in /proc/device-tree/compatible, with the Mini's
+//! /proc/device-tree/amlogic-dt-id fallback).
 
 use std::sync::LazyLock;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
-    /// Devicetree codename: "cucumber", "plum", "station-mini2".
+    /// Devicetree codename: "cucumber", "plum", "station-mini2", "yandexmini".
     pub codename: &'static str,
     /// ESPHome node name prefix; the MAC suffix is appended.
     pub host_prefix: &'static str,
@@ -13,10 +14,15 @@ pub struct Model {
     pub friendly_name: &'static str,
     pub model_name: &'static str,
 
-    // Capture: interleaved S16 frames from capture_pcm; VQE gets mic_channels / spk_channels.
+    // Capture: interleaved samples from capture_pcm, capture_bits per channel (S16_LE or S32_LE);
+    // VQE gets mic_channels / spk_channels. For S32_LE, capture_shift low bits are discarded when
+    // reducing to the VQE's 16-bit input: 16 for a full 32-bit sample, 8 for the Mini's stream,
+    // whose 24 significant bits are right-justified.
     pub capture_pcm: &'static str,
     pub capture_rate: u32,
     pub capture_channels: u32,
+    pub capture_bits: u32,
+    pub capture_shift: u32,
     pub mic_channels: &'static [u32],
     pub spk_channels: &'static [u32],
     pub vqe_preset: &'static str,
@@ -51,12 +57,14 @@ pub struct Model {
     /// info.
     pub has_clock: bool,
 
-    /// evdev device names; `mute_input` "" = no switch device (the Mini 2's mute is a GPIO).
+    /// evdev device names; `mute_input` "" = no switch device.
     pub keys_input: &'static str,
     pub mute_input: &'static str,
     /// Mic mute on a sysfs GPIO instead of an evdev switch: global GPIO number, 0 = none; active
     /// low, exported if needed but never configured (used only when already an input).
     pub mute_gpio: u32,
+    /// KEY_VOICECOMMAND; 0: no action/TALK button.
+    pub action_key: u16,
     /// Earcons, relative to /system/vendor/quasar/sounds/.
     pub error_sound: &'static str,
     pub wake_sound: &'static str,
@@ -66,10 +74,17 @@ pub struct Model {
     /// muted sources "other" (app / remote) and "smart_tts" (smart volume); keys and voice words
     /// click.
     pub volume_sound: &'static str,
-
     /// ALSA playback PCM (dmix + the softvol "Master Playback Volume"): GStreamer's alsasink,
     /// the Sendspin sink, and the PCM the mixer opens to create the control.
     pub playback_pcm: &'static str,
+    pub software_volume: bool,
+    /// ALSA playback switch (on hw:0) that must be 1 (on) for the amplifier to pass audio; empty:
+    /// no such control.
+    pub spk_mute_ctl: &'static str,
+    /// Sysfs switches that gate the speaker amplifier; written to "1" before a playback PCM is
+    /// opened. Empty: no gate.
+    pub amp_enable_paths: &'static [&'static str],
+
     /// Stock volume curve: platform level -> raw value (0..255) of the softvol "Master Playback
     /// Volume" on `playback_pcm`, piecewise linear between the points; the first point is
     /// level 0 (raw 0), the last one the top level. quasar.cfg volume_capability
@@ -93,7 +108,8 @@ pub struct Model {
     pub zigbee_boot: &'static str,
 }
 
-/// An Nx1 BGR framebuffer behind an ledfb trigger, with per-channel sysfs LEDs as fallback.
+/// An Nx1 BGR framebuffer behind an ledfb trigger, with per-channel sysfs LEDs as fallback, or an
+/// IS31FL323x I2C controller (18 channels = 6 RGB pixels).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LedStrip {
     pub count: i32,
@@ -107,6 +123,9 @@ pub struct LedStrip {
     pub trigger: &'static str,
     /// "ring" / "logo"
     pub sysfs_kind: &'static str,
+    /// "/dev/i2c-0"; empty: framebuffer/sysfs.
+    pub i2c_dev: &'static str,
+    pub i2c_addr: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,6 +193,8 @@ const NO_STRIP: LedStrip = LedStrip {
     fb_name: "",
     trigger: "",
     sysfs_kind: "",
+    i2c_dev: "",
+    i2c_addr: 0,
 };
 
 // { "0": 0, "1": 49, "20": 255 }: softvol min_dB -60, so 2.6 dB per level, level 1 at -48.5 dB.
@@ -197,6 +218,8 @@ static MIDI: Model = Model {
     capture_pcm: "hw:0,2",
     capture_rate: 96000,
     capture_channels: 8,
+    capture_bits: 16,
+    capture_shift: 16,
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5, 6, 7],
     vqe_preset: "cucumber",
@@ -209,6 +232,8 @@ static MIDI: Model = Model {
         fb_name: "ring",
         trigger: "ledfb-ring",
         sysfs_kind: "ring",
+        i2c_dev: "",
+        i2c_addr: 0,
     },
     logo: LedStrip {
         count: 6,
@@ -217,6 +242,8 @@ static MIDI: Model = Model {
         fb_name: "logo",
         trigger: "ledfb-logo",
         sysfs_kind: "logo",
+        i2c_dev: "",
+        i2c_addr: 0,
     },
     clock_dir: "/sys/class/leds/cucumber:white:clock-",
     clock_seg_base: 'a',
@@ -232,12 +259,16 @@ static MIDI: Model = Model {
     keys_input: "awinic_sar",
     mute_input: "mute",
     mute_gpio: 0,
+    action_key: 582,
     error_sound: "ru-RU/vins_error.wav",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
     timer_sound: "common/timer.wav",
     volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
+    software_volume: false,
+    spk_mute_ctl: "",
+    amp_enable_paths: &[],
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
     has_lux: true,
@@ -261,6 +292,8 @@ static LITE2: Model = Model {
     capture_pcm: "hw:0,1",
     capture_rate: 48000,
     capture_channels: 8,
+    capture_bits: 16,
+    capture_shift: 16,
     mic_channels: &[0, 2],
     spk_channels: &[6],
     vqe_preset: "plum",
@@ -273,6 +306,8 @@ static LITE2: Model = Model {
         fb_name: "YNDX LED ring",
         trigger: "led_ring_fb",
         sysfs_kind: "ring",
+        i2c_dev: "",
+        i2c_addr: 0,
     },
     logo: NO_STRIP,
     clock_dir: "/sys/class/leds/plum:white:clock",
@@ -287,12 +322,16 @@ static LITE2: Model = Model {
     keys_input: "aw9610x",
     mute_input: "gpio-keys",
     mute_gpio: 0,
+    action_key: 582,
     error_sound: "ru-RU/playback_error.mp3",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
     timer_sound: "common/timer.wav",
     volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
+    software_volume: false,
+    spk_mute_ctl: "",
+    amp_enable_paths: &[],
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
     has_lux: true,
@@ -327,6 +366,8 @@ static MINI2: Model = Model {
     capture_pcm: "default",
     capture_rate: 48000,
     capture_channels: 6,
+    capture_bits: 16,
+    capture_shift: 16,
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5],
     vqe_preset: "yandexmini_2",
@@ -339,6 +380,8 @@ static MINI2: Model = Model {
         fb_name: "",
         trigger: "",
         sysfs_kind: "ring",
+        i2c_dev: "",
+        i2c_addr: 0,
     },
     logo: NO_STRIP,
     clock_dir: "/sys/class/leds/mini2:white:clock",
@@ -354,6 +397,7 @@ static MINI2: Model = Model {
     // GPIOZ_3: pull-up, held low by the mic circuit while the microphones are cut (maind polls
     // it); GPIOZ_8 only pulses during a press.
     mute_gpio: 414,
+    action_key: 582,
     // This firmware's GStreamer has no MP3 decoder; every earcon ships as .opus.
     error_sound: "ru-RU/playback_error.opus",
     wake_sound: "common/spotter_start.opus",
@@ -361,9 +405,87 @@ static MINI2: Model = Model {
     timer_sound: "common/timer.opus",
     volume_sound: "common/volume_sound.opus",
     playback_pcm: "default",
+    software_volume: false,
+    spk_mute_ctl: "",
+    amp_enable_paths: &[],
     volume_map: MINI2_VOLUME,
     volume_min_step: false,
     // ltr308als01 seen on the #38 station (firmware 0.372), absent on the #9 one (0.369).
+    has_lux: false,
+    zigbee_tty: "",
+    zigbee_reset: "",
+    zigbee_boot: "",
+};
+
+/// Station Mini (first generation): 32-bit userland, 4 PDM mics (capture channels 0..3) and two
+/// speaker references (channels 6 and 7) at 48 kHz on hw:0,2. Channels 4/5 carry a large DC offset
+/// (the "micUnknownChannels" of quasar.cfg) and are not fed to the VQE. Playback is hw:0,0: it is
+/// the only output with the speaker loopback on channels 6/7. The ring is six RGB LEDs behind an
+/// IS31FL3236-compatible controller at i2c-0/0x3c (no framebuffer, no clock).
+static MINI: Model = Model {
+    codename: "yandexmini",
+    host_prefix: "yandex-mini-",
+    friendly_name: "Яндекс Станция Мини",
+    model_name: "Yandex Station Mini",
+    capture_pcm: "hw:0,2",
+    capture_rate: 48000,
+    capture_channels: 8,
+    capture_bits: 32,
+    capture_shift: 8, // right-justified 24-bit samples: keep the top 16 bits as int16
+    mic_channels: &[0, 1, 2, 3],
+    spk_channels: &[6, 7],
+    vqe_preset: "yandexmini",
+    // No pre-roll measurements on the Mini: an id without a rule gives an empty pre-roll.
+    wake_preroll: &[],
+    led_prefix: "",
+    ring: LedStrip {
+        count: 6,
+        first_index: 0,
+        fb_dev: "",
+        fb_name: "",
+        trigger: "",
+        sysfs_kind: "",
+        i2c_dev: "/dev/i2c-0",
+        i2c_addr: 0x3c,
+    },
+    logo: NO_STRIP,
+    clock_dir: "",
+    clock_seg_base: 'a',
+    clock_pos_base: 1,
+    clock_colon: &[],
+    clock_aux: &[],
+    clock_center: "",
+    clock_chip_current: false,
+    has_clock: false,
+    keys_input: "adc_keypad",
+    mute_input: "",
+    mute_gpio: 0,
+    action_key: 0, // no TALK button on this model (the keypad's talk pad is not fitted)
+    error_sound: "ru-RU/playback_error.mp3",
+    wake_sound: "common/spotter_start.mp3",
+    cancel_sound: "common/spotter_cancel.mp3",
+    timer_sound: "common/timer.wav",
+    volume_sound: "common/volume_sound.mp3",
+    // dmix over hw:0,0; defined in /data/pulsar/asound.conf and selected via ALSA_CONFIG_PATH.
+    playback_pcm: "mini",
+    // No softvol "speakers" PCM and the hardware "Master" control does not attenuate the output;
+    // Controller applies the volume to the GStreamer player channels instead.
+    software_volume: true,
+    spk_mute_ctl: "SPK mute",
+    // The stock maind opens the tdm_state amplifier gates; without them the ALSA sink runs but the
+    // speaker stays silent (SPK mute cannot be cleared while amp_table is 0). The driver clears
+    // amp_table when the playback PCM closes (observed idle state), and both sinks close it when
+    // playback ends, so only the next start has to set the gates again.
+    amp_enable_paths: &[
+        "/sys/class/tdm_state/amp_table",
+        "/sys/class/tdm_state/aux_amp",
+    ],
+    volume_map: &[
+        VolumePoint { level: 0, raw: 0 },
+        VolumePoint { level: 1, raw: 1 },
+        VolumePoint { level: 20, raw: 20 },
+    ],
+    volume_min_step: false,
     has_lux: false,
     zigbee_tty: "",
     zigbee_reset: "",
@@ -374,10 +496,18 @@ static MINI2: Model = Model {
 pub fn detect_model() -> Option<&'static Model> {
     static MODEL: LazyLock<Option<&'static Model>> = LazyLock::new(|| {
         let raw = std::fs::read("/proc/device-tree/compatible").unwrap_or_default();
-        let model = model_from_compatible(&raw);
+        let model = model_from_compatible(&raw).or_else(|| {
+            let dt = std::fs::read("/proc/device-tree/amlogic-dt-id").unwrap_or_default();
+            model_from_dt_id(&dt)
+        });
         if model.is_none() {
             let shown = String::from_utf8_lossy(&raw).replace('\0', " ");
-            log::error!("unsupported device (devicetree compatible: {shown})");
+            let dt = std::fs::read("/proc/device-tree/amlogic-dt-id").unwrap_or_default();
+            let dt = String::from_utf8_lossy(&dt);
+            log::error!(
+                "unsupported device (devicetree compatible: {shown}, amlogic-dt-id: '{}')",
+                dt.trim_end_matches('\0')
+            );
         }
         model
     });
@@ -393,6 +523,12 @@ pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
         b"yandex,station-mini2" => Some(&MINI2),
         _ => None,
     })
+}
+
+/// The Mini's devicetree has no yandex,* entry; its board id is the only stable marker.
+pub fn model_from_dt_id(raw: &[u8]) -> Option<&'static Model> {
+    let id = raw.split(|&b| b == 0).next().unwrap_or_default();
+    (id == b"axg_s420_v03").then_some(&MINI)
 }
 
 #[cfg(test)]
@@ -433,6 +569,29 @@ mod tests {
         assert_eq!(m.mute_input, "");
         assert_ne!(m.mute_gpio, 0);
         assert!(!m.has_clock && !m.has_lux && !m.volume_min_step);
+        assert_eq!(m.capture_bits, 16);
+        assert_eq!(m.capture_shift, 16);
+        assert_eq!(m.action_key, 582);
+    }
+
+    #[test]
+    fn mini_is_detected_by_board_id() {
+        let m = model_from_dt_id(b"axg_s420_v03\0").unwrap();
+        assert_eq!(m.codename, "yandexmini");
+        assert_eq!(m.capture_rate, 48000);
+        assert_eq!(m.capture_bits, 32);
+        assert_eq!(m.capture_shift, 8);
+        assert_eq!(m.ring.i2c_addr, 0x3c);
+        assert_eq!(m.ring.count, 6);
+        assert_eq!(m.logo.count, 0);
+        assert!(m.software_volume);
+        assert!(!m.has_clock && !m.has_lux);
+        // No trailing NUL still counts.
+        assert_eq!(
+            model_from_dt_id(b"axg_s420_v03").unwrap().codename,
+            "yandexmini"
+        );
+        assert!(model_from_dt_id(b"axg_s420_v02\0").is_none());
     }
 
     #[test]

@@ -8,8 +8,10 @@ live stations: `docs/stations.md` (Russian) with `tools/station.sh`.
 
 A native Rust daemon replacing the Yandex stack (`maind` / `quasar_launcher2`) on rooted Yandex
 Stations: Midi (`cucumber`: usually aarch64, glibc 2.36, 1 GB RAM; some images run a 32-bit
-armhf userland), Lite 2 (`plum`: 32-bit armhf, glibc 2.30, 237 MB RAM) and Mini 2
-(`station-mini2`: 32-bit armhf userland on an aarch64 kernel, glibc 2.30, 238 MB RAM). It exposes
+armhf userland), Lite 2 (`plum`: 32-bit armhf, glibc 2.30, 237 MB RAM), Mini 2 (`station-mini2`:
+32-bit armhf userland on an aarch64 kernel, glibc 2.30, 238 MB RAM) and Mini first generation
+(`yandexmini` / `axg_s420_v03`: 32-bit armhf, glibc 2.23, 236 MB RAM; no clock, light sensor,
+hardware MUTE, action key or Zigbee). It exposes
 the speaker to Home Assistant over the ESPHome Native API (port 6053; plaintext until a Noise key is
 provisioned, then Noise) and to Music Assistant as a Sendspin player (port 8928); on the Midi
 its Zigbee radio runs pulsar's own firmware (`radio/`): a deCONZ-protocol network coordinator for
@@ -24,12 +26,12 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 |---|---|
 | `satellite/Cargo.toml` | Cargo workspace (edition 2024, every external dependency pinned in `[workspace.dependencies]`), `rust-toolchain.toml`, `Makefile` (cargo-zigbuild cross builds, `make check`) |
 | `satellite/crates/pulsar/` | the daemon: `main.rs` (runtime, teardown watchdog, final settings flush), `crash.rs` (crash report), `controller/` (all satellite logic: voice pipeline state machine, entities, local commands, updates; `logic.rs` holds its pure decisions), `settings.rs` (`state.conf`: format readable by the binary kept as `.prev`, durable writes, `StateFile` debounce; see Conventions); `PULSAR_PORT_OFFSET=<n>` adds n to the ESPHome, Sendspin, deCONZ and arbiter ports and turns mDNS off (test instance next to the running daemon) |
-| `satellite/crates/pulsar-core/` | logging (stderr + ESPHome log sink), `Timers` (per-actor timers, firing order in `timers.rs`), actor registry (`spawn_actor`, `join_all`), sysfs / network / TZ helpers, `Model` (per-model hardware description: capture layout, VQE preset, LEDs, clock, inputs, sounds, Zigbee lines; detected from `/proc/device-tree/compatible`), `AmbientDimmer`, `MusicFrame`, `UiState`, `ClockShot`, `fmt` (`state.conf` number format) |
+| `satellite/crates/pulsar-core/` | logging (stderr + ESPHome log sink), `Timers` (per-actor timers, firing order in `timers.rs`), actor registry (`spawn_actor`, `join_all`), sysfs / network / TZ helpers, `Model` (per-model hardware description: capture layout, VQE preset, LEDs, clock, inputs, sounds, Zigbee lines; detected from `/proc/device-tree/compatible`, with the Mini's `/proc/device-tree/amlogic-dt-id` fallback), `AmbientDimmer`, `MusicFrame`, `UiState`, `ClockShot`, `fmt` (`state.conf` number format) |
 | `satellite/crates/pulsar-alsa/` | libasound loaded at runtime (dlopen), PCM / ctl wrappers, the versioned hw-params ABI of armhf alsa-lib (`__snd_pcm_hw_params_*` first); bin `alsa_abi_probe` |
 | `satellite/crates/pulsar-esphome/` | ESPHome API server: transport (plaintext / Noise), clients and the voice owner (`server.rs`), entities and states (`server/entities.rs`), commands and voice assistant messages (`server/commands.rs`), hand-written protobuf (`proto.rs`), Noise key (`key.rs`); bin `api_selftest`; client `tools/esphome_check.py` |
 | `satellite/crates/pulsar-lan/` | mDNS responder (`mdns.rs`) and the wake word arbiter between stations (`arbiter.rs`: claims over UDP broadcast :6054, 250 ms window, best claim answers); bin `lan_probe` |
-| `satellite/crates/pulsar-audio/` | microphone front-end (`frontend.rs`): capture thread (ALSA → FIFO) + processing thread: Yandex VQE → wake + command spotters → 16 kHz stream; music features of the speaker reference (`spectrum.rs`: 512-point FFT at 16 kHz → 8 bands, loudness, beats as `MusicFrame`) while the visualization can be shown; C API of libyandex_evil (`engine/`); bins `ww_offline`, `frontend_probe` |
-| `satellite/crates/pulsar-media/` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`, dlopen, `gst.rs`), channels Music / Announce on a GLib thread; Music plays through alsasink, Announce is decoded into an fdsink and played by its own ALSA writer (`pcm_out.rs`: 200 ms prime, no buffering pauses, `Done` after the device played the last sample); `Mixer` = ALSA "Master Playback Volume" (softvol of `Model::playback_pcm`: `speakers`, `default` on the Mini 2); bin `player_probe` |
+| `satellite/crates/pulsar-audio/` | microphone front-end (`frontend.rs`): capture thread (ALSA → FIFO) + processing thread: Yandex VQE → wake + command spotters → 16 kHz stream; music features of the speaker reference (`spectrum.rs`: 256/512-point FFT at 16 kHz → 8 bands, loudness, beats as `MusicFrame`) while the visualization can be shown; C API of libyandex_evil (`engine/`); bins `ww_offline`, `frontend_probe` |
+| `satellite/crates/pulsar-media/` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`, dlopen, `gst.rs`), channels Music / Announce on a GLib thread; Music plays through alsasink, Announce is decoded into an fdsink and played by its own ALSA writer (`pcm_out.rs`: 200 ms prime, no buffering pauses, `Done` after the device played the last sample); `Mixer` = ALSA "Master Playback Volume" (softvol of `Model::playback_pcm`: `speakers`, `default` on the Mini 2; on the Mini first generation the controller applies a software master); bin `player_probe` |
 | `satellite/crates/pulsar-sendspin/` | Sendspin player on top of sendspin-cpp (C shim in `shim/`, linked statically by `build.rs` in the Makefile builds), own ALSA sink on the playback dmix (`Model::playback_pcm`); roles player, metadata, controller, visualizer (8 log bands 40 Hz–7.6 kHz, loudness, beats → `MusicFrame`); bin `sendspin_probe` |
 | `satellite/crates/pulsar-hw/` | LED ring / logo (framebuffers behind ledfb triggers, or sysfs brightness without one; `leds.rs`: output, case matrix, layer compositor, fades), pure rendering of voice states / one-shots / effects / music styles (`led_fx.rs`), input (touch keys, `SW_MUTE_DEVICE` or a polled sysfs GPIO (`Model::mute_gpio`); `input.rs`); bin `hw_probe` |
 | `satellite/crates/pulsar-clock/` | clock (sysfs segments, per-LED brightness; `clock.rs`: layers), pure rendering of the clock's stock animations and music levels (`clock_fx.rs`), font, light sensor (`ltr308als01`, `light_sensor.rs`) |
@@ -113,12 +115,20 @@ go -C installer run . <ip>[:port]    # build if needed, copy binary (+ .prev), w
 
 Models are identified by `/proc/device-tree/compatible` (`yandex,<codename>`) both by the daemon
 (`detect_model()`, exits on unknown hardware) and by the installer (`modelName()`, `abis()`,
-`archOf()` in `installer/probe.go`). The installer skips a station whose adb is not root (`id -u`)
-before probing its loaders. The binary is `build/<arch>/pulsar` for the model's first ABI in
+`archOf()` in `installer/probe.go`). The Mini has no `yandex,*` entry; both the daemon and the
+installer fall back to `/proc/device-tree/amlogic-dt-id = axg_s420_v03` (`model_from_dt_id()`),
+and `boot.sh` uses the same marker. The installer skips a station whose adb is not root (`id -u`)
+before probing its loaders. `/data/pulsar/asound.conf` (Mini first generation) is written by the installer, not by HA
+updates: an update replaces only the binary and the radio images, so a change to
+`satellite/deploy/asound.conf` (e.g. a dmix fix) reaches an installed station only when
+`pulsar-install` runs again.
+
+The binary is `build/<arch>/pulsar` for the model's first ABI in
 `abis()` whose dynamic loader is on the station (`/lib/ld-linux-aarch64.so.1`,
 `/lib/ld-linux-armhf.so.3`): its usual one, or for the Midi the armhf build on images with only
-that loader (#13). A Lite 2 or Mini 2 without the armhf loader is skipped (no 64-bit userspace
-has been seen on them, and the aarch64 binary needs glibc 2.34). Adding a model: hardware study
+that loader (#13). A Lite 2, Mini 2 or Mini without the armhf loader is skipped (no 64-bit userspace
+has been seen on them, and the aarch64 binary needs glibc 2.34). The armhf build targets glibc 2.23,
+so the same binary covers the Mini (2.23), Lite 2 and Mini 2 (2.30). Adding a model: hardware study
 first (ALSA capture layout, VQE preset, spotter channels, LEDs, clock, inputs, earcons), then a
 `Model` in `satellite/crates/pulsar-core/src/model.rs` and `modelName()` / `abis()` entries. A
 second ABI in `abis()` is only for a userspace that has actually been seen on that model.
@@ -186,7 +196,7 @@ README, "Обновление из Home Assistant"). What must not break:
   supervisor). Station tests follow `docs/stations.md` (lock, test instance, volume cap, cleanup).
 - No volume changes or test sounds on a live speaker without the owner's consent; tests that play
   audio must cap volume (≤ 0.2 on the Mixer scale, raw ≤ 82).
-- `/tmp` is tmpfs (1 GB RAM on the Midi, 237 MB on the Lite 2, 238 MB on the Mini 2): remove test
+- `/tmp` is tmpfs (1 GB RAM on the Midi, 237 MB on the Lite 2 and Mini 2, ~118 MB on the Mini): remove test
   files afterwards.
 
 ## Yandex libraries (reverse-engineered C API, see `satellite/crates/pulsar-audio/src/engine/`)
@@ -197,8 +207,9 @@ From `/system/vendor/quasar/libyandex_evil.so`:
   `YandexVqeC_Create(cfg, "/system/vendor/quasar/vqe_models", 0, nullptr, &vqe)`,
   `YandexVqeC_Process(vqe, mics, nmic * chunk, spk, nspk * chunk)` with float samples in [-1, 1],
   frame-interleaved (Midi: 4 mics + 4 speaker refs, chunk 3072 @ 96 kHz; Lite 2: 2 + 1, chunk
-  1536 @ 48 kHz; Mini 2: 4 + 2 @ 48 kHz), `YandexVqeC_GetOutputChannelData(vqe, type, idx, &ptr,
-  &n)` → 512 samples @ 16 kHz.
+  1536 @ 48 kHz; Mini 2: 4 + 2 @ 48 kHz; Mini: 4 + 2, chunk 768 @ 48 kHz),
+  `YandexVqeC_GetOutputChannelData(vqe, type, idx, &ptr, &n)` → 512 samples @ 16 kHz (256 on the
+  Mini's 16 ms chunks).
 - Spotter: `spotter_create_multichannel(conf, 16000, n, types, false, &err)`,
   `spotter_submit_raw_data(sp, s16_interleaved, bytes, &err)`. Channel count per type comes from the
   model config. Hit events: 2 and 5.
@@ -345,25 +356,25 @@ with NWK mode but an IEEE address (payload 6 bytes longer than declared): sent a
 
 ## Model notes
 
-| | Midi (`cucumber`) | Lite 2 (`plum`) | Mini 2 (`station-mini2`) |
-|---|---|---|---|
-| SoC / userland | Amlogic A5, aarch64, glibc 2.36, 1 GB RAM; some firmware images run a 32-bit armhf userland (the installer then deploys `build/armhf/`). That image's alsa-lib is versioned; the armhf build reaches its current ABI through `pulsar-alsa` | Amlogic AXG, Cortex-A53, **32-bit armhf** userland, glibc 2.30, kernel 4.9, **237 MB RAM** | Amlogic AXG, aarch64 kernel with the same **32-bit armhf** userland, glibc 2.30, kernel 4.9.68, 238 MB RAM |
-| Storage | `/data` partition (several GB) | `/data` → `/bkupgrade/data` (ubifs, ~81 MB free); rootfs ubifs ro, 87 % full | `/data` → `/bkupgrade/data` (ubifs, ~20 MB free); rootfs ubifs ro, 83 % full |
-| Capture | `hw:0,2`, 8 ch @ 96 kHz: mics 0–3, speaker ref 4–7 | `hw:0,1`, 8 ch @ 48 kHz: mic 0 on ch 0 (= ch 1), mic 1 on ch 2 (= ch 3), speaker feedback on ch 6 (the VQE speaker reference: it leaves ~25–30 dB less echo in the VQE output than ch 4); ch 4/5 only carry a start-up transient. Max buffer 2048 frames (~42 ms) | `default` (multi in `/etc/asound.conf`), 6 ch @ 48 kHz: PDM mics 0–3 from `hw:0,1` ch 0/2/4/6, TDM amplifier loopback 4–5 from `hw:0,0` |
-| Playback | `speakers` | `speakers` | `default` (softvol `Master` over `dmix_spk_plug` → `hw:0,0`); no `speakers` PCM |
-| VQE preset | `cucumber`: 4 mics, 4 spk, chunk 3072 | `plum`: 2 mics, 1 spk, 48 kHz, chunk 1536 → 512 @ 16 kHz; outputs 1, 2, 4, 6, 8, 9 | `yandexmini_2`: 4 mics, 2 spk, 48 kHz |
-| Spotters | alisa: types 0, 3, 4; command: type 0 | alisa/yandex: types 0 and 4 (1 ch each); command: type 0. Models in `spotter_models/` are plum-tuned | same tarball as the Lite 2 in `spotter_models/`, not yet measured |
-| Ring | `/dev/fb0` 24×1 + `/dev/fb1` logo 6×1, BGR | `/dev/fb0` "YNDX LED ring" 3×1, 24 bpp, BGR; trigger `led_ring_fb`; sysfs `plum:<color>:ring1..3`; no logo | no framebuffer or trigger: sysfs `mini2:<color>:ring1..6` (IS31FL3236 on i2c 1-003c); no logo |
-| Clock | `cucumber:white:clock-<seg><digit>`, dimming via chip `current`; no centre dot | `plum:white:clock<SEG><pos>`: A–G × 0–3, colon `DH`+`DL`; `H0..3`, `DEGREE` kept dark (`quasar.cfg` `/leds/clock`); `DM` = centre dot at g height (`Model::clock_center`, extra LED 35 of the stock patterns [inference: position not confirmed by eye]); dimming via per-LED `brightness` 0–255 | wired as `mini2:white:clock<A..G><1..4>`, colon `PLUS1`+`PLUS2`, `DEGREE`/`MINUS` dark (`quasar.cfg`), but the second IS31FL3236 (i2c 0-003f) fails to probe on firmware 0.369: the clock finds no segment (`Model::has_clock` false); its entities exist only when `pulsar_clock::panel_present` finds one at start |
-| Keys | `awinic_sar`: 582 action, 115/114 volume | `aw9610x`: same codes | `sar0_pad0` (aw9610x SAR, event0): same codes |
-| Mic mute | input `mute`: `SW_MUTE_DEVICE` | input `gpio-keys`: `SW_MUTE_DEVICE` (+ `KEY_MUTE`) | no evdev switch: GPIOZ_3 (global 414, pull-up), active low, polled every 100 ms as maind does (`Model::mute_gpio`; exported if needed, no `direction` / `edge` write, used only when already an input) |
-| Light sensor | `ltr308als01` (iio) | same | `ltr308als01` on the #38 station (firmware 0.372; `in_intensity_input` = raw / 120, no `/etc/light-sensor.conf`), absent on the #9 station (0.369) [inference: firmware, board revision or device tree; not known which]; `Model::has_lux` false: the Illuminance entity exists only when the sensor opens at start |
-| Volume | "Master Playback Volume" softvol on `speakers` | same names; `speakers` comes from `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) | same control on `default`; `set_volume.sh` is `amixer set 'Master' <percent>%`, so the curve is linear in percent (`volume_min_step` false) |
-| alsa-lib | 1.2.10, versioned | 1.2.1.2, unversioned | 1.2.1.2, unversioned |
-| Earcons | `common/spotter_*.mp3`, `common/volume_sound.mp3`, `timer.wav`, `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` | `common/spotter_start.opus`, `common/spotter_cancel.opus`, `common/volume_sound.opus` [inference: file not confirmed on the station], `common/timer.opus`, `ru-RU/playback_error.opus` (no MP3 decoder in this GStreamer) |
-| Boot | `S97quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh` | `S99quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh`; `q stop` available | same as the Lite 2 |
-| Zigbee | Telink B91 on `/dev/ttyS2`, reset/boot via `zb_control` (see Zigbee radio) | none | none (no `ttyS2`, no `zb_control`) |
-
+| | Midi (`cucumber`) | Lite 2 (`plum`) | Mini 2 (`station-mini2`) | Mini (`yandexmini`, `axg_s420_v03`) |
+|---|---|---|---|---|
+| SoC / userland | Amlogic A5, aarch64, glibc 2.36, 1 GB RAM; some firmware images run a 32-bit armhf userland (the installer then deploys `build/armhf/`). That image's alsa-lib is versioned; the armhf build reaches its current ABI through `pulsar-alsa` | Amlogic AXG, Cortex-A53, **32-bit armhf** userland, glibc 2.30, kernel 4.9, **237 MB RAM** | Amlogic AXG, aarch64 kernel with the same **32-bit armhf** userland, glibc 2.30, kernel 4.9.68, 238 MB RAM | Amlogic AXG (`axg_s420_v03`), Cortex-A53, **32-bit armhf** userland, glibc **2.23**, kernel 4.9, **236 MB RAM** |
+| Storage | `/data` partition (several GB) | `/data` → `/bkupgrade/data` (ubifs, ~81 MB free); rootfs ubifs ro, 87 % full | `/data` → `/bkupgrade/data` (ubifs, ~20 MB free); rootfs ubifs ro, 83 % full | `/data` → `/bkupgrade/data` (ubifs, ~61 MB free); rootfs ubifs ro |
+| Capture | `hw:0,2`, 8 ch @ 96 kHz, S16_LE: mics 0–3, speaker ref 4–7 | `hw:0,1`, 8 ch @ 48 kHz: mic 0 on ch 0 (= ch 1), mic 1 on ch 2 (= ch 3), speaker feedback on ch 6 (the VQE speaker reference: it leaves ~25–30 dB less echo in the VQE output than ch 4); ch 4/5 only carry a start-up transient. Max buffer 2048 frames (~42 ms) | `default` (multi in `/etc/asound.conf`), 6 ch @ 48 kHz: PDM mics 0–3 from `hw:0,1` ch 0/2/4/6, TDM amplifier loopback 4–5 from `hw:0,0` | `hw:0,2`, 8 ch @ 48 kHz, S32_LE with right-justified 24-bit samples (`capture_shift=8`): mics 0–3, speaker refs 6/7; ch 4/5 carry a large DC offset and are not fed to the VQE |
+| Playback | `speakers` | `speakers` | `default` (softvol `Master` over `dmix_spk_plug` → `hw:0,0`); no `speakers` PCM | `mini` (dmix over `hw:0,0`, see Volume) |
+| VQE preset | `cucumber`: 4 mics, 4 spk, chunk 3072 | `plum`: 2 mics, 1 spk, 48 kHz, chunk 1536 → 512 @ 16 kHz; outputs 1, 2, 4, 6, 8, 9 | `yandexmini_2`: 4 mics, 2 spk, 48 kHz | `yandexmini`: 4 mics, 2 spk, 48 kHz, chunk 768 → 256 @ 16 kHz; 32-bit capture |
+| Spotters | alisa: types 0, 3, 4; command: type 0 | alisa/yandex: types 0 and 4 (1 ch each); command: type 0. Models in `spotter_models/` are plum-tuned | same tarball as the Lite 2 in `spotter_models/`, not yet measured | same firmware models; no TALK key |
+| Ring | `/dev/fb0` 24×1 + `/dev/fb1` logo 6×1, BGR | `/dev/fb0` "YNDX LED ring" 3×1, 24 bpp, BGR; trigger `led_ring_fb`; sysfs `plum:<color>:ring1..3`; no logo | no framebuffer or trigger: sysfs `mini2:<color>:ring1..6` (IS31FL3236 on i2c 1-003c); no logo | six RGB LEDs behind an IS31FL3236-compatible controller at `/dev/i2c-0@0x3c`; no framebuffer, no logo |
+| Clock | `cucumber:white:clock-<seg><digit>`, dimming via chip `current`; no centre dot | `plum:white:clock<SEG><pos>`: A–G × 0–3, colon `DH`+`DL`; `H0..3`, `DEGREE` kept dark (`quasar.cfg` `/leds/clock`); `DM` = centre dot at g height (`Model::clock_center`, extra LED 35 of the stock patterns [inference: position not confirmed by eye]); dimming via per-LED `brightness` 0–255 | wired as `mini2:white:clock<A..G><1..4>`, colon `PLUS1`+`PLUS2`, `DEGREE`/`MINUS` dark (`quasar.cfg`), but the second IS31FL3236 (i2c 0-003f) fails to probe on firmware 0.369: the clock finds no segment (`Model::has_clock` false); its entities exist only when `pulsar_clock::panel_present` finds one at start | none (`clock_dir=""`; all clock entities hidden) |
+| Keys | `awinic_sar`: 582 action, 115/114 volume | `aw9610x`: same codes | `sar0_pad0` (aw9610x SAR, event0): same codes | `adc_keypad`: 115/114 volume; no action key (`action_key=0`) |
+| Mic mute | input `mute`: `SW_MUTE_DEVICE` | input `gpio-keys`: `SW_MUTE_DEVICE` (+ `KEY_MUTE`) | no evdev switch: GPIOZ_3 (global 414, pull-up), active low, polled every 100 ms as maind does (`Model::mute_gpio`; exported if needed, no `direction` / `edge` write, used only when already an input) | none (`mute_input=""`); the software switch remains |
+| Light sensor | `ltr308als01` (iio) | same | `ltr308als01` on the #38 station (firmware 0.372; `in_intensity_input` = raw / 120, no `/etc/light-sensor.conf`), absent on the #9 station (0.369) [inference: firmware, board revision or device tree; not known which]; `Model::has_lux` false: the Illuminance entity exists only when the sensor opens at start | none |
+| Volume | "Master Playback Volume" softvol on `speakers` | same names; `speakers` comes from `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) | same control on `default`; `set_volume.sh` is `amixer set 'Master' <percent>%`, so the curve is linear in percent (`volume_min_step` false) | software: no usable ALSA master; controller applies the stock dB curve (`volume::software_gain`) to both player channels and Sendspin; sink is `mini` (dmix over `hw:0,0`, `/data/pulsar/asound.conf`) |
+| Output gates | none | none | — | `/sys/class/tdm_state/amp_table` + `aux_amp` = 1 and ALSA `SPK mute` = 1 before playback (opening the PCM may reset them; the player re-applies them before GStreamer's PLAYING, the ANNOUNCE writer before it opens the PCM). The driver clears `amp_table` when the PCM closes: idle is gated off (`aux_amp` stays 1), so the sinks only re-enable before a start |
+| alsa-lib | 1.2.10, versioned | 1.2.1.2, unversioned | 1.2.1.2, unversioned | versioned; loaded from `/system/vendor/quasar/libs` by `supervise.sh` |
+| Earcons | `common/spotter_*.mp3`, `common/volume_sound.mp3`, `timer.wav`, `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` | `common/spotter_start.opus`, `common/spotter_cancel.opus`, `common/volume_sound.opus` [inference: file not confirmed on the station], `common/timer.opus`, `ru-RU/playback_error.opus` (no MP3 decoder in this GStreamer) | `ru-RU/playback_error.mp3` |
+| Boot | `S97quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh` | `S99quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh`; `q stop` available | same as the Lite 2 | `S99onboot.sh` → stock stack; then `S99zpulsar` → `boot.sh` |
+| Zigbee | Telink B91 on `/dev/ttyS2`, reset/boot via `zb_control` (see Zigbee radio) | none | none (no `ttyS2`, no `zb_control`) | none |
 Lite 2 capture: reading and VQE on one thread overrun the 42 ms device buffer, so capture has its
 own thread with a FIFO. A few overruns an hour remain (`capture: Broken pipe, recovering`); they
 are expected.
@@ -401,7 +412,8 @@ port on the station.
   channels in one `select!`. Blocking and real-time work (capture, VQE, GLib, the ANNOUNCE output
   writer and its per-url reader, the Sendspin sink, the radio upload) runs on named `std::thread`s
   that send events through channels. `unsafe` and
-  libc calls live only in `sys.rs` / `ffi.rs` / `gst.rs` and the crash handler. Details, the
+  libc calls live only in `sys.rs` / `ffi.rs` / `gst.rs`, `pulsar-core`'s `getrandom` compat shim
+  and the crash handler. Details, the
   sendspin-cpp link recipe and per-service notes: `docs/architecture.md`.
 - Keep the ESPHome API server pending until a valid `HelloRequest`; probes must not displace HA.
 - State persisted in `state.conf` (key=value); add new keys with safe defaults. The binary kept as
@@ -460,11 +472,16 @@ port on the station.
   (maind's SimpleVolumeTonePlayer: every change except its sources "other" and "smart_tts") when
   the level (in whole percent) or mute changed, outside LISTENING / SPEAKING and arbitration and
   never over an announcement, the timer ring or a closing earcon (`logic::want_volume_click`); HA
-  and Sendspin changes are silent; music is not ducked under it.
+  and Sendspin changes are silent; music is not ducked under it. Software-volume models (the
+  Mini) get their master gain from the same 60 dB stock curve, linear in dB
+  (`pulsar_core::volume::software_gain`): level 1 ≈ -48.5 dB, one 5 % step = 2.55 dB; HA and the
+  Sendspin sink use it too.
 - Wake arbitration (switch "Nearest station answers", `state.conf` `nearest_answers=`, default 1):
   the front-end's processing thread (`wake_level_db` in `pulsar-audio/src/frontend.rs`) reports
-  the wake level as the mean of the 8 loudest of the last 47 `VQE_OMNI` frames (post-AEC, no AGC;
-  `VQE_OMNI_WITH_GAIN` loses the distance), rounded to 0.1 dB so both sides compare the same
+  the wake level as the mean of the loudest 8 × 32 ms of the last 1.5 s of `VQE_OMNI` frames
+  (post-AEC, no AGC; `VQE_OMNI_WITH_GAIN` loses the distance; 8 frames on the 32 ms models, 16 on
+  the Mini's 16 ms frames),
+  rounded to 0.1 dB so both sides compare the same
   numbers. A claim is one ASCII datagram `pulsar-wake/1 <name> <wake> <busy> <level>`, sent 3×
   40 ms apart to `255.255.255.255:6054`; the decision comes 250 ms later over claims of the same
   wake word received up to 500 ms before ours. A claim older than the 250 ms window wins outright

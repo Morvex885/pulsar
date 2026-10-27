@@ -254,7 +254,8 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
                 }
                 Some(FrontendEvent::Audio(pcm)) => {
                     audio += 1;
-                    audio_samples_ok &= pcm.len() == 512;
+                    // 512 samples (32 ms) on the Midi and Lite 2, 256 (16 ms) on the Mini.
+                    audio_samples_ok &= matches!(pcm.len(), 256 | 512);
                 }
                 Some(FrontendEvent::Music(f)) => {
                     music += 1;
@@ -308,7 +309,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
         if audio_samples_ok {
             ""
         } else {
-            " (not 512 samples each)"
+            " (not 256/512 samples each)"
         },
         music,
         s.captured_frames,

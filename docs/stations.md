@@ -3,11 +3,11 @@
 Правила для агентов и людей, которые тестируют pulsar на живых станциях. Помощник
 `tools/station.sh` их реализует.
 
-- **Адреса.** `PULSAR_MIDI` и `PULSAR_LITE2` в окружении — ssh-назначение (`root@<ip>` или алиас
-  из `~/.ssh/config`). В репозиторий они не попадают. Если переменной нет — статус
-  `заблокирован: нет PULSAR_<X>`.
+- **Адреса.** `PULSAR_MIDI`, `PULSAR_LITE2` и `PULSAR_MINI` в окружении — ssh-назначение
+  (`root@<ip>` или алиас из `~/.ssh/config`). В репозиторий они не попадают. Если переменной нет —
+  статус `заблокирован: нет PULSAR_<X>`.
 - **Lock.** Всё, что меняет состояние станции, — только под своим lock. Команда:
-  `PULSAR_TAG=<метка> tools/station.sh <midi|lite2> lock <минуты>`. Метка — произвольное слово без
+  `PULSAR_TAG=<метка> tools/station.sh <midi|lite2|mini> lock <минуты>`. Метка — произвольное слово без
   пробелов, по которому видно, чья это работа (ветка, задача).
   - Срок заявляется честно, 1–180 минут; живая подмена — минимум 30.
   - Каждая меняющая команда скрипта проверяет, что lock принадлежит `PULSAR_TAG`.
@@ -36,22 +36,26 @@
   `test-start` → … → `test-stop` → `start`.
   - `test-start` собирает `/tmp/pulsar-test/state.conf` из `/data/pulsar/state.conf`: удаляет
     строки `volume=`, `volume2=`, `volume_curve=`, `muted=`, `auto_update=`, `update_attempt=` и
-    дописывает `volume2=0.2`, `muted=0`, `auto_update=0`.
+    дописывает `volume2=0.2`, `muted=0`, `auto_update=0`. На Мини та же кривая в дБ, что у
+    остальных (`volume2=0.2` ≈ raw 82 softvol), поэтому отдельного уровня ей не нужно.
   - `api_key` не копируется (plaintext API), копии `zigbee-*.ybl` кладутся рядом.
   - Запуск: `PULSAR_PORT_OFFSET=10000` через `nohup`, лог в `/tmp/pulsar-test/log`.
   - Лог тестового экземпляра: `test-log [N]` (последние N строк `/tmp/pulsar-test/log`, по
     умолчанию 50); лог демона — `log [N]`.
   - Клиент — `tools/esphome_check.py --host <ip> --port 16053`.
-  - Перед сценариями со звуком проверить `amixer -c0 cget name='Master Playback Volume'`:
-    raw ≤ 82.
+  - Перед сценариями со звуком на Миди/Лайт 2 проверить
+    `amixer -c0 cget name='Master Playback Volume'`: raw ≤ 82. У Мини такого контроля нет:
+    тестовый экземпляр получает `volume2=0.2` (та же кривая, ≈ raw 82), а на звук проверяйте API
+    (`volume`).
 - **Убитый во время звука процесс.** Тест, который убивает играющий процесс
   (`kill -SEGV`/`kill -9` тестового экземпляра или probe во время звонка, TTS, музыки), оставляет
   устаревший dmix-lock прошивочной alsa-lib (заголовок `satellite/deploy/supervise.sh`): после
   него станция молчит до перезагрузки, перезапуск демона не помогает. После такого теста —
   обязательно очистка: `test-stop`, `stop` и `cleanup` снимают lock (печатают
   `removed stale ALSA dmix lock (…)`); `start` тоже: `supervise.sh` снимает lock перед каждым
-  запуском демона. Вручную — `ipcrm -M 0x400 -M 0x401 -S 0x400`, только когда в `ipcs -m` у
-  ключей 0x400/0x401 nattch 0.
+  запуском демона. У Миди/Лайт 2 вручную — `ipcrm -M 0x400 -M 0x401 -S 0x400`, только когда в
+  `ipcs -m` у ключей 0x400/0x401 nattch 0. У Мини dmix использует 0x8e5/0x8e6; `station.sh`
+  очищает оба набора.
 - `push` и `swap` проверяют передачу: файл льётся в `*.part`, сверяются размер и sha256 (без
   `sha256sum` на станции — только размер, с предупреждением); при расхождении `.part` удаляется,
   код возврата 1.
@@ -73,7 +77,9 @@
   `Master Playback Volume`, `amixer -c0 cget/cset name='Master Playback Volume'`). Probe-утилиты
   выставляют громкость сами и возвращают исходную. Тестовый экземпляр получает её из
   подготовленного `state.conf`. Живой демон после `start` берёт громкость владельца из
-  `/data/pulsar/state.conf`.
+  `/data/pulsar/state.conf`. У Мини аппаратной шкалы нет: громкость там программная, по той же
+  кривой в дБ (0.2 ≈ raw 82 softvol остальных моделей); выше неё без разрешения владельца не
+  поднимать.
 - **Радио Zigbee.**
   - Читать — только сырым скриптом `tools/deconz_read.py`: команды 0x0D, 0x07, 0x0A. Подключение
     вытесняет текущего deCONZ-клиента (Z2M/ZHA отключаются), поэтому скрипт запускается только
@@ -82,14 +88,14 @@
     network state запрещены.
   - Прошивать — только образ текущей роли из `state.conf`: `zigbee-coordinator.ybl` для
     `pulsar-coordinator`, `zigbee-router.ybl` для `router`. При роли `off` не прошивать.
-- **`/tmp` — tmpfs** (Lite 2: 237 МБ RAM). Утилиты собираются уже стрипнутыми, в конце сессии —
-  `cleanup`.
+- **`/tmp` — tmpfs** (Lite 2: 237 МБ RAM, Мини: ~118 МБ). Утилиты собираются уже стрипнутыми, в
+  конце сессии — `cleanup`.
 
 ## station.sh
 
 `tools/station.sh` (POSIX sh; на станции выполняется busybox ash) реализует эти правила: lock,
 `stop`/`start`, `push`, тестовый экземпляр, живая подмена, очистка dmix-lock. Вызов:
-`PULSAR_TAG=<метка> tools/station.sh <midi|lite2> <команда>`. Адреса станций берутся из
-`PULSAR_MIDI`/`PULSAR_LITE2` и в репозиторий не попадают. Python-утилиты в `tools/`
+`PULSAR_TAG=<метка> tools/station.sh <midi|lite2|mini> <команда>`. Адреса станций берутся из
+`PULSAR_MIDI`/`PULSAR_LITE2`/`PULSAR_MINI` и в репозиторий не попадают. Python-утилиты в `tools/`
 (`esphome_check.py`, `sendspin_server.py`, `deconz_read.py`) ставят зависимости из
 `tools/requirements.txt`.

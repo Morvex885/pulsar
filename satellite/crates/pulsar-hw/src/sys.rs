@@ -69,6 +69,69 @@ impl Framebuffer {
     }
 }
 
+/// `struct i2c_msg` of linux/i2c-dev.h. `I2C_RDWR` is the same number on every Linux ABI.
+#[repr(C)]
+struct I2cMsg {
+    addr: u16,
+    flags: u16,
+    len: u16,
+    buf: *mut u8,
+}
+
+#[repr(C)]
+struct I2cRdwrIoctlData {
+    msgs: *mut I2cMsg,
+    nmsgs: u32,
+}
+
+const I2C_RDWR: libc::Ioctl = 0x0707;
+
+/// An I2C adapter (/dev/i2c-N) used for the Mini's IS31FL3236-compatible LED controller.
+pub struct I2c(File);
+
+impl I2c {
+    /// Opens an adapter node read-write.
+    pub fn open(path: &str) -> io::Result<Self> {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_CLOEXEC)
+            .open(path)
+            .map(Self)
+    }
+
+    /// One register write: `[reg, data...]` in a single I2C message to `addr` (max 31 data bytes,
+    /// the controller's register window).
+    pub fn write_register(&self, addr: u16, reg: u8, data: &[u8]) -> io::Result<()> {
+        if data.len() > 31 {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        let mut buf = [0u8; 32];
+        buf[0] = reg;
+        buf[1..=data.len()].copy_from_slice(data);
+        let mut msg = I2cMsg {
+            addr,
+            flags: 0,
+            len: u16::try_from(data.len() + 1).map_err(|_| io::ErrorKind::InvalidInput)?,
+            buf: buf.as_mut_ptr(),
+        };
+        let mut xfer = I2cRdwrIoctlData {
+            msgs: &mut msg,
+            nmsgs: 1,
+        };
+        // SAFETY: `self.0` is an i2c-dev node (I2c is only created here), for which I2C_RDWR
+        // reads one i2c_rdwr_ioctl_data and the i2c_msg it points to; `buf` stays alive and
+        // writable for the duration of the ioctl.
+        let rc =
+            unsafe { libc::ioctl(self.0.as_raw_fd(), I2C_RDWR, std::ptr::from_mut(&mut xfer)) };
+        if rc < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// The kernel's `struct input_event` for this userland: `__kernel_ulong_t` seconds and
 /// microseconds, then type, code, value.
 #[repr(C)]

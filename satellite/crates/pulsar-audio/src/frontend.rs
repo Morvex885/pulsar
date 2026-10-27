@@ -26,11 +26,14 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::engine::{Engine, Stage, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
 use crate::spectrum::SpectrumAnalyzer;
 
-/// Wake word level window: 1.5 s of 32 ms VQE frames (512 samples @ 16 kHz on both models),
-/// long enough to cover the phrase when the spotter confirms; the loudest frames are the phrase
-/// itself.
-const LEVEL_CHUNKS: usize = 47;
-const LEVEL_TOP: usize = 8;
+/// Wake word level window: 1.5 s of VQE frames, long enough to cover the phrase when the spotter
+/// confirms; the loudest frames are the phrase itself. A duration, not a chunk count: 47 frames on
+/// the 32 ms models (Midi, Lite 2), 94 on the Mini's 16 ms ones, so the arbiter compares the same
+/// window on every model.
+const LEVEL_SECS: f32 = 1.5;
+/// The loudest 8 × 32 ms of the window count, i.e. 8 frames on the 32 ms models and 16 on the
+/// Mini: the same amount of audio, so the mean is comparable too.
+const LEVEL_TOP_PER_32MS: usize = 8;
 /// Pre-roll ring: 1.024 s of VQE chunks, more than any wake word's confirmation delay.
 const PREROLL_CHUNKS: usize = 32;
 /// End of speech for the "wake timing" log: the newest chunk within 20 dB (power) of the
@@ -61,10 +64,10 @@ pub enum FrontendEvent {
     Command {
         word: String,
     },
-    /// 16 kHz mono, one VQE chunk (512 samples), while streaming is on or a `Wake` is not yet
-    /// handled.
+    /// 16 kHz mono, one VQE chunk (512 samples, or 256 on the Mini), while streaming is on or a
+    /// `Wake` is not yet handled.
     Audio(Vec<i16>),
-    /// One per VQE chunk (32 ms) while music analysis is on.
+    /// One per VQE chunk (32 ms, or 16 ms on the Mini) while music analysis is on.
     Music(MusicFrame),
 }
 
@@ -377,9 +380,12 @@ impl Fifo {
 
 fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
     let nch = model.capture_channels as usize;
+    let bits = model.capture_bits;
     let mut pcm: Option<Pcm> = None;
     let mut hw_period = period;
-    let mut input = vec![0i16; period * nch];
+    let mut input16 = (bits == 16).then(|| vec![0i16; period * nch]);
+    let mut input32 = (bits == 32).then(|| vec![0i32; period * nch]);
+    let mut converted = (bits == 32).then(|| vec![0i16; period * nch]);
     while shared.running() {
         let Some(p) = pcm.as_mut() else {
             match open_capture(model, period) {
@@ -391,7 +397,11 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
             }
             continue;
         };
-        let mut r = p.readi(&mut input, hw_period);
+        let mut r = match (&mut input16, &mut input32) {
+            (Some(input), _) => p.readi(input, hw_period),
+            (_, Some(input)) => p.readi_s32(input, hw_period),
+            _ => unreachable!(),
+        };
         if r == Err(-libc::EAGAIN) {
             match p.wait(READ_WAIT_MS) {
                 // Ready, or timeout (re-checks running).
@@ -410,7 +420,18 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
                 continue;
             }
         };
-        let block = &input[..n * nch];
+        let block = if let Some(out) = &mut converted {
+            // S32_LE carries a right-justified 24-bit sample on the Mini; shifting out the low
+            // 8 bits and keeping the sign extension reduces it to the VQE's 16-bit input.
+            let input = input32.as_ref().expect("S32 input");
+            for (dst, &src) in out.iter_mut().zip(&input[..n * nch]) {
+                *dst = (src >> model.capture_shift).clamp(i32::from(i16::MIN), i32::from(i16::MAX))
+                    as i16;
+            }
+            &out[..n * nch]
+        } else {
+            &input16.as_ref().expect("S16 input")[..n * nch]
+        };
         shared.captured_frames.fetch_add(n as u64, Relaxed);
         if shared.tap_on.load(Relaxed)
             && let Some(tap) = lock(&shared.tap).as_ref()
@@ -463,12 +484,19 @@ pub(crate) fn hw_outcome(t: &HwTrace, rate: u32) -> Result<(u64, u64), HwFail> {
     }
 }
 
-/// Opens the model's capture PCM: S16, its channels, exactly its rate (a silent rate mismatch
-/// would feed the VQE and spotters wrongly timed audio), period = one VQE chunk, buffer = 8.
-/// The period may differ (the FIFO decouples ALSA periods from VQE chunks). Returns the PCM and
-/// the frames to read at once.
+/// Opens the model's capture PCM: its sample width (S16 or S32), channels, exactly its rate (a
+/// silent rate mismatch would feed the VQE and spotters wrongly timed audio), period = one VQE
+/// chunk, buffer = 8. The period may differ (the FIFO decouples ALSA periods from VQE chunks).
+/// Returns the PCM and the frames to read at once.
 fn open_capture(model: &Model, period: usize) -> Option<(Pcm, usize)> {
     let dev = model.capture_pcm;
+    if model.capture_bits != 16 && model.capture_bits != 32 {
+        error!(
+            "capture {dev}: unsupported sample width {} bits",
+            model.capture_bits
+        );
+        return None;
+    }
     // Non-blocking: reads never wait inside ALSA, so a stop never hangs in snd_pcm_readi.
     let mut pcm = match Pcm::open(dev, Stream::Capture, true) {
         Ok(p) => p,
@@ -478,7 +506,11 @@ fn open_capture(model: &Model, period: usize) -> Option<(Pcm, usize)> {
         }
     };
     let t = pcm.set_hw_params_traced(&HwRequest {
-        format: Format::S16Le,
+        format: if model.capture_bits == 32 {
+            Format::S32Le
+        } else {
+            Format::S16Le
+        },
         channels: model.capture_channels,
         rate: model.capture_rate,
         rate_exact: false,
@@ -488,8 +520,8 @@ fn open_capture(model: &Model, period: usize) -> Option<(Pcm, usize)> {
     match hw_outcome(&t, model.capture_rate) {
         Ok((per, buf)) => {
             info!(
-                "capture {dev}: {} Hz, {} ch, period {per}, buffer {buf}",
-                t.near.rate, model.capture_channels
+                "capture {dev}: {} Hz, {} ch, {} bits, period {per}, buffer {buf}",
+                t.near.rate, model.capture_channels, model.capture_bits
             );
             let per = usize::try_from(per).unwrap_or(usize::MAX);
             Some((pcm, per.min(period)))
@@ -526,17 +558,27 @@ pub(crate) fn deinterleave(
     }
 }
 
-/// Mean of the 8 loudest of the last 47 frames (mean squares), in dBFS clamped to -100..0 and
-/// rounded to 0.1 dB: stations compare levels received as "%.1f" text, so ours must be the same
-/// number the peers see, or ties could resolve differently on each side.
-pub(crate) fn wake_level_db(h: &[f32; LEVEL_CHUNKS]) -> f32 {
-    let mut s = *h;
+/// Level window and top count for a VQE chunk of `period` frames at `rate`: 1.5 s of frames and
+/// the loudest 8 × 32 ms of them (16 of the Mini's 16 ms frames).
+fn level_window(rate: u32, period: usize) -> (usize, usize) {
+    let chunk_secs = period as f32 / rate.max(1) as f32;
+    let chunks = (LEVEL_SECS / chunk_secs).round().max(1.0) as usize;
+    let top = ((LEVEL_TOP_PER_32MS as f32 * 0.032 / chunk_secs).round() as usize).max(1);
+    (chunks, top.min(chunks))
+}
+
+/// Mean of the `top` loudest frames of the level window (mean squares), in dBFS clamped to
+/// -100..0 and rounded to 0.1 dB: stations compare levels received as "%.1f" text, so ours must be
+/// the same number the peers see, or ties could resolve differently on each side.
+pub(crate) fn wake_level_db(h: &[f32], top: usize) -> f32 {
+    let mut s = h.to_vec();
     s.sort_unstable_by(|a, b| b.total_cmp(a));
+    let top = top.clamp(1, s.len().max(1));
     let mut sum = 0.0f32;
-    for &v in &s[..LEVEL_TOP] {
+    for &v in &s[..top.min(s.len())] {
         sum += v;
     }
-    let db = (10.0 * (sum / LEVEL_TOP as f32 + 1e-10).log10()).clamp(-100.0, 0.0);
+    let db = (10.0 * (sum / top as f32 + 1e-10).log10()).clamp(-100.0, 0.0);
     (db * 10.0).round() / 10.0
 }
 
@@ -609,13 +651,14 @@ impl PrerollRing {
 
 /// Chunks from the newest entry of the level window back to the last one within
 /// `SPEECH_END_RATIO` of its loudest (0 = the newest itself); None for a silent window.
-fn speech_end_chunks(h: &[f32; LEVEL_CHUNKS], newest: usize) -> Option<usize> {
+fn speech_end_chunks(h: &[f32], newest: usize) -> Option<usize> {
     let peak = h.iter().copied().fold(0.0f32, f32::max);
-    if peak <= 0.0 {
+    if peak <= 0.0 || h.is_empty() {
         return None;
     }
     let floor = SPEECH_END_RATIO * peak;
-    (0..LEVEL_CHUNKS).find(|&k| h[(newest + LEVEL_CHUNKS - k) % LEVEL_CHUNKS] >= floor)
+    let len = h.len();
+    (0..len).find(|&k| h[(newest + len - k) % len] >= floor)
 }
 
 /// Pre-roll length in chunks for `rule`, given the chunks since the 1st-stage hit.
@@ -656,8 +699,10 @@ fn processing(
     let mut input = vec![0i16; period * nch];
     let mut mics = vec![0f32; period * mic_ch.len()];
     let mut spk = vec![0f32; period * nspk];
-    // Mean square per VQE frame.
-    let mut level_hist = [0f32; LEVEL_CHUNKS];
+    // Mean square per VQE frame; the window is a duration so every model reports a level over
+    // the same 1.5 s (see LEVEL_SECS).
+    let (level_chunks, level_top) = level_window(model.capture_rate, period);
+    let mut level_hist = vec![0f32; level_chunks];
     let mut level_pos = 0;
     let mut ana = SpectrumAnalyzer::new(model.capture_rate, period);
     if !ana.ok() {
@@ -713,7 +758,7 @@ fn processing(
             && !d.is_empty()
         {
             level_hist[level_pos] = mean_square(d);
-            level_pos = (level_pos + 1) % LEVEL_CHUNKS;
+            level_pos = (level_pos + 1) % level_chunks;
         }
 
         // Every chunk goes into the ring, so a pre-roll never spans a gap. A `Wake` not yet
@@ -732,7 +777,7 @@ fn processing(
         }
 
         if shared.detect.load(Relaxed) {
-            first_stage_age = first_stage_age.map(|a| a + 1).filter(|&a| a < LEVEL_CHUNKS);
+            first_stage_age = first_stage_age.map(|a| a + 1).filter(|&a| a < level_chunks);
             let spotted = eng.feed_wake();
             match spotted.stage {
                 Stage::FirstStageHit => first_stage_age = Some(0),
@@ -740,8 +785,8 @@ fn processing(
                 Stage::None => {}
             }
             if !spotted.phrases.is_empty() {
-                let level_db = wake_level_db(&level_hist);
-                let newest = (level_pos + LEVEL_CHUNKS - 1) % LEVEL_CHUNKS;
+                let level_db = wake_level_db(&level_hist, level_top);
+                let newest = (level_pos + level_chunks - 1) % level_chunks;
                 let speech_end = speech_end_chunks(&level_hist, newest);
                 let rule = shared
                     .preroll
@@ -786,26 +831,47 @@ mod tests {
 
     #[test]
     fn level_is_the_mean_of_the_8_loudest_rounded_to_a_tenth() {
-        assert_eq!(wake_level_db(&[0.0; LEVEL_CHUNKS]), -100.0);
+        const CHUNKS: usize = 47;
+        const TOP: usize = 8;
+        assert_eq!(wake_level_db(&[0.0; CHUNKS], TOP), -100.0);
         // 8 frames at 0.01 (-20 dB) among quiet ones, anywhere in the ring.
-        let mut h = [1e-6f32; LEVEL_CHUNKS];
+        let mut h = [1e-6f32; CHUNKS];
         for i in [0, 5, 13, 20, 30, 40, 45, 46] {
             h[i] = 0.01;
         }
-        assert_eq!(wake_level_db(&h), -20.0);
+        assert_eq!(wake_level_db(&h, TOP), -20.0);
         // Only the top 8 count: a ninth loud frame changes nothing, a louder one does.
         h[1] = 0.01;
-        assert_eq!(wake_level_db(&h), -20.0);
+        assert_eq!(wake_level_db(&h, TOP), -20.0);
         h[2] = 0.09;
         // (0.09 + 7 * 0.01) / 8 = 0.02 -> -16.99 dB
-        assert_eq!(wake_level_db(&h), -17.0);
+        assert_eq!(wake_level_db(&h, TOP), -17.0);
         // Rounded half away from zero to 0.1 dB: -32.46 -> -32.5, -32.44 -> -32.4.
-        let at = |db: f64| [10f64.powf(db / 10.0) as f32; LEVEL_CHUNKS];
-        assert_eq!(wake_level_db(&at(-32.46)), -32.5);
-        assert_eq!(wake_level_db(&at(-32.44)), -32.4);
+        let at = |db: f64| [10f64.powf(db / 10.0) as f32; CHUNKS];
+        assert_eq!(wake_level_db(&at(-32.46), TOP), -32.5);
+        assert_eq!(wake_level_db(&at(-32.44), TOP), -32.4);
         // Clamped to -100..0.
-        assert_eq!(wake_level_db(&at(3.0)), 0.0);
-        assert_eq!(wake_level_db(&at(-120.0)), -100.0);
+        assert_eq!(wake_level_db(&at(3.0), TOP), 0.0);
+        assert_eq!(wake_level_db(&at(-120.0), TOP), -100.0);
+    }
+
+    #[test]
+    fn level_window_is_a_duration_not_a_chunk_count() {
+        // 32 ms models: 47 frames, top 8. The Mini's 16 ms frames: 1.5 s = 94 frames, top 16 --
+        // the same duration of the loudest audio, so a phrase at the same distance gives the
+        // same level on every model.
+        assert_eq!(level_window(48000, 1536), (47, 8));
+        assert_eq!(level_window(96000, 3072), (47, 8));
+        assert_eq!(level_window(48000, 768), (94, 16));
+        let mut h32 = [1e-6f32; 47];
+        for v in h32.iter_mut().take(8) {
+            *v = 0.01;
+        }
+        let mut h16 = [1e-6f32; 94];
+        for v in h16.iter_mut().take(16) {
+            *v = 0.01;
+        }
+        assert_eq!(wake_level_db(&h32, 8), wake_level_db(&h16, 16));
     }
 
     #[test]
@@ -834,7 +900,8 @@ mod tests {
 
     #[test]
     fn speech_end_is_the_newest_chunk_within_20_db_of_the_peak() {
-        let mut h = [0f32; LEVEL_CHUNKS];
+        const CHUNKS: usize = 47;
+        let mut h = [0f32; CHUNKS];
         assert_eq!(speech_end_chunks(&h, 10), None);
         // Word in chunks 3..=8, newest = 12: 4 quiet chunks after it.
         for v in &mut h[3..=8] {
@@ -846,7 +913,7 @@ mod tests {
         h[9] = 0.01;
         assert_eq!(speech_end_chunks(&h, 12), Some(3));
         // The window is a ring: newest = 1 reaches back over the end to the word.
-        assert_eq!(speech_end_chunks(&h, 1), Some(LEVEL_CHUNKS - 9 + 1));
+        assert_eq!(speech_end_chunks(&h, 1), Some(CHUNKS - 9 + 1));
         assert_eq!(speech_end_chunks(&h, 9), Some(0));
     }
 

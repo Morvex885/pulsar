@@ -223,6 +223,11 @@ impl Pcm {
         self.raw.readi(buf, frames, self.frame_bytes)
     }
 
+    /// `buf` must hold `frames` frames of the configured S32 format (else -EINVAL).
+    pub fn readi_s32(&mut self, buf: &mut [i32], frames: usize) -> Result<usize, i32> {
+        self.raw.readi_s32(buf, frames, self.frame_bytes)
+    }
+
     /// `buf` must hold `frames` frames of the configured format (else -EINVAL).
     pub fn writei(&mut self, buf: &[u8], frames: usize) -> Result<usize, i32> {
         self.raw.writei(buf, frames, self.frame_bytes)
@@ -244,6 +249,29 @@ impl Pcm {
 
     pub fn recover(&mut self, err: i32, silent: bool) -> Result<(), i32> {
         ok(self.raw.recover(err, silent))
+    }
+}
+
+/// Writes an integer mixer element on card 0, e.g. the Mini's "SPK mute" switch (1 = on).
+/// Opens the control for every call, as the stock firmware does before each playback start.
+pub fn set_mixer_integer(name: &str, values: &[i64]) -> Result<(), i32> {
+    let ctl = Ctl::open("hw:0")?;
+    ctl.write_integers(name, values)
+}
+
+/// Opens the model's output gates right before a playback start, as the stock daemon does: the
+/// sysfs amplifier switches and the ALSA "SPK mute" switch. Both sinks (GStreamer and Sendspin)
+/// share it; opening the PCM may reset the gates, so this runs on every start.
+pub fn enable_output(amp_enable_paths: &[&str], spk_mute_ctl: &str) {
+    for path in amp_enable_paths {
+        if !pulsar_core::sysfs::write_file(path, "1\n") {
+            log::warn!("amp: cannot write '{path}'");
+        }
+    }
+    if !spk_mute_ctl.is_empty()
+        && let Err(e) = set_mixer_integer(spk_mute_ctl, &[1])
+    {
+        log::warn!("spk: cannot unmute '{spk_mute_ctl}': {}", strerror(e));
     }
 }
 

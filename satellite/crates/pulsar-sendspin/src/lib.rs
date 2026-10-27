@@ -48,9 +48,15 @@ pub struct SendspinConfig {
     pub mac: String,
     /// Identity / pairing persistence directory (created 0700 if missing, not recursively).
     pub state_dir: PathBuf,
-    /// ALSA PCM of the player sink (`Model::playback_pcm`), mixed with the GStreamer channels by
-    /// its dmix.
-    pub playback_pcm: &'static str,
+    /// GStreamer / ALSA playback sink (the Mini's dmix is "mini", the others "speakers").
+    pub pcm: &'static str,
+    /// ALSA switch unmuted before the sink opens; empty: none.
+    pub spk_mute_ctl: &'static str,
+    /// Sysfs amplifier gates set to 1 before the sink opens; empty: none.
+    pub amp_enable_paths: &'static [&'static str],
+    /// No hardware master: the sink starts at the controller's volume instead of 1.0, matching
+    /// the channel gains the controller applies on the same models.
+    pub software_volume: bool,
     pub port: u16,
 }
 
@@ -134,7 +140,10 @@ mod tests {
             software_version: String::new(),
             mac: String::new(),
             state_dir: PathBuf::from("/nonexistent"),
-            playback_pcm: "speakers",
+            pcm: "speakers",
+            spk_mute_ctl: "",
+            amp_enable_paths: &[],
+            software_volume: false,
             port: 0,
         };
         match spawn(cfg, 0.2, false) {

@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
 use pulsar_alsa::{Format, HwRequest, Pcm, Stream};
+use pulsar_core::model::Model;
 
 /// The format playsink converts to (capsfilter before the fdsink) and the PCM is opened with.
 pub(crate) const CAPS: &str = "audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=2";
@@ -117,12 +118,17 @@ pub(crate) struct Output {
 }
 
 impl Output {
-    /// Starts the writer thread on PCM `device`; `notify` runs on that thread.
-    pub(crate) fn spawn(device: &str, notify: Box<dyn Fn(OutEvent) + Send>) -> Option<Output> {
+    /// Starts the writer thread on the model's playback PCM; `notify` runs on that thread.
+    pub(crate) fn spawn(
+        model: &'static Model,
+        notify: Box<dyn Fn(OutEvent) + Send>,
+    ) -> Option<Output> {
         let (cmds, rx) = mpsc::channel();
         let gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let w = Writer {
-            device: device.to_owned(),
+            device: model.playback_pcm.to_owned(),
+            amp_enable_paths: model.amp_enable_paths,
+            spk_mute_ctl: model.spk_mute_ctl,
             notify,
             gain: Arc::clone(&gain),
             scratch: Vec::new(),
@@ -243,6 +249,9 @@ enum Phase {
 
 struct Writer {
     device: String,
+    /// The Mini's amplifier switches and "SPK mute" (see `pulsar_alsa::enable_output`).
+    amp_enable_paths: &'static [&'static str],
+    spk_mute_ctl: &'static str,
     notify: Box<dyn Fn(OutEvent) + Send>,
     gain: Arc<AtomicU32>,
     /// Gain-scaled PCM on its way to the device.
@@ -517,6 +526,8 @@ impl Writer {
     }
 
     fn open(&mut self) -> Result<Pcm, (&'static str, i32)> {
+        // Opening the PCM may reset the gates; the stock daemon sets them right before playback.
+        pulsar_alsa::enable_output(self.amp_enable_paths, self.spk_mute_ctl);
         let mut pcm = Pcm::open(&self.device, Stream::Playback, false).map_err(|e| ("open", e))?;
         let hw = pcm
             .set_hw_params(&HwRequest {

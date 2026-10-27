@@ -18,5 +18,8 @@ mod test_server;
 mod updater;
 mod version;
 
+/// GitHub repository the daemon checks for releases.
+pub const UPDATE_REPO: &str = "Morvex885/pulsar";
+
 pub use updater::{Release, UpdateEvent, UpdaterHandle, arch, spawn};
 pub use version::release_newer;

@@ -1,7 +1,8 @@
 # Cross-build for Yandex Stations with cargo-zigbuild: one binary per userland ABI.
 #   ARCH=aarch64  64-bit userspace (Station Midi, glibc 2.36)
-#   ARCH=armhf    32-bit userspace (Station Lite 2 and Mini 2, glibc 2.30; also Midi images with
-#                  an armhf userland)
+#   ARCH=armhf    32-bit userspace (Station Lite 2 and Mini 2, glibc 2.30; Station Mini,
+#                  glibc 2.23; also Midi images with an armhf userland). Built for glibc 2.23 so
+#                  the first-generation Mini runs the same binary.
 # `make` builds both daemons; `make ARCH=armhf` one of them. Output: build/<arch>/pulsar (stripped,
 # the one deployed) and build/<arch>/pulsar.debug (line tables, for `addr2line -f -e` on the crash
 # report; non-PIE, so the addresses in it are absolute). `make ARCH=armhf tools` builds every tool
@@ -45,7 +46,7 @@ check:
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy --workspace --all-targets --locked -- -D warnings
 	env $(ZIGBUILD_ENV) $(CARGO_ZIGBUILD) clippy --workspace --all-targets --locked \
-	  --target aarch64-unknown-linux-gnu.2.36 --target armv7-unknown-linux-gnueabihf.2.30 -- -D warnings
+	  --target aarch64-unknown-linux-gnu.2.36 --target armv7-unknown-linux-gnueabihf.2.23 -- -D warnings
 	CARGO_TARGET_DIR=target/clippy-ffi RUSTFLAGS='--cfg sendspin_ffi' $(CARGO) clippy -p pulsar-sendspin \
 	  --all-targets --locked --target aarch64-unknown-linux-gnu --target armv7-unknown-linux-gnueabihf \
 	  -- -D warnings
@@ -69,13 +70,13 @@ RUST_CPU    :=
 RUST_TARGET := aarch64-unknown-linux-gnu
 GLIBC       := 2.36
 else ifeq ($(ARCH),armhf)
-TARGET      := arm-linux-gnueabihf.2.30
+TARGET      := arm-linux-gnueabihf.2.23
 CPU         := -mcpu=cortex_a53
 # Same core as the C++ build: VFPv4 makes f32/f64 mul_add a vfma instruction (the generic armv7
 # target calls libm fmaf instead).
 RUST_CPU    := -C target-cpu=cortex-a53
 RUST_TARGET := armv7-unknown-linux-gnueabihf
-GLIBC       := 2.30
+GLIBC       := 2.23
 else
 $(error ARCH must be one of: $(ARCHES))
 endif

@@ -36,7 +36,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
 
 use crate::led_fx::{self as fx, Col};
-use crate::sys::Framebuffer;
+use crate::sys::{Framebuffer, I2c};
 
 /// ~30 fps while animating (stock 20 ms frames resampled by time).
 const FRAME_MS: u64 = 33;
@@ -396,7 +396,18 @@ impl LedsHandle {
 pub fn spawn_leds(model: &'static Model) -> LedsHandle {
     let n = usize::try_from(model.ring.count).unwrap_or(0);
     let nlogo = usize::try_from(model.logo.count).unwrap_or(0);
-    let sink = if let Some(fb) = open_fb(model, nlogo) {
+    let sink = if !model.ring.i2c_dev.is_empty() {
+        match open_i2c(model, n, nlogo) {
+            Some(sink) => {
+                info!(
+                    "leds: driving {n} ring LEDs via i2c {}@0x{:02x}",
+                    model.ring.i2c_dev, model.ring.i2c_addr
+                );
+                sink
+            }
+            None => Sink::None,
+        }
+    } else if let Some(fb) = open_fb(model, nlogo) {
         info!("leds: driving {n} ring + {nlogo} logo LEDs via framebuffer");
         fb
     } else if let Some(files) = open_sysfs(model, n, nlogo) {
@@ -481,6 +492,11 @@ enum Sink {
         ring: Framebuffer,
         logo: Option<Framebuffer>,
     },
+    /// IS31FL3236-compatible 18-channel controller (6 RGB pixels).
+    I2c {
+        dev: I2c,
+        addr: u16,
+    },
     /// [ring r,g,b x n][logo r,g,b x nlogo]
     Sysfs(Vec<File>),
     /// Host tests: (time, pixels) of every write that changed something.
@@ -564,6 +580,23 @@ impl Output {
                         "logo fb",
                         now,
                     );
+                }
+            }
+            Sink::I2c { dev, addr } => {
+                if !have_last || px[..split] != self.last[..split] {
+                    let mut bgr = [0u8; 18];
+                    for (i, p) in px[..split].as_chunks::<3>().0.iter().enumerate() {
+                        bgr[i * 3..i * 3 + 3].copy_from_slice(&[p[2], p[1], p[0]]);
+                    }
+                    // 0x01: first PWM register; 0x25 = 0xAA latches the frame.
+                    let r = dev
+                        .write_register(*addr, 0x01, &bgr)
+                        .and_then(|()| dev.write_register(*addr, 0x25, &[0xaa]));
+                    if let Err(e) = r {
+                        warn_write(&mut self.warn[0], "i2c", &e, now);
+                        // Keep `last` as it was: the next frame must retry these pixels.
+                        return;
+                    }
                 }
             }
             Sink::Sysfs(files) => {
@@ -655,6 +688,37 @@ fn open_strip_fb(model: &Model, s: &LedStrip) -> Option<Framebuffer> {
             None
         }
     }
+}
+
+/// IS31FL3236-compatible controller: enable the output stage, set every channel's current and
+/// clear the PWM registers; the stock firmware sends the same three writes.
+fn open_i2c(model: &Model, n: usize, nlogo: usize) -> Option<Sink> {
+    if n != 6 || nlogo != 0 {
+        warn!("leds: i2c backend expects 6 ring LEDs and no logo ({n} + {nlogo})");
+        return None;
+    }
+    let dev = match I2c::open(model.ring.i2c_dev) {
+        Ok(dev) => dev,
+        Err(e) => {
+            warn!("leds: open {}: {}", model.ring.i2c_dev, crate::errstr(&e));
+            return None;
+        }
+    };
+    let addr = model.ring.i2c_addr;
+    let imax = [3u8; 18];
+    if let Err(e) = dev
+        .write_register(addr, 0x00, &[1])
+        .and_then(|()| dev.write_register(addr, 0x26, &imax))
+        .and_then(|()| dev.write_register(addr, 0x4b, &[1]))
+    {
+        warn!(
+            "leds: init {}@0x{addr:02x}: {}",
+            model.ring.i2c_dev,
+            crate::errstr(&e)
+        );
+        return None;
+    }
+    Some(Sink::I2c { dev, addr })
 }
 
 fn open_fb(model: &Model, nlogo: usize) -> Option<Sink> {

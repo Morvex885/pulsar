@@ -32,7 +32,7 @@ impl Rig {
     fn new() -> Self {
         let (tx, rx) = unbounded_channel();
         Self {
-            m: Machine::new(Rc::new(Cell::new(false)), tx),
+            m: Machine::new(Rc::new(Cell::new(false)), tx, KEY_ACTION),
             rx,
             keys: Ok([0; 96]),
             sw: Ok([0; 8]),

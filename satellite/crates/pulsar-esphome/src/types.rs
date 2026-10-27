@@ -58,8 +58,14 @@ pub struct ApiConfig {
     /// Clock music entities, no clock_show_text / clock_show_face actions, none of their states
     /// sent.
     pub has_clock: bool,
-    /// false: no Illuminance sensor, no lux states.
+    /// false: no Illuminance sensor, no lux states (the model has no ltr308als01).
     pub has_lux: bool,
+    /// The model has a readable hardware microphone mute switch/key.
+    pub has_hw_mic_mute: bool,
+    /// The model has any buttons at all (the Event «Button» entity).
+    pub has_buttons: bool,
+    /// The model has a TALK/action button (adds `action` and `action_long` event types).
+    pub has_action: bool,
     /// File holding the Noise encryption key (base64 of 32 bytes, as ESPHome's `api: encryption:
     /// key`). Missing or empty file: plaintext (and provisioning with the all-zeros key). HA may
     /// set or rotate it with NoiseEncryptionSetKeyRequest. None: encryption unsupported.
@@ -80,6 +86,9 @@ impl Default for ApiConfig {
             zigbee_modes: Vec::new(),
             has_clock: true,
             has_lux: true,
+            has_hw_mic_mute: true,
+            has_buttons: true,
+            has_action: true,
             key_path: None,
         }
     }

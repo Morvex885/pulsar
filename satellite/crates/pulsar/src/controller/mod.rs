@@ -42,9 +42,8 @@ const TIMER_RING_MAX_MS: i64 = 15 * 60 * 1000;
 // starts), and conversation agents (LLMs with tool calls) may think for a minute or more.
 const LISTEN_TIMEOUT_MS: u64 = 30_000;
 const PROCESS_TIMEOUT_MS: u64 = 120_000;
-// Updates: releases of this repository on GitHub. The first check waits for the network after
-// boot; an automatic install waits until the speaker is idle (it restarts the daemon).
-const UPDATE_REPO: &str = "Morvex885/pulsar";
+// Updates: releases of the model's repository on GitHub. The first check waits for the network
+// after boot; an automatic install waits until the speaker is idle (it restarts the daemon).
 const UPDATE_FIRST_CHECK_MS: u64 = 60_000;
 const UPDATE_CHECK_PERIOD_MS: u64 = 6 * 3_600_000;
 const UPDATE_IDLE_RETRY_MS: u64 = 10 * 60_000;
@@ -338,9 +337,12 @@ impl Controller {
                     .map(|r| r.label.to_owned())
                     .collect()
             },
-            key_path: Some(logic::in_dir(&dir, "api_key")),
             has_clock: model.has_clock || pulsar_clock::panel_present(model),
             has_lux: model.has_lux || lux_rx.is_some(),
+            has_hw_mic_mute: !model.mute_input.is_empty() || model.mute_gpio != 0,
+            has_buttons: !model.keys_input.is_empty(),
+            has_action: model.action_key != 0,
+            key_path: Some(logic::in_dir(&dir, "api_key")),
         };
         // The C++ server bound its port last (ApiServer::start); here the bind comes first, so
         // a failure exits before the hardware starts. Nothing reaches the server before `run`.
@@ -348,12 +350,16 @@ impl Controller {
             .map_err(|_| "ESPHome API server failed to start".to_owned())?;
         // Before any other thread exists: the player's spawn sets SSL_CERT_FILE (set_var), which
         // C code on another thread could be reading.
-        let (player, player_rx) = pulsar_media::spawn(model.playback_pcm);
+        let (player, player_rx) = pulsar_media::spawn(model);
         let (arbiter, arbiter_rx) = arbiter::spawn(id.name.clone(), ports.arbiter);
 
         // Hardware first: UI feedback should work even if HA is not connected.
         let leds = pulsar_hw::spawn_leds(model);
-        let clock = pulsar_clock::spawn(model);
+        let clock = if model.clock_dir.is_empty() {
+            pulsar_clock::ClockHandle::none()
+        } else {
+            pulsar_clock::spawn(model)
+        };
         clock.set_enabled(st.clock_on);
         clock.set_brightness(st.clock_brightness);
         clock.set_scroll_ms(st.clock_scroll_ms);
@@ -421,7 +427,8 @@ impl Controller {
                 );
             }
         }
-        let (updater, updater_rx) = pulsar_update::spawn(UPDATE_REPO.into(), VERSION.into());
+        let (updater, updater_rx) =
+            pulsar_update::spawn(pulsar_update::UPDATE_REPO.into(), VERSION.into());
 
         let (input, input_rx) = match pulsar_hw::spawn_input(model) {
             Ok((h, rx)) => (Some(h), Some(rx)),
@@ -445,7 +452,10 @@ impl Controller {
             software_version: id.project_version.clone(),
             mac: id.mac.to_ascii_lowercase(),
             state_dir: logic::in_dir(&dir, "sendspin"),
-            playback_pcm: model.playback_pcm,
+            pcm: model.playback_pcm,
+            spk_mute_ctl: model.spk_mute_ctl,
+            amp_enable_paths: model.amp_enable_paths,
+            software_volume: model.software_volume,
             port: ports.sendspin,
         };
         let (sendspin, sendspin_rx) = match pulsar_sendspin::spawn(ss_cfg, st.volume, st.muted) {

@@ -20,6 +20,8 @@ use std::thread::JoinHandle;
 use log::{debug, error, info, warn};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use pulsar_core::model::Model;
+
 use crate::gst::{self, Api, Call, MainLoop, Pipeline};
 use crate::pcm_out::{self, OutEvent, Output};
 
@@ -811,13 +813,23 @@ pub(crate) fn on_timer(tag: usize) -> bool {
 /// The firmware's GStreamer: one playbin per channel.
 struct GstBackend {
     api: &'static Api,
+    model: &'static Model,
     // Dropped before `out`: the pipelines are in NULL when the output closes the fdsink's fd.
     pipes: [Pipeline; 2],
     out: Output,
 }
 
+impl GstBackend {
+    fn enable_output(&self) {
+        pulsar_alsa::enable_output(self.model.amp_enable_paths, self.model.spk_mute_ctl);
+    }
+}
+
 impl Backend for GstBackend {
     fn set_state(&mut self, ch: Channel, s: GstState) -> bool {
+        if s == GstState::Playing {
+            self.enable_output();
+        }
         self.pipes[ch.index()].set_state(s as i32)
     }
 
@@ -940,7 +952,7 @@ fn new_pipeline(api: &'static Api, ch: Channel, pcm: &str) -> Option<Pipeline> {
 }
 
 /// dlopen + gst_init + static plugin registration + the GLib thread (C++ Player::init).
-fn start(shared: &Arc<Shared>, pcm: &str) -> Option<GlibThread> {
+fn start(shared: &Arc<Shared>, pcm: &str, model: &'static Model) -> Option<GlibThread> {
     // One player per process: its GLib thread owns the default main context.
     static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::Relaxed) {
@@ -959,11 +971,19 @@ fn start(shared: &Arc<Shared>, pcm: &str) -> Option<GlibThread> {
         new_pipeline(api, Channel::Announce, pcm)?,
     ];
     let out = Output::spawn(
-        pcm,
+        model,
         Box::new(move |ev| gst::idle_add(api, Box::new(move || on_out(ev)))),
     )?;
     let main_loop = Arc::new(MainLoop::new(api)?);
-    let machine = Machine::new(Box::new(GstBackend { api, pipes, out }), Arc::clone(shared));
+    let machine = Machine::new(
+        Box::new(GstBackend {
+            api,
+            model,
+            pipes,
+            out,
+        }),
+        Arc::clone(shared),
+    );
     let ml = Arc::clone(&main_loop);
     let thread = std::thread::Builder::new()
         .name("gst".into())
@@ -1000,13 +1020,17 @@ pub struct PlayerHandle {
     inner: Rc<Inner>,
 }
 
-/// Starts the player on ALSA PCM `pcm` (`Model::playback_pcm`). A failed dlopen / gst_init is
-/// logged ("player init failed") and gives a degraded handle: every play() ends with Done(false)
-/// at once and state() stays Idle.
-pub fn spawn(pcm: &str) -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
+/// Starts the player on the model's ALSA PCM (`Model::playback_pcm`) with its output gates. A
+/// failed dlopen / gst_init is logged ("player init failed") and gives a degraded handle: every
+/// play() ends with Done(false) at once and state() stays Idle.
+pub fn spawn(model: &'static Model) -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
+    spawn_inner(model.playback_pcm, model)
+}
+
+fn spawn_inner(pcm: &str, model: &'static Model) -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
     let (tx, rx) = unbounded_channel();
     let shared = Arc::new(Shared::new(tx));
-    let exec = start(&shared, pcm).map(|t| Box::new(t) as Box<dyn Exec>);
+    let exec = start(&shared, pcm, model).map(|t| Box::new(t) as Box<dyn Exec>);
     if exec.is_none() {
         error!("player init failed");
     }
@@ -1913,7 +1937,8 @@ mod tests {
     #[test]
     fn degraded_player_fails_every_play_at_once() {
         // No firmware GStreamer on the host: spawn() gives the degraded handle.
-        let (h, mut rx) = spawn("speakers");
+        let model = pulsar_core::model::model_from_compatible(b"yandex,cucumber\0").unwrap();
+        let (h, mut rx) = spawn(model);
         let a = h.play(Music, urls(&["/a.mp3"]));
         assert_eq!(rx.try_recv().unwrap(), Done { id: a, ok: false });
         h.pause(Music);

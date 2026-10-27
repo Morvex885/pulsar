@@ -3,15 +3,17 @@
 # PULSAR_TAG: free-form tag of the work holding the lock (one word, no spaces).
 set -eu
 usage() {
-  echo "usage: PULSAR_TAG=<tag> $0 midi|lite2 lock MINUTES|unlock|break-lock|stop|start|push FILE...|test-start|test-stop|test-log [N]|swap BINARY|restore|cleanup|status|log [N]" >&2
+  echo "usage: PULSAR_TAG=<tag> $0 midi|lite2|mini lock MINUTES|unlock|break-lock|stop|start|push FILE...|test-start|test-stop|test-log [N]|swap BINARY|restore|cleanup|status|log [N]" >&2
   exit 2
 }
 [ $# -ge 2 ] || usage
 case "$1" in
   midi) H=${PULSAR_MIDI:?PULSAR_MIDI is not set} ;;
   lite2) H=${PULSAR_LITE2:?PULSAR_LITE2 is not set} ;;
+  mini) H=${PULSAR_MINI:?PULSAR_MINI is not set} ;;
   *) usage ;;
 esac
+station=$1
 cmd=$2
 shift 2
 L=/tmp/pulsar-agent.lock
@@ -43,18 +45,21 @@ own() {
   tag=${PULSAR_TAG:?PULSAR_TAG is not set}
   r "read o _ 2>/dev/null < $L/owner && [ \"\$o\" = '$tag' ]" || { echo "no lock held by $tag" >&2; exit 1; }
 }
-# Remote snippet: remove a stale ALSA dmix lock (shm 0x400/0x401 nobody is attached to, then
-# semaphore 0x400) left by a process killed while playing; without it the station stays silent
-# until a reboot (satellite/deploy/supervise.sh header). Run where no pulsar is playing.
+# Remote snippet: remove a stale ALSA dmix lock (shm 0x400/0x401 or the Mini's 0x8e5/0x8e6
+# nobody is attached to, then its semaphore) left by a process killed while playing; without it
+# the station stays silent until a reboot (satellite/deploy/supervise.sh header). Run where no
+# pulsar is playing.
 DMIX=$(cat <<'EOF'
 r= b=0 s=$(ipcs -m 2>/dev/null)
-for k in 400 401; do
+for k in 400 401 8e5 8e6; do
   n=$(echo "$s" | awk -v k=0x00000$k '$1 == k { print $6; exit }')
   if [ "$n" = 0 ]; then ipcrm -M 0x$k && r="$r shm 0x$k"; elif [ -n "$n" ]; then b=1; fi
 done
-if [ $b = 0 ] && ipcs -s 2>/dev/null | awk '$1 == "0x00000400" { f = 1 } END { exit !f }'; then
-  ipcrm -S 0x400 && r="$r sem 0x400"
-fi
+for k in 400 8e5; do
+  if [ $b = 0 ] && ipcs -s 2>/dev/null | awk -v k=0x00000$k '$1 == k { f = 1 } END { exit !f }'; then
+    ipcrm -S 0x$k && r="$r sem 0x$k"
+  fi
+done
 if [ -n "$r" ]; then echo "removed stale ALSA dmix lock (${r# })"; fi
 EOF
 )
@@ -91,14 +96,21 @@ case "$cmd" in
     for f; do b=$(basename "$f"); up "$f" "$T/$b"; done ;;
   test-start)
     own
+    vol=0.2
     r "! pidof supervise.sh >/dev/null || { echo 'run stop first' >&2; exit 1; }
        [ -x $T/pulsar ] || { echo 'push pulsar first' >&2; exit 1; }
        grep -v -e '^volume=' -e '^volume2=' -e '^volume_curve=' -e '^muted=' -e '^auto_update=' -e '^update_attempt=' \
          $D/state.conf > $T/state.conf 2>/dev/null || true
-       printf 'volume2=0.2\nmuted=0\nauto_update=0\n' >> $T/state.conf
+       printf 'volume2=$vol\nmuted=0\nauto_update=0\n' >> $T/state.conf
        for z in $D/zigbee-*.ybl; do [ -f \"\$z\" ] && cp \"\$z\" $T/; done
        cd $T
-       nohup env PULSAR_PORT_OFFSET=10000 ./pulsar $T/state.conf < /dev/null >> $T/log 2>&1 &
+       alsa=; libs=
+       if [ "$station" = mini ]; then
+         [ -f $D/asound.conf ] || { echo 'Mini needs $D/asound.conf (satellite/deploy/asound.conf)' >&2; exit 1; }
+         alsa="ALSA_CONFIG_PATH=$D/asound.conf"
+         [ -d /system/vendor/quasar/libs ] && libs="LD_LIBRARY_PATH=/system/vendor/quasar/libs"
+       fi
+       nohup env PULSAR_PORT_OFFSET=10000 \$alsa \$libs ./pulsar $T/state.conf < /dev/null >> $T/log 2>&1 &
        echo \$! > $T/pid; sleep 2; kill -0 \$(cat $T/pid) && echo started" ;;
   test-stop)
     own

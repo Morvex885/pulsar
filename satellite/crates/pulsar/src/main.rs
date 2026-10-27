@@ -1,4 +1,4 @@
-//! pulsar: Home Assistant voice satellite for Yandex Stations (Midi, Lite 2).
+//! pulsar: Home Assistant voice satellite for Yandex Stations (Midi, Lite 2, Mini 2, Mini).
 //! usage: pulsar [--version | state_file]
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]

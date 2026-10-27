@@ -16,6 +16,8 @@ func modelName(code string) string {
 		return "Yandex Station Lite 2"
 	case "station-mini2":
 		return "Yandex Station Mini 2"
+	case "yandexmini":
+		return "Yandex Station Mini"
 	}
 	return ""
 }
@@ -32,6 +34,9 @@ func abis(code string) []string {
 	case "cucumber":
 		return []string{"aarch64", "armhf"}
 	case "plum", "station-mini2":
+		return []string{"armhf"}
+	case "yandexmini":
+		// First-generation Mini: 32-bit armhf userland (glibc 2.23) on an aarch64 kernel.
 		return []string{"armhf"}
 	}
 	return nil
@@ -53,8 +58,8 @@ func archOf(code string, loaders []string) string {
 func hasZigbee(code string) bool { return code == "cucumber" }
 
 type station struct {
-	serial, arch string
-	zigbee       bool
+	serial, arch, code string
+	zigbee             bool
 }
 
 // found: installable stations, in the order printed by probe.
@@ -98,6 +103,15 @@ func probe(s string, ours bool) {
 	}
 	code, supported := stationCode(compat)
 	if code == "" {
+		// The first-generation Mini has no yandex,* compatible entry; its board id is the
+		// stable marker (the daemon uses the same file).
+		dtid, _ := sh(s, `tr -d '\0' </proc/device-tree/amlogic-dt-id`)
+		if dtid == "axg_s420_v03" {
+			code = "yandexmini"
+			supported = true
+		}
+	}
+	if code == "" {
 		skip("not a Yandex Station")
 		return
 	}
@@ -134,7 +148,7 @@ func probe(s string, ours bool) {
 	} else {
 		state = "stock Yandex"
 	}
-	found = append(found, station{s, arch, hasZigbee(code)})
+	found = append(found, station{serial: s, arch: arch, code: code, zigbee: hasZigbee(code)})
 	note := ""
 	if arch != abis(code)[0] {
 		note = ", " + arch + " build"

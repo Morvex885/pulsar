@@ -539,6 +539,31 @@ impl RawPcm {
         sframes(n)
     }
 
+    /// [`RawPcm::readi`] for an S32_LE PCM; the caller converts the samples to S16.
+    pub(crate) fn readi_s32(
+        &mut self,
+        buf: &mut [i32],
+        frames: usize,
+        frame_bytes: usize,
+    ) -> Result<usize, i32> {
+        if frame_bytes == 0
+            || frames
+                .checked_mul(frame_bytes)
+                .is_none_or(|n| n > size_of_val(buf))
+        {
+            return Err(-libc::EINVAL);
+        }
+        // SAFETY: see impl comment; `buf` holds at least `frames` frames (checked above).
+        let n = unsafe {
+            (self.lib.pcm_readi)(
+                self.pcm.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                uframes(frames as u64),
+            )
+        };
+        sframes(n)
+    }
+
     pub(crate) fn writei(
         &mut self,
         buf: &[u8],

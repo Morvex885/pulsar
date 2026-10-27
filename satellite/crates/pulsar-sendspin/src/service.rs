@@ -226,15 +226,25 @@ pub fn spawn(
     }
     let unpaired = persist::unpaired_access(&cfg.state_dir);
     let (tx, rx) = unbounded_channel();
+    let initial_gain = if cfg.software_volume {
+        if muted {
+            0.0
+        } else {
+            pulsar_core::volume::software_gain(volume)
+        }
+    } else {
+        1.0
+    };
     let ctx = Arc::new(Ctx {
         events: Mutex::new(Vec::new()),
-        sink: Sink::new(cfg.playback_pcm),
+        sink: Sink::new(cfg.pcm, cfg.amp_enable_paths, cfg.spk_mute_ctl),
         state_dir: cfg.state_dir.clone(),
         tx,
         hooks: AtomicBool::new(true),
         vis_loudness: AtomicU32::new(0),
         vis_beat: AtomicBool::new(false),
     });
+    ctx.sink.set_gain(initial_gain);
     let config = Config {
         name: &cfg.name,
         product_name: &cfg.product_name,
@@ -572,7 +582,7 @@ mod tests {
         let (tx, rx) = unbounded_channel();
         let ctx = Ctx {
             events: Mutex::new(Vec::new()),
-            sink: Sink::new("speakers"),
+            sink: Sink::new("speakers", &[], ""),
             state_dir: PathBuf::from("/nonexistent"),
             tx,
             hooks: AtomicBool::new(true),
