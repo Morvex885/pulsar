@@ -133,8 +133,23 @@ pub enum PrerollRule {
 
 // Measured with frontend_probe ("wake timing" lines); see the values' comments.
 const CUCUMBER_PREROLL: &[WakePreroll] = &[];
+// Lite 2, frontend_probe 2026-10-28, one talker at 1-2 m: both models confirm with event 2
+// (1st stage) and never report a 1st-stage hit (event 3), so the length is fixed. Chunks from
+// the end of an isolated word (VQE_OMNI 20 dB below its peak; words quieter than -57 dB left
+// out, their noise floor is within 20 dB) to the confirmation: "alisa" 3..8 over 13 words,
+// "yandex" 0..9 over 5 (the spotter can confirm on the closing "кс" before it ends). The
+// shortest one is used, so the word never reaches STT.
 // The Mini 2 ships the Lite 2's spotter models and uses these too (not measured on it).
-const PLUM_PREROLL: &[WakePreroll] = &[];
+const PLUM_PREROLL: &[WakePreroll] = &[
+    WakePreroll {
+        id: "alisa",
+        rule: PrerollRule::Fixed(3),
+    },
+    WakePreroll {
+        id: "yandex",
+        rule: PrerollRule::Fixed(0),
+    },
+];
 
 const NO_STRIP: LedStrip = LedStrip {
     count: 0,
