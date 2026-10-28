@@ -70,8 +70,10 @@ pub struct Model {
     /// Stock volume curve: platform level -> raw value (0..255) of the softvol "Master Playback
     /// Volume" on `playback_pcm`, piecewise linear between the points; the first point is
     /// level 0 (raw 0), the last one the top level. quasar.cfg volume_capability
-    /// .volume_manager_settings.platformToAlsaMap; the platform level steps by 5 %
-    /// (changeStepPercent).
+    /// .volume_manager_settings.platformToAlsaMap. One platform level is 5 % on the 20-level maps;
+    /// maind's Alice volume (0..10, "громче" / "тише") is platform level / 2 rounded half up.
+    /// quasar.cfg changeStepPercent is the step of maind's gradual volume change
+    /// (start_volume_change), not of the keys or the voice words.
     pub volume_map: &'static [VolumePoint],
     /// true: any audible volume is at least the map's second point (the stock firmware never
     /// sets the raw values below it).

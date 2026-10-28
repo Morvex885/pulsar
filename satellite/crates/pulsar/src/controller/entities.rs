@@ -400,7 +400,10 @@ impl Controller {
                     EventId::Button,
                     if up { "volume_up" } else { "volume_down" },
                 );
-                self.set_volume(self.st.volume + if up { 0.05 } else { -0.05 }, true);
+                self.set_volume(
+                    pulsar_media::mixer::step_level(self.model, self.st.volume, up),
+                    true,
+                );
             }
         }
     }

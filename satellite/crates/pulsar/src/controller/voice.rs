@@ -753,8 +753,8 @@ impl Controller {
             }
             VoiceCommand::Resume => self.music_resume(),
             VoiceCommand::Louder | VoiceCommand::Quieter => {
-                let step = if c == VoiceCommand::Louder { 0.1 } else { -0.1 };
-                self.set_volume(self.st.volume + step, true);
+                let up = c == VoiceCommand::Louder;
+                self.set_volume(pulsar_media::mixer::step_alice(self.st.volume, up), true);
             }
             VoiceCommand::Next | VoiceCommand::Prev => {
                 let (t, shot) = if c == VoiceCommand::Next {

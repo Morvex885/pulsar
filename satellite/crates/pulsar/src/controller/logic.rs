@@ -321,8 +321,8 @@ pub fn want_duck(
 /// timer ring, closing earcons and the wake earcon: a new play() there cuts whatever plays. In
 /// LISTENING and while arbitrating the microphone audio goes to HA's speech-to-text. A level
 /// that stayed put (held key at 0 or 1) does not click; levels compare in whole percent, since
-/// f32 5 % steps down from 0.15..0.3 end at 7.45e-9, one step short of 0. `before` / `after`:
-/// (volume, muted).
+/// builds before the level-grid steps saved drifted volumes such as 7.45e-9 (one 5 % step short
+/// of 0) to state.conf. `before` / `after`: (volume, muted).
 pub fn want_volume_click(
     before: (f32, bool),
     after: (f32, bool),
