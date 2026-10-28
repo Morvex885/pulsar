@@ -712,11 +712,15 @@ fn processing(
         // handled holds the stream open: the owner switches streaming on only when it handles
         // the event, and the chunks in between continue the pre-roll. `wake_pending` is read
         // first: its Acquire pairs with `wake_handled`, after the owner's `set_streaming(true)`.
-        if let Some(d) = eng.output(VQE_OMNI_WITH_GAIN)
-            && let Some(slot) = ring.push(d)
-            && (shared.wake_pending.load(Acquire) > 0 || shared.stream.load(Relaxed))
-        {
-            let _ = tx.send(FrontendEvent::Audio(slot.to_vec()));
+        match eng.output(VQE_OMNI_WITH_GAIN) {
+            Some(d) => {
+                if let Some(slot) = ring.push(d)
+                    && (shared.wake_pending.load(Acquire) > 0 || shared.stream.load(Relaxed))
+                {
+                    let _ = tx.send(FrontendEvent::Audio(slot.to_vec()));
+                }
+            }
+            None => ring.clear(),
         }
 
         if shared.detect.load(Relaxed) {
