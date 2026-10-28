@@ -476,7 +476,7 @@ port on the station.
   spotter confirms after the word ends, so `FrontendEvent::Wake` carries the audio from the end
   of the word to the confirming chunk (`Model::wake_preroll` per model and wake word id: chunks
   since the 1st-stage hit, event 3, plus an offset, or a fixed count; measured with the
-  `wake timing:` lines of `frontend_probe`: the shortest reliable reading, checked through HA).
+  `wake timing:` lines of `frontend_probe`, kept short, settled through HA acceptance).
   The wake word itself must not reach STT: HA never removes it from the text, and agents then get
   «Алиса, включи свет». After a `Wake` the front-end keeps sending `Audio` until
   `FrontendHandle::wake_handled` (the controller calls it once per `Wake`, after `on_wake`), so
