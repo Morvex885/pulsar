@@ -357,7 +357,7 @@ with NWK mode but an IEEE address (payload 6 bytes longer than declared): sent a
 | Clock | `cucumber:white:clock-<seg><digit>`, dimming via chip `current`; no centre dot | `plum:white:clock<SEG><pos>`: A–G × 0–3, colon `DH`+`DL`; `H0..3`, `DEGREE` kept dark (`quasar.cfg` `/leds/clock`); `DM` = centre dot at g height (`Model::clock_center`, extra LED 35 of the stock patterns [inference: position not confirmed by eye]); dimming via per-LED `brightness` 0–255 | wired as `mini2:white:clock<A..G><1..4>`, colon `PLUS1`+`PLUS2`, `DEGREE`/`MINUS` dark (`quasar.cfg`), but the second IS31FL3236 (i2c 0-003f) fails to probe on firmware 0.369: the clock finds no segment (`Model::has_clock` false); its entities exist only when `pulsar_clock::panel_present` finds one at start |
 | Keys | `awinic_sar`: 582 action, 115/114 volume | `aw9610x`: same codes | `sar0_pad0` (aw9610x SAR, event0): same codes |
 | Mic mute | input `mute`: `SW_MUTE_DEVICE` | input `gpio-keys`: `SW_MUTE_DEVICE` (+ `KEY_MUTE`) | no evdev switch: GPIOZ_3 (global 414, pull-up), active low, polled every 100 ms as maind does (`Model::mute_gpio`; exported if needed, no `direction` / `edge` write, used only when already an input) |
-| Light sensor | `ltr308als01` (iio) | same | none (`Model::has_lux` false: no Illuminance entity) |
+| Light sensor | `ltr308als01` (iio) | same | `ltr308als01` on the #38 station (firmware 0.372; `in_intensity_input` = raw / 120, no `/etc/light-sensor.conf`), absent on the #9 station (0.369) [inference: firmware, board revision or device tree; not known which]; `Model::has_lux` false: the Illuminance entity exists only when the sensor opens at start |
 | Volume | "Master Playback Volume" softvol on `speakers` | same names; `speakers` comes from `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) | same control on `default`; `set_volume.sh` is `amixer set 'Master' <percent>%`, so the curve is linear in percent (`volume_min_step` false) |
 | alsa-lib | 1.2.10, versioned | 1.2.1.2, unversioned | 1.2.1.2, unversioned |
 | Earcons | `common/spotter_*.mp3`, `common/volume_sound.mp3`, `timer.wav`, `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` | `common/spotter_start.opus`, `common/spotter_cancel.opus`, `common/volume_sound.opus` [inference: file not confirmed on the station], `common/timer.opus`, `ru-RU/playback_error.opus` (no MP3 decoder in this GStreamer) |
@@ -380,7 +380,9 @@ B,G,R bytes).
 
 Mini 2 notes (firmware 0.369): the clock chip's probe failure (`register write to 0x4F failed
 (error -6)`) is the only reason the clock is dark: the DT node is fine, so a firmware or driver
-fix brings the panel back (`panel_present` then enables its entities at the next start). The mic
+fix brings the panel back (`panel_present` then enables its entities at the next start); the #38
+station (firmware 0.372) has both the panel (28 segments) and the light sensor [inference: what
+differs from the #9 station (firmware, board revision, device tree) is not known]. The mic
 mute button is momentary, but the microphone circuit latches it: GPIOZ_3 reads 0 while the
 microphones are cut and holds that level between presses, so the level is the state; GPIOZ_8
 (419) only pulses high during a press. The button emits no evdev event (`sar0_pad0` carries

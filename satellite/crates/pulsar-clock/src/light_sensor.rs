@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use log::{error, info};
+use log::info;
 use pulsar_core::{Timers, actors, sysfs};
 use tokio::sync::mpsc;
 
@@ -75,22 +75,18 @@ fn find(iio_dir: &Path) -> Option<PathBuf> {
 }
 
 /// Finds the sensor and polls it every `period_ms`; the first reading is in the channel when
-/// this returns. The poller stops once the receiver is dropped. Err (logged) when the sensor
-/// is missing or unreadable.
+/// this returns. The poller stops once the receiver is dropped. Err when the sensor is missing
+/// or unreadable; the caller logs it (a missing sensor is normal on some stations).
 pub fn spawn_light_sensor(period_ms: u64) -> Result<mpsc::UnboundedReceiver<f32>, String> {
     spawn_in(Path::new(IIO_DIR), period_ms)
 }
 
 fn spawn_in(iio_dir: &Path, period_ms: u64) -> Result<mpsc::UnboundedReceiver<f32>, String> {
     let Some(dir) = find(iio_dir) else {
-        let msg = format!("light: iio device {SENSOR_NAME} not found");
-        error!("{msg}");
-        return Err(msg);
+        return Err(format!("light: iio device {SENSOR_NAME} not found"));
     };
     let Some(lux) = read_lux(&dir) else {
-        let msg = format!("light: cannot read {}/", dir.display());
-        error!("{msg}");
-        return Err(msg);
+        return Err(format!("light: cannot read {}/", dir.display()));
     };
     info!("light: {}/ ({lux:.2} lx)", dir.display());
     let (tx, rx) = mpsc::unbounded_channel();

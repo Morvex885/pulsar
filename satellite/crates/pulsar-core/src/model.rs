@@ -81,7 +81,8 @@ pub struct Model {
     /// true: any audible volume is at least the map's second point (the stock firmware never
     /// sets the raw values below it).
     pub volume_min_step: bool,
-    /// false: no ambient light sensor (no Illuminance entity, the sensor is not opened).
+    /// false: the station may lack the ambient light sensor; the Illuminance entity then exists
+    /// only when the sensor opens at start, and a missing sensor is logged at info.
     pub has_lux: bool,
 
     /// Zigbee radio: Telink co-processor on a UART; its reset and boot lines are GPIO value
@@ -362,6 +363,7 @@ static MINI2: Model = Model {
     playback_pcm: "default",
     volume_map: MINI2_VOLUME,
     volume_min_step: false,
+    // ltr308als01 seen on the #38 station (firmware 0.372), absent on the #9 one (0.369).
     has_lux: false,
     zigbee_tty: "",
     zigbee_reset: "",
