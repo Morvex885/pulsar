@@ -29,7 +29,7 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 | `satellite/crates/pulsar-esphome/` | ESPHome API server: transport (plaintext / Noise), clients and the voice owner (`server.rs`), entities and states (`server/entities.rs`), commands and voice assistant messages (`server/commands.rs`), hand-written protobuf (`proto.rs`), Noise key (`key.rs`); bin `api_selftest`; client `tools/esphome_check.py` |
 | `satellite/crates/pulsar-lan/` | mDNS responder (`mdns.rs`) and the wake word arbiter between stations (`arbiter.rs`: claims over UDP broadcast :6054, 250 ms window, best claim answers); bin `lan_probe` |
 | `satellite/crates/pulsar-audio/` | microphone front-end (`frontend.rs`): capture thread (ALSA → FIFO) + processing thread: Yandex VQE → wake + command spotters → 16 kHz stream; music features of the speaker reference (`spectrum.rs`: 512-point FFT at 16 kHz → 8 bands, loudness, beats as `MusicFrame`) while the visualization can be shown; C API of libyandex_evil (`engine/`); bins `ww_offline`, `frontend_probe` |
-| `satellite/crates/pulsar-media/` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`, dlopen, `gst.rs`), channels Music / Announce on a GLib thread; `Mixer` = ALSA "Master Playback Volume" (softvol of `Model::playback_pcm`: `speakers`, `default` on the Mini 2); bin `player_probe` |
+| `satellite/crates/pulsar-media/` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`, dlopen, `gst.rs`), channels Music / Announce on a GLib thread; Music plays through alsasink, Announce is decoded into an fdsink and played by its own ALSA writer (`pcm_out.rs`: 200 ms prime, no buffering pauses, `Done` after the device played the last sample); `Mixer` = ALSA "Master Playback Volume" (softvol of `Model::playback_pcm`: `speakers`, `default` on the Mini 2); bin `player_probe` |
 | `satellite/crates/pulsar-sendspin/` | Sendspin player on top of sendspin-cpp (C shim in `shim/`, linked statically by `build.rs` in the Makefile builds), own ALSA sink on the playback dmix (`Model::playback_pcm`); roles player, metadata, controller, visualizer (8 log bands 40 Hz–7.6 kHz, loudness, beats → `MusicFrame`); bin `sendspin_probe` |
 | `satellite/crates/pulsar-hw/` | LED ring / logo (framebuffers behind ledfb triggers, or sysfs brightness without one; `leds.rs`: output, case matrix, layer compositor, fades), pure rendering of voice states / one-shots / effects / music styles (`led_fx.rs`), input (touch keys, `SW_MUTE_DEVICE` or a polled sysfs GPIO (`Model::mute_gpio`); `input.rs`); bin `hw_probe` |
 | `satellite/crates/pulsar-clock/` | clock (sysfs segments, per-LED brightness; `clock.rs`: layers), pure rendering of the clock's stock animations and music levels (`clock_fx.rs`), font, light sensor (`ltr308als01`, `light_sensor.rs`) |
@@ -396,8 +396,9 @@ port on the station.
 - Rust, one current-thread tokio runtime with a `LocalSet`: every service is an actor started with
   `pulsar_core::actors::spawn_actor`, driven through a `Clone` handle (commands, never blocking)
   and reporting through an unbounded event channel; the controller owns its state and serves all
-  channels in one `select!`. Blocking and real-time work (capture, VQE, GLib, the Sendspin sink,
-  the radio upload) runs on named `std::thread`s that send events through channels. `unsafe` and
+  channels in one `select!`. Blocking and real-time work (capture, VQE, GLib, the ANNOUNCE output
+  writer and its per-url reader, the Sendspin sink, the radio upload) runs on named `std::thread`s
+  that send events through channels. `unsafe` and
   libc calls live only in `sys.rs` / `ffi.rs` / `gst.rs` and the crash handler. Details, the
   sendspin-cpp link recipe and per-service notes: `docs/architecture.md`.
 - Keep the ESPHome API server pending until a valid `HelloRequest`; probes must not displace HA.

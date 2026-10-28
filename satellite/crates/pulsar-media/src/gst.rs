@@ -148,6 +148,7 @@ pub(crate) struct Api {
     timeout_add: unsafe extern "C" fn(c_uint, GSourceFunc, Gp) -> c_uint,
     source_remove: unsafe extern "C" fn(c_uint) -> c_int,
     object_set: unsafe extern "C" fn(Gp, *const c_char, ...),
+    object_get: unsafe extern "C" fn(Gp, *const c_char, ...),
     error_free: unsafe extern "C" fn(Gp),
     free: unsafe extern "C" fn(Gp),
     // Optional, like the two below: retry / resume only.
@@ -163,6 +164,7 @@ pub(crate) struct Api {
     message_parse_buffering: unsafe extern "C" fn(Gp, *mut c_int),
     message_parse_state_changed: unsafe extern "C" fn(Gp, *mut c_int, *mut c_int, *mut c_int),
     object_unref: unsafe extern "C" fn(Gp),
+    bin_get_by_name: unsafe extern "C" fn(Gp, *const c_char) -> Gp,
     element_query_position: Option<unsafe extern "C" fn(Gp, c_int, *mut i64) -> c_int>,
     element_seek_simple: Option<unsafe extern "C" fn(Gp, c_int, c_int, i64) -> c_int>,
 }
@@ -256,6 +258,7 @@ fn load_api() -> Option<Api> {
         let timeout_add = req(&glib, c"g_timeout_add", &mut ok);
         let source_remove = req(&glib, c"g_source_remove", &mut ok);
         let object_set = req(&glib, c"g_object_set", &mut ok);
+        let object_get = req(&glib, c"g_object_get", &mut ok);
         let error_free = req(&glib, c"g_error_free", &mut ok);
         let free = req(&glib, c"g_free", &mut ok);
         let quark_try_string = opt(&glib, c"g_quark_try_string");
@@ -271,6 +274,7 @@ fn load_api() -> Option<Api> {
         let message_parse_buffering = req(&gst, c"gst_message_parse_buffering", &mut ok);
         let message_parse_state_changed = req(&gst, c"gst_message_parse_state_changed", &mut ok);
         let object_unref = req(&gst, c"gst_object_unref", &mut ok);
+        let bin_get_by_name = req(&gst, c"gst_bin_get_by_name", &mut ok);
         if !ok {
             std::mem::forget((iconv, glib, gst));
             return None;
@@ -284,6 +288,7 @@ fn load_api() -> Option<Api> {
             timeout_add: timeout_add?,
             source_remove: source_remove?,
             object_set: object_set?,
+            object_get: object_get?,
             error_free: error_free?,
             free: free?,
             quark_try_string,
@@ -297,6 +302,7 @@ fn load_api() -> Option<Api> {
             message_parse_buffering: message_parse_buffering?,
             message_parse_state_changed: message_parse_state_changed?,
             object_unref: object_unref?,
+            bin_get_by_name: bin_get_by_name?,
             element_query_position,
             element_seek_simple,
             _iconv: iconv,
@@ -472,6 +478,8 @@ pub(crate) fn resource_error_quark(api: &Api) -> u32 {
 pub(crate) struct Pipeline {
     api: &'static Api,
     el: NonNull<c_void>,
+    /// The fdsink ANNOUNCE decodes into (a reference we hold), see [`Pipeline::find_out_sink`].
+    out_sink: Option<NonNull<c_void>>,
     /// GLib source id of the bus watch (0 = none).
     watch: c_uint,
 }
@@ -499,7 +507,12 @@ impl Pipeline {
             warn!("player: playbin: {}", unsafe { gerror_message(err) });
             free_error(api, err);
         }
-        Some(Pipeline { api, el, watch: 0 })
+        Some(Pipeline {
+            api,
+            el,
+            out_sink: None,
+            watch: 0,
+        })
     }
 
     /// The element's address, for comparing with a message source.
@@ -537,11 +550,34 @@ impl Pipeline {
         unsafe { (self.api.object_set)(el, c"flags".as_ptr(), v, null) };
     }
 
-    /// playbin "buffer-duration" (gint64, ns).
-    pub(crate) fn set_buffer_duration(&self, ns: i64) {
+    /// Finds the element named `name` inside playbin's "audio-sink" bin and keeps it as the
+    /// output sink of [`Pipeline::set_out_fd`]; false when there is none.
+    pub(crate) fn find_out_sink(&mut self, name: &CStr) -> bool {
         let (el, null) = (self.el.as_ptr(), ptr::null::<c_char>());
-        // SAFETY: "buffer-duration" is a gint64 property; NULL-terminated argument list.
-        unsafe { (self.api.object_set)(el, c"buffer-duration".as_ptr(), ns, null) };
+        let mut bin: Gp = ptr::null_mut();
+        // SAFETY: "audio-sink" is a GstElement property, read into a local (a new reference or
+        // NULL); NULL-terminated argument list.
+        unsafe { (self.api.object_get)(el, c"audio-sink".as_ptr(), &mut bin, null) };
+        if bin.is_null() {
+            return false;
+        }
+        // SAFETY: `bin` is a live bin we hold a reference to, dropped right after the lookup;
+        // the lookup returns a new reference or NULL.
+        let sink = unsafe {
+            let sink = (self.api.bin_get_by_name)(bin, name.as_ptr());
+            (self.api.object_unref)(bin);
+            sink
+        };
+        self.out_sink = NonNull::new(sink);
+        self.out_sink.is_some()
+    }
+
+    /// fdsink "fd" (gint) of the output sink; set while the pipeline is in NULL.
+    pub(crate) fn set_out_fd(&self, fd: c_int) {
+        let Some(sink) = self.out_sink else { return };
+        let null = ptr::null::<c_char>();
+        // SAFETY: "fd" is a gint property of fdsink; NULL-terminated argument list.
+        unsafe { (self.api.object_set)(sink.as_ptr(), c"fd".as_ptr(), fd, null) };
     }
 
     /// Position in ns; None without gst_element_query_position or when the query fails.
@@ -585,6 +621,10 @@ impl Drop for Pipeline {
             source_remove(self.api, self.watch);
         }
         self.set_state(STATE_NULL);
+        if let Some(sink) = self.out_sink.take() {
+            // SAFETY: the reference find_out_sink took, dropped once.
+            unsafe { (self.api.object_unref)(sink.as_ptr()) };
+        }
         // SAFETY: the reference gst_parse_launch returned, dropped once.
         unsafe { (self.api.object_unref)(self.el.as_ptr()) };
     }
