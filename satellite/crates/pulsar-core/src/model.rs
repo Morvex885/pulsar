@@ -136,7 +136,8 @@ pub enum PrerollRule {
 // confirms with event 2 and never reports event 3. Both get a fixed length. Words reach
 // VQE_OMNI at -54..-63 dB, near the noise floor, so the end of an isolated word is often not
 // found: confirmation 0..5 chunks after it, mostly 2..3 ("alisa", 10 words), 0..3 ("yandex",
-// 11 words). Checked through HA (see the PR).
+// 11 words). Readings this close to the noise floor are unreliable, so the typical reading is
+// used instead of the shortest; checked through HA (see the PR).
 const CUCUMBER_PREROLL: &[WakePreroll] = &[
     WakePreroll {
         id: "alisa",
