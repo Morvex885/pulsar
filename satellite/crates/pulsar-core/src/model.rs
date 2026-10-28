@@ -20,6 +20,9 @@ pub struct Model {
     pub mic_channels: &'static [u32],
     pub spk_channels: &'static [u32],
     pub vqe_preset: &'static str,
+    /// Pre-roll per wake word model: audio between the end of the wake word and its
+    /// confirmation, sent ahead of the request. Ids not listed get none.
+    pub wake_preroll: &'static [WakePreroll],
 
     /// Prefix of the per-channel sysfs LEDs "<led_prefix>:<color>:<ring|logo><index>".
     pub led_prefix: &'static str,
@@ -111,6 +114,28 @@ pub struct VolumePoint {
     pub raw: i32,
 }
 
+/// Pre-roll of one wake word model (`spotter_models/activation/<id>`), in 32 ms VQE chunks
+/// ending with the confirming chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WakePreroll {
+    pub id: &'static str,
+    pub rule: PrerollRule,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrerollRule {
+    /// (chunks since the 1st-stage hit) + `offset`, at least 0; `fallback` chunks when no
+    /// 1st-stage hit preceded the confirmation.
+    FirstStage { offset: i32, fallback: u32 },
+    /// Always this many chunks.
+    Fixed(u32),
+}
+
+// Measured with frontend_probe ("wake timing" lines); see the values' comments.
+const CUCUMBER_PREROLL: &[WakePreroll] = &[];
+// The Mini 2 ships the Lite 2's spotter models and uses these too (not measured on it).
+const PLUM_PREROLL: &[WakePreroll] = &[];
+
 const NO_STRIP: LedStrip = LedStrip {
     count: 0,
     first_index: 0,
@@ -144,6 +169,7 @@ static MIDI: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5, 6, 7],
     vqe_preset: "cucumber",
+    wake_preroll: CUCUMBER_PREROLL,
     led_prefix: "cucumber",
     ring: LedStrip {
         count: 24,
@@ -207,6 +233,7 @@ static LITE2: Model = Model {
     mic_channels: &[0, 2],
     spk_channels: &[6],
     vqe_preset: "plum",
+    wake_preroll: PLUM_PREROLL,
     led_prefix: "plum",
     ring: LedStrip {
         count: 3,
@@ -272,6 +299,7 @@ static MINI2: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5],
     vqe_preset: "yandexmini_2",
+    wake_preroll: PLUM_PREROLL,
     led_prefix: "mini2",
     ring: LedStrip {
         count: 6,

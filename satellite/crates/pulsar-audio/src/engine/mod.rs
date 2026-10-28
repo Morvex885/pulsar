@@ -39,10 +39,14 @@ pub const SPOTTER_TYPES: usize = SPOTTER_TO_VQE.len();
 const TYPE_CHANNELS_LIMIT: i64 = 8;
 const MAX_SPOTTER_CHANNELS: usize = SPOTTER_TYPES * (TYPE_CHANNELS_LIMIT as usize - 1);
 
-// Spotter events (event_id_to_str). Hits are confirmations; 0/4/7/9 mean "need more data /
-// finished".
+// Spotter events (event_id_to_str): 2 / 5 = CONFIRMATION_1ST_STAGE / _2ND_STAGE (hits),
+// 3 = 1ST_STAGE_HIT (the verifier starts waiting for more audio), 6 = REJECTION_2ND_STAGE;
+// 0/4/7/9 mean "need more data / finished". The ids follow the library's name table, checked
+// at start (`Engine::stages`).
 const EV_CONFIRM_1ST: i32 = 2;
+const EV_FIRST_STAGE_HIT: i32 = 3;
 const EV_CONFIRM_2ND: i32 = 5;
+const EV_REJECTION_2ND: i32 = 6;
 const EVENTS_STOP_MASK: u32 = (1 << 0) | (1 << 4) | (1 << 7) | (1 << 9);
 const MAX_EVENTS: usize = 16;
 // One hit per utterance.
@@ -110,19 +114,41 @@ pub(crate) trait EventSource {
     fn phrase(&mut self) -> String;
 }
 
-/// Reads the events of one fed chunk (at most 16, until a stop event) and returns the confirmed
-/// phrases, one per utterance (`DEBOUNCE_MS` after the previous hit).
+/// Last verifier step seen in one fed chunk (events 3 / 6).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Stage {
+    #[default]
+    None,
+    FirstStageHit,
+    Rejected,
+}
+
+/// What one fed chunk produced.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Spotted {
+    /// Confirmed phrases, one per utterance.
+    pub phrases: Vec<String>,
+    pub stage: Stage,
+}
+
+/// Reads the events of one fed chunk (at most 16, until a stop event): the confirmed phrases,
+/// one per utterance (`DEBOUNCE_MS` after the previous hit), and the last verifier step.
 pub(crate) fn drain_events(
     src: &mut impl EventSource,
     what: &str,
     last_hit_ms: &mut i64,
     mut now_ms: impl FnMut() -> i64,
-) -> Vec<String> {
-    let mut hits = Vec::new();
+) -> Spotted {
+    let mut out = Spotted::default();
     for _ in 0..MAX_EVENTS {
         let Some(ev) = src.next_event() else { break };
         if !(0..=9).contains(&ev) || (EVENTS_STOP_MASK >> ev) & 1 != 0 {
             break;
+        }
+        match ev {
+            EV_FIRST_STAGE_HIT => out.stage = Stage::FirstStageHit,
+            EV_REJECTION_2ND => out.stage = Stage::Rejected,
+            _ => {}
         }
         if ev != EV_CONFIRM_1ST && ev != EV_CONFIRM_2ND {
             continue;
@@ -134,9 +160,9 @@ pub(crate) fn drain_events(
         }
         *last_hit_ms = now;
         info!("{what} detected: '{phrase}' (event {ev})");
-        hits.push(phrase);
+        out.phrases.push(phrase);
     }
-    hits
+    out
 }
 
 struct Logged<'a>(&'a mut Spotter);
@@ -235,6 +261,16 @@ pub(crate) struct Engine {
     pub chunk: usize,
     /// VQE output samples per chunk.
     frame: usize,
+    /// Id of the wake word model (its directory name, e.g. "alisa").
+    wake_id: String,
+    /// Events 3 / 6 carry the names the stage tracking expects.
+    stages: bool,
+}
+
+fn model_id(dir: &Path) -> String {
+    dir.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 impl Engine {
@@ -281,6 +317,21 @@ impl Engine {
             return None;
         };
         info!("VQE '{preset}': {chunk} input frames -> {frame} output samples per chunk");
+        let (hit, rej) = (
+            lib.event_name(EV_FIRST_STAGE_HIT),
+            lib.event_name(EV_REJECTION_2ND),
+        );
+        // The names may come with or without an "EVENT_" prefix.
+        let stages = hit.as_deref().is_some_and(|n| n.ends_with("1ST_STAGE_HIT"))
+            && rej
+                .as_deref()
+                .is_some_and(|n| n.ends_with("REJECTION_2ND_STAGE"));
+        if !stages {
+            warn!(
+                "spotter event table differs: {EV_FIRST_STAGE_HIT}={hit:?} \
+                 {EV_REJECTION_2ND}={rej:?}; 1st-stage anchor off"
+            );
+        }
         let mut eng = Engine {
             wake: Slot::new("wake word"),
             cmd: Slot::new("command"),
@@ -288,6 +339,8 @@ impl Engine {
             lib,
             chunk: chunk_n,
             frame: frame_n,
+            wake_id: model_id(wake_dir),
+            stages,
         };
         if !eng.wake.init(&lib, wake_dir, VQE_OMNI_WITH_GAIN) {
             return None;
@@ -302,7 +355,18 @@ impl Engine {
 
     /// Switches the wake word model.
     pub fn set_wake_model(&mut self, dir: &Path) -> bool {
+        self.wake_id = model_id(dir);
         self.wake.init(&self.lib, dir, VQE_OMNI_WITH_GAIN)
+    }
+
+    /// Id of the current wake word model (`Model::wake_preroll` key).
+    pub fn wake_id(&self) -> &str {
+        &self.wake_id
+    }
+
+    /// VQE output samples per chunk.
+    pub fn frame(&self) -> usize {
+        self.frame
     }
 
     /// One VQE chunk; false after an error (logged).
@@ -321,24 +385,29 @@ impl Engine {
             .ok()
     }
 
-    /// Feeds the last chunk to the wake word spotter; its confirmed phrases.
-    pub fn feed_wake(&mut self) -> Vec<String> {
-        feed(&self.vqe, self.frame, &mut self.wake)
+    /// Feeds the last chunk to the wake word spotter: its confirmed phrases and verifier step
+    /// (`Stage::None` when the event ids are not the expected ones).
+    pub fn feed_wake(&mut self) -> Spotted {
+        let mut s = feed(&self.vqe, self.frame, &mut self.wake);
+        if !self.stages {
+            s.stage = Stage::None;
+        }
+        s
     }
 
     /// Feeds the last chunk to the command spotter; its confirmed phrases.
     pub fn feed_command(&mut self) -> Vec<String> {
-        feed(&self.vqe, self.frame, &mut self.cmd)
+        feed(&self.vqe, self.frame, &mut self.cmd).phrases
     }
 }
 
-fn feed(vqe: &Vqe, frame: usize, s: &mut Slot) -> Vec<String> {
+fn feed(vqe: &Vqe, frame: usize, s: &mut Slot) -> Spotted {
     let nch = s.vqe.len();
     let Some(sp) = s.sp.as_mut() else {
-        return Vec::new();
+        return Spotted::default();
     };
     if nch == 0 {
-        return Vec::new();
+        return Spotted::default();
     }
     let mut src: [&[f32]; MAX_SPOTTER_CHANNELS] = [&[]; MAX_SPOTTER_CHANNELS];
     let mut n = frame;
@@ -350,7 +419,7 @@ fn feed(vqe: &Vqe, frame: usize, s: &mut Slot) -> Vec<String> {
             }
             Err(e) => {
                 error!("VQE output: {e}");
-                return Vec::new();
+                return Spotted::default();
             }
         }
     }
@@ -362,7 +431,7 @@ fn feed(vqe: &Vqe, frame: usize, s: &mut Slot) -> Vec<String> {
     }
     if let Err(e) = sp.submit(&s.buf) {
         error!("spotter_submit_raw_data: {e}");
-        return Vec::new();
+        return Spotted::default();
     }
     drain_events(
         &mut Logged(sp),
@@ -466,7 +535,13 @@ mod tests {
         for stop in [Ok(0), Ok(4), Ok(7), Ok(9), Ok(-1), Ok(10), Err(())] {
             let mut s = Script::new(&[Ok(1), Ok(3), stop, Ok(2)]);
             let mut last = 0;
-            assert!(drain_events(&mut s, "t", &mut last, || 10_000).is_empty());
+            assert_eq!(
+                drain_events(&mut s, "t", &mut last, || 10_000),
+                Spotted {
+                    phrases: vec![],
+                    stage: Stage::FirstStageHit
+                }
+            );
             assert_eq!(s.polled, 3, "{stop:?}");
             assert_eq!(s.phrases, 0);
         }
@@ -477,7 +552,10 @@ mod tests {
         // 1, 3, 6, 8 are skipped; 2 and 5 confirm (the phrase is read only for those).
         let mut s = Script::new(&[Ok(1), Ok(2), Ok(3), Ok(6), Ok(8), Ok(0), Ok(5)]);
         let mut last = 0;
-        assert_eq!(drain_events(&mut s, "t", &mut last, || 5000), ["p1"]);
+        assert_eq!(
+            drain_events(&mut s, "t", &mut last, || 5000).phrases,
+            ["p1"]
+        );
         assert_eq!((s.polled, s.phrases, last), (6, 1, 5000));
     }
 
@@ -485,7 +563,10 @@ mod tests {
     fn events_at_most_16_per_chunk() {
         let mut s = Script::new(&[Ok(1); 40]);
         let mut last = 0;
-        assert!(drain_events(&mut s, "t", &mut last, || 5000).is_empty());
+        assert_eq!(
+            drain_events(&mut s, "t", &mut last, || 5000),
+            Spotted::default()
+        );
         assert_eq!(s.polled, 16);
     }
 
@@ -495,17 +576,45 @@ mod tests {
         let mut now = 10_000;
         // Two confirmations of one utterance (1st and 2nd stage): one hit.
         let mut s = Script::new(&[Ok(2), Ok(5)]);
-        assert_eq!(drain_events(&mut s, "t", &mut last, || now), ["p0"]);
+        assert_eq!(drain_events(&mut s, "t", &mut last, || now).phrases, ["p0"]);
         assert_eq!((s.phrases, last), (2, 10_000));
         // 1199 ms later: still the same utterance.
         now += 1199;
         let mut s = Script::new(&[Ok(2)]);
-        assert!(drain_events(&mut s, "t", &mut last, || now).is_empty());
+        assert!(
+            drain_events(&mut s, "t", &mut last, || now)
+                .phrases
+                .is_empty()
+        );
         assert_eq!(last, 10_000);
         // 1200 ms after the hit: a new one.
         now += 1;
         let mut s = Script::new(&[Ok(5)]);
-        assert_eq!(drain_events(&mut s, "t", &mut last, || now), ["p0"]);
+        assert_eq!(drain_events(&mut s, "t", &mut last, || now).phrases, ["p0"]);
         assert_eq!(last, 11_200);
+    }
+
+    #[test]
+    fn events_report_the_last_verifier_step() {
+        let stage = |evs: &[i32]| {
+            let evs: Vec<_> = evs.iter().map(|&e| Ok(e)).collect();
+            let mut last = 0;
+            drain_events(&mut Script::new(&evs), "t", &mut last, || 5000)
+        };
+        // 1st-stage hit, verifier waits for more audio: no phrase yet.
+        assert_eq!(stage(&[3, 4]).stage, Stage::FirstStageHit);
+        assert!(stage(&[3, 4]).phrases.is_empty());
+        assert_eq!(stage(&[3, 6]).stage, Stage::Rejected);
+        assert_eq!(stage(&[6, 3]).stage, Stage::FirstStageHit);
+        // Hit and confirmation in one chunk.
+        let s = stage(&[3, 5]);
+        assert_eq!(
+            (s.phrases.as_slice(), s.stage),
+            (&["p1".to_string()][..], Stage::FirstStageHit)
+        );
+        // A 1st-stage confirmation right after the hit (no verifier wait) is a hit too.
+        let s = stage(&[3, 2]);
+        assert_eq!((s.phrases.len(), s.stage), (1, Stage::FirstStageHit));
+        assert_eq!(stage(&[1, 2]).stage, Stage::None);
     }
 }

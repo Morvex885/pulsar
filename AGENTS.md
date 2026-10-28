@@ -467,11 +467,19 @@ port on the station.
   wake word received up to 500 ms before ours. A claim older than the 250 ms window wins outright
   (its station already decided and answers); otherwise busy (speaking, announcing, ringing) beats
   idle, then the higher level, then the larger station name. While arbitrating the ring shows
-  LISTENING, mic audio is buffered and sent after `voice_request_start`, a command word is held; a
-  losing station blocks voice commands for 2.5 s (cleared by its next wake word or dialog).
-  Stations without a voice subscriber do not claim (the wake word shows the usual not-subscribed
-  error). HA's `duplicate_wake_up_detected` error (first phrase per 2 s wins across satellites) is
-  handled silently: no error ring or sound.
+  LISTENING, mic audio (the wake word's pre-roll, then live) is buffered and sent after
+  `voice_request_start`, a command word is held; a losing station blocks voice commands for 2.5 s
+  (cleared by its next wake word or dialog). Stations without a voice subscriber do not claim
+  (the wake word shows the usual not-subscribed error). HA's `duplicate_wake_up_detected` error
+  (first phrase per 2 s wins across satellites) is handled silently: no error ring or sound.
+- Wake word pre-roll (`pulsar-audio/src/frontend.rs`, details in `docs/architecture.md`): the
+  spotter confirms after the word ends, so `FrontendEvent::Wake` carries the audio from the end
+  of the word to the confirming chunk (`Model::wake_preroll` per model and wake word id: chunks
+  since the 1st-stage hit, event 3, plus an offset, or a fixed count; measured with the
+  `wake timing:` lines of `frontend_probe`, biased short). The wake word itself must not reach
+  STT: HA never removes it from the text, and agents then get «Алиса, включи свет». After a `Wake`
+  the front-end keeps sending `Audio` until `FrontendHandle::wake_handled` (the controller calls
+  it once per `Wake`, after `on_wake`), so nothing is lost before `set_streaming(true)`.
 - Clock layers: order in the `pulsar-clock/src/clock.rs` module doc (pairing code > … > time;
   update install keeps it dark from `install_update` until exit). Persisted: `clock_scroll_ms=`,
   `clock_music=`. Player one-shots fire only when the command took effect (`music_pause()` returns

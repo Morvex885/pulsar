@@ -239,9 +239,14 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
         tokio::select! {
             () = &mut end => break,
             ev = rx.recv() => match ev {
-                Some(FrontendEvent::Wake { phrase, level_db }) => {
+                Some(FrontendEvent::Wake { phrase, level_db, preroll }) => {
                     wakes += 1;
-                    out!("t={:6.2}s WAKE '{phrase}' level {level_db:.1} dB", secs(start));
+                    out!(
+                        "t={:6.2}s WAKE '{phrase}' level {level_db:.1} dB preroll {} ms",
+                        secs(start),
+                        preroll.len() / 16
+                    );
+                    h.wake_handled();
                 }
                 Some(FrontendEvent::Command { word }) => {
                     commands += 1;

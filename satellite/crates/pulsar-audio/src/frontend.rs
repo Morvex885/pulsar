@@ -10,7 +10,9 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicBool, AtomicU32, AtomicU64, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed,
+};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -18,10 +20,10 @@ use std::time::Duration;
 use log::{error, info, warn};
 use pulsar_alsa::{Format, HwRequest, HwTrace, Pcm, Stream};
 use pulsar_core::MusicFrame;
-use pulsar_core::model::Model;
+use pulsar_core::model::{Model, PrerollRule};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::engine::{Engine, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
+use crate::engine::{Engine, Stage, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
 use crate::spectrum::SpectrumAnalyzer;
 
 /// Wake word level window: 1.5 s of 32 ms VQE frames (512 samples @ 16 kHz on both models),
@@ -29,6 +31,11 @@ use crate::spectrum::SpectrumAnalyzer;
 /// itself.
 const LEVEL_CHUNKS: usize = 47;
 const LEVEL_TOP: usize = 8;
+/// Pre-roll ring: 1.024 s of VQE chunks, more than any wake word's confirmation delay.
+const PREROLL_CHUNKS: usize = 32;
+/// End of speech for the "wake timing" log: the newest chunk within 20 dB (power) of the
+/// loudest one in the level window.
+const SPEECH_END_RATIO: f32 = 0.01;
 
 /// ALSA buffer in VQE chunks.
 const BUFFER_CHUNKS: u64 = 8;
@@ -45,11 +52,17 @@ pub enum FrontendEvent {
     Wake {
         phrase: String,
         level_db: f32,
+        /// 16 kHz mono audio from the end of the wake word up to and including the confirming
+        /// chunk, oldest first; empty without values for the model (`Model::wake_preroll`).
+        /// The `Audio` events after it continue it without a gap until
+        /// [`FrontendHandle::wake_handled`].
+        preroll: Vec<i16>,
     },
     Command {
         word: String,
     },
-    /// 16 kHz mono, one VQE chunk (512 samples), while streaming is on.
+    /// 16 kHz mono, one VQE chunk (512 samples), while streaming is on or a `Wake` is not yet
+    /// handled.
     Audio(Vec<i16>),
     /// One per VQE chunk (32 ms) while music analysis is on.
     Music(MusicFrame),
@@ -132,6 +145,16 @@ impl FrontendHandle {
         self.inner.shared.stream.store(on, Relaxed);
     }
 
+    /// The owner handled one [`FrontendEvent::Wake`]: ends the stream hold it started. Call it
+    /// after `set_streaming` for that wake word.
+    pub fn wake_handled(&self) {
+        let _ = self
+            .inner
+            .shared
+            .wake_pending
+            .try_update(AcqRel, Acquire, |v| v.checked_sub(1));
+    }
+
     /// While on, music features of the speaker reference come as [`FrontendEvent::Music`].
     pub fn set_music_analysis(&self, on: bool) {
         self.inner.shared.music.store(on, Relaxed);
@@ -171,6 +194,9 @@ struct Shared {
     detect: AtomicBool,
     commands: AtomicBool,
     stream: AtomicBool,
+    /// `Wake` events sent and not yet handled: audio keeps coming meanwhile, so nothing is lost
+    /// between the confirmation and the owner's `set_streaming(true)`.
+    wake_pending: AtomicU32,
     music: AtomicBool,
     pending_model: Mutex<Option<PathBuf>>,
     tap_on: AtomicBool,
@@ -190,6 +216,7 @@ impl Shared {
             detect: AtomicBool::new(true),
             commands: AtomicBool::new(false),
             stream: AtomicBool::new(false),
+            wake_pending: AtomicU32::new(0),
             music: AtomicBool::new(false),
             pending_model: Mutex::new(None),
             tap_on: AtomicBool::new(false),
@@ -514,6 +541,99 @@ fn mean_square(d: &[f32]) -> f32 {
     (sq / d.len() as f64) as f32
 }
 
+/// The last VQE chunks as s16, for the pre-roll after a wake word.
+pub(crate) struct PrerollRing {
+    buf: Vec<i16>,
+    frame: usize,
+    /// Slot the next chunk goes to.
+    next: usize,
+    filled: usize,
+}
+
+impl PrerollRing {
+    pub(crate) fn new(chunks: usize, frame: usize) -> Self {
+        PrerollRing {
+            buf: vec![0; chunks * frame],
+            frame,
+            next: 0,
+            filled: 0,
+        }
+    }
+
+    fn chunks(&self) -> usize {
+        self.buf.len() / self.frame.max(1)
+    }
+
+    /// Stores one chunk and returns it as s16. A chunk of another length breaks the timeline:
+    /// the ring is cleared and nothing is stored.
+    pub(crate) fn push(&mut self, d: &[f32]) -> Option<&[i16]> {
+        if d.len() != self.frame || self.frame == 0 || self.buf.is_empty() {
+            self.clear();
+            return None;
+        }
+        let at = self.next * self.frame;
+        let slot = &mut self.buf[at..at + self.frame];
+        for (o, &v) in slot.iter_mut().zip(d) {
+            *o = to_s16(v);
+        }
+        self.next = (self.next + 1) % self.chunks();
+        self.filled = (self.filled + 1).min(self.chunks());
+        Some(&self.buf[at..at + self.frame])
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.next = 0;
+        self.filled = 0;
+    }
+
+    /// The last `n` chunks (at most as many as stored), oldest first.
+    pub(crate) fn last(&self, n: usize) -> Vec<i16> {
+        let n = n.min(self.filled);
+        let total = self.chunks();
+        let mut out = Vec::with_capacity(n * self.frame);
+        for k in (1..=n).rev() {
+            let at = (self.next + total - k) % total * self.frame;
+            out.extend_from_slice(&self.buf[at..at + self.frame]);
+        }
+        out
+    }
+}
+
+/// Chunks from the newest entry of the level window back to the last one within
+/// `SPEECH_END_RATIO` of its loudest (0 = the newest itself); None for a silent window.
+fn speech_end_chunks(h: &[f32; LEVEL_CHUNKS], newest: usize) -> Option<usize> {
+    let peak = h.iter().copied().fold(0.0f32, f32::max);
+    if peak <= 0.0 {
+        return None;
+    }
+    let floor = SPEECH_END_RATIO * peak;
+    (0..LEVEL_CHUNKS).find(|&k| h[(newest + LEVEL_CHUNKS - k) % LEVEL_CHUNKS] >= floor)
+}
+
+/// Pre-roll length in chunks for `rule`, given the chunks since the 1st-stage hit.
+fn preroll_chunks(rule: Option<PrerollRule>, first_stage_age: Option<usize>) -> usize {
+    match (rule, first_stage_age) {
+        (None, _) => 0,
+        (Some(PrerollRule::Fixed(n)), _) => n as usize,
+        (Some(PrerollRule::FirstStage { offset, .. }), Some(a)) => {
+            (a as i64 + i64::from(offset)).max(0) as usize
+        }
+        (Some(PrerollRule::FirstStage { fallback, .. }), None) => fallback as usize,
+    }
+}
+
+/// "-" for None in the "wake timing" log.
+struct Chunks(Option<usize>);
+
+impl std::fmt::Display for Chunks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(n) => write!(f, "{n}"),
+            None => f.write_str("-"),
+        }
+    }
+}
+
 fn processing(
     model: &'static Model,
     mut eng: Engine,
@@ -536,13 +656,18 @@ fn processing(
         warn!("music analysis: unsupported capture layout");
     }
     let mut music_was_on = false;
+    let frame = eng.frame();
+    let mut ring = PrerollRing::new(PREROLL_CHUNKS, frame);
+    // Chunks since the wake spotter's 1st-stage hit, while its verifier waits.
+    let mut first_stage_age: Option<usize> = None;
 
     while shared.running() {
         let pending = lock(&shared.pending_model).take();
-        if let Some(dir) = pending
-            && !eng.set_wake_model(&dir)
-        {
-            error!("failed to switch wake word model to {}", dir.display());
+        if let Some(dir) = pending {
+            first_stage_age = None;
+            if !eng.set_wake_model(&dir) {
+                error!("failed to switch wake word model to {}", dir.display());
+            }
         }
         // Exactly one VQE chunk.
         {
@@ -569,6 +694,7 @@ fn processing(
             let _ = tx.send(FrontendEvent::Music(mf));
         }
         if !eng.process(&mics, &spk) {
+            ring.clear();
             continue;
         }
 
@@ -582,21 +708,54 @@ fn processing(
             level_pos = (level_pos + 1) % LEVEL_CHUNKS;
         }
 
-        if shared.stream.load(Relaxed)
-            && let Some(d) = eng.output(VQE_OMNI_WITH_GAIN)
-            && !d.is_empty()
+        // Every chunk goes into the ring, so a pre-roll never spans a gap. A `Wake` not yet
+        // handled holds the stream open: the owner switches streaming on only when it handles
+        // the event, and the chunks in between continue the pre-roll. `wake_pending` is read
+        // first: its Acquire pairs with `wake_handled`, after the owner's `set_streaming(true)`.
+        if let Some(d) = eng.output(VQE_OMNI_WITH_GAIN)
+            && let Some(slot) = ring.push(d)
+            && (shared.wake_pending.load(Acquire) > 0 || shared.stream.load(Relaxed))
         {
-            let _ = tx.send(FrontendEvent::Audio(d.iter().map(|&v| to_s16(v)).collect()));
+            let _ = tx.send(FrontendEvent::Audio(slot.to_vec()));
         }
 
         if shared.detect.load(Relaxed) {
-            let phrases = eng.feed_wake();
-            if !phrases.is_empty() {
+            first_stage_age = first_stage_age.map(|a| a + 1).filter(|&a| a < LEVEL_CHUNKS);
+            let spotted = eng.feed_wake();
+            match spotted.stage {
+                Stage::FirstStageHit => first_stage_age = Some(0),
+                Stage::Rejected => first_stage_age = None,
+                Stage::None => {}
+            }
+            if !spotted.phrases.is_empty() {
                 let level_db = wake_level_db(&level_hist);
-                for phrase in phrases {
-                    let _ = tx.send(FrontendEvent::Wake { phrase, level_db });
+                let newest = (level_pos + LEVEL_CHUNKS - 1) % LEVEL_CHUNKS;
+                let speech_end = speech_end_chunks(&level_hist, newest);
+                let rule = model
+                    .wake_preroll
+                    .iter()
+                    .find(|p| p.id == eng.wake_id())
+                    .map(|p| p.rule);
+                let n = preroll_chunks(rule, first_stage_age).min(PREROLL_CHUNKS);
+                let preroll = ring.last(n);
+                info!(
+                    "wake timing: first_stage={} speech_end={} preroll={}",
+                    Chunks(first_stage_age),
+                    Chunks(speech_end),
+                    preroll.len() / frame
+                );
+                first_stage_age = None;
+                for phrase in spotted.phrases {
+                    shared.wake_pending.fetch_add(1, Relaxed);
+                    let _ = tx.send(FrontendEvent::Wake {
+                        phrase,
+                        level_db,
+                        preroll: preroll.clone(),
+                    });
                 }
             }
+        } else {
+            first_stage_age = None;
         }
         if shared.commands.load(Relaxed) {
             for word in eng.feed_command() {
@@ -634,6 +793,62 @@ mod tests {
         // Clamped to -100..0.
         assert_eq!(wake_level_db(&at(3.0)), 0.0);
         assert_eq!(wake_level_db(&at(-120.0)), -100.0);
+    }
+
+    #[test]
+    fn preroll_ring_keeps_the_last_chunks_oldest_first() {
+        // 3 chunks of 2 samples; chunk k holds the samples k, k.
+        let mut r = PrerollRing::new(3, 2);
+        let chunk = |k: i16| [f32::from(k) / 32768.0; 2];
+        assert!(r.last(2).is_empty());
+        assert_eq!(r.push(&chunk(1)), Some(&[1i16, 1][..]));
+        // Asked for more than stored: what there is.
+        assert_eq!(r.last(3), [1, 1]);
+        for k in 2..=5 {
+            r.push(&chunk(k));
+        }
+        // Wrapped twice: chunks 3, 4, 5 remain.
+        assert_eq!(r.last(3), [3, 3, 4, 4, 5, 5]);
+        assert_eq!(r.last(2), [4, 4, 5, 5]);
+        assert_eq!(r.last(9), [3, 3, 4, 4, 5, 5]);
+        assert!(r.last(0).is_empty());
+        // A chunk of another length breaks the timeline: nothing older survives it.
+        assert_eq!(r.push(&[0.0; 3]), None);
+        assert!(r.last(3).is_empty());
+        r.push(&chunk(6));
+        assert_eq!(r.last(3), [6, 6]);
+    }
+
+    #[test]
+    fn speech_end_is_the_newest_chunk_within_20_db_of_the_peak() {
+        let mut h = [0f32; LEVEL_CHUNKS];
+        assert_eq!(speech_end_chunks(&h, 10), None);
+        // Word in chunks 3..=8, newest = 12: 4 quiet chunks after it.
+        for v in &mut h[3..=8] {
+            *v = 1.0;
+        }
+        h[9] = 0.009;
+        assert_eq!(speech_end_chunks(&h, 12), Some(4));
+        // Exactly 20 dB down still counts as speech.
+        h[9] = 0.01;
+        assert_eq!(speech_end_chunks(&h, 12), Some(3));
+        // The window is a ring: newest = 1 reaches back over the end to the word.
+        assert_eq!(speech_end_chunks(&h, 1), Some(LEVEL_CHUNKS - 9 + 1));
+        assert_eq!(speech_end_chunks(&h, 9), Some(0));
+    }
+
+    #[test]
+    fn preroll_length_per_rule() {
+        let first = |offset, fallback| Some(PrerollRule::FirstStage { offset, fallback });
+        assert_eq!(preroll_chunks(None, Some(5)), 0);
+        assert_eq!(preroll_chunks(Some(PrerollRule::Fixed(7)), None), 7);
+        assert_eq!(preroll_chunks(Some(PrerollRule::Fixed(7)), Some(2)), 7);
+        assert_eq!(preroll_chunks(first(3, 9), Some(4)), 7);
+        assert_eq!(preroll_chunks(first(-3, 9), Some(4)), 1);
+        // An anchor closer than the offset: nothing rather than the word itself.
+        assert_eq!(preroll_chunks(first(-3, 9), Some(2)), 0);
+        // No 1st-stage hit before the confirmation.
+        assert_eq!(preroll_chunks(first(-3, 9), None), 9);
     }
 
     #[test]
