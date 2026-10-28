@@ -23,3 +23,4 @@ led_speed=1
 voice_indication=0
 led_case_color=
 clock_music=Levels
+wake_preroll=0

@@ -428,6 +428,7 @@ impl Controller {
             model_dir(&st.wake_word),
             Some(PathBuf::from(COMMAND_MODEL)),
         );
+        mic.set_preroll(st.wake_preroll);
 
         let ss_cfg = SendspinConfig {
             name: id.friendly_name.clone(),

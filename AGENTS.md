@@ -472,15 +472,17 @@ port on the station.
   (cleared by its next wake word or dialog). Stations without a voice subscriber do not claim
   (the wake word shows the usual not-subscribed error). HA's `duplicate_wake_up_detected` error
   (first phrase per 2 s wins across satellites) is handled silently: no error ring or sound.
-- Wake word pre-roll (`pulsar-audio/src/frontend.rs`, details in `docs/architecture.md`): the
-  spotter confirms after the word ends, so `FrontendEvent::Wake` carries the audio from the end
-  of the word to the confirming chunk (`Model::wake_preroll` per model and wake word id: chunks
-  since the 1st-stage hit, event 3, plus an offset, or a fixed count; measured with the
-  `wake timing:` lines of `frontend_probe`, kept short, settled through HA acceptance).
-  The wake word itself must not reach STT: HA never removes it from the text, and agents then get
-  «Алиса, включи свет». After a `Wake` the front-end keeps sending `Audio` until
-  `FrontendHandle::wake_handled` (the controller calls it once per `Wake`, after `on_wake`), so
-  nothing is lost before `set_streaming(true)`.
+- Wake word pre-roll (switch "Wake word pre-roll", `state.conf` `wake_preroll=`, default 1;
+  `pulsar-audio/src/frontend.rs`, details in `docs/architecture.md`): the spotter confirms after
+  the word ends, so `FrontendEvent::Wake` carries the audio from the end of the word to the
+  confirming chunk (`Model::wake_preroll` per model and wake word id: chunks since the 1st-stage
+  hit, event 3, plus an offset, or a fixed count; measured with the `wake timing:` lines of
+  `frontend_probe`, kept short, settled through HA acceptance). The wake word itself must not
+  reach STT: HA never removes it from the text, and agents then get «Алиса, включи свет». Off,
+  the pre-roll is empty (`FrontendHandle::set_preroll`). After a `Wake` the front-end keeps
+  sending `Audio` until `FrontendHandle::wake_handled` (the controller calls it once per `Wake`,
+  after `on_wake`), so nothing is lost before `set_streaming(true)`; this does not depend on the
+  switch.
 - Clock layers: order in the `pulsar-clock/src/clock.rs` module doc (pairing code > … > time;
   update install keeps it dark from `install_update` until exit). Persisted: `clock_scroll_ms=`,
   `clock_music=`. Player one-shots fire only when the command took effect (`music_pause()` returns

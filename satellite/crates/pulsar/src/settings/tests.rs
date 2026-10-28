@@ -1,7 +1,8 @@
 // Fixtures in tests/golden/settings/ come from the C++ reference (rust-port-base): Settings::load
 // and Settings::save of controller.cpp, copied verbatim into a throwaway host harness built with
 // `zig c++ -std=c++20 -O2`. save_*.conf: `save` of the values below; load_*.out: `load` of
-// load_*.in, then `save`.
+// load_*.in, then `save`. Edited by hand since: `wake_preroll` (after `clock_music`; 0 in
+// load_odd.in).
 
 use super::*;
 

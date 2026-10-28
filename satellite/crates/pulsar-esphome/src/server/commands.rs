@@ -234,6 +234,7 @@ impl Server {
             key::SW_AUTO_UPDATE => SwitchId::AutoUpdate,
             key::SW_NEAREST_ANSWERS => SwitchId::NearestAnswers,
             key::SW_VOICE_INDICATION => SwitchId::VoiceIndication,
+            key::SW_WAKE_PREROLL => SwitchId::WakePreroll,
             _ => return,
         };
         self.emit(ApiEvent::Switch(id, state));

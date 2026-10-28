@@ -275,6 +275,11 @@ async fn commands_are_validated_like_cxx() {
                 .await;
             c.send(
                 msg::SWITCH_CMD,
+                kv(key::SW_WAKE_PREROLL, |w| w.boolean(2, true, true)),
+            )
+            .await;
+            c.send(
+                msg::SWITCH_CMD,
                 kv(key::MEDIA, |w| w.boolean(2, true, true)),
             )
             .await;
@@ -287,6 +292,7 @@ async fn commands_are_validated_like_cxx() {
                     ApiEvent::Select(SelectId::ClockMusic, "Levels".into()),
                     ApiEvent::Switch(SwitchId::NearestAnswers, true),
                     ApiEvent::Switch(SwitchId::VoiceIndication, false),
+                    ApiEvent::Switch(SwitchId::WakePreroll, true),
                 ]
             );
 

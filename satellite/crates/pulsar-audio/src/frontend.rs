@@ -155,6 +155,12 @@ impl FrontendHandle {
             .try_update(AcqRel, Acquire, |v| v.checked_sub(1));
     }
 
+    /// Pre-roll in [`FrontendEvent::Wake`] on/off (`Model::wake_preroll`). On by default; the
+    /// stream hold after a `Wake` does not depend on it.
+    pub fn set_preroll(&self, on: bool) {
+        self.inner.shared.preroll.store(on, Relaxed);
+    }
+
     /// While on, music features of the speaker reference come as [`FrontendEvent::Music`].
     pub fn set_music_analysis(&self, on: bool) {
         self.inner.shared.music.store(on, Relaxed);
@@ -197,6 +203,7 @@ struct Shared {
     /// `Wake` events sent and not yet handled: audio keeps coming meanwhile, so nothing is lost
     /// between the confirmation and the owner's `set_streaming(true)`.
     wake_pending: AtomicU32,
+    preroll: AtomicBool,
     music: AtomicBool,
     pending_model: Mutex<Option<PathBuf>>,
     tap_on: AtomicBool,
@@ -217,6 +224,7 @@ impl Shared {
             commands: AtomicBool::new(false),
             stream: AtomicBool::new(false),
             wake_pending: AtomicU32::new(0),
+            preroll: AtomicBool::new(true),
             music: AtomicBool::new(false),
             pending_model: Mutex::new(None),
             tap_on: AtomicBool::new(false),
@@ -735,10 +743,11 @@ fn processing(
                 let level_db = wake_level_db(&level_hist);
                 let newest = (level_pos + LEVEL_CHUNKS - 1) % LEVEL_CHUNKS;
                 let speech_end = speech_end_chunks(&level_hist, newest);
-                let rule = model
-                    .wake_preroll
-                    .iter()
-                    .find(|p| p.id == eng.wake_id())
+                let rule = shared
+                    .preroll
+                    .load(Relaxed)
+                    .then(|| model.wake_preroll.iter().find(|p| p.id == eng.wake_id()))
+                    .flatten()
                     .map(|p| p.rule);
                 let n = preroll_chunks(rule, first_stage_age).min(PREROLL_CHUNKS);
                 let preroll = ring.last(n);

@@ -70,6 +70,7 @@ impl Controller {
         api.publish_switch(SwitchId::AutoUpdate, self.st.auto_update);
         api.publish_switch(SwitchId::NearestAnswers, self.st.nearest_answers);
         api.publish_switch(SwitchId::VoiceIndication, self.st.voice_indication);
+        api.publish_switch(SwitchId::WakePreroll, self.st.wake_preroll);
         self.publish_update();
         let api = &self.api;
         api.publish_binary_sensor(BinarySensorId::HwMicMute, self.hw_mic_muted);
@@ -162,6 +163,10 @@ impl Controller {
                 self.st.voice_indication = state;
                 self.leds.set_voice_indication(state);
                 self.clock.set_voice_indication(state);
+            }
+            SwitchId::WakePreroll => {
+                self.st.wake_preroll = state;
+                self.mic.set_preroll(state);
             }
         }
         self.api.publish_switch(id, state);
