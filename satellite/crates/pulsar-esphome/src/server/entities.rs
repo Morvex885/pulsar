@@ -314,9 +314,9 @@ impl Server {
             cfg,
         ));
         out.push(switch(
-            "wake_word_pre_roll",
+            "command_right_after_wake_word",
             key::SW_WAKE_PREROLL,
-            "Wake word pre-roll",
+            "Command right after wake word",
             "mdi:skip-backward",
             cfg,
         ));
