@@ -131,9 +131,22 @@ pub enum PrerollRule {
     Fixed(u32),
 }
 
-// Midi: not measured yet, so no pre-roll (the stream hold still closes the gap after the
-// confirmation).
-const CUCUMBER_PREROLL: &[WakePreroll] = &[];
+// Midi, frontend_probe 2026-10-28, one talker at 1-2 m: "alisa" confirms with event 5 and the
+// 1st-stage hit (event 3) always comes in the same chunk, so it anchors nothing; "yandex"
+// confirms with event 2 and never reports event 3. Both get a fixed length. Words reach
+// VQE_OMNI at -54..-63 dB, near the noise floor, so the end of an isolated word is often not
+// found: confirmation 0..5 chunks after it, mostly 2..3 ("alisa", 10 words), 0..3 ("yandex",
+// 11 words). Checked through HA (see the PR).
+const CUCUMBER_PREROLL: &[WakePreroll] = &[
+    WakePreroll {
+        id: "alisa",
+        rule: PrerollRule::Fixed(2),
+    },
+    WakePreroll {
+        id: "yandex",
+        rule: PrerollRule::Fixed(2),
+    },
+];
 // Lite 2, frontend_probe 2026-10-28, one talker at 1-2 m: both models confirm with event 2
 // (1st stage) and never report a 1st-stage hit (event 3), so the length is fixed. Chunks from
 // the end of an isolated word (VQE_OMNI 20 dB below its peak) to the confirmation, over words
