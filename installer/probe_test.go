@@ -11,6 +11,21 @@ func TestMiniModel(t *testing.T) {
 	}
 }
 
+func TestLoaderFor(t *testing.T) {
+	tests := []struct {
+		target, want string
+	}{
+		{"aarch64", "aarch64"},
+		{"armhf", "armhf"},
+		{"mini", "armhf"}, // the first-generation Mini runs the armhf loader (glibc 2.23 build)
+	}
+	for _, tt := range tests {
+		if got := loaderFor(tt.target); got != tt.want {
+			t.Errorf("loaderFor(%q) = %q, want %q", tt.target, got, tt.want)
+		}
+	}
+}
+
 func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 	tests := []struct {
 		name, code string
@@ -23,7 +38,7 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 		{"plum without its loader is skipped", "plum", []string{"aarch64"}, ""},
 		{"station-mini2 is armhf", "station-mini2", []string{"aarch64", "armhf"}, "armhf"},
 		{"station-mini2 without its loader is skipped", "station-mini2", []string{"aarch64"}, ""},
-		{"mini stays armhf", "yandexmini", []string{"aarch64", "armhf"}, "armhf"},
+		{"mini uses the glibc 2.23 target", "yandexmini", []string{"aarch64", "armhf"}, "mini"},
 		{"mini without its loader is skipped", "yandexmini", []string{"aarch64"}, ""},
 		{"no compatible loader", "cucumber", nil, ""},
 		{"unsupported model", "unknown", []string{"aarch64", "armhf"}, ""},
@@ -34,6 +49,21 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 				t.Fatalf("archOf(%q, %v) = %q, want %q", tt.code, tt.loaders, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestQuasarDeviceType(t *testing.T) {
+	cases := map[string]string{
+		`{"deviceType":"yandexmini"}`:              "yandexmini",
+		"{\n  \"deviceType\" : \"yandexmini\",\n}": "yandexmini",
+		`{"deviceType": "station-mini2"}`:          "station-mini2",
+		`{"other":"yandexmini"}`:                   "",
+		``:                                         "",
+	}
+	for cfg, want := range cases {
+		if got := quasarDeviceType(cfg); got != want {
+			t.Errorf("quasarDeviceType(%q) = %q, want %q", cfg, got, want)
+		}
 	}
 }
 

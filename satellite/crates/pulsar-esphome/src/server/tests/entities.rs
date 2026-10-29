@@ -37,6 +37,7 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         zigbee_modes: s(&["Coordinator", "Router"]),
         has_clock: true,
         has_lux: true,
+        has_wake_preroll: true,
         has_hw_mic_mute: true,
         has_buttons: true,
         has_action: true,
@@ -680,6 +681,7 @@ async fn mini_has_no_clock_lux_mute_case_or_talk_entities() {
             let (id, mut cfg) = selftest("now");
             cfg.has_clock = false;
             cfg.has_lux = false;
+            cfg.has_wake_preroll = false;
             cfg.has_hw_mic_mute = false;
             cfg.has_action = false;
             // The Mini's ledconfigs directory is empty; with_none() leaves just "None".
@@ -707,12 +709,13 @@ async fn mini_has_no_clock_lux_mute_case_or_talk_entities() {
                         .collect();
                 }
             }
-            // 16 entities plus the led_show service; no clock, Lux, hardware MUTE, case colour or
-            // TALK entities.
-            assert_eq!(keys.len(), 17, "keys: {keys:?}");
+            // 15 entities plus the led_show service; no clock, Lux, wake pre-roll, hardware MUTE,
+            // case colour or TALK entities.
+            assert_eq!(keys.len(), 16, "keys: {keys:?}");
             assert!(keys.contains(&key::ACTION_LED_SHOW));
             for absent in [
                 key::SW_CLOCK,
+                key::SW_WAKE_PREROLL,
                 key::NUMBER_CLOCK_BRI,
                 key::NUMBER_CLOCK_SCROLL,
                 key::TEXT_CLOCK,

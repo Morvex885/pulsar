@@ -819,18 +819,20 @@ struct GstBackend {
     out: Output,
 }
 
-impl GstBackend {
-    fn enable_output(&self) {
-        pulsar_alsa::enable_output(self.model.amp_enable_paths, self.model.spk_mute_ctl);
-    }
-}
-
 impl Backend for GstBackend {
     fn set_state(&mut self, ch: Channel, s: GstState) -> bool {
-        if s == GstState::Playing {
-            self.enable_output();
+        // MUSIC's alsasink opens the device only after this call, and dmix may switch the
+        // amplifier off while the last client closes; enable on both sides of PLAYING. ANNOUNCE
+        // is not played by GStreamer (pcm_out opens the PCM itself).
+        let music_playing = s == GstState::Playing && ch == Channel::Music;
+        if music_playing {
+            pulsar_alsa::enable_output(self.model);
         }
-        self.pipes[ch.index()].set_state(s as i32)
+        let ok = self.pipes[ch.index()].set_state(s as i32);
+        if music_playing {
+            pulsar_alsa::enable_output(self.model);
+        }
+        ok
     }
 
     fn set_uri(&mut self, ch: Channel, uri: &str) {
@@ -930,9 +932,9 @@ impl Drop for GlibThread {
 // The fdsink of ANNOUNCE's output (pcm_out); playsink converts to its caps.
 const OUT_SINK: &CStr = c"pcmout";
 
-fn new_pipeline(api: &'static Api, ch: Channel, pcm: &str) -> Option<Pipeline> {
+fn new_pipeline(api: &'static Api, ch: Channel, model: &'static Model) -> Option<Pipeline> {
     let sink = match ch {
-        Channel::Music => format!("alsasink device={pcm}"),
+        Channel::Music => format!("alsasink device={}", model.playback_pcm),
         Channel::Announce => format!(
             "capsfilter caps=\\\"{}\\\" ! fdsink name={} sync=false",
             pcm_out::CAPS,
@@ -952,7 +954,7 @@ fn new_pipeline(api: &'static Api, ch: Channel, pcm: &str) -> Option<Pipeline> {
 }
 
 /// dlopen + gst_init + static plugin registration + the GLib thread (C++ Player::init).
-fn start(shared: &Arc<Shared>, pcm: &str, model: &'static Model) -> Option<GlibThread> {
+fn start(shared: &Arc<Shared>, model: &'static Model) -> Option<GlibThread> {
     // One player per process: its GLib thread owns the default main context.
     static STARTED: AtomicBool = AtomicBool::new(false);
     if STARTED.swap(true, Ordering::Relaxed) {
@@ -967,8 +969,8 @@ fn start(shared: &Arc<Shared>, pcm: &str, model: &'static Model) -> Option<GlibT
         return None;
     }
     let pipes = [
-        new_pipeline(api, Channel::Music, pcm)?,
-        new_pipeline(api, Channel::Announce, pcm)?,
+        new_pipeline(api, Channel::Music, model)?,
+        new_pipeline(api, Channel::Announce, model)?,
     ];
     let out = Output::spawn(
         model,
@@ -1024,13 +1026,13 @@ pub struct PlayerHandle {
 /// failed dlopen / gst_init is logged ("player init failed") and gives a degraded handle: every
 /// play() ends with Done(false) at once and state() stays Idle.
 pub fn spawn(model: &'static Model) -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
-    spawn_inner(model.playback_pcm, model)
+    spawn_inner(model)
 }
 
-fn spawn_inner(pcm: &str, model: &'static Model) -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
+fn spawn_inner(model: &'static Model) -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
     let (tx, rx) = unbounded_channel();
     let shared = Arc::new(Shared::new(tx));
-    let exec = start(&shared, pcm, model).map(|t| Box::new(t) as Box<dyn Exec>);
+    let exec = start(&shared, model).map(|t| Box::new(t) as Box<dyn Exec>);
     if exec.is_none() {
         error!("player init failed");
     }

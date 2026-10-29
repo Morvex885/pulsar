@@ -431,7 +431,12 @@ enum TimerKey {
     Frame,
     /// One-shot at the next end of timed content while nothing moves.
     Expiry,
+    /// A write failed on a static frame: retry it even though nothing changes.
+    Retry,
 }
+
+/// Retry period of a failed static frame (the I²C ring is the only sink that reports errors).
+const RETRY_MS: u64 = 1000;
 
 async fn run(mut comp: Compositor, mut out: Output, mut rx: UnboundedReceiver<Cmd>, opened: bool) {
     let epoch = Instant::now();
@@ -464,9 +469,10 @@ async fn run(mut comp: Compositor, mut out: Output, mut rx: UnboundedReceiver<Cm
 
 fn frame(comp: &mut Compositor, out: &mut Output, timers: &mut Timers<TimerKey>, now: i64) {
     let animated = comp.frame(now);
-    out.write(&comp.px, now);
+    let failed = out.write(&comp.px, now);
     if animated {
         timers.cancel(TimerKey::Expiry);
+        timers.cancel(TimerKey::Retry);
         if !timers.is_set(TimerKey::Frame) {
             timers.set_repeating(TimerKey::Frame, FRAME_MS, FRAME_MS);
         }
@@ -474,6 +480,13 @@ fn frame(comp: &mut Compositor, out: &mut Output, timers: &mut Timers<TimerKey>,
     }
     timers.cancel(TimerKey::Frame);
     timers.cancel(TimerKey::Expiry);
+    if failed {
+        // Nothing will change the pixels any more; a dropped frame would stay dark until the
+        // next command. Retry while the sink keeps failing.
+        timers.set(TimerKey::Retry, RETRY_MS);
+    } else {
+        timers.cancel(TimerKey::Retry);
+    }
     if let Some(e) = comp.next_expiry(now) {
         timers.set(TimerKey::Expiry, u64::try_from(e - now).unwrap_or(0));
     }
@@ -547,9 +560,11 @@ impl Output {
         self.write(&off, now);
     }
 
-    fn write(&mut self, px: &[u8], now: i64) {
+    /// Writes changed pixels; true when a sink reported an error and the frame should be retried.
+    fn write(&mut self, px: &[u8], now: i64) -> bool {
         let split = self.n * 3;
         let have_last = self.has_last;
+        let mut failed = false;
         match &mut self.sink {
             Sink::None => {}
             #[cfg(test)]
@@ -560,7 +575,7 @@ impl Output {
             }
             Sink::Fb { ring, logo } => {
                 if !have_last || px[..split] != self.last[..split] {
-                    write_fb(
+                    failed |= !write_fb(
                         ring,
                         &px[..split],
                         &mut self.bgr,
@@ -572,7 +587,7 @@ impl Output {
                 if let Some(logo) = logo
                     && (!have_last || px[split..] != self.last[split..])
                 {
-                    write_fb(
+                    failed |= !write_fb(
                         logo,
                         &px[split..],
                         &mut self.bgr,
@@ -594,8 +609,8 @@ impl Output {
                         .and_then(|()| dev.write_register(*addr, 0x25, &[0xaa]));
                     if let Err(e) = r {
                         warn_write(&mut self.warn[0], "i2c", &e, now);
-                        // Keep `last` as it was: the next frame must retry these pixels.
-                        return;
+                        // Keep `last` as it was: the retry must send these pixels again.
+                        return true;
                     }
                 }
             }
@@ -607,8 +622,13 @@ impl Output {
                 }
             }
         }
+        if failed {
+            // Keep `last` as it was, so the retry does not skip these pixels.
+            return true;
+        }
         self.last.copy_from_slice(px);
         self.has_last = true;
+        false
     }
 }
 
@@ -620,17 +640,24 @@ fn write_fb(
     w: &mut WriteWarn,
     what: &str,
     now: i64,
-) {
+) -> bool {
     bgr.clear();
     for p in px.as_chunks::<3>().0 {
         bgr.extend_from_slice(&[p[2], p[1], p[0]]);
     }
-    match fb.write(bgr) {
-        Ok(k) if k == bgr.len() => {}
-        Ok(_) => warn_write(w, what, &io::Error::from(io::ErrorKind::WriteZero), now),
-        Err(e) => warn_write(w, what, &e, now),
-    }
+    let ok = match fb.write(bgr) {
+        Ok(k) if k == bgr.len() => true,
+        Ok(_) => {
+            warn_write(w, what, &io::Error::from(io::ErrorKind::WriteZero), now);
+            false
+        }
+        Err(e) => {
+            warn_write(w, what, &e, now);
+            false
+        }
+    };
     fb.pan();
+    ok
 }
 
 fn warn_write(w: &mut WriteWarn, what: &str, err: &io::Error, now: i64) {

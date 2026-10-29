@@ -380,6 +380,25 @@ impl Controller {
                 self.update_detection();
                 self.update_ui();
             }
+            InputEvent::MuteToggle => {
+                let muted = !self.mic_muted();
+                info!(
+                    "mic mute button: {}",
+                    if muted { "muted" } else { "unmuted" }
+                );
+                self.st.mic_muted = muted;
+                if muted {
+                    self.cancel_arbitration();
+                    if self.phase == logic::Phase::Listening {
+                        self.finish_interaction();
+                    }
+                }
+                self.update_detection();
+                self.update_ui();
+                self.publish_microphones();
+                // A write cut short by a power loss must not unmute the station.
+                let _ = self.persist_now();
+            }
             InputEvent::Button(Button::Action, p) => {
                 self.api.fire_event(
                     EventId::Button,

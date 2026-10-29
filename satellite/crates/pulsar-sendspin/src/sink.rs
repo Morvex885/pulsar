@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use log::{debug, error, info};
-use pulsar_alsa::{Format, HwRequest, Pcm, Stream};
+use pulsar_alsa::{Format, HwRequest, Pcm};
+use pulsar_core::model::Model;
 
 use crate::ffi::now_us;
 use crate::gain;
@@ -39,10 +40,8 @@ pub(crate) struct Sink {
 
 /// Audio thread state (under `Sink::io`).
 struct Io {
-    /// PCM name and the output gates of the model.
-    pcm_name: &'static str,
-    amp_enable_paths: &'static [&'static str],
-    spk_mute_ctl: &'static str,
+    /// Playback PCM and output gates of the model.
+    model: &'static Model,
     pcm: Option<Pcm>,
     active: bool,
     want_rate: u32,
@@ -74,16 +73,10 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Sink {
-    pub(crate) fn new(
-        pcm: &'static str,
-        amp_enable_paths: &'static [&'static str],
-        spk_mute_ctl: &'static str,
-    ) -> Self {
+    pub(crate) fn new(model: &'static Model) -> Self {
         Self {
             io: Mutex::new(Io {
-                pcm_name: pcm,
-                amp_enable_paths,
-                spk_mute_ctl,
+                model,
                 pcm: None,
                 active: false,
                 want_rate: 0,
@@ -362,10 +355,6 @@ impl Io {
         self.close();
     }
 
-    fn enable_output(&self) {
-        pulsar_alsa::enable_output(self.amp_enable_paths, self.spk_mute_ctl);
-    }
-
     fn open(&mut self) -> bool {
         let now = now_us();
         if now < self.next_open_us {
@@ -381,10 +370,8 @@ impl Io {
                 return false;
             }
         };
-        // The amplifier gates / switch may have been reset while the sink was closed.
-        self.enable_output();
         let mut opened = false;
-        let res = Pcm::open(self.pcm_name, Stream::Playback, false)
+        let res = pulsar_alsa::open_playback(self.model)
             .map_err(|e| ("open", e))
             .and_then(|mut pcm| {
                 opened = true;
@@ -416,7 +403,7 @@ impl Io {
                 if !self.open_failed_logged {
                     error!(
                         "sendspin: ALSA '{}' {step} failed for {} Hz/{} ch/{} bit: {}",
-                        self.pcm_name,
+                        self.model.playback_pcm,
                         self.want_rate,
                         self.want_channels,
                         self.want_bits,
@@ -425,16 +412,13 @@ impl Io {
                 }
                 self.open_failed_logged = true;
                 if opened {
-                    info!("sendspin: ALSA '{}' closed", self.pcm_name);
+                    info!("sendspin: ALSA '{}' closed", self.model.playback_pcm);
                 }
                 self.next_open_us = now + REOPEN_RETRY_US;
                 return false;
             }
         };
         self.pcm = Some(pcm);
-        // Opening the PCM can reset the TDM amplifier gate on the Mini; re-apply it now that the
-        // device is open, as the stock player's PLAYING callback does.
-        self.enable_output();
         self.rate = self.want_rate;
         self.channels = self.want_channels;
         self.bits = self.want_bits;
@@ -448,7 +432,7 @@ impl Io {
         self.stats_us = now;
         info!(
             "sendspin: ALSA '{}' open {} Hz/{} ch/{} bit (period {period}, buffer {buffer} frames = {:.0} ms)",
-            self.pcm_name,
+            self.model.playback_pcm,
             self.rate,
             self.channels,
             self.bits,
@@ -459,7 +443,7 @@ impl Io {
 
     fn close(&mut self) {
         if self.pcm.take().is_some() {
-            info!("sendspin: ALSA '{}' closed", self.pcm_name);
+            info!("sendspin: ALSA '{}' closed", self.model.playback_pcm);
         }
     }
 

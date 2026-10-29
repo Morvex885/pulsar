@@ -52,12 +52,13 @@ pub enum UpdateEvent {
     },
 }
 
-/// Asset suffix of this build.
+/// Asset suffix of this build. The first-generation Mini has a separate glibc-2.23 binary
+/// (`mini`); the other armhf userlands use `armhf`.
 pub fn arch() -> &'static str {
     if cfg!(target_arch = "aarch64") {
         "aarch64"
     } else if cfg!(target_arch = "arm") {
-        "armhf"
+        pulsar_core::model::detect_model().map_or("armhf", |m| m.update_asset)
     } else {
         "host"
     }

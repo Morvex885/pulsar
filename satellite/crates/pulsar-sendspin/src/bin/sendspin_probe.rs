@@ -6,7 +6,7 @@
 //! server connects it sends the transport command NEXT once. On hardware-volume models the
 //! device's "Master Playback Volume" is capped at raw 82 (0.2 on the Mixer scale,
 //! docs/stations.md) for the run and restored afterwards; the Mini has no such control and uses
-//! the model's dmix sink at software volume 0.06.
+//! the same software volume 0.2 through the model's dmix sink.
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -60,7 +60,7 @@ impl VolumeCap {
     /// Ok(None): no such control (the Mini's software volume), nothing to cap.
     fn apply(model: &Model) -> Result<Option<Self>, String> {
         if model.software_volume {
-            println!("volume: software (0.06)");
+            println!("volume: software (0.2)");
             return Ok(None);
         }
         let ctl = match Ctl::open("hw:0") {
@@ -119,8 +119,6 @@ struct Counts {
 fn main() -> ExitCode {
     pulsar_core::init_logger();
     pulsar_core::add_own_target(module_path!());
-    // As in the daemon (the player sets it): alsa-lib's own messages only at debug level.
-    pulsar_alsa::quiet_error_handler();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -131,6 +129,9 @@ fn main() -> ExitCode {
     let Some(model) = pulsar_core::model::detect_model() else {
         return ExitCode::FAILURE;
     };
+    pulsar_alsa::init(model);
+    // As in the daemon (the player sets it): alsa-lib's own messages only at debug level.
+    pulsar_alsa::quiet_error_handler();
     let cap = match VolumeCap::apply(model) {
         Ok(cap) => cap,
         Err(e) => {
@@ -190,14 +191,12 @@ async fn run(args: &Args, model: &'static Model) -> Result<Counts, String> {
         software_version: "probe".into(),
         mac: String::new(),
         state_dir: args.state_dir.clone(),
-        pcm: model.playback_pcm,
-        spk_mute_ctl: model.spk_mute_ctl,
-        amp_enable_paths: model.amp_enable_paths,
-        software_volume: model.software_volume,
+        model,
         port: args.port,
     };
-    let volume = if model.software_volume { 0.06 } else { 0.2 };
-    let (handle, mut events) = pulsar_sendspin::spawn(cfg, volume, false)?;
+    let volume = 0.2;
+    let master = pulsar_core::volume::master_gain(model, volume);
+    let (handle, mut events) = pulsar_sendspin::spawn(cfg, volume, false, master)?;
     let mut term = signal(SignalKind::terminate()).map_err(|e| format!("signal: {e}"))?;
     let mut int = signal(SignalKind::interrupt()).map_err(|e| format!("signal: {e}"))?;
     println!(

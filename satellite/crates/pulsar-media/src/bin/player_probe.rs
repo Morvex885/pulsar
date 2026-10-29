@@ -250,6 +250,7 @@ fn main() -> ExitCode {
     let Some(model) = pulsar_core::model::detect_model() else {
         return ExitCode::FAILURE;
     };
+    pulsar_alsa::init(model);
     // Test sounds only with the volume capped: without the control there is no cap.
     let mut mx = Mixer::open(model);
     let software = model.software_volume;
@@ -356,7 +357,7 @@ fn main() -> ExitCode {
     // The mixer's master is already in the signal on hardware models; a software master has to
     // go into the channel gains the same way the controller does it.
     let master = if software {
-        pulsar_core::volume::software_gain(volume)
+        mixer::master_gain(model, volume)
     } else {
         1.0
     };

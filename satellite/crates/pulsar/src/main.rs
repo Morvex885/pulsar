@@ -58,6 +58,8 @@ fn main() -> ExitCode {
     let Some(model) = pulsar_core::model::detect_model() else {
         return ExitCode::from(1);
     };
+    // Before the runtime, threads and any audio library: ALSA_CONFIG_PATH and libasound.
+    pulsar_alsa::init(model);
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

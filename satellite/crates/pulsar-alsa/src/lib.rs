@@ -7,6 +7,15 @@
 mod ffi;
 
 use ffi::{HwParams, MixerValue, RawCtl, RawPcm, SwParams};
+use pulsar_core::model::Model;
+
+/// Applies the model's process-wide ALSA settings before any thread or audio library starts:
+/// ALSA_CONFIG_PATH and the absolute libasound path (the Mini's firmware keeps it outside the
+/// loader's search path). Must be called before the first [`load`].
+pub fn init(model: &Model) {
+    model.apply_env();
+    ffi::set_library_path(model.alsa_lib);
+}
 
 /// Loads libasound.so.2 once; every other call loads it on demand. Err = dlerror text.
 pub fn load() -> Result<(), String> {
@@ -259,20 +268,36 @@ pub fn set_mixer_integer(name: &str, values: &[i64]) -> Result<(), i32> {
     ctl.write_integers(name, values)
 }
 
-/// Opens the model's output gates right before a playback start, as the stock daemon does: the
-/// sysfs amplifier switches and the ALSA "SPK mute" switch. Both sinks (GStreamer and Sendspin)
-/// share it; opening the PCM may reset the gates, so this runs on every start.
-pub fn enable_output(amp_enable_paths: &[&str], spk_mute_ctl: &str) {
-    for path in amp_enable_paths {
+/// Switches the model's output on: the sysfs amplifier gates and the ALSA "SPK mute" mixer.
+/// Opening a PCM or dmix dropping its last client may switch the gates off again, so this runs
+/// both before and after a device is opened.
+pub fn enable_output(model: &Model) {
+    for path in model.amp_enable_paths {
         if !pulsar_core::sysfs::write_file(path, "1\n") {
             log::warn!("amp: cannot write '{path}'");
         }
     }
-    if !spk_mute_ctl.is_empty()
-        && let Err(e) = set_mixer_integer(spk_mute_ctl, &[1])
+    if !model.spk_mute_ctl.is_empty()
+        && let Err(e) = set_mixer_integer(model.spk_mute_ctl, &[1])
     {
-        log::warn!("spk: cannot unmute '{spk_mute_ctl}': {}", strerror(e));
+        log::warn!(
+            "spk: cannot unmute '{}': {}",
+            model.spk_mute_ctl,
+            strerror(e)
+        );
     }
+}
+
+/// Opens the model's playback PCM with the output gates on. Gates are enabled before the open (a
+/// device must never start muted) and again afterwards: dmix turns the amplifier off when its
+/// last client closes, so another channel may have closed it between our two calls. All PCM
+/// openers in the daemon use this; the MUSIC pipeline, whose alsasink opens the device inside
+/// GStreamer, instead calls [`enable_output`] before and after the pipeline reaches PLAYING.
+pub fn open_playback(model: &Model) -> Result<Pcm, i32> {
+    enable_output(model);
+    let pcm = Pcm::open(model.playback_pcm, Stream::Playback, false)?;
+    enable_output(model);
+    Ok(pcm)
 }
 
 pub struct Ctl {

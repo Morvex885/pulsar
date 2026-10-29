@@ -1,14 +1,13 @@
-# Cross-build for Yandex Stations with cargo-zigbuild: one binary per userland ABI.
+# Cross-build for Yandex Stations with cargo-zigbuild: one binary per userland ABI / glibc.
 #   ARCH=aarch64  64-bit userspace (Station Midi, glibc 2.36)
-#   ARCH=armhf    32-bit userspace (Station Lite 2 and Mini 2, glibc 2.30; Station Mini,
-#                  glibc 2.23; also Midi images with an armhf userland). Built for glibc 2.23 so
-#                  the first-generation Mini runs the same binary.
-# `make` builds both daemons; `make ARCH=armhf` one of them. Output: build/<arch>/pulsar (stripped,
+#   ARCH=armhf    32-bit userspace of the Lite 2, Mini 2 and armhf Midi images (glibc 2.30)
+#   ARCH=mini     first-generation Mini: 32-bit armhf userspace with glibc 2.23
+# `make` builds all three daemons; `make ARCH=armhf` one of them. Output: build/<arch>/pulsar (stripped,
 # the one deployed) and build/<arch>/pulsar.debug (line tables, for `addr2line -f -e` on the crash
 # report; non-PIE, so the addresses in it are absolute). `make ARCH=armhf tools` builds every tool
 # (crates/*/src/bin/*.rs) into build/<arch>/tools/, `make ARCH=armhf build/armhf/tools/<name>` one
-# of them. `make check`: fmt, clippy and tests on the host (without sendspin-cpp); clippy also
-# for both stations, through cargo-zigbuild.
+# of them. `make check`: fmt, clippy and tests on the host (without sendspin-cpp); station clippy
+# covers all three targets, through cargo-zigbuild (aarch64 2.36, armhf 2.30, mini 2.23).
 #
 # The Sendspin player links sendspin-cpp and its dependencies statically. They are fetched once
 # (pinned commits/tags, see third_party/fetch.sh) into third_party/src/ and built per ARCH with
@@ -19,7 +18,7 @@
 ZIG   ?= zig
 CARGO ?= cargo
 CARGO_ZIGBUILD ?= cargo-zigbuild
-ARCHES := aarch64 armhf
+ARCHES := aarch64 armhf mini
 
 # zig for cargo-zigbuild: arch builds and the station clippy of `make check`. cargo-zigbuild would
 # prefer `python3 -m ziglang` (any version) over the zig checked here: point it at that zig and at
@@ -35,7 +34,8 @@ $(ARCHES):
 	+$(MAKE) --no-print-directory ARCH=$@ binary
 
 # Host build: pulsar-sendspin compiles without its sendspin-cpp FFI here. The second clippy run
-# lints the code under #[cfg(target_arch = ...)] for both stations (type-checks only, nothing is
+# lints the code under #[cfg(target_arch = ...)] for all three targets in one invocation
+# (type-checks only, nothing is
 # linked or run, so any zig does); build scripts compile C for those targets (ring), hence
 # cargo-zigbuild.
 # The third lints pulsar-sendspin's FFI side (cfg sendspin_ffi, normally set by its build.rs when
@@ -46,7 +46,8 @@ check:
 	$(CARGO) fmt --all --check
 	$(CARGO) clippy --workspace --all-targets --locked -- -D warnings
 	env $(ZIGBUILD_ENV) $(CARGO_ZIGBUILD) clippy --workspace --all-targets --locked \
-	  --target aarch64-unknown-linux-gnu.2.36 --target armv7-unknown-linux-gnueabihf.2.23 -- -D warnings
+	  --target aarch64-unknown-linux-gnu.2.36 --target armv7-unknown-linux-gnueabihf.2.30 \
+	  --target armv7-unknown-linux-gnueabihf.2.23 -- -D warnings
 	CARGO_TARGET_DIR=target/clippy-ffi RUSTFLAGS='--cfg sendspin_ffi' $(CARGO) clippy -p pulsar-sendspin \
 	  --all-targets --locked --target aarch64-unknown-linux-gnu --target armv7-unknown-linux-gnueabihf \
 	  -- -D warnings
@@ -70,10 +71,16 @@ RUST_CPU    :=
 RUST_TARGET := aarch64-unknown-linux-gnu
 GLIBC       := 2.36
 else ifeq ($(ARCH),armhf)
-TARGET      := arm-linux-gnueabihf.2.23
+TARGET      := arm-linux-gnueabihf.2.30
 CPU         := -mcpu=cortex_a53
 # Same core as the C++ build: VFPv4 makes f32/f64 mul_add a vfma instruction (the generic armv7
 # target calls libm fmaf instead).
+RUST_CPU    := -C target-cpu=cortex-a53
+RUST_TARGET := armv7-unknown-linux-gnueabihf
+GLIBC       := 2.30
+else ifeq ($(ARCH),mini)
+TARGET      := arm-linux-gnueabihf.2.23
+CPU         := -mcpu=cortex_a53
 RUST_CPU    := -C target-cpu=cortex-a53
 RUST_TARGET := armv7-unknown-linux-gnueabihf
 GLIBC       := 2.23
@@ -112,18 +119,22 @@ BUILD_TIME := $(shell TZ=UTC0 LC_ALL=C git log -1 --format=%cd --date=format-loc
 # third_party/toolchain/zig-c++ does not filter; those wrappers serve the CMake build only).
 # Non-PIE (relocation-model=static) keeps crash report addresses absolute; frame pointers feed
 # the aarch64 crash report's fp: chain.
+# One target dir per arch: armhf and mini use the same Rust triple but different glibc versions,
+# and a shared target/ would let parallel builds overwrite each other's output.
+CARGO_TARGET_DIR := target/$(ARCH)
 CARGO_ENV := PULSAR_VERSION='$(VERSION)' PULSAR_BUILD_TIME='$(BUILD_TIME)' \
              PULSAR_SS_SRC=$(CURDIR)/$(SS_SRC) PULSAR_SS_BUILD=$(CURDIR)/$(SS_BUILD) PULSAR_REQUIRE_SS=1 \
              RUSTFLAGS='-C relocation-model=static -C force-frame-pointers=yes $(RUST_CPU)' \
+             CARGO_TARGET_DIR='$(CARGO_TARGET_DIR)' \
              $(ZIGBUILD_ENV)
 ZIGBUILD  := env $(CARGO_ENV) $(CARGO) zigbuild --release --locked --target $(RUST_TARGET).$(GLIBC)
-OUT       := target/$(RUST_TARGET)/release
+OUT       := $(CARGO_TARGET_DIR)/$(RUST_TARGET)/release
 TOOLS     := $(basename $(notdir $(wildcard crates/*/src/bin/*.rs)))
 
-# cargo always runs (FORCE) and decides itself what is out of date; `+` hands it make's jobserver.
-# Builds of both arches share target/ and wait for each other on its lock. The deployed binary is
-# stripped (/data holds the binary, its .prev and the upload: ~80 MB on the Lite 2, ~20 MB on the
-# Mini 2).
+# cargo always runs (FORCE) and decides itself what is out of date; `+` hands make's jobserver.
+# Each arch has its own target/$(ARCH), so parallel builds never share output. The deployed binary
+# is stripped (/data holds the binary, its .prev and the upload: ~80 MB on the Lite 2, ~20 MB on
+# the Mini 2).
 binary: $(SS_STAMP) FORCE
 	+$(ZIGBUILD) -p pulsar --bin pulsar
 	@mkdir -p $(BUILD)

@@ -162,6 +162,7 @@ fn main() -> ExitCode {
     let Some(m) = pulsar_core::model::detect_model() else {
         return ExitCode::from(1);
     };
+    pulsar_alsa::init(m);
     let args = match parse_args(std::env::args().skip(1)) {
         Ok(a) => a,
         Err(e) => {

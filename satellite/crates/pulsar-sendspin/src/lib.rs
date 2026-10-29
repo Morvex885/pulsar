@@ -48,15 +48,8 @@ pub struct SendspinConfig {
     pub mac: String,
     /// Identity / pairing persistence directory (created 0700 if missing, not recursively).
     pub state_dir: PathBuf,
-    /// GStreamer / ALSA playback sink (the Mini's dmix is "mini", the others "speakers").
-    pub pcm: &'static str,
-    /// ALSA switch unmuted before the sink opens; empty: none.
-    pub spk_mute_ctl: &'static str,
-    /// Sysfs amplifier gates set to 1 before the sink opens; empty: none.
-    pub amp_enable_paths: &'static [&'static str],
-    /// No hardware master: the sink starts at the controller's volume instead of 1.0, matching
-    /// the channel gains the controller applies on the same models.
-    pub software_volume: bool,
+    /// Model of this station: playback PCM and output gates.
+    pub model: &'static pulsar_core::model::Model,
     pub port: u16,
 }
 
@@ -140,13 +133,10 @@ mod tests {
             software_version: String::new(),
             mac: String::new(),
             state_dir: PathBuf::from("/nonexistent"),
-            pcm: "speakers",
-            spk_mute_ctl: "",
-            amp_enable_paths: &[],
-            software_volume: false,
+            model: pulsar_core::model::model_from_dt_id(b"axg_s420_v03").unwrap(),
             port: 0,
         };
-        match spawn(cfg, 0.2, false) {
+        match spawn(cfg, 0.2, false, 1.0) {
             Err(e) => assert_eq!(e, "sendspin: built without sendspin-cpp"),
             Ok(_) => panic!("spawned without sendspin-cpp"),
         }

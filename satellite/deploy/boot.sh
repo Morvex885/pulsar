@@ -15,10 +15,12 @@ mkdir /tmp/pulsar-boot.lock 2>/dev/null || exit 0
 pidof pulsar >/dev/null 2>&1 && exit 0
 pidof supervise.sh >/dev/null 2>&1 && exit 0  # never two supervisors
 # Supported models only (see satellite/crates/pulsar-core/src/model.rs); anything else keeps the
-# Yandex stack. The first-generation Mini has no yandex,* compatibility entry: its board id is the
-# marker (the daemon and installer use the same file).
+# Yandex stack. The first-generation Mini has no yandex,* compatibility entry: the Amlogic S420
+# board id alone is not Yandex-specific, so quasar.cfg must also name the yandexmini device.
 if ! tr '\0' '\n' </proc/device-tree/compatible | grep -qxE 'yandex,(cucumber|plum|station-mini2)'; then
-  [ "$(tr -d '\0' </proc/device-tree/amlogic-dt-id 2>/dev/null)" = axg_s420_v03 ] || exit 0
+  [ "$(tr -d '\0' </proc/device-tree/amlogic-dt-id 2>/dev/null)" = axg_s420_v03 ] &&
+    grep -qE '"deviceType"[[:space:]]*:[[:space:]]*"yandexmini"' /system/vendor/quasar/quasar.cfg 2>/dev/null ||
+    exit 0
 fi
 
 # onboot.sh has started quasar in background before S99zpulsar runs; wait for it, then stop it.

@@ -97,21 +97,28 @@ case "$cmd" in
   test-start)
     own
     vol=0.2
-    r "! pidof supervise.sh >/dev/null || { echo 'run stop first' >&2; exit 1; }
-       [ -x $T/pulsar ] || { echo 'push pulsar first' >&2; exit 1; }
-       grep -v -e '^volume=' -e '^volume2=' -e '^volume_curve=' -e '^muted=' -e '^auto_update=' -e '^update_attempt=' \
-         $D/state.conf > $T/state.conf 2>/dev/null || true
-       printf 'volume2=$vol\nmuted=0\nauto_update=0\n' >> $T/state.conf
-       for z in $D/zigbee-*.ybl; do [ -f \"\$z\" ] && cp \"\$z\" $T/; done
-       cd $T
-       alsa=; libs=
-       if [ "$station" = mini ]; then
-         [ -f $D/asound.conf ] || { echo 'Mini needs $D/asound.conf (satellite/deploy/asound.conf)' >&2; exit 1; }
-         alsa="ALSA_CONFIG_PATH=$D/asound.conf"
-         [ -d /system/vendor/quasar/libs ] && libs="LD_LIBRARY_PATH=/system/vendor/quasar/libs"
-       fi
-       nohup env PULSAR_PORT_OFFSET=10000 \$alsa \$libs ./pulsar $T/state.conf < /dev/null >> $T/log 2>&1 &
-       echo \$! > $T/pid; sleep 2; kill -0 \$(cat $T/pid) && echo started" ;;
+    # A quoted heredoc: no local shell expansion and no nested quotes in the remote command.
+    r sh -s -- "$T" "$D" "$vol" "$station" <<'EOF'
+T=$1
+D=$2
+vol=$3
+station=$4
+! pidof supervise.sh >/dev/null || { echo 'run stop first' >&2; exit 1; }
+[ -x "$T/pulsar" ] || { echo 'push pulsar first' >&2; exit 1; }
+grep -v -e '^volume=' -e '^volume2=' -e '^volume_curve=' -e '^muted=' -e '^auto_update=' -e '^update_attempt=' \
+  "$D/state.conf" > "$T/state.conf" 2>/dev/null || true
+printf 'volume2=%s\nmuted=0\nauto_update=0\n' "$vol" >> "$T/state.conf"
+for z in "$D"/zigbee-*.ybl; do [ -f "$z" ] && cp "$z" "$T/"; done
+cd "$T" || exit 1
+if [ "$station" = mini ]; then
+  [ -f "$D/asound.conf" ] || { echo 'Mini needs /data/pulsar/asound.conf (satellite/deploy/asound.conf)' >&2; exit 1; }
+fi
+nohup env PULSAR_PORT_OFFSET=10000 ./pulsar "$T/state.conf" < /dev/null >> "$T/log" 2>&1 &
+echo $! > "$T/pid"
+sleep 2
+kill -0 "$(cat "$T/pid")" && echo started
+EOF
+    ;;
   test-stop)
     own
     r "p=\$(cat $T/pid) || exit 1; kill \$p 2>/dev/null

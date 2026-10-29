@@ -50,6 +50,7 @@ pub fn spawn(
     _cfg: SendspinConfig,
     _volume: f32,
     _muted: bool,
+    _master_gain: f32,
 ) -> Result<(SendspinHandle, UnboundedReceiver<SendspinEvent>), String> {
     Err("sendspin: built without sendspin-cpp".into())
 }

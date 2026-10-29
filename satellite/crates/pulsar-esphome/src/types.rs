@@ -60,6 +60,8 @@ pub struct ApiConfig {
     pub has_clock: bool,
     /// false: no Illuminance sensor, no lux states (the model has no ltr308als01).
     pub has_lux: bool,
+    /// The model has wake-word pre-roll rules: the switch "Command right after wake word".
+    pub has_wake_preroll: bool,
     /// The model has a readable hardware microphone mute switch/key.
     pub has_hw_mic_mute: bool,
     /// The model has any buttons at all (the Event «Button» entity).
@@ -86,6 +88,7 @@ impl Default for ApiConfig {
             zigbee_modes: Vec::new(),
             has_clock: true,
             has_lux: true,
+            has_wake_preroll: true,
             has_hw_mic_mute: true,
             has_buttons: true,
             has_action: true,

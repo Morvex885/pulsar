@@ -34,8 +34,9 @@ const LEVEL_SECS: f32 = 1.5;
 /// The loudest 8 × 32 ms of the window count, i.e. 8 frames on the 32 ms models and 16 on the
 /// Mini: the same amount of audio, so the mean is comparable too.
 const LEVEL_TOP_PER_32MS: usize = 8;
-/// Pre-roll ring: 1.024 s of VQE chunks, more than any wake word's confirmation delay.
-const PREROLL_CHUNKS: usize = 32;
+/// Pre-roll ring: 1.024 s of VQE chunks, more than any wake word's confirmation delay. A duration,
+/// not a chunk count: 32 chunks on the 32 ms models and 64 on the Mini's 16 ms ones.
+const PREROLL_SECS: f32 = 1.024;
 /// End of speech for the "wake timing" log: the newest chunk within 20 dB (power) of the
 /// loudest one in the level window.
 const SPEECH_END_RATIO: f32 = 0.01;
@@ -380,7 +381,8 @@ impl Fifo {
 
 fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
     let nch = model.capture_channels as usize;
-    let bits = model.capture_bits;
+    let bits = model.capture_format.bits();
+    let shift = model.capture_format.shift();
     let mut pcm: Option<Pcm> = None;
     let mut hw_period = period;
     let mut input16 = (bits == 16).then(|| vec![0i16; period * nch]);
@@ -425,8 +427,7 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
             // 8 bits and keeping the sign extension reduces it to the VQE's 16-bit input.
             let input = input32.as_ref().expect("S32 input");
             for (dst, &src) in out.iter_mut().zip(&input[..n * nch]) {
-                *dst = (src >> model.capture_shift).clamp(i32::from(i16::MIN), i32::from(i16::MAX))
-                    as i16;
+                *dst = (src >> shift).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
             }
             &out[..n * nch]
         } else {
@@ -490,13 +491,10 @@ pub(crate) fn hw_outcome(t: &HwTrace, rate: u32) -> Result<(u64, u64), HwFail> {
 /// Returns the PCM and the frames to read at once.
 fn open_capture(model: &Model, period: usize) -> Option<(Pcm, usize)> {
     let dev = model.capture_pcm;
-    if model.capture_bits != 16 && model.capture_bits != 32 {
-        error!(
-            "capture {dev}: unsupported sample width {} bits",
-            model.capture_bits
-        );
-        return None;
-    }
+    let format = match model.capture_format {
+        pulsar_core::model::CaptureFormat::S16 => Format::S16Le,
+        pulsar_core::model::CaptureFormat::S32 { .. } => Format::S32Le,
+    };
     // Non-blocking: reads never wait inside ALSA, so a stop never hangs in snd_pcm_readi.
     let mut pcm = match Pcm::open(dev, Stream::Capture, true) {
         Ok(p) => p,
@@ -506,11 +504,7 @@ fn open_capture(model: &Model, period: usize) -> Option<(Pcm, usize)> {
         }
     };
     let t = pcm.set_hw_params_traced(&HwRequest {
-        format: if model.capture_bits == 32 {
-            Format::S32Le
-        } else {
-            Format::S16Le
-        },
+        format,
         channels: model.capture_channels,
         rate: model.capture_rate,
         rate_exact: false,
@@ -521,7 +515,9 @@ fn open_capture(model: &Model, period: usize) -> Option<(Pcm, usize)> {
         Ok((per, buf)) => {
             info!(
                 "capture {dev}: {} Hz, {} ch, {} bits, period {per}, buffer {buf}",
-                t.near.rate, model.capture_channels, model.capture_bits
+                t.near.rate,
+                model.capture_channels,
+                model.capture_format.bits()
             );
             let per = usize::try_from(per).unwrap_or(usize::MAX);
             Some((pcm, per.min(period)))
@@ -570,8 +566,19 @@ fn level_window(rate: u32, period: usize) -> (usize, usize) {
 /// Mean of the `top` loudest frames of the level window (mean squares), in dBFS clamped to
 /// -100..0 and rounded to 0.1 dB: stations compare levels received as "%.1f" text, so ours must be
 /// the same number the peers see, or ties could resolve differently on each side.
+#[cfg(test)]
 pub(crate) fn wake_level_db(h: &[f32], top: usize) -> f32 {
     let mut s = h.to_vec();
+    wake_level_db_sorted(&mut s, top)
+}
+
+/// The level with a caller-owned scratch buffer (the processing thread reuses it).
+fn wake_level_db_into(h: &[f32], top: usize, scratch: &mut [f32]) -> f32 {
+    scratch.copy_from_slice(h);
+    wake_level_db_sorted(scratch, top)
+}
+
+fn wake_level_db_sorted(s: &mut [f32], top: usize) -> f32 {
     s.sort_unstable_by(|a, b| b.total_cmp(a));
     let top = top.clamp(1, s.len().max(1));
     let mut sum = 0.0f32;
@@ -703,6 +710,8 @@ fn processing(
     // the same 1.5 s (see LEVEL_SECS).
     let (level_chunks, level_top) = level_window(model.capture_rate, period);
     let mut level_hist = vec![0f32; level_chunks];
+    // Scratch for the level's top-N selection; reused on every wake word.
+    let mut level_sorted = vec![0f32; level_chunks];
     let mut level_pos = 0;
     let mut ana = SpectrumAnalyzer::new(model.capture_rate, period);
     if !ana.ok() {
@@ -710,7 +719,9 @@ fn processing(
     }
     let mut music_was_on = false;
     let frame = eng.frame();
-    let mut ring = PrerollRing::new(PREROLL_CHUNKS, frame);
+    let chunk_secs = period as f32 / model.capture_rate.max(1) as f32;
+    let preroll_ring_chunks = (PREROLL_SECS / chunk_secs).ceil().max(1.0) as usize;
+    let mut ring = PrerollRing::new(preroll_ring_chunks, frame);
     // Chunks since the wake spotter's 1st-stage hit, while its verifier waits.
     let mut first_stage_age: Option<usize> = None;
 
@@ -785,7 +796,7 @@ fn processing(
                 Stage::None => {}
             }
             if !spotted.phrases.is_empty() {
-                let level_db = wake_level_db(&level_hist, level_top);
+                let level_db = wake_level_db_into(&level_hist, level_top, &mut level_sorted);
                 let newest = (level_pos + level_chunks - 1) % level_chunks;
                 let speech_end = speech_end_chunks(&level_hist, newest);
                 let rule = shared
@@ -794,7 +805,7 @@ fn processing(
                     .then(|| model.wake_preroll.iter().find(|p| p.id == eng.wake_id()))
                     .flatten()
                     .map(|p| p.rule);
-                let n = preroll_chunks(rule, first_stage_age).min(PREROLL_CHUNKS);
+                let n = preroll_chunks(rule, first_stage_age).min(preroll_ring_chunks);
                 let preroll = ring.last(n);
                 info!(
                     "wake timing: first_stage={} speech_end={} preroll={}",

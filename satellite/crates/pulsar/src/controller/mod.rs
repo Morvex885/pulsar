@@ -339,6 +339,7 @@ impl Controller {
             },
             has_clock: model.has_clock || pulsar_clock::panel_present(model),
             has_lux: model.has_lux || lux_rx.is_some(),
+            has_wake_preroll: !model.wake_preroll.is_empty(),
             has_hw_mic_mute: !model.mute_input.is_empty() || model.mute_gpio != 0,
             has_buttons: !model.keys_input.is_empty(),
             has_action: model.action_key != 0,
@@ -355,11 +356,8 @@ impl Controller {
 
         // Hardware first: UI feedback should work even if HA is not connected.
         let leds = pulsar_hw::spawn_leds(model);
-        let clock = if model.clock_dir.is_empty() {
-            pulsar_clock::ClockHandle::none()
-        } else {
-            pulsar_clock::spawn(model)
-        };
+        // spawn handles an absent panel (empty clock_dir) with a no-op handle.
+        let clock = pulsar_clock::spawn(model);
         clock.set_enabled(st.clock_on);
         clock.set_brightness(st.clock_brightness);
         clock.set_scroll_ms(st.clock_scroll_ms);
@@ -452,20 +450,19 @@ impl Controller {
             software_version: id.project_version.clone(),
             mac: id.mac.to_ascii_lowercase(),
             state_dir: logic::in_dir(&dir, "sendspin"),
-            pcm: model.playback_pcm,
-            spk_mute_ctl: model.spk_mute_ctl,
-            amp_enable_paths: model.amp_enable_paths,
-            software_volume: model.software_volume,
+            model,
             port: ports.sendspin,
         };
-        let (sendspin, sendspin_rx) = match pulsar_sendspin::spawn(ss_cfg, st.volume, st.muted) {
-            Ok((h, rx)) => (Some(h), Some(rx)),
-            Err(e) => {
-                debug!("{e}");
-                error!("Sendspin player unavailable");
-                (None, None)
-            }
-        };
+        let master = pulsar_media::mixer::master_gain(model, st.volume);
+        let (sendspin, sendspin_rx) =
+            match pulsar_sendspin::spawn(ss_cfg, st.volume, st.muted, master) {
+                Ok((h, rx)) => (Some(h), Some(rx)),
+                Err(e) => {
+                    debug!("{e}");
+                    error!("Sendspin player unavailable");
+                    (None, None)
+                }
+            };
 
         // A test instance (port offset) stays invisible to HA and Music Assistant.
         let mdns = if ports.offset == 0 {

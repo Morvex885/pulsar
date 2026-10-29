@@ -273,6 +273,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "log",
+ "pulsar-alsa",
  "pulsar-audio",
  "pulsar-clock",
  "pulsar-core",

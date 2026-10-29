@@ -14,15 +14,12 @@ pub struct Model {
     pub friendly_name: &'static str,
     pub model_name: &'static str,
 
-    // Capture: interleaved samples from capture_pcm, capture_bits per channel (S16_LE or S32_LE);
-    // VQE gets mic_channels / spk_channels. For S32_LE, capture_shift low bits are discarded when
-    // reducing to the VQE's 16-bit input: 16 for a full 32-bit sample, 8 for the Mini's stream,
-    // whose 24 significant bits are right-justified.
+    // Capture: interleaved samples from capture_pcm, capture_format per channel (S16_LE or S32_LE);
+    // VQE gets mic_channels / spk_channels.
     pub capture_pcm: &'static str,
     pub capture_rate: u32,
     pub capture_channels: u32,
-    pub capture_bits: u32,
-    pub capture_shift: u32,
+    pub capture_format: CaptureFormat,
     pub mic_channels: &'static [u32],
     pub spk_channels: &'static [u32],
     pub vqe_preset: &'static str,
@@ -63,7 +60,8 @@ pub struct Model {
     /// Mic mute on a sysfs GPIO instead of an evdev switch: global GPIO number, 0 = none; active
     /// low, exported if needed but never configured (used only when already an input).
     pub mute_gpio: u32,
-    /// KEY_VOICECOMMAND; 0: no action/TALK button.
+    /// Key code of the action/TALK button (KEY_VOICECOMMAND 582; the Mini's TALK pad is
+    /// KEY_POWER 116); 0: no action button.
     pub action_key: u16,
     /// Earcons, relative to /system/vendor/quasar/sounds/.
     pub error_sound: &'static str,
@@ -77,6 +75,15 @@ pub struct Model {
     /// ALSA playback PCM (dmix + the softvol "Master Playback Volume"): GStreamer's alsasink,
     /// the Sendspin sink, and the PCM the mixer opens to create the control.
     pub playback_pcm: &'static str,
+    /// ALSA config selected through ALSA_CONFIG_PATH before any thread starts (the Mini's dmix);
+    /// empty: the firmware's /etc/asound.conf.
+    pub alsa_config: &'static str,
+    /// Absolute libasound path for `pulsar-alsa` (the Mini keeps it outside the loader path);
+    /// empty: the usual "libasound.so.2" lookup.
+    pub alsa_lib: &'static str,
+    /// Release asset suffix of this model's armhf build (the Mini needs glibc 2.23, the other
+    /// armhf userlands 2.30).
+    pub update_asset: &'static str,
     pub software_volume: bool,
     /// ALSA playback switch (on hw:0) that must be 1 (on) for the amplifier to pass audio; empty:
     /// no such control.
@@ -106,6 +113,33 @@ pub struct Model {
     pub zigbee_tty: &'static str,
     pub zigbee_reset: &'static str,
     pub zigbee_boot: &'static str,
+}
+
+/// Sample format of the capture PCM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureFormat {
+    S16,
+    /// S32_LE with right-justified 24 significant bits; `shift` low bits are discarded to get
+    /// the VQE's 16-bit input (8 on the Mini). A full 32-bit sample would use 16.
+    S32 {
+        shift: u32,
+    },
+}
+
+impl CaptureFormat {
+    pub fn bits(self) -> u32 {
+        match self {
+            Self::S16 => 16,
+            Self::S32 { .. } => 32,
+        }
+    }
+
+    pub fn shift(self) -> u32 {
+        match self {
+            Self::S16 => 0,
+            Self::S32 { shift } => shift,
+        }
+    }
 }
 
 /// An Nx1 BGR framebuffer behind an ledfb trigger, with per-channel sysfs LEDs as fallback, or an
@@ -218,8 +252,7 @@ static MIDI: Model = Model {
     capture_pcm: "hw:0,2",
     capture_rate: 96000,
     capture_channels: 8,
-    capture_bits: 16,
-    capture_shift: 16,
+    capture_format: CaptureFormat::S16,
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5, 6, 7],
     vqe_preset: "cucumber",
@@ -266,6 +299,9 @@ static MIDI: Model = Model {
     timer_sound: "common/timer.wav",
     volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
+    alsa_config: "",
+    alsa_lib: "",
+    update_asset: "armhf",
     software_volume: false,
     spk_mute_ctl: "",
     amp_enable_paths: &[],
@@ -292,8 +328,7 @@ static LITE2: Model = Model {
     capture_pcm: "hw:0,1",
     capture_rate: 48000,
     capture_channels: 8,
-    capture_bits: 16,
-    capture_shift: 16,
+    capture_format: CaptureFormat::S16,
     mic_channels: &[0, 2],
     spk_channels: &[6],
     vqe_preset: "plum",
@@ -329,6 +364,9 @@ static LITE2: Model = Model {
     timer_sound: "common/timer.wav",
     volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
+    alsa_config: "",
+    alsa_lib: "",
+    update_asset: "armhf",
     software_volume: false,
     spk_mute_ctl: "",
     amp_enable_paths: &[],
@@ -366,8 +404,7 @@ static MINI2: Model = Model {
     capture_pcm: "default",
     capture_rate: 48000,
     capture_channels: 6,
-    capture_bits: 16,
-    capture_shift: 16,
+    capture_format: CaptureFormat::S16,
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5],
     vqe_preset: "yandexmini_2",
@@ -405,6 +442,9 @@ static MINI2: Model = Model {
     timer_sound: "common/timer.opus",
     volume_sound: "common/volume_sound.opus",
     playback_pcm: "default",
+    alsa_config: "",
+    alsa_lib: "",
+    update_asset: "armhf",
     software_volume: false,
     spk_mute_ctl: "",
     amp_enable_paths: &[],
@@ -430,8 +470,8 @@ static MINI: Model = Model {
     capture_pcm: "hw:0,2",
     capture_rate: 48000,
     capture_channels: 8,
-    capture_bits: 32,
-    capture_shift: 8, // right-justified 24-bit samples: keep the top 16 bits as int16
+    // Right-justified 24-bit samples: keep the top 16 bits as int16.
+    capture_format: CaptureFormat::S32 { shift: 8 },
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[6, 7],
     vqe_preset: "yandexmini",
@@ -460,7 +500,9 @@ static MINI: Model = Model {
     keys_input: "adc_keypad",
     mute_input: "",
     mute_gpio: 0,
-    action_key: 0, // no TALK button on this model (the keypad's talk pad is not fitted)
+    // The keypad's TALK pad is KEY_POWER (116) in the devicetree, though it is not fitted on the
+    // retail Mini; map it so a fitted pad works like the other models' TALK button.
+    action_key: 116,
     error_sound: "ru-RU/playback_error.mp3",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -468,6 +510,10 @@ static MINI: Model = Model {
     volume_sound: "common/volume_sound.mp3",
     // dmix over hw:0,0; defined in /data/pulsar/asound.conf and selected via ALSA_CONFIG_PATH.
     playback_pcm: "mini",
+    alsa_config: "/data/pulsar/asound.conf",
+    alsa_lib: "/system/vendor/quasar/libs/libasound.so.2",
+    // The Mini's userland is glibc 2.23; the other armhf models get the 2.30 build.
+    update_asset: "mini",
     // No softvol "speakers" PCM and the hardware "Master" control does not attenuate the output;
     // Controller applies the volume to the GStreamer player channels instead.
     software_volume: true,
@@ -480,17 +526,46 @@ static MINI: Model = Model {
         "/sys/class/tdm_state/amp_table",
         "/sys/class/tdm_state/aux_amp",
     ],
-    volume_map: &[
-        VolumePoint { level: 0, raw: 0 },
-        VolumePoint { level: 1, raw: 1 },
-        VolumePoint { level: 20, raw: 20 },
-    ],
-    volume_min_step: false,
+    volume_map: STOCK_VOLUME,
+    volume_min_step: true,
     has_lux: false,
     zigbee_tty: "",
     zigbee_reset: "",
     zigbee_boot: "",
 };
+
+impl Model {
+    /// Process-wide ALSA setup, before any thread or audio library is started. Only the Mini sets
+    /// ALSA_CONFIG_PATH: its dmix PCM lives in /data/pulsar/asound.conf.
+    pub fn apply_env(&self) {
+        if !self.alsa_config.is_empty() {
+            crate::sys::set_var("ALSA_CONFIG_PATH", self.alsa_config);
+        }
+    }
+
+    /// First-generation Mini; the only model with a separate glibc-2.23 armhf build.
+    pub fn is_mini(&self) -> bool {
+        self.codename == "yandexmini"
+    }
+}
+
+/// The `deviceType` value of quasar.cfg (e.g. "yandexmini"), the firmware's own model marker.
+pub fn quasar_device_type(cfg: &str) -> Option<&str> {
+    const KEY: &str = "\"deviceType\"";
+    let after = cfg.find(KEY)? + KEY.len();
+    let rest = cfg[after..].trim_start().strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+/// The Mini model from its board id, but only when quasar.cfg confirms a Yandex firmware:
+/// `axg_s420_v03` is an Amlogic S420 reference board id, not a Yandex-specific one.
+pub fn mini_from_board_and_cfg(dt_id: &[u8], quasar_cfg: &str) -> Option<&'static Model> {
+    (quasar_device_type(quasar_cfg) == Some("yandexmini"))
+        .then(|| model_from_dt_id(dt_id))
+        .flatten()
+}
 
 /// The model of this device, read once; None (logged) on unsupported hardware.
 pub fn detect_model() -> Option<&'static Model> {
@@ -498,7 +573,9 @@ pub fn detect_model() -> Option<&'static Model> {
         let raw = std::fs::read("/proc/device-tree/compatible").unwrap_or_default();
         let model = model_from_compatible(&raw).or_else(|| {
             let dt = std::fs::read("/proc/device-tree/amlogic-dt-id").unwrap_or_default();
-            model_from_dt_id(&dt)
+            let cfg =
+                std::fs::read_to_string("/system/vendor/quasar/quasar.cfg").unwrap_or_default();
+            mini_from_board_and_cfg(&dt, &cfg)
         });
         if model.is_none() {
             let shown = String::from_utf8_lossy(&raw).replace('\0', " ");
@@ -525,7 +602,8 @@ pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
     })
 }
 
-/// The Mini's devicetree has no yandex,* entry; its board id is the only stable marker.
+/// The Mini's devicetree has no yandex,* entry. The board id alone is not a Yandex marker; use
+/// [`mini_from_board_and_cfg`] unless testing the id parser.
 pub fn model_from_dt_id(raw: &[u8]) -> Option<&'static Model> {
     let id = raw.split(|&b| b == 0).next().unwrap_or_default();
     (id == b"axg_s420_v03").then_some(&MINI)
@@ -569,8 +647,7 @@ mod tests {
         assert_eq!(m.mute_input, "");
         assert_ne!(m.mute_gpio, 0);
         assert!(!m.has_clock && !m.has_lux && !m.volume_min_step);
-        assert_eq!(m.capture_bits, 16);
-        assert_eq!(m.capture_shift, 16);
+        assert_eq!(m.capture_format, CaptureFormat::S16);
         assert_eq!(m.action_key, 582);
     }
 
@@ -579,8 +656,7 @@ mod tests {
         let m = model_from_dt_id(b"axg_s420_v03\0").unwrap();
         assert_eq!(m.codename, "yandexmini");
         assert_eq!(m.capture_rate, 48000);
-        assert_eq!(m.capture_bits, 32);
-        assert_eq!(m.capture_shift, 8);
+        assert_eq!(m.capture_format, CaptureFormat::S32 { shift: 8 });
         assert_eq!(m.ring.i2c_addr, 0x3c);
         assert_eq!(m.ring.count, 6);
         assert_eq!(m.logo.count, 0);
@@ -592,6 +668,18 @@ mod tests {
             "yandexmini"
         );
         assert!(model_from_dt_id(b"axg_s420_v02\0").is_none());
+        // axg_s420_v03 is an Amlogic reference-board id: only a Yandex firmware makes it a Mini.
+        let cfg = r#"{"deviceType" : "yandexmini", "x": 1}"#;
+        assert_eq!(
+            mini_from_board_and_cfg(b"axg_s420_v03\0", cfg)
+                .unwrap()
+                .codename,
+            "yandexmini"
+        );
+        assert!(mini_from_board_and_cfg(b"axg_s420_v03\0", r#"{"deviceType":"other"}"#).is_none());
+        assert!(mini_from_board_and_cfg(b"axg_s420_v02\0", cfg).is_none());
+        assert_eq!(quasar_device_type(cfg), Some("yandexmini"));
+        assert_eq!(quasar_device_type("{}"), None);
     }
 
     #[test]

@@ -313,13 +313,15 @@ impl Server {
             "mdi:led-on",
             cfg,
         ));
-        out.push(switch(
-            "command_right_after_wake_word",
-            key::SW_WAKE_PREROLL,
-            "Command right after wake word",
-            "mdi:skip-backward",
-            cfg,
-        ));
+        if self.cfg.has_wake_preroll {
+            out.push(switch(
+                "command_right_after_wake_word",
+                key::SW_WAKE_PREROLL,
+                "Command right after wake word",
+                "mdi:skip-backward",
+                cfg,
+            ));
+        }
         let number = |oid, key, name, icon, (min, max, step): (f32, f32, f32), unit| {
             let mut w = Writer::new();
             entity_head(&mut w, oid, key, name);
@@ -718,7 +720,9 @@ impl Server {
         self.send_bool(msg::SWITCH_STATE, key::SW_AUTO_UPDATE, auto, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_NEAREST_ANSWERS, nearest, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_VOICE_INDICATION, voice, to);
-        self.send_bool(msg::SWITCH_STATE, key::SW_WAKE_PREROLL, preroll, to);
+        if self.cfg.has_wake_preroll {
+            self.send_bool(msg::SWITCH_STATE, key::SW_WAKE_PREROLL, preroll, to);
+        }
         self.send_update(to);
         if self.cfg.has_hw_mic_mute {
             self.send_bool(msg::BINARY_SENSOR_STATE, key::BS_HW_MIC_MUTE, hw, to);
@@ -826,7 +830,11 @@ impl Server {
     pub(super) fn publish(&mut self, p: Publish) {
         let on = self.states_on();
         // Entities the device does not list get no states; their caches are kept all the same.
-        let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
+        let (has_clock, has_lux, has_preroll) = (
+            self.cfg.has_clock,
+            self.cfg.has_lux,
+            self.cfg.has_wake_preroll,
+        );
         let c = &mut self.cache;
         match p {
             Publish::Media(st, volume, muted) => {
@@ -855,7 +863,9 @@ impl Server {
                 };
                 *s = BoolState { has: true, v };
                 let s = *s;
-                if on && (has_clock || !matches!(id, SwitchId::Clock)) {
+                let known = !matches!(id, SwitchId::Clock) || has_clock;
+                let known = known && (!matches!(id, SwitchId::WakePreroll) || has_preroll);
+                if on && known {
                     self.send_bool(msg::SWITCH_STATE, key, s, None);
                 }
             }

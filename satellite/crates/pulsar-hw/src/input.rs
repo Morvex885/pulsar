@@ -5,9 +5,10 @@
 //! 100 ms. All use the same key codes and switch:
 //!
 //! touch keys (capacitive, EV_KEY only; Midi KEY bitmap "40 0 0 0 0 0 0 0 c000000000000 0"):
-//!   KEY_VOICECOMMAND (582) -> Action     (maind: "ACTIVATE")
+//!   Model::action_key (KEY_VOICECOMMAND 582, Mini's TALK pad KEY_POWER 116) -> Action
 //!   KEY_VOLUMEUP     (115) -> VolumeUp
 //!   KEY_VOLUMEDOWN   (114) -> VolumeDown
+//!   KEY_MUTE         (113) -> MuteToggle (Mini's adc_keypad; the mic mute is software there)
 //! mute switch (gpio-keys, KEY bitmap bit 113 KEY_MUTE, SW bitmap 0x4000 = SW_MUTE_DEVICE (14)):
 //!   the hardware microphone mute slider/toggle; SW_MUTE_DEVICE=1 means muted. Its KEY_MUTE
 //!   press/release events are ignored, the switch state is authoritative (initial value via
@@ -44,6 +45,7 @@ const SYN_DROPPED: u16 = 3;
 const SW_MUTE_DEVICE: u16 = 0x0e;
 const KEY_VOLUMEDOWN: u16 = 114;
 const KEY_VOLUMEUP: u16 = 115;
+const KEY_MUTE: u16 = 113;
 #[cfg(test)]
 const KEY_ACTION: u16 = 582;
 
@@ -80,6 +82,9 @@ pub enum InputEvent {
     Button(Button, Press),
     /// Hardware mic mute switch changed (true = muted).
     Mute(bool),
+    /// Momentary mute button that does not latch the microphone itself (the Mini's KEY_MUTE):
+    /// the controller toggles its software mute.
+    MuteToggle,
 }
 
 /// Keeps the input actor alive; the actor stops when the last clone is dropped.
@@ -373,6 +378,14 @@ impl Machine {
 
     fn on_key(&mut self, code: u16, value: i32) {
         let now = self.now();
+        if code == KEY_MUTE {
+            // value 1 is the press; 2 is autorepeat and 0 the release.
+            if value == 1 {
+                info!("input: mute button");
+                let _ = self.tx.send(InputEvent::MuteToggle);
+            }
+            return;
+        }
         if self.action_key != 0 && code == self.action_key {
             if value == 1 && self.action_down.is_none() {
                 self.action_down = Some(now);

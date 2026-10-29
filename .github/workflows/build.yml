@@ -17,10 +17,11 @@ concurrency:
 jobs:
   build:
     # Job names "build (aarch64)" / "build (armhf)" are required status checks of the main ruleset.
+    # build (mini) is the separate glibc-2.23 armhf target for the first-generation Mini.
     strategy:
       fail-fast: false
       matrix:
-        arch: [aarch64, armhf]
+        arch: [aarch64, armhf, mini]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -65,8 +66,8 @@ jobs:
           if-no-files-found: error
 
   check:
-    # Host: cargo fmt --check, clippy -D warnings (host + both stations, the latter through
-    # cargo-zigbuild: ring's build script compiles C for the target), tests (without sendspin-cpp).
+    # Host: cargo fmt --check, clippy -D warnings (host + all three station targets, the latter
+    # through cargo-zigbuild: ring's build script compiles C for the target), tests (without sendspin-cpp).
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -178,7 +179,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
-      - name: 'GitHub release: archives per host OS, both binaries, debug files'
+      - name: 'GitHub release: archives per host OS, all three binaries, debug files'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -187,12 +188,16 @@ jobs:
           cp artifacts/radio/zigbee-*.ybl radio/out/
           # Constant names: the daemon's updater downloads releases/download/<tag>/zigbee-*.ybl.
           cp artifacts/radio/zigbee-*.ybl .
-          for a in aarch64 armhf; do
-            mkdir -p satellite/build/$a ssh/out/$a
+          for a in aarch64 armhf mini; do
+            mkdir -p satellite/build/$a
             cp artifacts/pulsar-$a/pulsar satellite/build/$a/pulsar
-            cp artifacts/ssh/$a/dropbearmulti artifacts/ssh/$a/sftp-server ssh/out/$a/
             cp artifacts/pulsar-$a/pulsar pulsar-$a.bin
             cp artifacts/pulsar-$a/pulsar.debug pulsar-$a.debug
+          done
+          # dropbear is a separate userspace binary; the Mini uses the armhf one.
+          for a in aarch64 armhf; do
+            mkdir -p ssh/out/$a
+            cp artifacts/ssh/$a/dropbearmulti artifacts/ssh/$a/sftp-server ssh/out/$a/
           done
           # Constant names: README links releases/latest/download/pulsar-<os>-<arch>.<ext>.
           satellite/deploy/dist.sh pulsar-windows-amd64.zip artifacts/installer/windows-amd64/pulsar-install.exe

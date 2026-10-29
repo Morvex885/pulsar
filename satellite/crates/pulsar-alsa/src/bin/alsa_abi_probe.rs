@@ -8,6 +8,9 @@ use std::process::ExitCode;
 use pulsar_alsa::{Format, HwRequest, Pcm, Stream};
 
 fn main() -> ExitCode {
+    if let Some(model) = pulsar_core::model::detect_model() {
+        pulsar_alsa::init(model);
+    }
     if let Err(e) = pulsar_alsa::load() {
         eprintln!("load libasound: {e}");
         return ExitCode::FAILURE;

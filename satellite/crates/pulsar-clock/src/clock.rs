@@ -805,6 +805,9 @@ impl Clock {
 /// Whether any clock segment of `model` exists in sysfs (decides the clock entities of a model
 /// whose panel may be missing, `Model::has_clock` false).
 pub fn panel_present(model: &Model) -> bool {
+    if model.clock_dir.is_empty() {
+        return false;
+    }
     (0..DIGITS).any(|d| {
         (0..SEGS).any(|s| {
             let led = format!(
@@ -828,7 +831,12 @@ pub struct ClockHandle {
 /// clock actor, which stops when every handle is dropped. Without any segment: logged ("clock
 /// unavailable"), the handle is a no-op.
 pub fn spawn(model: &'static Model) -> ClockHandle {
-    let Some(leds) = Leds::open(model) else {
+    // An empty clock_dir means the model has no display at all (the Mini): no sysfs probe with
+    // relative paths and no warning.
+    let Some(leds) = (!model.clock_dir.is_empty())
+        .then(|| Leds::open(model))
+        .flatten()
+    else {
         if model.has_clock {
             warn!("clock unavailable");
         }
@@ -853,12 +861,6 @@ pub fn spawn(model: &'static Model) -> ClockHandle {
 }
 
 impl ClockHandle {
-    /// A no-op handle for models without a clock (the Mini), so callers need no special cases
-    /// and the daemon does not log a missing display at every start.
-    pub fn none() -> Self {
-        Self { tx: None }
-    }
-
     fn send(&self, cmd: Cmd) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(cmd);

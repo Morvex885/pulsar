@@ -23,12 +23,13 @@ func modelName(code string) string {
 }
 
 // abis lists the userspace ABIs a model's firmware runs, its usual one first; nil = model not
-// supported. The installed binary is build/<arch>/pulsar for the first ABI whose dynamic loader
-// is on the station. A second ABI is only for a userspace actually seen on that model: some Midi
-// images run a 32-bit userspace on the 64-bit kernel (#13) and need the armhf build (its ALSA
-// ABI is the one in audio/alsa_abi.h, #14). Lite 2 and Mini 2 stay armhf-only: no 64-bit
-// userspace has been seen on them, and the aarch64 binary needs glibc 2.34 — on a miss it would
-// crash-loop back to the Yandex stack (no .prev on a first install).
+// supported. The installed binary is build/<target>/pulsar for the first target whose dynamic
+// loader is on the station. A second ABI is only for a userspace actually seen on that model:
+// some Midi images run a 32-bit userspace on the 64-bit kernel (#13) and need the armhf build
+// (its ALSA ABI is the one in audio/alsa_abi.h, #14). Lite 2 and Mini 2 stay armhf-only: no
+// 64-bit userspace has been seen on them, and the aarch64 binary needs glibc 2.34 — on a miss it
+// would crash-loop back to the Yandex stack (no .prev on a first install). The first-generation
+// Mini uses a separate glibc-2.23 build (`mini`); the other armhf userlands get 2.30.
 func abis(code string) []string {
 	switch code {
 	case "cucumber":
@@ -37,18 +38,44 @@ func abis(code string) []string {
 		return []string{"armhf"}
 	case "yandexmini":
 		// First-generation Mini: 32-bit armhf userland (glibc 2.23) on an aarch64 kernel.
-		return []string{"armhf"}
+		return []string{"mini"}
 	}
 	return nil
 }
 
-// archOf picks the model's first ABI whose loader is on the station (loaders: the words the
-// loader probe printed). "" = none of the model's ABIs: skip the station.
+// loaderFor maps a build target to the dynamic-loader word printed by the station probe.
+func loaderFor(target string) string {
+	if target == "mini" {
+		return "armhf"
+	}
+	return target
+}
+
+// archOf picks the model's first build target whose loader is on the station (loaders: the words
+// the loader probe printed). "" = none of the model's targets: skip the station.
 func archOf(code string, loaders []string) string {
-	for _, a := range abis(code) {
-		if slices.Contains(loaders, a) {
-			return a
+	for _, target := range abis(code) {
+		if slices.Contains(loaders, loaderFor(target)) {
+			return target
 		}
+	}
+	return ""
+}
+
+// quasarDeviceType returns the "deviceType" string of quasar.cfg, the firmware's own model
+// marker. It is deliberately a tiny parser: the file is JSON-like and only this key is needed.
+func quasarDeviceType(cfg string) string {
+	const key = `"deviceType"`
+	i := strings.Index(cfg, key)
+	if i < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(cfg[i+len(key):])
+	rest = strings.TrimPrefix(rest, ":")
+	rest = strings.TrimSpace(rest)
+	rest = strings.TrimPrefix(rest, `"`)
+	if j := strings.IndexByte(rest, '"'); j >= 0 {
+		return rest[:j]
 	}
 	return ""
 }
@@ -103,10 +130,12 @@ func probe(s string, ours bool) {
 	}
 	code, supported := stationCode(compat)
 	if code == "" {
-		// The first-generation Mini has no yandex,* compatible entry; its board id is the
-		// stable marker (the daemon uses the same file).
+		// The first-generation Mini has no yandex,* compatible entry. axg_s420_v03 is an
+		// Amlogic reference board, not a Yandex marker: require quasar.cfg's deviceType too
+		// (the daemon and boot.sh use the same pair).
 		dtid, _ := sh(s, `tr -d '\0' </proc/device-tree/amlogic-dt-id`)
-		if dtid == "axg_s420_v03" {
+		cfg, _ := sh(s, `cat /system/vendor/quasar/quasar.cfg 2>/dev/null`)
+		if dtid == "axg_s420_v03" && quasarDeviceType(cfg) == "yandexmini" {
 			code = "yandexmini"
 			supported = true
 		}

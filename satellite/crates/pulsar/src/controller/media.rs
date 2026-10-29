@@ -28,11 +28,7 @@ impl Controller {
     /// mute also zeroes the software gains of both playback channels and Sendspin. On models
     /// without a usable ALSA master (the Mini) this is also where the master volume is applied.
     pub(super) fn apply_gains(&self) {
-        let master = if self.model.software_volume {
-            pulsar_core::volume::software_gain(self.st.volume)
-        } else {
-            1.0
-        };
+        let master = pulsar_media::mixer::master_gain(self.model, self.st.volume);
         let music = if self.st.muted {
             0.0
         } else {

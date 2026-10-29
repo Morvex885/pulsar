@@ -1,11 +1,11 @@
-//! SpectrumAnalyzer against the C++ analyzer (tests/golden/spectrum.txt): a sine scenario
-//! (three tones and noise, then a fade-out), silence (with a quiet tone fading through the
-//! silence threshold) and a beat sequence (80 Hz kicks, strong, weak and one too early), on the
-//! Lite 2 layout (48 kHz, chunk 1536, 1 speaker channel), the Midi one (96 kHz, chunk 3072,
-//! 4 channels) and the Mini one (48 kHz, chunk 768, 2 channels). The inputs are integer samples,
-//! generated here exactly as by the C++ generator. The Lite 2 and Midi rows are that binary's
-//! output; the Mini rows are the same scenario through the fixed analyzer, whose 16 ms time
-//! constants are derived from the 32 ms ones (the C++ daemon applies them per chunk).
+//! SpectrumAnalyzer golden data (tests/golden/spectrum.txt): a sine scenario (three tones and
+//! noise, then a fade-out), silence (with a quiet tone fading through the silence threshold) and
+//! a beat sequence (80 Hz kicks, strong, weak and one too early), on the Lite 2 layout (48 kHz,
+//! chunk 1536, 1 speaker channel), the Midi one (96 kHz, chunk 3072, 4 channels) and the Mini one
+//! (48 kHz, chunk 768, 2 channels). The inputs are integer samples, generated here exactly as by
+//! the C++ generator. The Lite 2 and Midi rows are the C++ binary's output; the Mini rows are the
+//! same scenario through the fixed Rust analyzer, whose 16 ms time constants are derived from the
+//! 32 ms ones (the C++ daemon applies them per chunk).
 
 use std::f64::consts::PI;
 

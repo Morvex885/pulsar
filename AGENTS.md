@@ -10,8 +10,8 @@ A native Rust daemon replacing the Yandex stack (`maind` / `quasar_launcher2`) o
 Stations: Midi (`cucumber`: usually aarch64, glibc 2.36, 1 GB RAM; some images run a 32-bit
 armhf userland), Lite 2 (`plum`: 32-bit armhf, glibc 2.30, 237 MB RAM), Mini 2 (`station-mini2`:
 32-bit armhf userland on an aarch64 kernel, glibc 2.30, 238 MB RAM) and Mini first generation
-(`yandexmini` / `axg_s420_v03`: 32-bit armhf, glibc 2.23, 236 MB RAM; no clock, light sensor,
-hardware MUTE, action key or Zigbee). It exposes
+(`yandexmini` / `axg_s420_v03`: 32-bit armhf, glibc 2.23 via the separate `mini` build target,
+236 MB RAM; no clock, light sensor, hardware MUTE, TALK button or Zigbee). It exposes
 the speaker to Home Assistant over the ESPHome Native API (port 6053; plaintext until a Noise key is
 provisioned, then Noise) and to Music Assistant as a Sendspin player (port 8928); on the Midi
 its Zigbee radio runs pulsar's own firmware (`radio/`): a deCONZ-protocol network coordinator for
@@ -26,14 +26,14 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 |---|---|
 | `satellite/Cargo.toml` | Cargo workspace (edition 2024, every external dependency pinned in `[workspace.dependencies]`), `rust-toolchain.toml`, `Makefile` (cargo-zigbuild cross builds, `make check`) |
 | `satellite/crates/pulsar/` | the daemon: `main.rs` (runtime, teardown watchdog, final settings flush), `crash.rs` (crash report), `controller/` (all satellite logic: voice pipeline state machine, entities, local commands, updates; `logic.rs` holds its pure decisions), `settings.rs` (`state.conf`: format readable by the binary kept as `.prev`, durable writes, `StateFile` debounce; see Conventions); `PULSAR_PORT_OFFSET=<n>` adds n to the ESPHome, Sendspin, deCONZ and arbiter ports and turns mDNS off (test instance next to the running daemon) |
-| `satellite/crates/pulsar-core/` | logging (stderr + ESPHome log sink), `Timers` (per-actor timers, firing order in `timers.rs`), actor registry (`spawn_actor`, `join_all`), sysfs / network / TZ helpers, `Model` (per-model hardware description: capture layout, VQE preset, LEDs, clock, inputs, sounds, Zigbee lines; detected from `/proc/device-tree/compatible`, with the Mini's `/proc/device-tree/amlogic-dt-id` fallback), `AmbientDimmer`, `MusicFrame`, `UiState`, `ClockShot`, `fmt` (`state.conf` number format) |
+| `satellite/crates/pulsar-core/` | logging (stderr + ESPHome log sink), `Timers` (per-actor timers, firing order in `timers.rs`), actor registry (`spawn_actor`, `join_all`), sysfs / network / TZ helpers, `Model` (per-model hardware description: capture layout, VQE preset, LEDs, clock, inputs, sounds, Zigbee lines; detected from `/proc/device-tree/compatible`, with the Mini requiring `amlogic-dt-id = axg_s420_v03` AND `quasar.cfg` `deviceType=yandexmini` (`mini_from_board_and_cfg`)), `AmbientDimmer`, `MusicFrame`, `UiState`, `ClockShot`, `fmt` (`state.conf` number format) |
 | `satellite/crates/pulsar-alsa/` | libasound loaded at runtime (dlopen), PCM / ctl wrappers, the versioned hw-params ABI of armhf alsa-lib (`__snd_pcm_hw_params_*` first); bin `alsa_abi_probe` |
 | `satellite/crates/pulsar-esphome/` | ESPHome API server: transport (plaintext / Noise), clients and the voice owner (`server.rs`), entities and states (`server/entities.rs`), commands and voice assistant messages (`server/commands.rs`), hand-written protobuf (`proto.rs`), Noise key (`key.rs`); bin `api_selftest`; client `tools/esphome_check.py` |
 | `satellite/crates/pulsar-lan/` | mDNS responder (`mdns.rs`) and the wake word arbiter between stations (`arbiter.rs`: claims over UDP broadcast :6054, 250 ms window, best claim answers); bin `lan_probe` |
 | `satellite/crates/pulsar-audio/` | microphone front-end (`frontend.rs`): capture thread (ALSA → FIFO) + processing thread: Yandex VQE → wake + command spotters → 16 kHz stream; music features of the speaker reference (`spectrum.rs`: 256/512-point FFT at 16 kHz → 8 bands, loudness, beats as `MusicFrame`) while the visualization can be shown; C API of libyandex_evil (`engine/`); bins `ww_offline`, `frontend_probe` |
-| `satellite/crates/pulsar-media/` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`, dlopen, `gst.rs`), channels Music / Announce on a GLib thread; Music plays through alsasink, Announce is decoded into an fdsink and played by its own ALSA writer (`pcm_out.rs`: 200 ms prime, no buffering pauses, `Done` after the device played the last sample); `Mixer` = ALSA "Master Playback Volume" (softvol of `Model::playback_pcm`: `speakers`, `default` on the Mini 2; on the Mini first generation the controller applies a software master); bin `player_probe` |
+| `satellite/crates/pulsar-media/` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`, dlopen, `gst.rs`), channels Music / Announce on a GLib thread; Music plays through alsasink, Announce is decoded into an fdsink and played by its own ALSA writer (`pcm_out.rs`: 200 ms prime, no buffering pauses, `Done` after the device played the last sample); `Mixer` = ALSA "Master Playback Volume" (softvol of `Model::playback_pcm`: `speakers`, `default` on the Mini 2; on the Mini first generation the controller applies a software master (`volume::master_gain`)); bin `player_probe` |
 | `satellite/crates/pulsar-sendspin/` | Sendspin player on top of sendspin-cpp (C shim in `shim/`, linked statically by `build.rs` in the Makefile builds), own ALSA sink on the playback dmix (`Model::playback_pcm`); roles player, metadata, controller, visualizer (8 log bands 40 Hz–7.6 kHz, loudness, beats → `MusicFrame`); bin `sendspin_probe` |
-| `satellite/crates/pulsar-hw/` | LED ring / logo (framebuffers behind ledfb triggers, or sysfs brightness without one; `leds.rs`: output, case matrix, layer compositor, fades), pure rendering of voice states / one-shots / effects / music styles (`led_fx.rs`), input (touch keys, `SW_MUTE_DEVICE` or a polled sysfs GPIO (`Model::mute_gpio`); `input.rs`); bin `hw_probe` |
+| `satellite/crates/pulsar-hw/` | LED ring / logo (framebuffers behind ledfb triggers, or sysfs brightness without one; `leds.rs`: output, case matrix, layer compositor, fades), pure rendering of voice states / one-shots / effects / music styles (`led_fx.rs`), input (touch keys, `SW_MUTE_DEVICE`, a `KEY_*` keypad (`adc_keypad`, the Mini) or a polled sysfs GPIO (`Model::mute_gpio`); `input.rs`); bin `hw_probe` |
 | `satellite/crates/pulsar-clock/` | clock (sysfs segments, per-LED brightness; `clock.rs`: layers), pure rendering of the clock's stock animations and music levels (`clock_fx.rs`), font, light sensor (`ltr308als01`, `light_sensor.rs`) |
 | `satellite/crates/pulsar-zigbee/` | Midi Zigbee radio: zbhci link to the Telink chip (`link.rs`), coordinator on pulsar's firmware + ZDO to the coordinator itself (`coordinator.rs`), deCONZ-protocol TCP server for Zigbee2MQTT / ZHA (`deconz.rs`), router control (`router.rs`), `.ybl` parsing + XMODEM upload through the radio's bootloader (`flasher.rs`), role / firmware orchestration (`service.rs`), role table (`roles.rs`), byte order helpers (`bytes.rs`); bin `zigbee_probe [port] \| info \| flash <image>` (coordinator + deCONZ server on another port without the daemon; firmware identification; writing an image) |
 | `satellite/crates/pulsar-update/` | HA "Firmware" update entity backend: HTTPS with rustls + ring (`https.rs`), GitHub release check / download / verify / swap (`updater.rs`), version comparison (`version.rs`); bin `update_probe` |
@@ -52,25 +52,29 @@ logs), `re/` (Ghidra projects and decompiled Yandex code), `ref/` (upstream chec
 ## Build
 
 ```sh
-make -C satellite -j"$(nproc)"                       # both: build/{aarch64,armhf}/pulsar
-make -C satellite ARCH=armhf                          # one architecture
-make -C satellite ARCH=armhf tools                    # every tool → build/armhf/tools/
+make -C satellite -j"$(nproc)"                       # all three: build/{aarch64,armhf,mini}/pulsar
+make -C satellite ARCH=armhf                          # one target: aarch64, armhf or mini
+make -C satellite ARCH=mini                           # the Mini's glibc-2.23 build target
+make -C satellite ARCH=armhf tools                    # every tool → build/armhf/tools/ (ARCH=mini → build/mini/tools/)
 make -C satellite ARCH=armhf build/armhf/tools/alsa_abi_probe   # one tool (crates/*/src/bin/<name>.rs)
-make -C satellite check                              # host: cargo fmt --check, clippy -D warnings (host + both targets via cargo-zigbuild, needs zig of any version), tests
-ssh/build.sh                                         # → ssh/out/{aarch64,armhf}/{dropbearmulti,sftp-server}
+make -C satellite check                              # host: cargo fmt --check, clippy -D warnings (host + all three targets via cargo-zigbuild: aarch64 2.36, armhf 2.30 and mini 2.23, needs zig of any version), tests
+ssh/build.sh                                         # → ssh/out/{aarch64,armhf}/{dropbearmulti,sftp-server} (no mini output: the Mini runs the armhf dropbear)
 radio/build.sh                                       # → radio/out/zigbee-{coordinator,router}.ybl (needs libc6:i386, unzip)
 go -C installer test ./...                           # installer unit tests
 go -C installer run . [args]                         # installer from a checkout (builds the daemon first)
 ```
 
-Host tools: rustup (installs the toolchain pinned in `satellite/rust-toolchain.toml` with both
-targets), **cargo-zigbuild 0.24.0** (`cargo install cargo-zigbuild --locked --version 0.24.0`;
+Host tools: rustup (installs the toolchain pinned in `satellite/rust-toolchain.toml`, both Rust
+triples: aarch64 and armv7; the `mini` target is the armv7 one with the glibc-2.23 suffix),
+**cargo-zigbuild 0.24.0** (`cargo install cargo-zigbuild --locked --version 0.24.0`;
 also for `make check`), **zig 0.14.1** (`ZIG=/path/to/zig` if not in PATH; arch builds reject
 ≤ 0.13, whose armhf C++ release builds (sendspin-cpp) crash before `main`; `make check` takes any
 zig: its station clippy only compiles ring's C), a host C compiler (`cc`, for `make check`), make,
 git, curl, patch; cmake ≥ 3.16 and ninja for sendspin-cpp only; Go 1.27+ (installer). The first
 build fetches pinned dependencies into `satellite/third_party/src/` and builds sendspin-cpp per
-architecture into `satellite/build/<arch>/third_party/`; cargo's output is in `satellite/target/`.
+architecture into `satellite/build/<arch>/third_party/`; cargo's output goes to per-arch
+`satellite/target/<arch>/` (armhf and mini share the Rust triple, so a shared dir would let
+parallel builds overwrite each other's output).
 libasound is loaded at runtime (`dlopen`, `pulsar-alsa`), nothing ALSA is linked. Outputs per arch:
 `pulsar` (stripped, the one deployed) and `pulsar.debug` (unstripped, line tables) for
 `addr2line -f -e` on the crash report the daemon writes to the log (`=== CRASH`; non-PIE,
@@ -81,15 +85,16 @@ version is `git describe --tags --match 'v*' --always --dirty` (`--version`, HA 
 crates (x86_64, without sendspin-cpp) and the installer; hardware behaviour is verified on the
 device.
 
-CI (`.github/workflows/build.yml`) builds the daemon and every tool for both architectures, runs
+CI (`.github/workflows/build.yml`) builds the daemon and every tool for all three build targets, runs
 `make -C satellite check` (job `check`) and builds the radio firmware images (job `radio`) on each
 pull request and push to `main`; the binaries are attached to the run as artifacts. Job
 `installer` vets the installer for linux/windows/darwin, runs its tests and cross-builds it for
 windows/amd64, darwin/{arm64,amd64} and linux/{amd64,arm64}. Pushing a tag `v*` additionally builds
 dropbear (job `ssh`, `ssh/build.sh`) and publishes a GitHub release with one archive per host OS,
 `pulsar-{windows-amd64.zip,macos-{arm64,amd64}.tar.gz,linux-{amd64,arm64}.tar.gz}` (assembled by
-`satellite/deploy/dist.sh`: `pulsar-install`, both daemon binaries, `radio/out/zigbee-*.ybl`,
-dropbear and the device scripts in the repo layout), plus `pulsar-<arch>.bin`, `pulsar-<arch>.debug`,
+`satellite/deploy/dist.sh`: `pulsar-install`, all three daemon binaries, `radio/out/zigbee-*.ybl`,
+dropbear and the device scripts in the repo layout), plus `pulsar-{aarch64,armhf,mini}.bin` and
+the matching `.debug`,
 `zigbee-coordinator.ybl`, `zigbee-router.ybl` and `SHA256SUMS`. Asset names are constant (see
 "Updates from HA"). Only stable releases are offered (`releases/latest`); the tag must equal the
 binary's `git describe` (the build job checks out the tag, so it does).
@@ -115,20 +120,28 @@ go -C installer run . <ip>[:port]    # build if needed, copy binary (+ .prev), w
 
 Models are identified by `/proc/device-tree/compatible` (`yandex,<codename>`) both by the daemon
 (`detect_model()`, exits on unknown hardware) and by the installer (`modelName()`, `abis()`,
-`archOf()` in `installer/probe.go`). The Mini has no `yandex,*` entry; both the daemon and the
-installer fall back to `/proc/device-tree/amlogic-dt-id = axg_s420_v03` (`model_from_dt_id()`),
-and `boot.sh` uses the same marker. The installer skips a station whose adb is not root (`id -u`)
+`archOf()` in `installer/probe.go`). The Mini has no `yandex,*` entry, and its board id alone means
+nothing: all three sites — the daemon (`mini_from_board_and_cfg()`), the installer and `boot.sh` —
+require BOTH `/proc/device-tree/amlogic-dt-id = axg_s420_v03` (an Amlogic S420 reference-board id,
+not Yandex-specific) AND `/system/vendor/quasar/quasar.cfg` naming `deviceType=yandexmini`. The installer skips a station whose adb is not root (`id -u`)
 before probing its loaders. `/data/pulsar/asound.conf` (Mini first generation) is written by the installer, not by HA
 updates: an update replaces only the binary and the radio images, so a change to
 `satellite/deploy/asound.conf` (e.g. a dmix fix) reaches an installed station only when
 `pulsar-install` runs again.
 
-The binary is `build/<arch>/pulsar` for the model's first ABI in
+The binary is `build/<target>/pulsar` for the model's first target in
 `abis()` whose dynamic loader is on the station (`/lib/ld-linux-aarch64.so.1`,
 `/lib/ld-linux-armhf.so.3`): its usual one, or for the Midi the armhf build on images with only
 that loader (#13). A Lite 2, Mini 2 or Mini without the armhf loader is skipped (no 64-bit userspace
-has been seen on them, and the aarch64 binary needs glibc 2.34). The armhf build targets glibc 2.23,
-so the same binary covers the Mini (2.23), Lite 2 and Mini 2 (2.30). Adding a model: hardware study
+has been seen on them, and the aarch64 binary needs glibc 2.34); `archOf()` checks each target of
+the model against its loader (`loaderFor()` maps a target named `mini` to the armhf loader) and
+returns the target name, `mini` for yandexmini. The armhf build now targets glibc 2.30 (Lite 2,
+Mini 2, armhf Midi images) while the first-generation Mini gets its own `mini` target — same
+`armv7-unknown-linux-gnueabihf` Rust triple and `-C target-cpu=cortex-a53`, glibc 2.23 — because a
+single 2.23 armhf binary would be auto-shipped through HA updates to Lite 2 / Mini 2 / armhf Midi,
+which were never verified at 2.23; the updater picks the asset named by `Model::update_asset`
+(`pulsar-armhf.bin` or `pulsar-mini.bin`, each with `.debug`), so Mini stations download and
+install `pulsar-mini.bin` automatically. Adding a model: hardware study
 first (ALSA capture layout, VQE preset, spotter channels, LEDs, clock, inputs, earcons), then a
 `Model` in `satellite/crates/pulsar-core/src/model.rs` and `modelName()` / `abis()` entries. A
 second ABI in `abis()` is only for a userspace that has actually been seen on that model.
@@ -164,7 +177,8 @@ stale ALSA dmix lock and logs `=== alsa: removed stale dmix lock (…)`; the ins
 Updates from HA (`pulsar-update`, entities "Firmware" + "Auto update"; user-facing behaviour in
 README, "Обновление из Home Assistant"). What must not break:
 - Asset names are constant: README links `releases/latest/download/...`, and the updater downloads
-  `releases/download/<tag>/pulsar-<arch>.bin`, `zigbee-coordinator.ybl` and `zigbee-router.ybl`
+  `releases/download/<tag>/pulsar-{aarch64,armhf,mini}.bin` (the model's `Model::update_asset`),
+  `zigbee-coordinator.ybl` and `zigbee-router.ybl`
   (Midi; each skipped when the release has none) and `SHA256SUMS`.
 - The latest release is found through the redirect of `https://github.com/<repo>/releases/latest`
   to `/releases/tag/<tag>`, not the REST API: its 60 requests/hour per public IP are exhausted
@@ -358,20 +372,20 @@ with NWK mode but an IEEE address (payload 6 bytes longer than declared): sent a
 
 | | Midi (`cucumber`) | Lite 2 (`plum`) | Mini 2 (`station-mini2`) | Mini (`yandexmini`, `axg_s420_v03`) |
 |---|---|---|---|---|
-| SoC / userland | Amlogic A5, aarch64, glibc 2.36, 1 GB RAM; some firmware images run a 32-bit armhf userland (the installer then deploys `build/armhf/`). That image's alsa-lib is versioned; the armhf build reaches its current ABI through `pulsar-alsa` | Amlogic AXG, Cortex-A53, **32-bit armhf** userland, glibc 2.30, kernel 4.9, **237 MB RAM** | Amlogic AXG, aarch64 kernel with the same **32-bit armhf** userland, glibc 2.30, kernel 4.9.68, 238 MB RAM | Amlogic AXG (`axg_s420_v03`), Cortex-A53, **32-bit armhf** userland, glibc **2.23**, kernel 4.9, **236 MB RAM** |
+| SoC / userland | Amlogic A5, aarch64, glibc 2.36, 1 GB RAM; some firmware images run a 32-bit armhf userland (the installer then deploys `build/armhf/`). That image's alsa-lib is versioned; the armhf build reaches its current ABI through `pulsar-alsa` | Amlogic AXG, Cortex-A53, **32-bit armhf** userland, glibc 2.30, kernel 4.9, **237 MB RAM** | Amlogic AXG, aarch64 kernel with the same **32-bit armhf** userland, glibc 2.30, kernel 4.9.68, 238 MB RAM | Amlogic AXG (`axg_s420_v03`), Cortex-A53, **32-bit armhf** userland, glibc **2.23** (built by its own `mini` target: same `armv7-unknown-linux-gnueabihf` triple and `-C target-cpu=cortex-a53` as the 2.30 armhf build), kernel 4.9, **236 MB RAM** |
 | Storage | `/data` partition (several GB) | `/data` → `/bkupgrade/data` (ubifs, ~81 MB free); rootfs ubifs ro, 87 % full | `/data` → `/bkupgrade/data` (ubifs, ~20 MB free); rootfs ubifs ro, 83 % full | `/data` → `/bkupgrade/data` (ubifs, ~61 MB free); rootfs ubifs ro |
-| Capture | `hw:0,2`, 8 ch @ 96 kHz, S16_LE: mics 0–3, speaker ref 4–7 | `hw:0,1`, 8 ch @ 48 kHz: mic 0 on ch 0 (= ch 1), mic 1 on ch 2 (= ch 3), speaker feedback on ch 6 (the VQE speaker reference: it leaves ~25–30 dB less echo in the VQE output than ch 4); ch 4/5 only carry a start-up transient. Max buffer 2048 frames (~42 ms) | `default` (multi in `/etc/asound.conf`), 6 ch @ 48 kHz: PDM mics 0–3 from `hw:0,1` ch 0/2/4/6, TDM amplifier loopback 4–5 from `hw:0,0` | `hw:0,2`, 8 ch @ 48 kHz, S32_LE with right-justified 24-bit samples (`capture_shift=8`): mics 0–3, speaker refs 6/7; ch 4/5 carry a large DC offset and are not fed to the VQE |
+| Capture | `hw:0,2`, 8 ch @ 96 kHz, S16_LE: mics 0–3, speaker ref 4–7 | `hw:0,1`, 8 ch @ 48 kHz: mic 0 on ch 0 (= ch 1), mic 1 on ch 2 (= ch 3), speaker feedback on ch 6 (the VQE speaker reference: it leaves ~25–30 dB less echo in the VQE output than ch 4); ch 4/5 only carry a start-up transient. Max buffer 2048 frames (~42 ms) | `default` (multi in `/etc/asound.conf`), 6 ch @ 48 kHz: PDM mics 0–3 from `hw:0,1` ch 0/2/4/6, TDM amplifier loopback 4–5 from `hw:0,0` | `hw:0,2`, 8 ch @ 48 kHz, S32_LE with right-justified 24-bit samples (`CaptureFormat::S32 { shift: 8 }`): mics 0–3, speaker refs 6/7; ch 4/5 carry a large DC offset and are not fed to the VQE |
 | Playback | `speakers` | `speakers` | `default` (softvol `Master` over `dmix_spk_plug` → `hw:0,0`); no `speakers` PCM | `mini` (dmix over `hw:0,0`, see Volume) |
 | VQE preset | `cucumber`: 4 mics, 4 spk, chunk 3072 | `plum`: 2 mics, 1 spk, 48 kHz, chunk 1536 → 512 @ 16 kHz; outputs 1, 2, 4, 6, 8, 9 | `yandexmini_2`: 4 mics, 2 spk, 48 kHz | `yandexmini`: 4 mics, 2 spk, 48 kHz, chunk 768 → 256 @ 16 kHz; 32-bit capture |
-| Spotters | alisa: types 0, 3, 4; command: type 0 | alisa/yandex: types 0 and 4 (1 ch each); command: type 0. Models in `spotter_models/` are plum-tuned | same tarball as the Lite 2 in `spotter_models/`, not yet measured | same firmware models; no TALK key |
+| Spotters | alisa: types 0, 3, 4; command: type 0 | alisa/yandex: types 0 and 4 (1 ch each); command: type 0. Models in `spotter_models/` are plum-tuned | same tarball as the Lite 2 in `spotter_models/`, not yet measured | same firmware models; the TALK pad is not fitted on the retail Mini |
 | Ring | `/dev/fb0` 24×1 + `/dev/fb1` logo 6×1, BGR | `/dev/fb0` "YNDX LED ring" 3×1, 24 bpp, BGR; trigger `led_ring_fb`; sysfs `plum:<color>:ring1..3`; no logo | no framebuffer or trigger: sysfs `mini2:<color>:ring1..6` (IS31FL3236 on i2c 1-003c); no logo | six RGB LEDs behind an IS31FL3236-compatible controller at `/dev/i2c-0@0x3c`; no framebuffer, no logo |
 | Clock | `cucumber:white:clock-<seg><digit>`, dimming via chip `current`; no centre dot | `plum:white:clock<SEG><pos>`: A–G × 0–3, colon `DH`+`DL`; `H0..3`, `DEGREE` kept dark (`quasar.cfg` `/leds/clock`); `DM` = centre dot at g height (`Model::clock_center`, extra LED 35 of the stock patterns [inference: position not confirmed by eye]); dimming via per-LED `brightness` 0–255 | wired as `mini2:white:clock<A..G><1..4>`, colon `PLUS1`+`PLUS2`, `DEGREE`/`MINUS` dark (`quasar.cfg`), but the second IS31FL3236 (i2c 0-003f) fails to probe on firmware 0.369: the clock finds no segment (`Model::has_clock` false); its entities exist only when `pulsar_clock::panel_present` finds one at start | none (`clock_dir=""`; all clock entities hidden) |
-| Keys | `awinic_sar`: 582 action, 115/114 volume | `aw9610x`: same codes | `sar0_pad0` (aw9610x SAR, event0): same codes | `adc_keypad`: 115/114 volume; no action key (`action_key=0`) |
+| Keys | `awinic_sar`: 582 action, 115/114 volume | `aw9610x`: same codes | `sar0_pad0` (aw9610x SAR, event0): same codes | `adc_keypad`: 115/114 volume; `KEY_MUTE` 113 on the mic mute button toggles the software mic mute (persisted at once); the TALK pad is `KEY_POWER` 116 = action key (`action_key=116`, not fitted on the retail Mini) |
 | Mic mute | input `mute`: `SW_MUTE_DEVICE` | input `gpio-keys`: `SW_MUTE_DEVICE` (+ `KEY_MUTE`) | no evdev switch: GPIOZ_3 (global 414, pull-up), active low, polled every 100 ms as maind does (`Model::mute_gpio`; exported if needed, no `direction` / `edge` write, used only when already an input) | none (`mute_input=""`); the software switch remains |
 | Light sensor | `ltr308als01` (iio) | same | `ltr308als01` on the #38 station (firmware 0.372; `in_intensity_input` = raw / 120, no `/etc/light-sensor.conf`), absent on the #9 station (0.369) [inference: firmware, board revision or device tree; not known which]; `Model::has_lux` false: the Illuminance entity exists only when the sensor opens at start | none |
-| Volume | "Master Playback Volume" softvol on `speakers` | same names; `speakers` comes from `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) | same control on `default`; `set_volume.sh` is `amixer set 'Master' <percent>%`, so the curve is linear in percent (`volume_min_step` false) | software: no usable ALSA master; controller applies the stock dB curve (`volume::software_gain`) to both player channels and Sendspin; sink is `mini` (dmix over `hw:0,0`, `/data/pulsar/asound.conf`) |
-| Output gates | none | none | — | `/sys/class/tdm_state/amp_table` + `aux_amp` = 1 and ALSA `SPK mute` = 1 before playback (opening the PCM may reset them; the player re-applies them before GStreamer's PLAYING, the ANNOUNCE writer before it opens the PCM). The driver clears `amp_table` when the PCM closes: idle is gated off (`aux_amp` stays 1), so the sinks only re-enable before a start |
-| alsa-lib | 1.2.10, versioned | 1.2.1.2, unversioned | 1.2.1.2, unversioned | versioned; loaded from `/system/vendor/quasar/libs` by `supervise.sh` |
+| Volume | "Master Playback Volume" softvol on `speakers` | same names; `speakers` comes from `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) | same control on `default`; `set_volume.sh` is `amixer set 'Master' <percent>%`, so the curve is linear in percent (`volume_min_step` false) | software: no usable ALSA master; controller applies the stock dB curve (`pulsar_core::volume::master_gain`, was `software_gain`) to both player channels and Sendspin; same `STOCK_VOLUME` map and `volume_min_step=true` as the other models; sink is `mini` (dmix over `hw:0,0`, `/data/pulsar/asound.conf`) |
+| Output gates | none | none | — | `/sys/class/tdm_state/amp_table` + `aux_amp` = 1 and ALSA `SPK mute` = 1, enabled by `pulsar_alsa::open_playback(model)` before and after the PCM open (Sendspin sink, ANNOUNCE writer; the open can reset them) and by the MUSIC pipeline's `pulsar_alsa::enable_output(model)` before and after GStreamer reaches PLAYING. dmix turns `amp_table` off when the last client closes, and the driver clears it when the PCM closes: idle is gated off (`aux_amp` stays 1), so the re-enable sits before every start |
+| alsa-lib | 1.2.10, versioned | 1.2.1.2, unversioned | 1.2.1.2, unversioned | versioned; the daemon dlopens the absolute path `/system/vendor/quasar/libs/libasound.so.2` from `model.alsa_lib` |
 | Earcons | `common/spotter_*.mp3`, `common/volume_sound.mp3`, `timer.wav`, `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` | `common/spotter_start.opus`, `common/spotter_cancel.opus`, `common/volume_sound.opus` [inference: file not confirmed on the station], `common/timer.opus`, `ru-RU/playback_error.opus` (no MP3 decoder in this GStreamer) | `ru-RU/playback_error.mp3` |
 | Boot | `S97quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh` | `S99quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh`; `q stop` available | same as the Lite 2 | `S99onboot.sh` → stock stack; then `S99zpulsar` → `boot.sh` |
 | Zigbee | Telink B91 on `/dev/ttyS2`, reset/boot via `zb_control` (see Zigbee radio) | none | none (no `ttyS2`, no `zb_control`) | none |
@@ -413,7 +427,7 @@ port on the station.
   writer and its per-url reader, the Sendspin sink, the radio upload) runs on named `std::thread`s
   that send events through channels. `unsafe` and
   libc calls live only in `sys.rs` / `ffi.rs` / `gst.rs`, `pulsar-core`'s `getrandom` compat shim
-  and the crash handler. Details, the
+  (only the glibc-2.23 `mini` target needs it) and the crash handler. Details, the
   sendspin-cpp link recipe and per-service notes: `docs/architecture.md`.
 - Keep the ESPHome API server pending until a valid `HelloRequest`; probes must not displace HA.
 - State persisted in `state.conf` (key=value); add new keys with safe defaults. The binary kept as
@@ -474,7 +488,9 @@ port on the station.
   never over an announcement, the timer ring or a closing earcon (`logic::want_volume_click`); HA
   and Sendspin changes are silent; music is not ducked under it. Software-volume models (the
   Mini) get their master gain from the same 60 dB stock curve, linear in dB
-  (`pulsar_core::volume::software_gain`): level 1 ≈ -48.5 dB, one 5 % step = 2.55 dB; HA and the
+  (`pulsar_core::volume::master_gain`, was `software_gain`): level 1 ≈ -48.5 dB, one 5 % step =
+  2.55 dB; the Mini uses the same stock `STOCK_VOLUME` map and `volume_min_step=true` as the other
+  models; HA and the
   Sendspin sink use it too.
 - Wake arbitration (switch "Nearest station answers", `state.conf` `nearest_answers=`, default 1):
   the front-end's processing thread (`wake_level_db` in `pulsar-audio/src/frontend.rs`) reports
@@ -497,7 +513,10 @@ port on the station.
   confirms after the word ends, so `FrontendEvent::Wake` carries the audio from the end of the
   word to the confirming chunk (`Model::wake_preroll` per model and wake word id: chunks since the
   1st-stage hit, event 3, plus an offset, or a fixed count; measured with the `wake timing:` lines
-  of `frontend_probe`, kept short, settled through HA acceptance). The wake word itself must not
+  of `frontend_probe`, kept short, settled through HA acceptance). The pre-roll ring is sized in
+  seconds (`PREROLL_SECS` = 1.024 s; the chunk count derives from the model's chunk length), and
+  models with no wake-preroll rules (currently the first-generation Mini) hide the switch
+  entirely. The wake word itself must not
   reach STT: HA never removes it from the text, and agents then get «Алиса, включи свет». Off,
   the pre-roll is empty (`FrontendHandle::set_preroll`). After a `Wake` the front-end keeps
   sending `Audio` until `FrontendHandle::wake_handled` (the controller calls it once per `Wake`,

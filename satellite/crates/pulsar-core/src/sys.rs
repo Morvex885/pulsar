@@ -5,6 +5,13 @@ use std::net::Ipv4Addr;
 use std::os::fd::RawFd;
 use std::sync::LazyLock;
 
+/// Sets a process-wide environment variable. Call only before threads or libraries that read the
+/// environment are started (Rust 2024 marks setenv unsafe for that reason).
+pub fn set_var(key: &str, value: &str) {
+    // SAFETY: the daemon calls this before spawning any thread or loading a library.
+    unsafe { std::env::set_var(key, value) };
+}
+
 #[allow(
     clippy::useless_conversion,
     reason = "time_t and long are 32-bit on armhf, 64-bit on aarch64"

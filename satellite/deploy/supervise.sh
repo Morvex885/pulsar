@@ -24,19 +24,8 @@ D=${PULSAR_DIR:-/data/pulsar}
 LOG=${PULSAR_LOG:-/tmp/pulsar.log}
 Q=${PULSAR_Q:-/system/vendor/quasar/q}
 BIN=$D/pulsar
-# The first-generation Mini (board axg_s420_v03, no yandex,* compatible entry) keeps alsa-lib
-# only under /system/vendor/quasar/libs and needs its dmix PCM from /data/pulsar/asound.conf.
-# Do not change ALSA for the Midi / Lite 2: they have their own libs and asound.conf.
-if [ "$(tr -d '\0' </proc/device-tree/amlogic-dt-id 2>/dev/null)" = axg_s420_v03 ]; then
-  if [ -d /system/vendor/quasar/libs ]; then
-    LD_LIBRARY_PATH=/system/vendor/quasar/libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-    export LD_LIBRARY_PATH
-  fi
-  if [ -f "$D/asound.conf" ]; then
-    ALSA_CONFIG_PATH=$D/asound.conf
-    export ALSA_CONFIG_PATH
-  fi
-fi
+# The daemon applies the Mini's ALSA environment itself (Model::apply_env + the absolute libasound
+# path), before it starts any thread or audio library. Nothing model-specific here.
 MAXLOG=1000000
 LONG=${PULSAR_LONG:-300}
 CRASHES=5
@@ -59,7 +48,6 @@ say() { echo "=== supervise: $* $(date)" >> "$LOG"; }
 give_back() { # Yandex stack again, like ctl.sh disable
   rm -f "$D/enabled"
   say "$1; disabled, starting the Yandex stack"
-  unset ALSA_CONFIG_PATH LD_LIBRARY_PATH
   pidof quasar_launcher2 >/dev/null 2>&1 || "$Q" start >/dev/null 2>&1
   exit 1
 }

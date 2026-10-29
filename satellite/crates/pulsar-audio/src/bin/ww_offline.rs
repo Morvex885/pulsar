@@ -43,6 +43,7 @@ fn run() -> u8 {
     let Some(m) = pulsar_core::model::detect_model() else {
         return 1;
     };
+    pulsar_alsa::init(m);
     let spk_channels = match std::env::var_os("SPK") {
         Some(s) => parse_channels(&s.to_string_lossy()),
         None => m.spk_channels.to_vec(),

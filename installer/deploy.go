@@ -100,10 +100,11 @@ func installOne(st station) (ok bool, note string, lost bool) {
 }
 
 // deployFiles copies the daemon, scripts, the radio's firmware images (zigbee) and dropbear (--ssh).
-// changed: the binary was replaced; supChanged: supervise.sh differs from the installed one.
+// changed: the binary was replaced; supChanged: supervise.sh differs from the installed one or
+// the Mini's asound.conf was replaced (the daemon reads it when it starts).
 func deployFiles(s, bin, arch, code string, zigbee bool) (changed, supChanged, ok bool) {
 	changed, supChanged = true, true
-	sshOut := filepath.Join(root, "ssh", "out", arch)
+	sshOut := filepath.Join(root, "ssh", "out", loaderFor(arch))
 	deploy := filepath.Join(root, "satellite", "deploy")
 	fmt.Printf("== %s: daemon (%s)\n", s, arch)
 	if shTo(os.Stdout, s, "mkdir -p "+dataDir) != nil {
@@ -142,7 +143,7 @@ func deployFiles(s, bin, arch, code string, zigbee bool) (changed, supChanged, o
 	}
 	if code == "yandexmini" {
 		// The Mini needs a dmix PCM over hw:0,0 so MUSIC, ANNOUNCE and Sendspin share the
-		// speaker; supervise.sh selects it through ALSA_CONFIG_PATH.
+		// speaker; the daemon selects /data/pulsar/asound.conf through ALSA_CONFIG_PATH.
 		want := sha256File(filepath.Join(deploy, "asound.conf"))
 		have, _ := sh(s, "[ -f "+dataDir+"/asound.conf ] && sha256sum "+dataDir+"/asound.conf")
 		if want == "" || firstField(have) != want {
@@ -158,6 +159,8 @@ func deployFiles(s, bin, arch, code string, zigbee bool) (changed, supChanged, o
 			if shTo(os.Stdout, s, "cd "+dataDir+" && chmod 644 asound.conf.new && mv asound.conf.new asound.conf && sync") != nil {
 				return
 			}
+			// The running daemon read the old config at start; reload the supervisor and daemon.
+			supChanged = true
 		}
 	}
 	if changed {

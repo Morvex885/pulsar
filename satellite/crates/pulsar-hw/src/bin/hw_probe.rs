@@ -554,6 +554,7 @@ async fn monitor(
                     say(&format!("BUTTON {b} {p}"));
                 }
                 Some(InputEvent::Mute(m)) => say(&format!("MUTE {}", if m { "on" } else { "off" })),
+                Some(InputEvent::MuteToggle) => say("MUTE_TOGGLE"),
                 None => input = None,
             },
             lux = async { light.as_mut()?.recv().await }, if light.is_some() => match lux {
