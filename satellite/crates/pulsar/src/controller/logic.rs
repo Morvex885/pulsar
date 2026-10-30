@@ -237,6 +237,27 @@ pub fn command_of(word: &str) -> Option<VoiceCommand> {
     })
 }
 
+/// STT fallback when the local command spotter misses a stop word. Match the whole
+/// utterance so questions such as "хватит ли времени" stay with Home Assistant.
+pub fn stt_stop(text: &str) -> bool {
+    let text = text.to_lowercase();
+    let trim = |c: char| {
+        c.is_whitespace()
+            || c.is_ascii_punctuation()
+            || matches!(c, '«' | '»' | '\u{2010}'..='\u{2027}' | '‹' | '›')
+    };
+    let mut text = text.trim_matches(trim);
+    for wake in ["алиса", "яндекс"] {
+        if let Some(rest) = text.strip_prefix(wake)
+            && rest.starts_with(trim)
+        {
+            text = rest.trim_matches(trim);
+            break;
+        }
+    }
+    matches!(text, "стоп" | "хватит")
+}
+
 /// Within the window after the wake word that opened this dialog: HA may end the speech of a
 /// short "Алиса, громче" (PROCESSING) before the command spotter confirms the word.
 pub fn after_wake(phase: Phase, now: i64, listen_started_ms: i64) -> bool {

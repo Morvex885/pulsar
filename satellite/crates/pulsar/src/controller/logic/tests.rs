@@ -186,6 +186,39 @@ fn command_words() {
 }
 
 #[test]
+fn stt_stop_words() {
+    for text in [
+        "стоп",
+        " Хватит! ",
+        "СТОП.",
+        "Алиса, стоп!",
+        "Яндекс хватит…",
+        "«стоп»",
+        "Алиса—стоп",
+        "“Хватит!”",
+        "Яндекс – «стоп».",
+    ] {
+        assert!(stt_stop(text), "{text:?}");
+    }
+    for text in [
+        "",
+        "Алиса",
+        "алисастоп",
+        "хватит ли времени",
+        "не стоп",
+        "стопка",
+        "сколько стоит стоп кран",
+        "погода",
+        "стоп музыку",
+        "«стоп музыку»",
+        "Алиса—стоп—музыку",
+        "«хватит ли времени»",
+    ] {
+        assert!(!stt_stop(text), "{text:?}");
+    }
+}
+
+#[test]
 fn command_gating() {
     // The window after the wake word: 2.5 s of LISTENING / PROCESSING.
     assert!(after_wake(Phase::Listening, 12_499, 10_000));
