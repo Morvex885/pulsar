@@ -26,6 +26,38 @@ pub fn monotonic_ms() -> i64 {
     i64::from(ts.tv_sec) * 1000 + i64::from(ts.tv_nsec) / 1_000_000
 }
 
+fn epoch_seconds<T: TryFrom<u32>>(epoch: u32) -> std::io::Result<T> {
+    T::try_from(epoch).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "HA epoch does not fit time_t",
+        )
+    })
+}
+
+fn set_realtime_with(
+    epoch: u32,
+    set: impl FnOnce(&libc::timespec) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let ts = libc::timespec {
+        tv_sec: epoch_seconds(epoch)?,
+        tv_nsec: 0,
+    };
+    set(&ts)
+}
+
+/// Applies UTC seconds from HA; requires the OS permission to set CLOCK_REALTIME.
+pub fn set_realtime(epoch: u32) -> std::io::Result<()> {
+    set_realtime_with(epoch, |ts| {
+        // SAFETY: `ts` is a live timespec with representable seconds and zero nanoseconds.
+        if unsafe { libc::clock_settime(libc::CLOCK_REALTIME, ts) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    })
+}
+
 /// Local wall-clock hour, minute and second of a Unix time, in the process's TZ.
 pub fn local_hms(unix_secs: i64) -> (i32, i32, i32) {
     let t = unix_secs as libc::time_t;
@@ -179,6 +211,62 @@ pub fn if_nametoindex(name: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn epoch_conversion_checks_both_time_t_widths() {
+        for epoch in [0, 1_700_000_000, i32::MAX as u32] {
+            assert_eq!(epoch_seconds::<i32>(epoch).unwrap() as u32, epoch);
+            assert_eq!(epoch_seconds::<i64>(epoch).unwrap(), i64::from(epoch));
+        }
+        for epoch in [i32::MAX as u32 + 1, u32::MAX] {
+            assert_eq!(
+                epoch_seconds::<i32>(epoch).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+            assert_eq!(epoch_seconds::<i64>(epoch).unwrap(), i64::from(epoch));
+        }
+    }
+
+    #[test]
+    fn realtime_passes_utc_epoch_without_touching_host_clock() {
+        let mut called = false;
+        set_realtime_with(1_700_000_000, |ts| {
+            called = true;
+            assert_eq!(ts.tv_sec, 1_700_000_000);
+            assert_eq!(ts.tv_nsec, 0);
+            Ok(())
+        })
+        .unwrap();
+        assert!(called);
+    }
+
+    #[test]
+    fn realtime_checks_platform_range_before_calling_setter() {
+        let mut called = false;
+        let result = set_realtime_with(u32::MAX, |ts| {
+            called = true;
+            assert_eq!(ts.tv_nsec, 0);
+            Ok(())
+        });
+        if std::mem::size_of::<libc::time_t>() == 4 {
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+            assert!(!called);
+        } else {
+            result.unwrap();
+            assert!(called);
+        }
+    }
+
+    #[test]
+    fn realtime_preserves_setter_error() {
+        for errno in [libc::EPERM, libc::EINVAL] {
+            let err = set_realtime_with(1_700_000_000, |_| {
+                Err(std::io::Error::from_raw_os_error(errno))
+            })
+            .unwrap_err();
+            assert_eq!(err.raw_os_error(), Some(errno));
+        }
+    }
 
     /// A decimal-comma locale on this test thread only (uselocale), as GStreamer's setlocale
     /// would give the whole process. Skipped where ru_RU.UTF-8 is not installed.
