@@ -116,6 +116,9 @@ fn rgb_values(model: &Model, s: &LedStrip, i: i32) -> [i32; 3] {
 
 /// Every LED of a short ring, every third of the Midi's; the first logo LED.
 fn ring_dump(model: &Model) -> String {
+    if !model.ring.i2c_dev.is_empty() {
+        return "i2c (no read-back)".to_owned();
+    }
     let hex = |v: [i32; 3]| format!("{:02x}{:02x}{:02x}", v[0], v[1], v[2]);
     let step = if model.ring.count > 6 { 3 } else { 1 };
     let mut s = String::new();
@@ -173,8 +176,13 @@ fn strip_fb(s: &LedStrip) -> Option<Vec<[u8; 3]>> {
 }
 
 /// Checks that every pixel of the strip's framebuffer is `fb` (in framebuffer mode) and that
-/// every LED's sysfs brightness matches it as the model reads it back (within ±3).
+/// every LED's sysfs brightness matches it as the model reads it back (within ±3). An I²C ring
+/// (the Mini's) has neither: the check is skipped.
 fn check_strip(model: &Model, s: &LedStrip, what: &str, fb: [u8; 3]) -> bool {
+    if !s.i2c_dev.is_empty() {
+        say(&format!("   check {what}: I²C ring has no read-back, SKIP"));
+        return true;
+    }
     let want = sysfs_expected(model, fb);
     let mut ok = true;
     let mut got = String::new();
@@ -986,8 +994,10 @@ async fn all(model: &'static Model, input_s: u64, state_ms: u64) -> bool {
         }
     };
     // The handles do not report whether their device opened (the daemon does not need it): the
-    // ring's framebuffer or first sysfs LED, and any clock segment, stand in for C++ open().
+    // ring's framebuffer, first sysfs LED or I²C bus, and any clock segment, stand in for C++
+    // open().
     let leds_open = std::path::Path::new(model.ring.fb_dev).exists()
+        || (!model.ring.i2c_dev.is_empty() && std::path::Path::new(model.ring.i2c_dev).exists())
         || std::path::Path::new(&format!(
             "/sys/class/leds/{}:red:{}{}/brightness",
             model.led_prefix, model.ring.sysfs_kind, model.ring.first_index
@@ -1021,10 +1031,12 @@ async fn all(model: &'static Model, input_s: u64, state_ms: u64) -> bool {
     );
     leds.set_muted(false);
     let mut steps = led_steps(&leds, &music);
-    steps.extend(clock_steps(&clock, &music, Some(leds.clone())));
+    if clock_open {
+        steps.extend(clock_steps(&clock, &music, Some(leds.clone())));
+    }
     let dumps = Dumps {
         ring: true,
-        clock: true,
+        clock: clock_open,
     };
     let ok = run_steps(model, steps, state_ms, dumps).await;
     say(&format!(
@@ -1035,7 +1047,7 @@ async fn all(model: &'static Model, input_s: u64, state_ms: u64) -> bool {
     if let Some(rx) = light_rx.as_mut() {
         while rx.try_recv().is_ok() {}
     }
-    let light_ok = light_rx.is_some();
+    let light_opened = light_rx.is_some();
     let readings = monitor(input_rx, light_rx, input_s).await;
     say(&format!("final clock {}", clock_dump(model)));
     done.set(true);
@@ -1044,5 +1056,11 @@ async fn all(model: &'static Model, input_s: u64, state_ms: u64) -> bool {
     drop(leds);
     let off = leds_off_after_exit(model).await;
     restore_current(saved);
-    ok && off && light_ok && readings > 0
+    // A model whose sensor may be absent (`Model::has_lux` false) passes without one.
+    let light_ok = if light_opened {
+        readings > 0
+    } else {
+        !model.has_lux
+    };
+    ok && off && light_ok
 }

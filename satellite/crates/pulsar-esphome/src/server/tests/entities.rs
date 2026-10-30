@@ -675,7 +675,7 @@ async fn states_go_to_subscribers_and_zigbee_entities_need_modes() {
 }
 
 #[tokio::test]
-async fn mini_has_no_clock_lux_mute_case_or_talk_entities() {
+async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
     local()
         .run_until(async {
             let (id, mut cfg) = selftest("now");
@@ -683,6 +683,8 @@ async fn mini_has_no_clock_lux_mute_case_or_talk_entities() {
             cfg.has_lux = false;
             cfg.has_wake_preroll = false;
             cfg.has_hw_mic_mute = false;
+            // Only a mute button: no «Button» event entity (Model::has_button_events).
+            cfg.has_buttons = false;
             cfg.has_action = false;
             // The Mini's ledconfigs directory is empty; with_none() leaves just "None".
             cfg.case_colors = ["None"].iter().map(|v| (*v).to_owned()).collect();
@@ -693,25 +695,16 @@ async fn mini_has_no_clock_lux_mute_case_or_talk_entities() {
             event(&mut rx).await;
             p.send(msg::LIST_ENTITIES_REQ, &Writer::new()).await;
             let mut keys = Vec::new();
-            let mut event_types = Vec::new();
             loop {
                 let (t, m) = p.recv().await.unwrap();
                 if t == msg::LIST_DONE {
                     break;
                 }
-                let key = field(&m, 2).unwrap().u32();
-                keys.push(key);
-                if t == msg::LIST_EVENT {
-                    event_types = fields(&m)
-                        .into_iter()
-                        .filter(|f| f.num == 9)
-                        .map(|f| f.str())
-                        .collect();
-                }
+                keys.push(field(&m, 2).unwrap().u32());
             }
-            // 15 entities plus the led_show service; no clock, Lux, wake pre-roll, hardware MUTE,
-            // case colour or TALK entities.
-            assert_eq!(keys.len(), 16, "keys: {keys:?}");
+            // 14 entities plus the led_show service; no clock, Lux, wake pre-roll, hardware MUTE,
+            // case colour or Button entities.
+            assert_eq!(keys.len(), 15, "keys: {keys:?}");
             assert!(keys.contains(&key::ACTION_LED_SHOW));
             for absent in [
                 key::SW_CLOCK,
@@ -726,11 +719,10 @@ async fn mini_has_no_clock_lux_mute_case_or_talk_entities() {
                 key::BS_HW_MIC_MUTE,
                 key::SENSOR_LUX,
                 key::SELECT_CASE_COLOR,
+                key::EVENT_BUTTON,
             ] {
                 assert!(!keys.contains(&absent), "unexpected entity key {absent}");
             }
-            assert_eq!(event_types, ["volume_up", "volume_down"]);
-
             // The controller may still publish these cache values; the server must drop them.
             p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
             let _ = p.sync().await;

@@ -7,6 +7,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use super::*;
 
 const UP: u16 = KEY_VOLUMEUP;
+const KEY_MUTE: u16 = 113;
 
 fn ev(type_: u16, code: u16, value: i32) -> RawInputEvent {
     RawInputEvent {
@@ -30,13 +31,13 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        Self::with_action_key(KEY_ACTION)
+        Self::with_keys(KEY_ACTION, 0)
     }
 
-    fn with_action_key(action_key: u16) -> Self {
+    fn with_keys(action_key: u16, mute_key: u16) -> Self {
         let (tx, rx) = unbounded_channel();
         Self {
-            m: Machine::new(Rc::new(Cell::new(false)), tx, action_key),
+            m: Machine::new(Rc::new(Cell::new(false)), tx, action_key, mute_key),
             rx,
             keys: Ok([0; 96]),
             sw: Ok([0; 8]),
@@ -108,7 +109,7 @@ const VOL_UP: InputEvent = InputEvent::Button(Button::VolumeUp, Press::Short);
 
 #[tokio::test(start_paused = true)]
 async fn mute_key_toggles_once_per_press() {
-    let mut r = Rig::new();
+    let mut r = Rig::with_keys(KEY_ACTION, KEY_MUTE);
     r.feed(Dev::Keys, &key(KEY_MUTE, 1));
     assert_eq!(r.events(), [InputEvent::MuteToggle]);
     // Autorepeat and release are not new presses.
@@ -117,20 +118,24 @@ async fn mute_key_toggles_once_per_press() {
     assert_eq!(r.events(), []);
     r.feed(Dev::Keys, &key(KEY_MUTE, 1));
     assert_eq!(r.events(), [InputEvent::MuteToggle]);
+
+    // A model without a mute button ignores KEY_MUTE on its keys device.
+    let mut r = Rig::new();
+    r.feed(Dev::Keys, &key(KEY_MUTE, 1));
+    r.feed(Dev::Keys, &key(KEY_MUTE, 0));
+    assert_eq!(r.events(), []);
 }
 
 #[tokio::test(start_paused = true)]
-async fn mini_talk_pad_is_key_power() {
-    let mut r = Rig::with_action_key(116);
-    r.feed(Dev::Keys, &key(116, 1));
-    r.run(100).await;
-    r.feed(Dev::Keys, &key(116, 0));
-    assert_eq!(r.events(), [SHORT]);
-    // The generic action code is not this model's key and stays unhandled.
+async fn no_action_key_leaves_key_voicecommand_unhandled() {
+    // The Mini: mute button only.
+    let mut r = Rig::with_keys(0, KEY_MUTE);
     r.feed(Dev::Keys, &key(KEY_ACTION, 1));
     r.run(1000).await;
     r.feed(Dev::Keys, &key(KEY_ACTION, 0));
     assert_eq!(r.events(), []);
+    r.feed(Dev::Keys, &key(KEY_MUTE, 1));
+    assert_eq!(r.events(), [InputEvent::MuteToggle]);
 }
 
 #[tokio::test(start_paused = true)]

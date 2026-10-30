@@ -60,9 +60,13 @@ pub struct Model {
     /// Mic mute on a sysfs GPIO instead of an evdev switch: global GPIO number, 0 = none; active
     /// low, exported if needed but never configured (used only when already an input).
     pub mute_gpio: u32,
-    /// Key code of the action/TALK button (KEY_VOICECOMMAND 582; the Mini's TALK pad is
-    /// KEY_POWER 116); 0: no action button.
+    /// Key code of the action/TALK button (KEY_VOICECOMMAND 582); 0: no action button.
     pub action_key: u16,
+    /// Key code of a momentary microphone-mute button on `keys_input` that toggles the software
+    /// mute (the Mini's KEY_MUTE 113); 0: none.
+    pub mute_key: u16,
+    /// `keys_input` has KEY_VOLUMEUP / KEY_VOLUMEDOWN (115 / 114).
+    pub volume_keys: bool,
     /// Earcons, relative to /system/vendor/quasar/sounds/.
     pub error_sound: &'static str,
     pub wake_sound: &'static str,
@@ -81,9 +85,6 @@ pub struct Model {
     /// Absolute libasound path for `pulsar-alsa` (the Mini keeps it outside the loader path);
     /// empty: the usual "libasound.so.2" lookup.
     pub alsa_lib: &'static str,
-    /// Release asset suffix of this model's armhf build (the Mini needs glibc 2.23, the other
-    /// armhf userlands 2.30).
-    pub update_asset: &'static str,
     pub software_volume: bool,
     /// ALSA playback switch (on hw:0) that must be 1 (on) for the amplifier to pass audio; empty:
     /// no such control.
@@ -293,6 +294,8 @@ static MIDI: Model = Model {
     mute_input: "mute",
     mute_gpio: 0,
     action_key: 582,
+    mute_key: 0,
+    volume_keys: true,
     error_sound: "ru-RU/vins_error.wav",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -301,7 +304,6 @@ static MIDI: Model = Model {
     playback_pcm: "speakers",
     alsa_config: "",
     alsa_lib: "",
-    update_asset: "armhf",
     software_volume: false,
     spk_mute_ctl: "",
     amp_enable_paths: &[],
@@ -358,6 +360,8 @@ static LITE2: Model = Model {
     mute_input: "gpio-keys",
     mute_gpio: 0,
     action_key: 582,
+    mute_key: 0,
+    volume_keys: true,
     error_sound: "ru-RU/playback_error.mp3",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -366,7 +370,6 @@ static LITE2: Model = Model {
     playback_pcm: "speakers",
     alsa_config: "",
     alsa_lib: "",
-    update_asset: "armhf",
     software_volume: false,
     spk_mute_ctl: "",
     amp_enable_paths: &[],
@@ -435,6 +438,8 @@ static MINI2: Model = Model {
     // it); GPIOZ_8 only pulses during a press.
     mute_gpio: 414,
     action_key: 582,
+    mute_key: 0,
+    volume_keys: true,
     // This firmware's GStreamer has no MP3 decoder; every earcon ships as .opus.
     error_sound: "ru-RU/playback_error.opus",
     wake_sound: "common/spotter_start.opus",
@@ -444,7 +449,6 @@ static MINI2: Model = Model {
     playback_pcm: "default",
     alsa_config: "",
     alsa_lib: "",
-    update_asset: "armhf",
     software_volume: false,
     spk_mute_ctl: "",
     amp_enable_paths: &[],
@@ -500,9 +504,10 @@ static MINI: Model = Model {
     keys_input: "adc_keypad",
     mute_input: "",
     mute_gpio: 0,
-    // The keypad's TALK pad is KEY_POWER (116) in the devicetree, though it is not fitted on the
-    // retail Mini; map it so a fitted pad works like the other models' TALK button.
-    action_key: 116,
+    // The retail Mini has no TALK pad and no volume keys: adc_keypad sends only KEY_MUTE.
+    action_key: 0,
+    mute_key: 113,
+    volume_keys: false,
     error_sound: "ru-RU/playback_error.mp3",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -512,8 +517,6 @@ static MINI: Model = Model {
     playback_pcm: "mini",
     alsa_config: "/data/pulsar/asound.conf",
     alsa_lib: "/system/vendor/quasar/libs/libasound.so.2",
-    // The Mini's userland is glibc 2.23; the other armhf models get the 2.30 build.
-    update_asset: "mini",
     // No softvol "speakers" PCM and the hardware "Master" control does not attenuate the output;
     // Controller applies the volume to the GStreamer player channels instead.
     software_volume: true,
@@ -536,16 +539,28 @@ static MINI: Model = Model {
 
 impl Model {
     /// Process-wide ALSA setup, before any thread or audio library is started. Only the Mini sets
-    /// ALSA_CONFIG_PATH: its dmix PCM lives in /data/pulsar/asound.conf.
+    /// ALSA_CONFIG_PATH: its dmix PCM lives in /data/pulsar/asound.conf (put there by
+    /// pulsar-install). A missing file leaves the firmware's config, where that PCM does not exist.
     pub fn apply_env(&self) {
-        if !self.alsa_config.is_empty() {
+        if self.alsa_config.is_empty() {
+            return;
+        }
+        if std::path::Path::new(self.alsa_config).is_file() {
             crate::sys::set_var("ALSA_CONFIG_PATH", self.alsa_config);
+        } else {
+            log::error!(
+                "alsa: {} missing, ALSA_CONFIG_PATH not set: '{}' cannot open until pulsar-install \
+                 puts it back",
+                self.alsa_config,
+                self.playback_pcm
+            );
         }
     }
 
-    /// First-generation Mini; the only model with a separate glibc-2.23 armhf build.
-    pub fn is_mini(&self) -> bool {
-        self.codename == "yandexmini"
+    /// Whether the keys device has anything for the «Button» event entity: an action button or
+    /// volume keys (a mute button alone toggles the mute switch).
+    pub fn has_button_events(&self) -> bool {
+        !self.keys_input.is_empty() && (self.action_key != 0 || self.volume_keys)
     }
 }
 
@@ -649,6 +664,8 @@ mod tests {
         assert!(!m.has_clock && !m.has_lux && !m.volume_min_step);
         assert_eq!(m.capture_format, CaptureFormat::S16);
         assert_eq!(m.action_key, 582);
+        assert_eq!(m.mute_key, 0);
+        assert!(m.has_button_events());
     }
 
     #[test]
@@ -662,6 +679,9 @@ mod tests {
         assert_eq!(m.logo.count, 0);
         assert!(m.software_volume);
         assert!(!m.has_clock && !m.has_lux);
+        // Only KEY_MUTE on the keypad: it toggles the mute, and there is no «Button» entity.
+        assert_eq!((m.action_key, m.mute_key), (0, 113));
+        assert!(!m.has_button_events());
         // No trailing NUL still counts.
         assert_eq!(
             model_from_dt_id(b"axg_s420_v03").unwrap().codename,

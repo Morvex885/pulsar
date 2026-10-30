@@ -1,5 +1,5 @@
 #!/bin/sh
-# Assembles the release archive for one host OS: pulsar-install, all daemon builds, the Midi
+# Assembles the release archive for one host OS: pulsar-install, both daemon builds, the Midi
 # radio's firmware images, dropbear and the device scripts in the repository layout (pulsar-install
 # finds them next to itself).
 # Usage: satellite/deploy/dist.sh <out.zip|out.tar.gz> <pulsar-install binary>
@@ -21,9 +21,8 @@ put() { # repo-relative path, mode
   # CI artifacts lose permission bits.
   chmod "$2" "$P/$1"
 }
-for a in aarch64 armhf mini; do put satellite/build/$a/pulsar 755; done
-# dropbear is a separate userspace binary; the Mini uses the armhf one.
 for a in aarch64 armhf; do
+  put satellite/build/$a/pulsar 755
   put ssh/out/$a/dropbearmulti 755
   put ssh/out/$a/sftp-server 755
 done

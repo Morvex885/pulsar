@@ -104,7 +104,7 @@ func installOne(st station) (ok bool, note string, lost bool) {
 // the Mini's asound.conf was replaced (the daemon reads it when it starts).
 func deployFiles(s, bin, arch, code string, zigbee bool) (changed, supChanged, ok bool) {
 	changed, supChanged = true, true
-	sshOut := filepath.Join(root, "ssh", "out", loaderFor(arch))
+	sshOut := filepath.Join(root, "ssh", "out", arch)
 	deploy := filepath.Join(root, "satellite", "deploy")
 	fmt.Printf("== %s: daemon (%s)\n", s, arch)
 	if shTo(os.Stdout, s, "mkdir -p "+dataDir) != nil {

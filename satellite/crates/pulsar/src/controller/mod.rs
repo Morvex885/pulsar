@@ -341,7 +341,7 @@ impl Controller {
             has_lux: model.has_lux || lux_rx.is_some(),
             has_wake_preroll: !model.wake_preroll.is_empty(),
             has_hw_mic_mute: !model.mute_input.is_empty() || model.mute_gpio != 0,
-            has_buttons: !model.keys_input.is_empty(),
+            has_buttons: model.has_button_events(),
             has_action: model.action_key != 0,
             key_path: Some(logic::in_dir(&dir, "api_key")),
         };

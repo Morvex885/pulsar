@@ -11,10 +11,18 @@ use pulsar_core::model::Model;
 
 /// Applies the model's process-wide ALSA settings before any thread or audio library starts:
 /// ALSA_CONFIG_PATH and the absolute libasound path (the Mini's firmware keeps it outside the
-/// loader's search path). Must be called before the first [`load`].
+/// loader's search path). With such a path the library is loaded here, before GStreamer: dlopen
+/// with RTLD_GLOBAL makes libquasar_gstreamer's NEEDED `libasound.so.2` resolve to this copy by
+/// SONAME whether or not that library carries a RUNPATH (not checked on a Mini). The other models
+/// keep the lazy SONAME lookup: an early `libasound.so.2` dlopen from the executable (no RUNPATH)
+/// could pick another copy than GStreamer's RUNPATH does. Must be called before the first [`load`].
 pub fn init(model: &Model) {
     model.apply_env();
     ffi::set_library_path(model.alsa_lib);
+    if !model.alsa_lib.is_empty() {
+        // A failed dlopen is logged by ffi::lib.
+        let _ = ffi::lib();
+    }
 }
 
 /// Loads libasound.so.2 once; every other call loads it on demand. Err = dlerror text.
@@ -292,7 +300,8 @@ pub fn enable_output(model: &Model) {
 /// device must never start muted) and again afterwards: dmix turns the amplifier off when its
 /// last client closes, so another channel may have closed it between our two calls. All PCM
 /// openers in the daemon use this; the MUSIC pipeline, whose alsasink opens the device inside
-/// GStreamer, instead calls [`enable_output`] before and after the pipeline reaches PLAYING.
+/// GStreamer, instead calls [`enable_output`] before it starts the pipeline and again when the
+/// pipeline reports PLAYING (the device is open by then).
 pub fn open_playback(model: &Model) -> Result<Pcm, i32> {
     enable_output(model);
     let pcm = Pcm::open(model.playback_pcm, Stream::Playback, false)?;

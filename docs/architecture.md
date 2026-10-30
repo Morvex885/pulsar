@@ -11,7 +11,7 @@ satellite/
   Cargo.toml              # [workspace] members = ["crates/*"], resolver = "3", [workspace.dependencies], [profile.release]
   Cargo.lock              # коммитится
   rust-toolchain.toml     # stable, цели aarch64-unknown-linux-gnu + armv7-unknown-linux-gnueabihf, rustfmt + clippy
-  Makefile                # make (все три arch), make ARCH=x [tools], make check (host)
+  Makefile                # make (обе arch), make ARCH=x [tools], make check (host)
   crates/
     pulsar-core/          # логгер, Timers, actors, sysfs, net, tz, Model, общие типы
     pulsar-alsa/          # dlopen libasound (bin alsa_abi_probe)
@@ -150,7 +150,7 @@ satellite/
    repeated N times» (не чаще раза в 30 с); очередь sink — 512 строк, при переполнении первой
    идёт «N log lines dropped».
 8. `unsafe` и все вызовы `libc` (включая `std::env::set_var`) живут только в модулях
-   `sys.rs`/`ffi.rs`, `pulsar-core/src/compat.rs` (getrandom для glibc 2.23) и в обработчике
+   `sys.rs`/`ffi.rs`, `pulsar-core/src/compat.rs` (getrandom: в glibc 2.23 armhf-сборки его нет) и в обработчике
    крашей.
    - В каждом крейте `#![deny(unsafe_op_in_unsafe_fn)]`, у каждого блока комментарий `// SAFETY:`.
    - Символы dlopen резолвятся один раз в структуру указателей на функции.
@@ -164,17 +164,16 @@ satellite/
    AGENTS.md).
 10. `make -C satellite check` должен проходить: `cargo fmt --all --check`,
     `cargo clippy --workspace --all-targets --locked -- -D warnings` (host), тот же clippy для
-    станций через `cargo-zigbuild clippy … --target aarch64-unknown-linux-gnu.2.36 --target armv7-unknown-linux-gnueabihf.2.30 --target armv7-unknown-linux-gnueabihf.2.23`
+    станций через `cargo-zigbuild clippy … --target aarch64-unknown-linux-gnu.2.36 --target armv7-unknown-linux-gnueabihf.2.23`
     (цели ставит rustup по `rust-toolchain.toml`, линкер не нужен; build-скрипт `ring` компилирует
     C для цели, поэтому нужен zig — любой версии, в CI 0.14.1 — и cargo-zigbuild 0.24.0, с теми же
     `CARGO_ZIGBUILD_*`, что у arch-сборок), `cargo test --workspace --locked` (host x86_64, без
     sendspin-cpp).
-    - Clippy линтует host и все три станции (armhf и mini — один и тот же Rust-triple, разные
-      суффиксы glibc). Архитектурно-зависимый код вместе со всеми его хелперами
+    - Clippy линтует host и обе цели. Архитектурно-зависимый код вместе со всеми его хелперами
       целиком лежит под `#[cfg(target_arch = …)]`, чтобы ни на одной из них не было мёртвого кода.
     - FFI-сторона `pulsar-sendspin` (cfg `sendspin_ffi`) линтуется отдельным проходом:
       `CARGO_TARGET_DIR=target/clippy-ffi RUSTFLAGS='--cfg sendspin_ffi' cargo clippy -p pulsar-sendspin --all-targets`
-      для обеих Rust-целей (только проверка типов, C++ не компилируется и не линкуется).
+      для обеих целей (только проверка типов, C++ не компилируется и не линкуется).
 
 ## Плавающая точка (FMA)
 
@@ -190,7 +189,7 @@ satellite/
   (`frontend.rs` `mean_square`), энергии `ww_offline`, матрица цвета корпуса в `leds.rs`,
   диапазоны музыки часов в `clock.rs`, число громкости на часах. Сливания не добавлять и не
   убирать.
-- Станционные 32-битные armhf-сборки (цели `armhf` и `mini`) дают аппаратный `vfma` для `mul_add` только с
+- Станционные armhf-сборки дают аппаратный `vfma` для `mul_add` только с
   `-C target-cpu=cortex-a53` (его ставит Makefile, см. «Рецепт линковки» ниже). Сборка armv7 без
   этого флага (например, ручной `cargo build --target armv7-unknown-linux-gnueabihf` без
   `RUSTFLAGS` из Makefile) уводит `mul_add` в вызов libm `fmaf`/`fma`: результат тот же, но
@@ -206,7 +205,7 @@ satellite/
 Шим `pulsar-sendspin/shim/` и статические библиотеки sendspin-cpp линкуются через `cargo zigbuild`
 (cargo-zigbuild 0.24.0, zig 0.14.1, `cc` из workspace) в окружении Makefile:
 `RUSTFLAGS='-C relocation-model=static -C force-frame-pointers=yes'` плюс
-`-C target-cpu=cortex-a53` для обеих armhf-целей (armhf и mini), без `CC_*`/`CXX_*`. Достаточно минимального рецепта:
+`-C target-cpu=cortex-a53` для armhf, без `CC_*`/`CXX_*`. Достаточно минимального рецепта:
 
 ```rust
 // build.rs
@@ -217,12 +216,13 @@ println!("cargo:rustc-link-lib=c++");
 - `c++abi` и `-Wl,--start-group`/`--end-group` не нужны: zig сам линкует свои libc++,
   libc++abi и libunwind статически. Для статических библиотек с перекрёстными ссылками
   `--start-group` остаётся запасным путём.
-- `-C target-cpu=cortex-a53` для обеих armhf-целей соответствует `-mcpu=cortex_a53` у C++-части сборки и
+- `-C target-cpu=cortex-a53` для armhf соответствует `-mcpu=cortex_a53` у C++-части сборки и
   делает `mul_add` аппаратным `vfma` (см. «Плавающая точка»).
 - non-PIE: оба бинаря `EXEC`, адреса в отчёте о падении абсолютные. `NEEDED`: aarch64 — только
-  `libc.so.6` (максимум `GLIBC_2.34`); armhf — `libpthread.so.0`, `libc.so.6`, `libdl.so.2`,
-  `ld-linux-armhf.so.3` (максимум `GLIBC_2.30`); mini — те же библиотеки с максимумом
-  `GLIBC_2.23` и собственным `getrandom` shim в `pulsar-core`; `hard-float ABI`.
+  `libm.so.6` и `libc.so.6` (максимум `GLIBC_2.34`); armhf — `libm.so.6`, `libpthread.so.0`,
+  `libc.so.6`, `libdl.so.2`, `ld-linux-armhf.so.3` (цель — glibc 2.23 Мини, фактический максимум
+  версий символов `GLIBC_2.18`; Лайт 2, Мини 2 и 32-битные образы Миди с glibc 2.30 запускают тот
+  же бинарь; `getrandom` — shim в `pulsar-core`), `hard-float ABI`.
 - При компиляции `cc` печатает безвредные предупреждения проверки компилятора через обёртки
   cargo-zigbuild: aarch64 — `zig: error: version '.2.36' in target triple 'aarch64-unknown-linux-gnu.2.36' is invalid`,
   armhf — `…/cargo-zigbuild/0.24.0/aeabi_unaligned.c:1:1: error: FileNotFound`. Объект при этом
@@ -284,9 +284,13 @@ println!("cargo:rustc-link-lib=c++");
 
 - `init(model)` зовётся в `main` до старта рантайма, потоков и библиотек (`pulsar-alsa` нельзя
   грузить до этого): `Model::apply_env` задаёт `ALSA_CONFIG_PATH` (только Мини —
-  `/data/pulsar/asound.conf`), а путь к libasound — из `Model::alsa_lib`; у Мини это абсолютный
-  `/system/vendor/quasar/libs/libasound.so.2`, потому что каталог прошивки вне путей поиска
-  загрузчика. `supervise.sh` и станционные скрипты окружение для Мини больше не задают.
+  `/data/pulsar/asound.conf`, и только если файл есть; иначе ошибка в логе), а путь к libasound —
+  из `Model::alsa_lib`; у Мини это абсолютный `/system/vendor/quasar/libs/libasound.so.2`, потому
+  что каталог прошивки вне путей поиска загрузчика. С таким путём `init` сразу загружает
+  библиотеку (RTLD_GLOBAL), до GStreamer: `NEEDED libasound.so.2` у `libquasar_gstreamer.so`
+  тогда разрешается в эту копию по SONAME, есть у неё RUNPATH или нет (на Мини не проверено).
+  Остальные модели грузят libasound лениво по SONAME. `supervise.sh` и станционные скрипты
+  окружение для Мини не задают.
 - Для `hw_params` `set_rate_near` / `set_period_size_near` / `set_buffer_size_near` /
   `get_period_size` / `get_buffer_size` сначала ищется `__snd_pcm_hw_params_*`, затем обычное имя:
   в версионированной alsa-lib (образы Миди с armhf userland) обычное имя может привязаться к
@@ -379,16 +383,16 @@ println!("cargo:rustc-link-lib=c++");
   контроллер применяет её к каналам игрока и Sendspin. На остальных моделях без контрола
   `available() = false`. `set_volume`/`set_muted` сразу пишут контрол и поля, геттеры читают поля.
   Программная громкость идёт по той же 60-дБ кривой, что softvol остальных моделей
-  (`pulsar_core::volume::master_gain`, была `software_gain`: ступень 5 % = 2,55 дБ). Кривая Мини —
-  та же штатная карта `STOCK_VOLUME` с `volume_min_step=true`, отдельной копии кривой в
-  `pulsar-media` больше нет (`mixer.rs` берёт её из `pulsar_core::volume`).
+  (`pulsar_core::volume::master_gain`: ступень 5 % = 2,55 дБ). Кривая Мини — та же штатная карта
+  `STOCK_VOLUME` с `volume_min_step=true`; `mixer.rs` берёт кривую из `pulsar_core::volume`.
 - На Мини затворы усилителя включаются вокруг каждого открытия PCM:
   Sendspin-sink и писатель ANNOUNCE открывают устройство через общий
   `pulsar_alsa::open_playback(model)` — `amp_table`/`aux_amp` = 1 и снятие ALSA `SPK mute` до и
   после открытия (dmix выключает `amp_table`, когда закрывается последний клиент, само открытие
   может их сбросить, а драйвер обнуляет `amp_table` при закрытии PCM); MUSIC-конвейер, чей
   alsasink открывает устройство внутри GStreamer, вместо этого вызывает
-  `pulsar_alsa::enable_output(model)` до и после перехода в PLAYING. Idle остаётся запертым
+  `pulsar_alsa::enable_output(model)` перед запуском конвейера и ещё раз, когда он сообщает
+  PLAYING (к этому моменту alsasink уже открыл устройство). Idle остаётся запертым
   (`aux_amp` остаётся 1), поэтому включение стоит перед каждым стартом. Sink — `mini` из
   `/data/pulsar/asound.conf` (dmix).
 

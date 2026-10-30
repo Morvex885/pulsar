@@ -23,40 +23,29 @@ func modelName(code string) string {
 }
 
 // abis lists the userspace ABIs a model's firmware runs, its usual one first; nil = model not
-// supported. The installed binary is build/<target>/pulsar for the first target whose dynamic
-// loader is on the station. A second ABI is only for a userspace actually seen on that model:
-// some Midi images run a 32-bit userspace on the 64-bit kernel (#13) and need the armhf build
-// (its ALSA ABI is the one in audio/alsa_abi.h, #14). Lite 2 and Mini 2 stay armhf-only: no
-// 64-bit userspace has been seen on them, and the aarch64 binary needs glibc 2.34 — on a miss it
-// would crash-loop back to the Yandex stack (no .prev on a first install). The first-generation
-// Mini uses a separate glibc-2.23 build (`mini`); the other armhf userlands get 2.30.
+// supported. The installed binary is build/<arch>/pulsar for the first ABI whose dynamic loader
+// is on the station. A second ABI is only for a userspace actually seen on that model: some Midi
+// images run a 32-bit userspace on the 64-bit kernel (#13) and need the armhf build (its ALSA
+// ABI is the one in audio/alsa_abi.h, #14). Lite 2, Mini 2 and Mini stay armhf-only: no 64-bit
+// userspace has been seen on them, and the aarch64 binary needs glibc 2.34 — on a miss it would
+// crash-loop back to the Yandex stack (no .prev on a first install). The armhf build targets
+// glibc 2.23, the Mini's; the 2.30 userlands of the Lite 2 and Mini 2 run it as well.
 func abis(code string) []string {
 	switch code {
 	case "cucumber":
 		return []string{"aarch64", "armhf"}
-	case "plum", "station-mini2":
+	case "plum", "station-mini2", "yandexmini":
 		return []string{"armhf"}
-	case "yandexmini":
-		// First-generation Mini: 32-bit armhf userland (glibc 2.23) on an aarch64 kernel.
-		return []string{"mini"}
 	}
 	return nil
 }
 
-// loaderFor maps a build target to the dynamic-loader word printed by the station probe.
-func loaderFor(target string) string {
-	if target == "mini" {
-		return "armhf"
-	}
-	return target
-}
-
-// archOf picks the model's first build target whose loader is on the station (loaders: the words
-// the loader probe printed). "" = none of the model's targets: skip the station.
+// archOf picks the model's first ABI whose loader is on the station (loaders: the words the
+// loader probe printed). "" = none of the model's ABIs: skip the station.
 func archOf(code string, loaders []string) string {
-	for _, target := range abis(code) {
-		if slices.Contains(loaders, loaderFor(target)) {
-			return target
+	for _, a := range abis(code) {
+		if slices.Contains(loaders, a) {
+			return a
 		}
 	}
 	return ""
@@ -70,10 +59,14 @@ func quasarDeviceType(cfg string) string {
 	if i < 0 {
 		return ""
 	}
-	rest := strings.TrimSpace(cfg[i+len(key):])
-	rest = strings.TrimPrefix(rest, ":")
-	rest = strings.TrimSpace(rest)
-	rest = strings.TrimPrefix(rest, `"`)
+	rest, ok := strings.CutPrefix(strings.TrimSpace(cfg[i+len(key):]), ":")
+	if !ok {
+		return ""
+	}
+	rest, ok = strings.CutPrefix(strings.TrimSpace(rest), `"`)
+	if !ok {
+		return ""
+	}
 	if j := strings.IndexByte(rest, '"'); j >= 0 {
 		return rest[:j]
 	}

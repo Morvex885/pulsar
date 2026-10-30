@@ -272,6 +272,8 @@ pub(crate) trait Backend: Send {
     fn out_end(&mut self);
     /// ANNOUNCE's pipeline is in NULL: the output drops the current item and stops at once.
     fn out_flush(&mut self);
+    /// MUSIC's pipeline reached PLAYING: its alsasink has the device open.
+    fn music_playing(&mut self);
 }
 
 /// State shared by the handle (runtime thread) and the GLib thread.
@@ -622,6 +624,7 @@ impl Machine {
                 }
                 // ANNOUNCE is PLAYING once its output started (OutEvent::Started).
                 if new == GstState::Playing as i32 && ch == Channel::Music {
+                    self.backend.music_playing();
                     let c = &mut self.chans[i];
                     c.reached_playing = true;
                     if c.want_play && !c.buffering {
@@ -821,18 +824,17 @@ struct GstBackend {
 
 impl Backend for GstBackend {
     fn set_state(&mut self, ch: Channel, s: GstState) -> bool {
-        // MUSIC's alsasink opens the device only after this call, and dmix may switch the
-        // amplifier off while the last client closes; enable on both sides of PLAYING. ANNOUNCE
-        // is not played by GStreamer (pcm_out opens the PCM itself).
-        let music_playing = s == GstState::Playing && ch == Channel::Music;
-        if music_playing {
+        // MUSIC's alsasink opens the device asynchronously after this call, and dmix may switch
+        // the amplifier off when another client closes meanwhile: the gates go on here and again
+        // in `music_playing`. ANNOUNCE is not played by GStreamer (pcm_out opens the PCM itself).
+        if s == GstState::Playing && ch == Channel::Music {
             pulsar_alsa::enable_output(self.model);
         }
-        let ok = self.pipes[ch.index()].set_state(s as i32);
-        if music_playing {
-            pulsar_alsa::enable_output(self.model);
-        }
-        ok
+        self.pipes[ch.index()].set_state(s as i32)
+    }
+
+    fn music_playing(&mut self) {
+        pulsar_alsa::enable_output(self.model);
     }
 
     fn set_uri(&mut self, ch: Channel, uri: &str) {
@@ -1026,10 +1028,6 @@ pub struct PlayerHandle {
 /// failed dlopen / gst_init is logged ("player init failed") and gives a degraded handle: every
 /// play() ends with Done(false) at once and state() stays Idle.
 pub fn spawn(model: &'static Model) -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
-    spawn_inner(model)
-}
-
-fn spawn_inner(model: &'static Model) -> (PlayerHandle, UnboundedReceiver<PlayerEvent>) {
     let (tx, rx) = unbounded_channel();
     let shared = Arc::new(Shared::new(tx));
     let exec = start(&shared, model).map(|t| Box::new(t) as Box<dyn Exec>);
@@ -1276,6 +1274,7 @@ mod tests {
             let mut f = self.0.lock().unwrap();
             !(s != GstState::Null && std::mem::take(&mut f.fail_next_start))
         }
+        fn music_playing(&mut self) {}
         fn set_uri(&mut self, ch: Channel, uri: &str) {
             self.log(format!("ch{} uri {uri}", ch.index()));
         }

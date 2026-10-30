@@ -1,8 +1,8 @@
-//! The Mini's glibc 2.23 has no `getrandom` (glibc 2.25). Rust's standard library references it
-//! for `/dev/urandom` replacement; provide the syscall wrapper on 32-bit arm, whose build targets
-//! that older ABI. The aarch64 build (glibc 2.36) uses the libc symbol. Every 32-bit ARM binary
-//! and test harness links pulsar-core, so the shim is reachable from one place (the glibc-2.30
-//! armhf build does not need it but carries it unused).
+//! The armhf build targets glibc 2.23 (the Mini's userland), which has no `getrandom` (glibc
+//! 2.25), yet Rust's standard library references it. This is the syscall wrapper for every 32-bit
+//! ARM binary and test harness (all of them link pulsar-core). On the 2.30 userlands (Lite 2,
+//! Mini 2, armhf Midi images) the binary still resolves to this definition, the same syscall as
+//! libc's. The aarch64 build (glibc 2.36) uses libc's symbol.
 
 #[cfg(all(target_arch = "arm", target_os = "linux"))]
 #[unsafe(no_mangle)]

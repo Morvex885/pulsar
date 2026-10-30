@@ -64,7 +64,7 @@ pub struct ApiConfig {
     pub has_wake_preroll: bool,
     /// The model has a readable hardware microphone mute switch/key.
     pub has_hw_mic_mute: bool,
-    /// The model has any buttons at all (the Event «Button» entity).
+    /// The model has an action button or volume keys (the Event «Button» entity).
     pub has_buttons: bool,
     /// The model has a TALK/action button (adds `action` and `action_long` event types).
     pub has_action: bool,

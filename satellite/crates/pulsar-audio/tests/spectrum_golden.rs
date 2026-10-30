@@ -106,7 +106,7 @@ fn sample(
 }
 
 #[test]
-fn matches_the_cxx_analyzer() {
+fn matches_the_golden_data() {
     let mut golden = GOLDEN.lines().filter(|l| !l.starts_with('#'));
     let mut max_diff = 0f32;
     let mut beats = 0;
@@ -141,7 +141,7 @@ fn matches_the_cxx_analyzer() {
                     let d = (w - v).abs();
                     // Bit-exact on the host the data was made on (glibc 2.39); another glibc's
                     // sinf / cosf / log10f may differ by an ulp.
-                    assert!(d <= 1e-6, "{at}: column {j}: {v} vs C++ {w}");
+                    assert!(d <= 1e-6, "{at}: column {j}: {v} vs golden {w}");
                     max_diff = max_diff.max(d);
                 }
             }
@@ -149,5 +149,5 @@ fn matches_the_cxx_analyzer() {
     }
     assert!(golden.next().is_none(), "golden data has more chunks");
     assert!(beats > 10, "{beats} beats");
-    eprintln!("max difference to the C++ analyzer: {max_diff:e}, {beats} beats");
+    eprintln!("max difference to the golden data: {max_diff:e}, {beats} beats");
 }
