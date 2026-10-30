@@ -117,7 +117,10 @@ impl Controller {
                 self.persist();
             }
         }
-        info!("time from HA: epoch={epoch} tz='{tz}' (local clock now follows TZ)");
+        match pulsar_core::tz::set_epoch(epoch) {
+            Ok(()) => info!("time from HA: epoch={epoch} tz='{tz}' (system clock synchronized)"),
+            Err(e) => warn!("time from HA: epoch={epoch} tz='{tz}': clock_settime failed: {e}"),
+        }
     }
 
     fn on_restart(&mut self) {
