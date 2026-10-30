@@ -386,7 +386,7 @@ async fn plaintext_session() {
             );
             assert!(h.connected());
 
-            // GetTimeResponse: the TZ string wins over the parsed zone, which is the fallback.
+            // Even after GetTimeRequest, plaintext time must never reach the controller.
             let mut w = Writer::new();
             w.fixed32(1, 1_700_000_000, false);
             w.bytes(3, &unhex("08dfa801"), false);
@@ -404,20 +404,6 @@ async fn plaintext_session() {
             p.send(200, &Writer::new()).await;
             p.send(msg::PING_RESP, &Writer::new()).await;
             assert!(p.sync().await.is_empty());
-            assert_eq!(
-                event(&mut rx).await,
-                ApiEvent::Time {
-                    epoch: 1_700_000_000,
-                    posix_tz: "<+0300>-3".into()
-                }
-            );
-            assert_eq!(
-                event(&mut rx).await,
-                ApiEvent::Time {
-                    epoch: 1_700_000_001,
-                    posix_tz: "MSK-3".into()
-                }
-            );
             assert!(rx.try_recv().is_err());
 
             // A second hello on the same connection is answered but connects nobody new.
@@ -742,6 +728,53 @@ async fn client_not_reading_is_dropped() {
 }
 
 #[tokio::test]
+async fn device_key_time_reaches_controller() {
+    let dir = TmpDir::new("device-time");
+    let key_path = dir.path().join("api_key");
+    std::fs::write(&key_path, format!("{KEY_B64}\n")).unwrap();
+    local()
+        .run_until(async {
+            let (_h, mut rx, port) = start(Some(key_path));
+            let key = crate::key::decode_psk(KEY_B64.as_bytes()).unwrap();
+            let mut p = Peer::noise(port, &key).await.unwrap();
+            p.hello("HA").await;
+            event(&mut rx).await;
+
+            // The TZ string wins over the parsed zone; no extra epoch-range policy.
+            let mut w = Writer::new();
+            w.fixed32(1, 1, false);
+            w.bytes(3, &unhex("08dfa801"), false);
+            p.send(msg::GET_TIME_RESP, &w).await;
+            assert_eq!(
+                event(&mut rx).await,
+                ApiEvent::Time {
+                    epoch: 1,
+                    posix_tz: "<+0300>-3".into()
+                }
+            );
+            let mut w = Writer::new();
+            w.fixed32(1, 1_700_000_001, false);
+            w.str(2, "MSK-3", false);
+            w.bytes(3, &unhex("08dfa801"), false);
+            p.send(msg::GET_TIME_RESP, &w).await;
+            assert_eq!(
+                event(&mut rx).await,
+                ApiEvent::Time {
+                    epoch: 1_700_000_001,
+                    posix_tz: "MSK-3".into()
+                }
+            );
+            // Epoch 0 is still filtered on a trusted session.
+            let mut w = Writer::new();
+            w.str(2, "UTC0", false);
+            p.send(msg::GET_TIME_RESP, &w).await;
+            assert!(p.sync().await.is_empty());
+            assert!(rx.try_recv().is_err());
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn noise_provisioning_and_key_change() {
     let dir = TmpDir::new("noise");
     let key_path = dir.path().join("api_key");
@@ -764,6 +797,12 @@ async fn noise_provisioning_and_key_change() {
             p.hello("HA").await;
             event(&mut rx).await;
             assert!(p.sync().await.is_empty());
+            let mut time = Writer::new();
+            time.fixed32(1, 1_700_000_000, false);
+            time.str(2, "MSK-3", false);
+            p.send(msg::GET_TIME_RESP, &time).await;
+            assert!(p.sync().await.is_empty());
+            assert!(rx.try_recv().is_err());
 
             // A rejected key changes nothing.
             let mut w = Writer::new();
@@ -774,13 +813,20 @@ async fn noise_provisioning_and_key_change() {
 
             let mut w = Writer::new();
             w.str(1, &format!(" {KEY_B64}\n"), false);
-            p.send(msg::NOISE_SET_KEY_REQ, &w).await;
+            // One batch: time after the key is written, before the delayed disconnect.
+            let noise = p.noise.as_mut().unwrap();
+            let mut batch = noise.encrypt(msg::NOISE_SET_KEY_REQ as u16, w.data());
+            batch.extend(noise.encrypt(msg::GET_TIME_RESP as u16, time.data()));
+            batch.extend(noise.encrypt(msg::PING_REQ as u16, &[]));
+            p.write(&batch).await;
             let resp = p.expect(msg::NOISE_SET_KEY_RESP).await;
             assert!(field(&resp, 1).unwrap().boolean());
             assert_eq!(
                 std::fs::read_to_string(&key_path).unwrap(),
                 format!("{KEY_B64}\n")
             );
+            p.expect(msg::PING_RESP).await;
+            assert!(rx.try_recv().is_err());
             // 100 ms later: new TXT, then every client is asked to leave.
             let txt = event(&mut rx).await;
             let ApiEvent::MdnsTxtChanged(txt) = txt else {
@@ -823,6 +869,14 @@ async fn noise_provisioning_and_key_change() {
             );
             tokio::time::sleep(Duration::from_millis(300)).await;
             assert!(p.sync().await.is_empty());
+            p.send(msg::GET_TIME_RESP, &time).await;
+            assert_eq!(
+                event(&mut rx).await,
+                ApiEvent::Time {
+                    epoch: 1_700_000_000,
+                    posix_tz: "MSK-3".into()
+                }
+            );
 
             // Clearing it: back to plaintext.
             p.send(msg::NOISE_SET_KEY_REQ, &Writer::new()).await;
@@ -844,6 +898,16 @@ async fn noise_provisioning_and_key_change() {
             assert_eq!(event(&mut rx).await, ApiEvent::ClientDisconnected);
             let mut plain = Peer::connect(port).await;
             plain.hello("plain").await;
+            event(&mut rx).await;
+            plain.send(msg::GET_TIME_RESP, &time).await;
+            assert!(plain.sync().await.is_empty());
+            assert!(rx.try_recv().is_err());
+            let mut zero = Peer::noise(port, &[0; 32]).await.unwrap();
+            zero.hello("provisioning again").await;
+            event(&mut rx).await;
+            zero.send(msg::GET_TIME_RESP, &time).await;
+            assert!(zero.sync().await.is_empty());
+            assert!(rx.try_recv().is_err());
         })
         .await;
 }

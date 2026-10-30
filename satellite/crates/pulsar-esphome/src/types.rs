@@ -406,8 +406,9 @@ pub enum ApiEvent {
         color: String,
         seconds: i32,
     },
-    /// Time from HA (GetTimeResponse); `posix_tz` is a POSIX TZ string (e.g. "MSK-3"), may be
-    /// empty.
+    /// Nonzero time from a session authenticated by a completed Noise handshake with the device
+    /// key (never plaintext or the all-zeros provisioning key). `posix_tz` is a POSIX TZ string
+    /// (e.g. "MSK-3"), may be empty.
     Time {
         epoch: u32,
         posix_tz: String,

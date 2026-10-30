@@ -476,6 +476,10 @@ struct Client {
     log_level: u32,
     proto: Proto,
     noise: Noise,
+    /// Credential selected at Noise start, not the key in force when the handshake ends.
+    noise_device_key: bool,
+    /// Set only after a successful handshake using this session's device key.
+    authenticated_device_key: bool,
 }
 
 impl Client {
@@ -765,6 +769,8 @@ impl Server {
             log_level: 0,
             proto: Proto::Unknown,
             noise: Noise::ClientHello,
+            noise_device_key: false,
+            authenticated_device_key: false,
         });
     }
 
@@ -1012,11 +1018,12 @@ impl Server {
         ) {
             error!("api: noise setup failed ({e})");
             self.close_client(id, "noise setup failed");
+        } else {
+            c.noise_device_key = self.key.has_key;
         }
     }
 
     fn noise_handshake(&mut self, id: u64, body: &[u8]) {
-        let has_key = self.key.has_key;
         let reject_all = self.key.reject_all;
         let Some(c) = self.client(id) else { return };
         if reject_all {
@@ -1030,7 +1037,8 @@ impl Server {
         c.out();
         match c.noise.handshake(body, &mut c.wbuf) {
             Ok(()) => {
-                let key = if has_key {
+                c.authenticated_device_key = c.noise_device_key;
+                let key = if c.authenticated_device_key {
                     "device key"
                 } else {
                     "provisioning key"
@@ -1310,6 +1318,9 @@ impl Server {
                 self.update_log_sink();
             }
             msg::GET_TIME_RESP => {
+                if !c.authenticated_device_key {
+                    return;
+                }
                 let mut epoch = 0;
                 let mut tz = String::new();
                 let mut parsed = None;

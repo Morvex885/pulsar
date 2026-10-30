@@ -301,6 +301,10 @@ println!("cargo:rustc-link-lib=c++");
 
 ### `pulsar-esphome`
 
+- `GetTimeResponse` (epoch и TZ) передаётся контроллеру только после успешного Noise handshake
+  с персональным ключом устройства, выбранным при старте этой сессии. Plaintext и Noise с
+  нулевым provisioning-ключом игнорируются, в том числе после записи нового ключа до отключения.
+  После provisioning HA переподключается с персональным ключом и получает обычный запрос времени.
 - mDNS вынесен из ApiServer: респондер создаёт контроллер, ApiServer только отдаёт `mdns_txt()` и
   событие `MdnsTxtChanged`. IP для сенсора «IP address» берётся из
   `pulsar_core::net::best_interface()`.
