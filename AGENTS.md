@@ -495,8 +495,9 @@ port on the station.
   switch.
 - Clock layers: order in the `pulsar-clock/src/clock.rs` module doc (pairing code > … > time;
   update install keeps it dark from `install_update` until exit). Persisted: `clock_scroll_ms=`,
-  `clock_music=`. Player one-shots fire only when the command took effect (`music_pause()` returns
-  whether something played; next / previous when Sendspin accepted the transport command).
+  `clock_music=`, `clock_auto_brightness=`. Player one-shots fire only when the command took
+  effect (`music_pause()` returns whether something played; next / previous when Sendspin
+  accepted the transport command).
 - LED layers: order in the `pulsar-hw/src/leds.rs` module doc and `active_layer`. Output:
   `(v · ambient dim)²`, case matrix (`led_case_color=`, rows = output R, G, B [inference:
   orientation not confirmed by eye]), × 0.8. Music: Sendspin visualizer frames win while they keep

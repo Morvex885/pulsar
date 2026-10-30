@@ -304,6 +304,7 @@ async fn run(port: u16, name: String, run_s: i64, key_path: Option<PathBuf>) -> 
         zigbee_modes: strings(&["Coordinator", "Router"]),
         has_clock: true,
         has_lux: true,
+        has_auto_brightness: true,
         key_path,
     };
     let Ok((api, mut events)) = spawn(id, cfg) else {

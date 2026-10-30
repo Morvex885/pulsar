@@ -117,7 +117,8 @@ fn glyph_frame(g: Glyphs, colon: bool) -> Frame {
 }
 
 /// Output level (chip current on the Midi, value of a lit segment on the Lite 2) for the user
-/// brightness 0..1 and the ambient factor 0.02..1: 0 only when the user turned it to 0.
+/// brightness 0..1 and the ambient factor 0.02..1 (1 with auto brightness off): 0 only when the
+/// user turned it to 0.
 fn level(user_bri: f32, ambient: f32) -> i32 {
     if user_bri <= 0.0 {
         return 0;
@@ -685,6 +686,7 @@ enum Cmd {
     SetEnabled(bool),
     SetBrightness(f32),
     SetAmbientLux(f32),
+    SetAutoBrightness(bool),
     SetTimer { ms_left: i64, running: bool },
     FlashNumber(i32),
     ShowCode(String),
@@ -717,13 +719,21 @@ struct Clock {
     /// < 0: unknown, no auto-dimming (only logged).
     lux: f32,
     dimmer: AmbientDimmer,
+    /// false: the level is the user brightness alone; readings still feed `dimmer`, so turning
+    /// it back on applies the current light at once.
+    auto_bri: bool,
     refreshes: u32,
     timers: Timers<Timer>,
 }
 
 impl Clock {
     fn apply_level(&mut self) {
-        let lvl = level(self.user_bri, self.dimmer.factor());
+        let ambient = if self.auto_bri {
+            self.dimmer.factor()
+        } else {
+            1.0
+        };
+        let lvl = level(self.user_bri, ambient);
         if self.leds.set_level(lvl) {
             debug!(
                 "clock: level={lvl} (user {:.2}, lux {:.1})",
@@ -754,6 +764,10 @@ impl Clock {
             Cmd::SetAmbientLux(lux) => {
                 self.lux = lux.max(0.0);
                 self.dimmer.update(self.lux);
+                self.apply_level();
+            }
+            Cmd::SetAutoBrightness(on) => {
+                self.auto_bri = on;
                 self.apply_level();
             }
             Cmd::SetTimer { ms_left, running } => l.set_timer(ms_left, running, now),
@@ -840,6 +854,7 @@ pub fn spawn(model: &'static Model) -> ClockHandle {
         user_bri: 1.0,
         lux: -1.0,
         dimmer: AmbientDimmer::new(),
+        auto_bri: true,
         refreshes: 0,
         timers: Timers::new(),
     };
@@ -863,13 +878,19 @@ impl ClockHandle {
         self.send(Cmd::SetEnabled(on));
     }
 
-    /// 0..1 user scale, multiplied by the ambient auto-dimming.
+    /// 0..1 user scale; with auto brightness on, the ceiling of the ambient auto-dimming.
     pub fn set_brightness(&self, b: f32) {
         self.send(Cmd::SetBrightness(b));
     }
 
     pub fn set_ambient_lux(&self, lux: f32) {
         self.send(Cmd::SetAmbientLux(lux));
+    }
+
+    /// On: the level follows the light sensor (the 0..1 scale is the ceiling). Off: the level
+    /// is the 0..1 scale alone, whatever the light.
+    pub fn set_auto_brightness(&self, on: bool) {
+        self.send(Cmd::SetAutoBrightness(on));
     }
 
     /// Shows a countdown mm:ss (or h:mm) instead of the time while `ms_left > 0`; <= 0 clears.

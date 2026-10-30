@@ -46,6 +46,7 @@ pub(super) mod key {
     pub const ACTION_LED_SHOW: u32 = 30;
     pub const SELECT_CLOCK_MUSIC: u32 = 31;
     pub const SW_WAKE_PREROLL: u32 = 32;
+    pub const SW_CLOCK_AUTO_BRI: u32 = 33;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -118,6 +119,7 @@ pub(super) struct Cache {
     media_muted: bool,
     sw_microphones: BoolState,
     sw_clock: BoolState,
+    sw_clock_auto_bri: BoolState,
     sw_auto_update: BoolState,
     sw_nearest_answers: BoolState,
     sw_voice_indication: BoolState,
@@ -150,6 +152,7 @@ impl Cache {
             media_muted: false,
             sw_microphones: BoolState::default(),
             sw_clock: BoolState::default(),
+            sw_clock_auto_bri: BoolState::default(),
             sw_auto_update: BoolState::default(),
             sw_nearest_answers: BoolState::default(),
             sw_voice_indication: BoolState::default(),
@@ -245,6 +248,18 @@ impl Server {
         self.send_msg(id, msg::DEVICE_CAPS_RESP, &w);
     }
 
+    fn switch_listed(&self, id: SwitchId) -> bool {
+        match id {
+            SwitchId::Clock => self.cfg.has_clock,
+            SwitchId::ClockAutoBrightness => self.cfg.has_clock && self.cfg.has_auto_brightness,
+            SwitchId::Microphones
+            | SwitchId::AutoUpdate
+            | SwitchId::NearestAnswers
+            | SwitchId::VoiceIndication
+            | SwitchId::WakePreroll => true,
+        }
+    }
+
     /// The entity list in the C++ order (HA keeps it per device; keys and object_ids must not
     /// move).
     pub(super) fn list_entities(&mut self, id: u64) {
@@ -282,7 +297,7 @@ impl Server {
             "mdi:microphone",
             None,
         ));
-        if self.cfg.has_clock {
+        if self.switch_listed(SwitchId::Clock) {
             out.push(switch(
                 "clock_display",
                 key::SW_CLOCK,
@@ -292,6 +307,15 @@ impl Server {
             ));
         }
         let cfg = Some(ENTITY_CATEGORY_CONFIG);
+        if self.switch_listed(SwitchId::ClockAutoBrightness) {
+            out.push(switch(
+                "clock_auto_brightness",
+                key::SW_CLOCK_AUTO_BRI,
+                "Clock auto brightness",
+                "mdi:brightness-auto",
+                cfg,
+            ));
+        }
         out.push(switch(
             "auto_update",
             key::SW_AUTO_UPDATE,
@@ -689,9 +713,10 @@ impl Server {
         let to = Some(id);
         let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
         let c = &self.cache;
-        let (mic, clock, auto, nearest, voice, preroll, hw) = (
+        let (mic, clock, auto_bri, auto, nearest, voice, preroll, hw) = (
             c.sw_microphones,
             c.sw_clock,
+            c.sw_clock_auto_bri,
             c.sw_auto_update,
             c.sw_nearest_answers,
             c.sw_voice_indication,
@@ -701,8 +726,11 @@ impl Server {
         let (lux, bri, scroll, speed) = (c.lux, c.clock_bri, c.clock_scroll, c.led_speed);
         self.send_media(to);
         self.send_bool(msg::SWITCH_STATE, key::SW_MICROPHONES, mic, to);
-        if has_clock {
+        if self.switch_listed(SwitchId::Clock) {
             self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK, clock, to);
+        }
+        if self.switch_listed(SwitchId::ClockAutoBrightness) {
+            self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK_AUTO_BRI, auto_bri, to);
         }
         self.send_bool(msg::SWITCH_STATE, key::SW_AUTO_UPDATE, auto, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_NEAREST_ANSWERS, nearest, to);
@@ -812,6 +840,10 @@ impl Server {
         let on = self.states_on();
         // Entities the device does not list get no states; their caches are kept all the same.
         let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
+        let switch_listed = match &p {
+            Publish::Switch(id, _) => self.switch_listed(*id),
+            _ => false,
+        };
         let c = &mut self.cache;
         match p {
             Publish::Media(st, volume, muted) => {
@@ -826,6 +858,9 @@ impl Server {
                 let (s, key) = match id {
                     SwitchId::Microphones => (&mut c.sw_microphones, key::SW_MICROPHONES),
                     SwitchId::Clock => (&mut c.sw_clock, key::SW_CLOCK),
+                    SwitchId::ClockAutoBrightness => {
+                        (&mut c.sw_clock_auto_bri, key::SW_CLOCK_AUTO_BRI)
+                    }
                     SwitchId::AutoUpdate => (&mut c.sw_auto_update, key::SW_AUTO_UPDATE),
                     SwitchId::NearestAnswers => {
                         (&mut c.sw_nearest_answers, key::SW_NEAREST_ANSWERS)
@@ -837,7 +872,7 @@ impl Server {
                 };
                 *s = BoolState { has: true, v };
                 let s = *s;
-                if on && (has_clock || !matches!(id, SwitchId::Clock)) {
+                if on && switch_listed {
                     self.send_bool(msg::SWITCH_STATE, key, s, None);
                 }
             }
