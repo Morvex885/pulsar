@@ -2,7 +2,8 @@
 //! Station Midi: touch keys "awinic_sar", mute switch "mute"; Station Lite 2: touch keys
 //! "aw9610x", mute switch "gpio-keys"; Station Mini 2: touch keys "sar0_pad0", no mute switch
 //! device: the latched mute line is a GPIO (`Model::mute_gpio`, low = muted), sampled every
-//! 100 ms. All use the same key codes and switch:
+//! 100 ms; Station Mini: keypad "adc_keypad" with only the momentary mute button. The others use
+//! the same key codes and switch:
 //!
 //! touch keys (capacitive, EV_KEY only; Midi KEY bitmap "40 0 0 0 0 0 0 0 c000000000000 0"):
 //!   Model::action_key (KEY_VOICECOMMAND 582) -> Action
@@ -46,8 +47,6 @@ const SYN_DROPPED: u16 = 3;
 const SW_MUTE_DEVICE: u16 = 0x0e;
 const KEY_VOLUMEDOWN: u16 = 114;
 const KEY_VOLUMEUP: u16 = 115;
-#[cfg(test)]
-const KEY_ACTION: u16 = 582;
 
 const LONG_PRESS_MS: u64 = 800;
 const REPEAT_DELAY_MS: u64 = 500;

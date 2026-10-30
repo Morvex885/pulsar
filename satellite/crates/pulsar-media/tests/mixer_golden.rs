@@ -14,7 +14,7 @@
 //! a Lite 2, where this test, cross-built, also passed.
 
 use pulsar_core::model::{Model, VolumePoint, model_from_compatible};
-use pulsar_media::mixer;
+use pulsar_core::volume;
 
 const fn vp(level: i32, raw: i32) -> VolumePoint {
     VolumePoint { level, raw }
@@ -66,12 +66,12 @@ fn curves_match_cxx() {
         match func {
             "to_raw" => {
                 let v: f32 = input.parse().unwrap();
-                assert_eq!(mixer::to_raw(m, v), want.parse::<i64>().unwrap(), "{line}");
+                assert_eq!(volume::to_raw(m, v), want.parse::<i64>().unwrap(), "{line}");
                 counts[0] += 1;
             }
             "from_raw" => {
                 let raw: i64 = input.parse().unwrap();
-                let got = mixer::from_raw(m, raw);
+                let got = volume::from_raw(m, raw);
                 assert_eq!(
                     got.to_bits(),
                     want.parse::<f32>().unwrap().to_bits(),
@@ -82,9 +82,9 @@ fn curves_match_cxx() {
             "to_legacy" | "from_legacy" => {
                 let v: f32 = input.parse().unwrap();
                 let got = if func == "to_legacy" {
-                    mixer::to_legacy(m, v)
+                    volume::to_legacy(m, v)
                 } else {
-                    mixer::from_legacy(m, v)
+                    volume::from_legacy(m, v)
                 };
                 assert_eq!(
                     got.to_bits(),
@@ -104,13 +104,13 @@ fn curves_match_cxx() {
 fn stock_curve_landmarks() {
     let m = model_from_compatible(b"yandex,plum\0").unwrap();
     // The port's station tests cap the volume at 0.2, i.e. raw 82.
-    assert_eq!(mixer::to_raw(m, 0.2), 82);
-    assert_eq!(mixer::to_raw(m, 0.0), 0);
-    assert_eq!(mixer::to_raw(m, 0.01), 49);
-    assert_eq!(mixer::to_raw(m, 1.0), 255);
-    assert_eq!(mixer::from_raw(m, 0), 0.0);
-    assert_eq!(mixer::from_raw(m, 255), 1.0);
-    assert_eq!(mixer::from_raw(m, 49), 0.05);
+    assert_eq!(volume::to_raw(m, 0.2), 82);
+    assert_eq!(volume::to_raw(m, 0.0), 0);
+    assert_eq!(volume::to_raw(m, 0.01), 49);
+    assert_eq!(volume::to_raw(m, 1.0), 255);
+    assert_eq!(volume::from_raw(m, 0), 0.0);
+    assert_eq!(volume::from_raw(m, 255), 1.0);
+    assert_eq!(volume::from_raw(m, 49), 0.05);
 }
 
 #[test]
@@ -118,9 +118,9 @@ fn mini2_curve_has_no_lowest_step() {
     // Linear in percent, no jump to a lowest step: low HA volumes stay low (the C++ curve made
     // any volume of a two-point map full volume).
     let m = model_from_compatible(b"yandex,station-mini2\0").unwrap();
-    assert_eq!(mixer::to_raw(m, 0.01), 3);
-    assert_eq!(mixer::to_raw(m, 0.05), 13);
-    assert_eq!(mixer::to_raw(m, 0.2), 51);
-    assert_eq!(mixer::to_raw(m, 1.0), 255);
-    assert_eq!(mixer::from_raw(m, 51), 0.2);
+    assert_eq!(volume::to_raw(m, 0.01), 3);
+    assert_eq!(volume::to_raw(m, 0.05), 13);
+    assert_eq!(volume::to_raw(m, 0.2), 51);
+    assert_eq!(volume::to_raw(m, 1.0), 255);
+    assert_eq!(volume::from_raw(m, 51), 0.2);
 }

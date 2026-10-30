@@ -19,7 +19,7 @@ use std::process::{Command, ExitCode};
 use std::sync::Mutex;
 
 use pulsar_core::Timers;
-use pulsar_media::{Channel, Mixer, PlayId, PlayState, PlayerEvent, mixer, spawn};
+use pulsar_media::{Channel, Mixer, PlayId, PlayState, PlayerEvent, spawn};
 use tokio::signal::unix::{SignalKind, signal};
 
 const MASTER: &str = "Master Playback Volume";
@@ -311,8 +311,8 @@ fn main() -> ExitCode {
     } else {
         mx.volume().min(MAX_TEST_VOLUME)
     };
-    let cap = mixer::to_raw(model, MAX_TEST_VOLUME);
-    let want = mixer::to_raw(model, volume);
+    let cap = pulsar_core::volume::to_raw(model, MAX_TEST_VOLUME);
+    let want = pulsar_core::volume::to_raw(model, volume);
     mx.set_volume(volume);
     println!(
         "[{:6.2}] set_volume({volume:.3}): expect values={want},{want}",
@@ -357,7 +357,7 @@ fn main() -> ExitCode {
     // The mixer's master is already in the signal on hardware models; a software master has to
     // go into the channel gains the same way the controller does it.
     let master = if software {
-        mixer::master_gain(model, volume)
+        pulsar_core::volume::master_gain(model, volume)
     } else {
         1.0
     };

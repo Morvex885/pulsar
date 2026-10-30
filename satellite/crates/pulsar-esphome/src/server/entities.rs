@@ -432,12 +432,7 @@ impl Server {
             entity_head(&mut w, "button", key::EVENT_BUTTON, "Button");
             w.str(5, "mdi:gesture-tap-button", false);
             w.str(8, "button", false);
-            if self.cfg.has_action {
-                for t in ["action", "action_long"] {
-                    w.str(9, t, true);
-                }
-            }
-            for t in ["volume_up", "volume_down"] {
+            for t in ["action", "action_long", "volume_up", "volume_down"] {
                 w.str(9, t, true);
             }
             out.push((msg::LIST_EVENT, w));
@@ -829,7 +824,9 @@ impl Server {
 
     pub(super) fn publish(&mut self, p: Publish) {
         let on = self.states_on();
-        // Entities the device does not list get no states; their caches are kept all the same.
+        // Entities the device does not list get no states; the config is fixed for the process,
+        // so most of them skip the cache too (the clock text and the wake pre-roll switch are
+        // still cached).
         let (has_clock, has_lux, has_preroll) = (
             self.cfg.has_clock,
             self.cfg.has_lux,
@@ -958,9 +955,6 @@ impl Server {
             }
             Publish::Event(EventId::Button, event_type) => {
                 if !on || !self.cfg.has_buttons {
-                    return;
-                }
-                if !self.cfg.has_action && matches!(event_type.as_str(), "action" | "action_long") {
                     return;
                 }
                 let mut w = Writer::new();

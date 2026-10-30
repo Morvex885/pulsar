@@ -40,7 +40,6 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         has_wake_preroll: true,
         has_hw_mic_mute: true,
         has_buttons: true,
-        has_action: true,
         key_path: None,
     };
     (id, cfg)
@@ -685,7 +684,6 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
             cfg.has_hw_mic_mute = false;
             // Only a mute button: no «Button» event entity (Model::has_button_events).
             cfg.has_buttons = false;
-            cfg.has_action = false;
             // The Mini's ledconfigs directory is empty; with_none() leaves just "None".
             cfg.case_colors = ["None"].iter().map(|v| (*v).to_owned()).collect();
             cfg.zigbee_modes.clear();
@@ -706,7 +704,7 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
             // case colour or Button entities.
             assert_eq!(keys.len(), 15, "keys: {keys:?}");
             assert!(keys.contains(&key::ACTION_LED_SHOW));
-            for absent in [
+            let absent = [
                 key::SW_CLOCK,
                 key::SW_WAKE_PREROLL,
                 key::NUMBER_CLOCK_BRI,
@@ -720,12 +718,24 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
                 key::SENSOR_LUX,
                 key::SELECT_CASE_COLOR,
                 key::EVENT_BUTTON,
-            ] {
-                assert!(!keys.contains(&absent), "unexpected entity key {absent}");
+            ];
+            for k in absent {
+                assert!(!keys.contains(&k), "unexpected entity key {k}");
+            }
+            // The initial states carry the listed entities only.
+            publish_selftest_states(&h);
+            p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+            let initial: Vec<u32> = p
+                .sync()
+                .await
+                .iter()
+                .filter_map(|(_, m)| state_key(m))
+                .collect();
+            assert!(initial.contains(&key::NUMBER_LED_SPEED), "{initial:?}");
+            for k in absent {
+                assert!(!initial.contains(&k), "unexpected state for key {k}");
             }
             // The controller may still publish these cache values; the server must drop them.
-            p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
-            let _ = p.sync().await;
             h.publish_switch(SwitchId::Clock, true);
             h.publish_number(NumberId::ClockBrightness, 50.0);
             h.publish_number(NumberId::ClockScroll, 400.0);
@@ -737,6 +747,12 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
             h.publish_sensor(SensorId::Illuminance, 12.5);
             h.fire_event(EventId::Button, "action");
             assert!(p.sync().await.is_empty());
+            // A listed entity still gets its state.
+            h.publish_number(NumberId::LedSpeed, 2.0);
+            let got = p.sync().await;
+            assert_eq!(got.len(), 1, "{got:?}");
+            assert_eq!(got[0].0, msg::NUMBER_STATE);
+            assert_eq!(state_key(&got[0].1), Some(key::NUMBER_LED_SPEED));
         })
         .await;
 }

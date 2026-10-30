@@ -42,7 +42,7 @@ const TIMER_RING_MAX_MS: i64 = 15 * 60 * 1000;
 // starts), and conversation agents (LLMs with tool calls) may think for a minute or more.
 const LISTEN_TIMEOUT_MS: u64 = 30_000;
 const PROCESS_TIMEOUT_MS: u64 = 120_000;
-// Updates: releases of the model's repository on GitHub. The first check waits for the network
+// Updates: releases of this repository on GitHub. The first check waits for the network
 // after boot; an automatic install waits until the speaker is idle (it restarts the daemon).
 const UPDATE_FIRST_CHECK_MS: u64 = 60_000;
 const UPDATE_CHECK_PERIOD_MS: u64 = 6 * 3_600_000;
@@ -342,7 +342,6 @@ impl Controller {
             has_wake_preroll: !model.wake_preroll.is_empty(),
             has_hw_mic_mute: !model.mute_input.is_empty() || model.mute_gpio != 0,
             has_buttons: model.has_button_events(),
-            has_action: model.action_key != 0,
             key_path: Some(logic::in_dir(&dir, "api_key")),
         };
         // The C++ server bound its port last (ApiServer::start); here the bind comes first, so
@@ -384,7 +383,7 @@ impl Controller {
             st.volume_legacy,
             st.legacy_on_stock,
             mixer.volume(),
-            |v| pulsar_media::mixer::from_legacy(model, v),
+            |v| pulsar_core::volume::from_legacy(model, v),
         );
         st.volume = volume;
         // Changes made while starting are written like any other (StateFile, 1 s later).
@@ -453,7 +452,7 @@ impl Controller {
             model,
             port: ports.sendspin,
         };
-        let master = pulsar_media::mixer::master_gain(model, st.volume);
+        let master = pulsar_core::volume::master_gain(model, st.volume);
         let (sendspin, sendspin_rx) =
             match pulsar_sendspin::spawn(ss_cfg, st.volume, st.muted, master) {
                 Ok((h, rx)) => (Some(h), Some(rx)),
@@ -789,7 +788,7 @@ impl Controller {
     /// `st` changed: written a moment after the last change (`StateFile`). `volume=` follows
     /// `volume2=` on the curve of earlier builds.
     fn persist(&mut self) {
-        self.st.volume_legacy = pulsar_media::mixer::to_legacy(self.model, self.st.volume);
+        self.st.volume_legacy = pulsar_core::volume::to_legacy(self.model, self.st.volume);
         self.state.changed();
     }
 
@@ -798,7 +797,7 @@ impl Controller {
     /// stays pending (`StateFile`).
     #[must_use = "a write that must be on disk has to check it"]
     fn persist_now(&mut self) -> bool {
-        self.st.volume_legacy = pulsar_media::mixer::to_legacy(self.model, self.st.volume);
+        self.st.volume_legacy = pulsar_core::volume::to_legacy(self.model, self.st.volume);
         self.state.write_now(&self.st)
     }
 

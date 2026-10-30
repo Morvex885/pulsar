@@ -24,8 +24,6 @@ D=${PULSAR_DIR:-/data/pulsar}
 LOG=${PULSAR_LOG:-/tmp/pulsar.log}
 Q=${PULSAR_Q:-/system/vendor/quasar/q}
 BIN=$D/pulsar
-# The daemon applies the Mini's ALSA environment itself (Model::apply_env + the absolute libasound
-# path), before it starts any thread or audio library. Nothing model-specific here.
 MAXLOG=1000000
 LONG=${PULSAR_LONG:-300}
 CRASHES=5

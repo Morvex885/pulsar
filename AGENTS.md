@@ -27,7 +27,7 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 |---|---|
 | `satellite/Cargo.toml` | Cargo workspace (edition 2024, every external dependency pinned in `[workspace.dependencies]`), `rust-toolchain.toml`, `Makefile` (cargo-zigbuild cross builds, `make check`) |
 | `satellite/crates/pulsar/` | the daemon: `main.rs` (runtime, teardown watchdog, final settings flush), `crash.rs` (crash report), `controller/` (all satellite logic: voice pipeline state machine, entities, local commands, updates; `logic.rs` holds its pure decisions), `settings.rs` (`state.conf`: format readable by the binary kept as `.prev`, durable writes, `StateFile` debounce; see Conventions); `PULSAR_PORT_OFFSET=<n>` adds n to the ESPHome, Sendspin, deCONZ and arbiter ports and turns mDNS off (test instance next to the running daemon) |
-| `satellite/crates/pulsar-core/` | logging (stderr + ESPHome log sink), `Timers` (per-actor timers, firing order in `timers.rs`), actor registry (`spawn_actor`, `join_all`), sysfs / network / TZ helpers, `Model` (per-model hardware description: capture layout, VQE preset, LEDs, clock, inputs, sounds, Zigbee lines; detected from `/proc/device-tree/compatible`, with the Mini requiring `amlogic-dt-id = axg_s420_v03` AND `quasar.cfg` `deviceType=yandexmini` (`mini_from_board_and_cfg`)), `AmbientDimmer`, `MusicFrame`, `UiState`, `ClockShot`, `fmt` (`state.conf` number format) |
+| `satellite/crates/pulsar-core/` | logging (stderr + ESPHome log sink), `Timers` (per-actor timers, firing order in `timers.rs`), actor registry (`spawn_actor`, `join_all`), sysfs / network / TZ helpers, `Model` (per-model hardware description: capture layout, VQE preset, LEDs, clock, inputs, sounds, Zigbee lines; detected from `/proc/device-tree/compatible`, with the Mini requiring `amlogic-dt-id = axg_s420_v03` AND `quasar.cfg` `deviceType=yandexmini` (`mini_from_board_and_cfg`)), `volume` (stock volume curves, `state.conf` legacy level, software master gain), `AmbientDimmer`, `MusicFrame`, `UiState`, `ClockShot`, `fmt` (`state.conf` number format) |
 | `satellite/crates/pulsar-alsa/` | libasound loaded at runtime (dlopen), PCM / ctl wrappers, the versioned hw-params ABI of armhf alsa-lib (`__snd_pcm_hw_params_*` first); bin `alsa_abi_probe` |
 | `satellite/crates/pulsar-esphome/` | ESPHome API server: transport (plaintext / Noise), clients and the voice owner (`server.rs`), entities and states (`server/entities.rs`), commands and voice assistant messages (`server/commands.rs`), hand-written protobuf (`proto.rs`), Noise key (`key.rs`); bin `api_selftest`; client `tools/esphome_check.py` |
 | `satellite/crates/pulsar-lan/` | mDNS responder (`mdns.rs`) and the wake word arbiter between stations (`arbiter.rs`: claims over UDP broadcast :6054, 250 ms window, best claim answers); bin `lan_probe` |
@@ -147,14 +147,15 @@ ssh root@<ip> 'cd /data/pulsar && cp pulsar pulsar.prev &&
 ```
 
 Device layout: `/data/pulsar/{pulsar,.prev,.bad,boot.sh,supervise.sh,
-ctl.sh,state.conf,api_key,enabled,sendspin/,zigbee-coordinator.ybl,zigbee-router.ybl}`. Outside
+ctl.sh,state.conf,api_key,enabled,sendspin/,zigbee-coordinator.ybl,zigbee-router.ybl,asound.conf}`
+(`asound.conf`: Mini only). Outside
 /data: `/etc/init.d/S99zpulsar` (autostart, written by the installer). `api_key`: ESPHome Noise PSK
 (base64 of 32 bytes, 0600), written by HA's auto-provisioning or `ctl.sh api-key`; absent =
 plaintext (Noise with the all-zeros key is then accepted so HA can provision); corrupt = API fails
 closed. `.bad`: binary replaced by the crash-loop rollback. Log: `/tmp/pulsar.log`
 (`ctl.sh log N`; rotated at 1 MB by `supervise.sh`, one `.1` kept). Boot chain: busybox init →
 `rcS` (runs `/etc/init.d/S??*` in order with `start`, waiting for each) → `S97quasar` (Midi) /
-`S99quasar` (Lite 2, Mini 2) → `onboot.sh` (adbd via `activate_adb.sh check`, quasar in
+`S99quasar` (Lite 2, Mini 2) / `S99onboot.sh` (Mini) → `onboot.sh` (adbd via `activate_adb.sh check`, quasar in
 background; returns); then `S99zpulsar` (sorts after `S99quasar`; `S99pulsar` would not) →
 `boot.sh` in background (once per boot: `/tmp/pulsar-boot.lock`) → waits for quasar, `q stop` →
 `supervise.sh` restart loop while `enabled` exists. `ctl.sh reload` restarts the supervisor itself
@@ -201,8 +202,8 @@ README, "Обновление из Home Assistant"). What must not break:
   supervisor). Station tests follow `docs/stations.md` (lock, test instance, volume cap, cleanup).
 - No volume changes or test sounds on a live speaker without the owner's consent; tests that play
   audio must cap volume (≤ 0.2 on the Mixer scale, raw ≤ 82).
-- `/tmp` is tmpfs (1 GB RAM on the Midi, 237 MB on the Lite 2 and Mini 2, ~118 MB on the Mini): remove test
-  files afterwards.
+- `/tmp` is tmpfs (1 GB RAM on the Midi, 237 MB on the Lite 2, 238 MB on the Mini 2, 236 MB on
+  the Mini, whose tmpfs is ~118 MB): remove test files afterwards.
 
 ## Yandex libraries (reverse-engineered C API, see `satellite/crates/pulsar-audio/src/engine/`)
 
@@ -385,10 +386,11 @@ Lite 2 capture: reading and VQE on one thread overrun the 42 ms device buffer, s
 own thread with a FIFO. A few overruns an hour remain (`capture: Broken pipe, recovering`); they
 are expected.
 
-Stale dmix lock (both models; mechanism in the `supervise.sh` header): a process killed while
+Stale dmix lock (every model; mechanism in the `supervise.sh` header): a process killed while
 playing leaves every later player silent until a reboot, and a daemon restart alone does not help.
 `supervise.sh` clears it before each launch, `tools/station.sh` in `stop`, `test-stop` and
-`cleanup`; by hand: `ipcrm -M 0x400 -M 0x401 -S 0x400` when `ipcs -m` shows nattch 0 for both.
+`cleanup`; by hand: `ipcrm -M 0x400 -M 0x401 -S 0x400` (the Mini's `minidmix`: `ipcrm -M 0x8e5
+-M 0x8e6 -S 0x8e5`) when `ipcs -m` shows nattch 0 for both.
 
 Lite 2 LEDs: `led_ring_fb` scales each channel on its way to the LEDs; sysfs `brightness` reads
 the framebuffer value × ~0.36 (red), ~0.23 (green), ~0.2 (blue) and caps at 63, so ring colours
@@ -438,7 +440,8 @@ port on the station.
 - Comments explain device facts and constraints, not what the code does.
 - Floating point: `mul_add` sits exactly where the station builds' rounding requires a fused
   multiply-add; golden tests pin it (`pulsar-audio` `spectrum_golden.rs`, `pulsar-clock`
-  `clock_fx.rs` render / levels, `pulsar-hw` `led_fx/tests.rs`, `pulsar-media` `mixer_golden.rs`,
+  `clock_fx.rs` render / levels, `pulsar-hw` `led_fx/tests.rs`, `pulsar-media` `mixer_golden.rs`
+  (the curves live in `pulsar_core::volume`),
   `pulsar-core` `ambient.rs`); the wake level, `ww_offline` energies, the case matrix, the clock's
   music ranges and the volume number follow the same rule without a test. Do not add or remove
   fusions. armhf builds need `-C target-cpu=cortex-a53` (the Makefile sets it), or `mul_add`

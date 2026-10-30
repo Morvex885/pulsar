@@ -65,8 +65,6 @@ pub struct Model {
     /// Key code of a momentary microphone-mute button on `keys_input` that toggles the software
     /// mute (the Mini's KEY_MUTE 113); 0: none.
     pub mute_key: u16,
-    /// `keys_input` has KEY_VOLUMEUP / KEY_VOLUMEDOWN (115 / 114).
-    pub volume_keys: bool,
     /// Earcons, relative to /system/vendor/quasar/sounds/.
     pub error_sound: &'static str,
     pub wake_sound: &'static str,
@@ -132,13 +130,6 @@ impl CaptureFormat {
         match self {
             Self::S16 => 16,
             Self::S32 { .. } => 32,
-        }
-    }
-
-    pub fn shift(self) -> u32 {
-        match self {
-            Self::S16 => 0,
-            Self::S32 { shift } => shift,
         }
     }
 }
@@ -295,7 +286,6 @@ static MIDI: Model = Model {
     mute_gpio: 0,
     action_key: 582,
     mute_key: 0,
-    volume_keys: true,
     error_sound: "ru-RU/vins_error.wav",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -361,7 +351,6 @@ static LITE2: Model = Model {
     mute_gpio: 0,
     action_key: 582,
     mute_key: 0,
-    volume_keys: true,
     error_sound: "ru-RU/playback_error.mp3",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -439,7 +428,6 @@ static MINI2: Model = Model {
     mute_gpio: 414,
     action_key: 582,
     mute_key: 0,
-    volume_keys: true,
     // This firmware's GStreamer has no MP3 decoder; every earcon ships as .opus.
     error_sound: "ru-RU/playback_error.opus",
     wake_sound: "common/spotter_start.opus",
@@ -507,7 +495,6 @@ static MINI: Model = Model {
     // The retail Mini has no TALK pad and no volume keys: adc_keypad sends only KEY_MUTE.
     action_key: 0,
     mute_key: 113,
-    volume_keys: false,
     error_sound: "ru-RU/playback_error.mp3",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -557,10 +544,11 @@ impl Model {
         }
     }
 
-    /// Whether the keys device has anything for the «Button» event entity: an action button or
-    /// volume keys (a mute button alone toggles the mute switch).
+    /// Whether the keys device feeds the «Button» event entity (action, action_long, volume_up,
+    /// volume_down): every model with the action button also has the volume keys. The Mini's
+    /// keypad has only the mute button, which toggles the Microphones switch instead.
     pub fn has_button_events(&self) -> bool {
-        !self.keys_input.is_empty() && (self.action_key != 0 || self.volume_keys)
+        !self.keys_input.is_empty() && self.action_key != 0
     }
 }
 
@@ -700,6 +688,9 @@ mod tests {
         assert!(mini_from_board_and_cfg(b"axg_s420_v02\0", cfg).is_none());
         assert_eq!(quasar_device_type(cfg), Some("yandexmini"));
         assert_eq!(quasar_device_type("{}"), None);
+        // The installer and boot.sh reject these too.
+        assert_eq!(quasar_device_type(r#"{"deviceType" "yandexmini"}"#), None);
+        assert_eq!(quasar_device_type(r#"{"deviceType": yandexmini}"#), None);
     }
 
     #[test]

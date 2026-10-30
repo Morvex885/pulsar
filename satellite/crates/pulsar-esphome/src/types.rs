@@ -64,10 +64,8 @@ pub struct ApiConfig {
     pub has_wake_preroll: bool,
     /// The model has a readable hardware microphone mute switch/key.
     pub has_hw_mic_mute: bool,
-    /// The model has an action button or volume keys (the Event «Button» entity).
+    /// The model has the action button and volume keys (the Event «Button» entity).
     pub has_buttons: bool,
-    /// The model has a TALK/action button (adds `action` and `action_long` event types).
-    pub has_action: bool,
     /// File holding the Noise encryption key (base64 of 32 bytes, as ESPHome's `api: encryption:
     /// key`). Missing or empty file: plaintext (and provisioning with the all-zeros key). HA may
     /// set or rotate it with NoiseEncryptionSetKeyRequest. None: encryption unsupported.
@@ -91,7 +89,6 @@ impl Default for ApiConfig {
             has_wake_preroll: true,
             has_hw_mic_mute: true,
             has_buttons: true,
-            has_action: true,
             key_path: None,
         }
     }

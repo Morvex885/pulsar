@@ -20,7 +20,7 @@ use std::time::Duration;
 use log::{error, info, warn};
 use pulsar_alsa::{Format, HwRequest, HwTrace, Pcm, Stream};
 use pulsar_core::MusicFrame;
-use pulsar_core::model::{Model, PrerollRule};
+use pulsar_core::model::{CaptureFormat, Model, PrerollRule};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::engine::{Engine, Stage, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
@@ -379,15 +379,61 @@ impl Fifo {
     }
 }
 
+/// Capture buffer per sample format.
+enum CaptureBuf {
+    S16(Vec<i16>),
+    /// Raw S32 frames and their 16-bit conversion.
+    S32 {
+        raw: Vec<i32>,
+        out: Vec<i16>,
+        shift: u32,
+    },
+}
+
+impl CaptureBuf {
+    fn new(format: CaptureFormat, samples: usize) -> Self {
+        match format {
+            CaptureFormat::S16 => Self::S16(vec![0; samples]),
+            CaptureFormat::S32 { shift } => Self::S32 {
+                raw: vec![0; samples],
+                out: vec![0; samples],
+                shift,
+            },
+        }
+    }
+
+    fn read(&mut self, pcm: &mut Pcm, frames: usize) -> Result<usize, i32> {
+        match self {
+            Self::S16(buf) => pcm.readi(buf, frames),
+            Self::S32 { raw, .. } => pcm.readi_s32(raw, frames),
+        }
+    }
+
+    /// The first `samples` samples read, as the VQE's 16-bit input.
+    fn samples(&mut self, samples: usize) -> &[i16] {
+        match self {
+            Self::S16(buf) => &buf[..samples],
+            Self::S32 { raw, out, shift } => {
+                s32_to_s16(&raw[..samples], *shift, &mut out[..samples]);
+                &out[..samples]
+            }
+        }
+    }
+}
+
+/// S32_LE carries a right-justified 24-bit sample on the Mini: shifting out the low `shift` bits
+/// keeps the sign extension and gives the VQE's 16-bit input; anything wider saturates.
+fn s32_to_s16(src: &[i32], shift: u32, dst: &mut [i16]) {
+    for (d, &s) in dst.iter_mut().zip(src) {
+        *d = (s >> shift).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+    }
+}
+
 fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
     let nch = model.capture_channels as usize;
-    let bits = model.capture_format.bits();
-    let shift = model.capture_format.shift();
     let mut pcm: Option<Pcm> = None;
     let mut hw_period = period;
-    let mut input16 = (bits == 16).then(|| vec![0i16; period * nch]);
-    let mut input32 = (bits == 32).then(|| vec![0i32; period * nch]);
-    let mut converted = (bits == 32).then(|| vec![0i16; period * nch]);
+    let mut buf = CaptureBuf::new(model.capture_format, period * nch);
     while shared.running() {
         let Some(p) = pcm.as_mut() else {
             match open_capture(model, period) {
@@ -399,11 +445,7 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
             }
             continue;
         };
-        let mut r = match (&mut input16, &mut input32) {
-            (Some(input), _) => p.readi(input, hw_period),
-            (_, Some(input)) => p.readi_s32(input, hw_period),
-            _ => unreachable!(),
-        };
+        let mut r = buf.read(p, hw_period);
         if r == Err(-libc::EAGAIN) {
             match p.wait(READ_WAIT_MS) {
                 // Ready, or timeout (re-checks running).
@@ -422,17 +464,7 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
                 continue;
             }
         };
-        let block = if let Some(out) = &mut converted {
-            // S32_LE carries a right-justified 24-bit sample on the Mini; shifting out the low
-            // 8 bits and keeping the sign extension reduces it to the VQE's 16-bit input.
-            let input = input32.as_ref().expect("S32 input");
-            for (dst, &src) in out.iter_mut().zip(&input[..n * nch]) {
-                *dst = (src >> shift).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-            }
-            &out[..n * nch]
-        } else {
-            &input16.as_ref().expect("S16 input")[..n * nch]
-        };
+        let block = buf.samples(n * nch);
         shared.captured_frames.fetch_add(n as u64, Relaxed);
         if shared.tap_on.load(Relaxed)
             && let Some(tap) = lock(&shared.tap).as_ref()
@@ -839,6 +871,24 @@ mod tests {
     use super::*;
     use pulsar_alsa::HwResult;
     use pulsar_core::model::model_from_compatible;
+
+    #[test]
+    fn s32_capture_keeps_the_top_16_of_24_bits() {
+        // Right-justified 24-bit samples (the Mini, shift 8): the sign survives the shift, and
+        // a value outside 24 bits saturates instead of wrapping.
+        let src = [
+            -1 << 8,
+            0x007F_FF00,
+            -0x0080_0000,
+            0x0000_00FF,
+            -1,
+            0x0100_0000,
+            i32::MIN,
+        ];
+        let mut dst = [0i16; 7];
+        s32_to_s16(&src, 8, &mut dst);
+        assert_eq!(dst, [-1, 32767, -32768, 0, -1, 32767, -32768]);
+    }
 
     #[test]
     fn level_is_the_mean_of_the_8_loudest_rounded_to_a_tenth() {

@@ -11,16 +11,13 @@
 use log::{debug, error, info};
 use pulsar_alsa::{Ctl, Pcm, Stream};
 use pulsar_core::model::Model;
-use pulsar_core::volume::clamp_unit;
-
-pub use pulsar_core::volume::{
-    from_legacy, from_raw, master_gain, step_alice, step_level, to_legacy, to_raw,
-};
+use pulsar_core::volume::{clamp_unit, from_raw, to_raw};
 
 const MASTER: &str = "Master Playback Volume";
 
 /// The master volume control. Without it (open failed, logged) `available()` is false and the
-/// volume is kept in memory only.
+/// volume is kept in memory only. Software-volume models (`Model::software_volume`) have no
+/// control: `available()` is true and the controller applies the volume as a channel gain.
 pub struct Mixer {
     model: &'static Model,
     ctl: Option<Ctl>,
@@ -29,7 +26,8 @@ pub struct Mixer {
 }
 
 impl Mixer {
-    /// Card 0; adopts the current raw value when it reads as > 0, else the volume stays 0.5.
+    /// Card 0; adopts the current raw value when it reads as > 0, else the volume stays 0.5 (0.1
+    /// with software volume).
     pub fn open(model: &'static Model) -> Mixer {
         let mut mixer = Mixer {
             model,
@@ -114,6 +112,7 @@ impl Mixer {
 mod tests {
     use super::*;
     use pulsar_core::model::model_from_compatible;
+    use pulsar_core::volume::{step_alice, step_level};
 
     fn midi() -> &'static Model {
         model_from_compatible(b"yandex,cucumber\0").unwrap()

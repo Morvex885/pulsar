@@ -463,8 +463,8 @@ midi beats 124 1 0 0.219268546 0 0 0 0 0 0.219009236 0 0
 midi beats 125 1 0 0.221366882 0 0 0 0 0 0.221174106 0 0
 midi beats 126 1 0 0.224801809 0 0 0 0 0 0.22460404 0 0
 midi beats 127 1 0 0.225480318 0 0 0 0 0 0.225215659 0 0
-# Station Mini layout (48 kHz, chunk 768, 2 speaker channels), same generator and C++ source at
-# tag v0.4.3-mini1, clang 17 on macOS arm64 with -O2 -ffp-contract=on.
+# Station Mini layout (48 kHz, chunk 768, 2 speaker channels); see the header for where these
+# rows come from.
 mini sine 0 1 1 1 0.571991146 0.831970632 0.742724597 0 1 0.777849734 0.025451066 0.118807219
 mini sine 1 1 0 1 0.563319325 0.832638383 0.741795003 0 1 0.77775377 0.0273672324 0.120929293
 mini sine 2 1 0 1 0.557192147 0.833083093 0.741066396 0 1 0.777742505 0.0240067374 0.119727239

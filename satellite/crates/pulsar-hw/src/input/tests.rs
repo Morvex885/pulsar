@@ -8,6 +8,7 @@ use super::*;
 
 const UP: u16 = KEY_VOLUMEUP;
 const KEY_MUTE: u16 = 113;
+const KEY_ACTION: u16 = 582;
 
 fn ev(type_: u16, code: u16, value: i32) -> RawInputEvent {
     RawInputEvent {
