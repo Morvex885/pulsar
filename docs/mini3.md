@@ -1,10 +1,9 @@
 # Мини 3 (`bergamot`) — экспериментальный профиль
 
-Статус: **draft, ручной запуск Rust-демона и playback проверены на одной станции**.
+Статус: экспериментальный; ручной запуск демона и воспроизведение проверены на одной станции.
 Не Mini 3 Pro. Обследованы две Мини 3 с одинаковой прошивкой
 `0.369.1.50.4794652521.20261021.117` и совместимостями
 `yandex,bergamot-evt1`, `yandex,bergamot`, `amlogic, axg`.
-Владелец подтвердил штатный wake → HA Assist → STT/агент → TTS.
 Акустическое качество AEC отдельно не измерялось.
 
 ## Подтверждено штатной системой
@@ -13,17 +12,18 @@
 | --- | --- |
 | ABI | Linux 4.9.68 aarch64, loader `/lib/ld-linux-armhf.so.3`, glibc 2.30; installer выбирает только armhf |
 | RAM | MemTotal около 238 MiB |
-| Capture | `/etc/asound.conf`: `multi_capture` из `hw:0,1`, 8 физических каналов; три микрофона 0/1/2 и обратный сигнал динамика 6 |
+| Capture | `/etc/asound.conf`: `multi_capture` из `hw:0,1`, 8 физических каналов: микрофоны PDM0–2 на каналах 0/1/2, канал 6 — `HW feedback (TDMB_IN0)`, обратный сигнал усилителя (референс динамика для VQE) |
 | VQE | preset `bergamot`, 3 mic + 1 spk: 768 capture frames @ 48000 Hz → 256 samples @ 16000 Hz, 16 ms |
-| Playback | ALSA `speakers` -> `dmix_speakers` -> `hw:0,0`, stereo 48000 Hz |
+| Playback | ALSA `speakers` -> `dmix_speakers` -> `hw:0,0`, stereo 48000 Hz; у `dmix_speakers` `ipc_key 1024` (= 0x400), так что очистка зависшего dmix-лока в `supervise.sh` и `tools/station.sh` её покрывает |
 | Volume | `Master` mono, 0..255; карта штатного конфига 0->0, 1->33, 20->255 |
-| Ring | `/dev/fb0`, имя `logo`, 6x1, 24 bpp; `bergamot:<цвет>:logo0..5`, trigger `ledfb-logo`; отдельного логотипа нет |
-| Clock | `bergamot:white:clock<A..G><0..3>`, `DH`/`DL`, `DM`, `DEGREE`; присутствие панели проверяется при старте |
-| Keys | evdev `aw933xx`, bitmap содержит action/volume up/down; физические нажатия пока не проверены |
-| Mic mute | evdev `gpio-keys`, SW_MUTE_DEVICE; начальное состояние прочитано, физическое переключение пока не проверено |
+| Ring | `/dev/fb0`, имя `logo`, 6x1, 24 bpp (AW21018); `bergamot:<цвет>:logo0..5`, trigger `ledfb-logo`; отдельного логотипа нет |
+| Clock | продаётся с часами (AW21036) и без них; `bergamot:white:clock<A..G><0..3>`, `DH`/`DL`, `DM`, `DEGREE`; присутствие панели проверяется при старте |
+| Keys | evdev `aw933xx`, bitmap содержит action/volume up/down |
+| Mic mute | evdev `gpio-keys`, SW_MUTE_DEVICE; начальное состояние прочитано |
 | Lux | IIO `ltr308als01` |
-| Earcons | `common/spotter_start.mp3`, `spotter_cancel.mp3`, `volume_sound.mp3`, `timer.wav`, `ru-RU/playback_error.mp3` существуют |
+| Earcons | `common/spotter_start.mp3`, `spotter_cancel.mp3`, `volume_sound.mp3`, `timer.wav` (по заголовку это MP3), `ru-RU/playback_error.mp3` [inference: GStreamer прошивки декодирует MP3, раз штатные earcons — MP3; в логе pulsar не проверено] |
 | Models | Штатные каталоги `spotter_models/activation/alisa` и `spotter_models/command` существуют |
+| Пре-ролл | `alisa` 6, `yandex` 8 чанков по 16 мс: длины Лайт 2 во времени, не замерялись |
 
 В обеих станциях совпали SHA256 `libyandex_evil.so`, `libtflite.so`, `quasar.cfg` и
 `asound.conf`. Проприетарные библиотеки, модели, сырые конфиги и персональные сведения
@@ -40,23 +40,19 @@ HA подключился по ESPHome API с автоматической вы�
 Pause/resume, volume и stop проверены через MA; переподключение после рестарта сервера
 MA произошло автоматически. Это не акустическое измерение AEC или распознавания речи.
 
-## До снятия draft
+## Не проверено
 
-Соблюдать [протокол стенда](stations.md), согласовать окно остановки штатного стека,
-сохранить доступ SSH/ADB и подготовить возврат к нему. Сборка — только на локальном ПК.
-Не запускать штатный и свой capture одновременно; не начинать с постоянной установки.
+- AEC при музыке и ответе (сравнение raw-микрофонов и выхода VQE).
+- Сырой захват по каналам (`frontend_probe --record`): какой канал какой микрофон.
+- Длительная работа capture/VQE (короткий 20 s smoke без потерь не доказывает суточную
+  устойчивость).
+- Цвета и порядок зон кольца.
+- Физические кнопки action/volume и переключатель mic mute, включая запуск с выключенными
+  микрофонами.
+- Часы, их яркость и датчик освещённости; вариант без часов.
+- MP3-earcons в логе pulsar.
+- Длины пре-ролла (строки `wake timing:`).
+- Установка через `pulsar-install` от начала до конца и автозапуск после перезагрузки.
 
-- [x] Локальные fmt, host/cross-clippy, Go tests/vet; полный демон с Sendspin и probes собраны для armhf/glibc 2.30.
-- [ ] Полный `make check`: на локальном x86_64/glibc 2.43 падает `ambient::tests::rounds_like_the_fused_cxx_build` на 1 ULP; тот же результат на чистой закреплённой базе, без патча Мини 3. Остальные Rust-тесты, включая новые, проходят; эталон округления не менялся.
-- [x] ALSA ABI probe, загрузка VQE-пресета и фактические размеры фреймов.
-- [ ] Длительный capture/VQE: короткий 20 s smoke без потерь не доказывает суточную устойчивость.
-- [x] Штатное wake word, передача речи в HA, ответ TTS на динамике — подтверждено владельцем.
-- [ ] AEC при музыке/ответе: сравнить raw mic и выход VQE; не считать успех wake word доказательством AEC.
-- [ ] Кольцо: правильные цвета, порядок зон и восстановление штатных triggers.
-- [ ] Кнопки action/volume и mic mute, включая запуск с выключенными микрофонами.
-- [ ] Часы, яркость и датчик освещённости; вариант без часов отдельно не проверен.
-- [ ] MP3/WAV earcons, громкость и возврат прежнего уровня после теста (не выше 0.2).
-- [x] Sendspin/Music Assistant, playback/controls, TTS overlay и повторное подключение.
-- [ ] Установка, автозапуск после перезагрузки и возврат штатного стека.
-
-В этот PR не входят microWakeWord, openWakeWord и обучение своего слова активации.
+Источники: замеры автора PR #30 на двух станциях;
+[hackalice.me: Станция Мини 3](https://hackalice.me/devices/station-mini3/).

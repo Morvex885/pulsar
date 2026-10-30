@@ -243,6 +243,7 @@ mod tests {
             &b"yandex,cucumber\0"[..],
             b"yandex,plum\0",
             b"yandex,station-mini2\0",
+            b"yandex,bergamot\0",
         ] {
             let m = model_from_compatible(c).unwrap();
             for k in 0..=20 {

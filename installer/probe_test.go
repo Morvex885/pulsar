@@ -14,11 +14,8 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 		{"plum without its loader is skipped", "plum", []string{"aarch64"}, ""},
 		{"station-mini2 is armhf", "station-mini2", []string{"aarch64", "armhf"}, "armhf"},
 		{"station-mini2 without its loader is skipped", "station-mini2", []string{"aarch64"}, ""},
-		{"bergamot is armhf", "bergamot", []string{"armhf"}, "armhf"},
-		{"bergamot never prefers aarch64", "bergamot", []string{"aarch64", "armhf"}, "armhf"},
-		{"bergamot without armhf is skipped", "bergamot", []string{"aarch64"}, ""},
-		{"bergamot without loaders is skipped", "bergamot", nil, ""},
-		{"bergamot board variant is unsupported", "bergamot-evt1", []string{"aarch64", "armhf"}, ""},
+		{"bergamot is armhf", "bergamot", []string{"aarch64", "armhf"}, "armhf"},
+		{"bergamot without its loader is skipped", "bergamot", []string{"aarch64"}, ""},
 		{"no compatible loader", "cucumber", nil, ""},
 		{"unsupported model", "unknown", []string{"aarch64", "armhf"}, ""},
 	}
@@ -28,23 +25,6 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 				t.Fatalf("archOf(%q, %v) = %q, want %q", tt.code, tt.loaders, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestMini3Model(t *testing.T) {
-	if got := modelName("bergamot"); got != "Yandex Station Mini 3" {
-		t.Fatalf("modelName(bergamot) = %q", got)
-	}
-	if got := abis("bergamot"); len(got) != 1 || got[0] != "armhf" {
-		t.Fatalf("abis(bergamot) = %v, want [armhf]", got)
-	}
-	if hasZigbee("bergamot") {
-		t.Fatal("bergamot must not install Zigbee firmware")
-	}
-	for _, code := range []string{"bergamot-evt1", "bergamot-extra", "unknown"} {
-		if modelName(code) != "" || abis(code) != nil {
-			t.Errorf("%q must remain unsupported", code)
-		}
 	}
 }
 

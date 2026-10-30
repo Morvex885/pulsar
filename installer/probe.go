@@ -26,8 +26,9 @@ func modelName(code string) string {
 // supported. The installed binary is build/<arch>/pulsar for the first ABI whose dynamic loader
 // is on the station. A second ABI is only for a userspace actually seen on that model: some Midi
 // images run a 32-bit userspace on the 64-bit kernel (#13) and need the armhf build (its ALSA
-// ABI is the one in audio/alsa_abi.h, #14).
-// Лайт 2, Мини 2 и Мини 3: подтверждён только armhf; aarch64 требует glibc 2.34.
+// ABI is the one in audio/alsa_abi.h, #14). Lite 2, Mini 2 and Mini 3 stay armhf-only: no 64-bit
+// userspace has been seen on them, and the aarch64 binary needs glibc 2.34 — on a miss it would
+// crash-loop back to the Yandex stack (no .prev on a first install).
 func abis(code string) []string {
 	switch code {
 	case "cucumber":

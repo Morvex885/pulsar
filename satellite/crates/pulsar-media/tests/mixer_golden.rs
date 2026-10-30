@@ -116,7 +116,7 @@ fn stock_curve_landmarks() {
 #[test]
 fn mini3_curve_landmarks() {
     let m = model_from_compatible(b"yandex,bergamot\0").unwrap();
-    // Штатная карта Мини 3: 0 -> 0, 1 -> 33, 20 -> 255; не карта Лайт 2.
+    // Mini 3 stock map: 0 -> 0, 1 -> 33, 20 -> 255 (not the Lite 2's).
     assert_eq!(mixer::to_raw(m, 0.0), 0);
     assert_eq!(mixer::to_raw(m, 0.01), 33);
     assert_eq!(mixer::to_raw(m, 0.05), 33);

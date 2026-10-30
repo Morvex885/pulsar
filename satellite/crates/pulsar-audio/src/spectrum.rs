@@ -1,7 +1,7 @@
 //! Music features from the speaker reference channels of the capture (what the station itself
-//! plays, after the softvol): 8 bands, loudness, beats. One VQE chunk (256 or 512 samples at
-//! 16 kHz after decimation) per call; accumulates 512 samples for each FFT on the front-end's
-//! processing thread.
+//! plays, after the softvol): 8 bands, loudness, beats. One VQE chunk per call (512 samples at
+//! 16 kHz after decimation, 256 on the Mini 3); the FFT runs every 512 samples, on the
+//! front-end's processing thread.
 //!
 //! Rounding follows the C++ daemon as built for the stations: zig c++ (clang,
 //! -ffp-contract=on) fuses `a ± b * c` within one expression into a fused multiply-add on aarch64
@@ -115,7 +115,10 @@ impl SpectrumAnalyzer {
         }
         let decim = (rate / 16000) as usize;
         let chunk_samples = chunk_frames / decim;
-        if (chunk_samples != N && chunk_samples != N / 2) || !chunk_frames.is_multiple_of(decim) {
+        if chunk_samples == 0
+            || !N.is_multiple_of(chunk_samples)
+            || !chunk_frames.is_multiple_of(decim)
+        {
             return a;
         }
         a.decim = decim;
@@ -140,7 +143,8 @@ impl SpectrumAnalyzer {
         a
     }
 
-    /// False when the chunk is not 256 or 512 samples at 16 kHz (rate a multiple of 16 kHz).
+    /// False unless the chunk at 16 kHz divides the 512-sample FFT window (rate a multiple of
+    /// 16 kHz).
     pub fn ok(&self) -> bool {
         self.decim != 0
     }
@@ -153,7 +157,7 @@ impl SpectrumAnalyzer {
     }
 
     /// `spk`: the chunk's frames of `nspk` interleaved channels in [-1, 1]. True when `out` was
-    /// filled; 256-sample chunks produce a frame every second call.
+    /// filled; chunks shorter than 512 samples fill one FFT window over several calls.
     pub fn process(&mut self, spk: &[f32], nspk: usize, out: &mut MusicFrame) -> bool {
         if self.decim == 0 || nspk == 0 {
             return false;
@@ -274,6 +278,7 @@ mod tests {
         assert!(!SpectrumAnalyzer::new(0, 512).ok());
         assert!(!SpectrumAnalyzer::new(48000, 1024).ok());
         assert!(!SpectrumAnalyzer::new(48000, 1537).ok());
+        assert!(!SpectrumAnalyzer::new(48000, 1152).ok());
         let mut a = SpectrumAnalyzer::new(44100, 1536);
         let mut f = MusicFrame::default();
         assert!(!a.process(&[0.0; 1536], 1, &mut f));

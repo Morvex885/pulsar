@@ -215,6 +215,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
         PathBuf::from(format!("{MODELS}{}", a.wake)),
         Some(PathBuf::from(COMMAND_MODEL)),
     );
+    let frame = h.frame();
     h.set_commands(a.commands);
     h.set_streaming(a.stream);
     h.set_music_analysis(a.music);
@@ -232,7 +233,6 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let (mut audio, mut music, mut beats, mut wakes, mut commands) = (0u64, 0u64, 0u64, 0u64, 0u64);
     let (mut audio_samples_ok, mut loudness) = (true, 0f32);
-    let mut audio_chunk_samples = None;
     let mut audio_samples = 0usize;
     let mut prev = FrontendStats::default();
     let mut prev_counts = (0u64, 0u64);
@@ -256,8 +256,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
                 }
                 Some(FrontendEvent::Audio(pcm)) => {
                     audio += 1;
-                    let expected = *audio_chunk_samples.get_or_insert(pcm.len());
-                    audio_samples_ok &= expected > 0 && pcm.len() == expected;
+                    audio_samples_ok &= pcm.len() == frame;
                     audio_samples += pcm.len();
                 }
                 Some(FrontendEvent::Music(f)) => {
@@ -305,15 +304,14 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
         r.finish()?;
     }
     out!(
-        "done: {:.1} s, chunks {}, audio {} x {} samples ({audio_samples} total){}, music {} (beats {beats}), wake {wakes}, command {commands}, captured {} frames, dropped {} frames",
+        "done: {:.1} s, chunks {}, audio {} x {frame} samples ({audio_samples} total){}, music {} (beats {beats}), wake {wakes}, command {commands}, captured {} frames, dropped {} frames",
         secs(start),
         s.chunks,
         audio,
-        audio_chunk_samples.unwrap_or(0),
         if audio_samples_ok {
-            ""
+            String::new()
         } else {
-            " (empty or inconsistent chunk size)"
+            format!(" (not {frame} samples each)")
         },
         music,
         s.captured_frames,

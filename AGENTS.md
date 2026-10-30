@@ -8,15 +8,17 @@ live stations: `docs/stations.md` (Russian) with `tools/station.sh`.
 
 A native Rust daemon replacing the Yandex stack (`maind` / `quasar_launcher2`) on rooted Yandex
 Stations: Midi (`cucumber`: usually aarch64, glibc 2.36, 1 GB RAM; some images run a 32-bit
-armhf userland), Lite 2 (`plum`: 32-bit armhf, glibc 2.30, 237 MB RAM) and Mini 2
-(`station-mini2`: 32-bit armhf userland on an aarch64 kernel, glibc 2.30, 238 MB RAM). It exposes
-the speaker to Home Assistant over the ESPHome Native API (port 6053; plaintext until a Noise key is
-provisioned, then Noise) and to Music Assistant as a Sendspin player (port 8928); on the Midi
-its Zigbee radio runs pulsar's own firmware (`radio/`): a deCONZ-protocol network coordinator for
-Zigbee2MQTT / ZHA (port 6638) or a router in another network (e.g. Zigbee2MQTT). Wake word, command
-spotting and echo cancellation use the firmware's own proprietary libraries, loaded with `dlopen`
-at runtime; they are never copied into the repo. Stations on one LAN arbitrate the wake word over
-UDP broadcast (port 6054) so that only the one that heard it loudest answers.
+armhf userland), Lite 2 (`plum`: 32-bit armhf, glibc 2.30, 237 MB RAM), Mini 2
+(`station-mini2`: 32-bit armhf userland on an aarch64 kernel, glibc 2.30, 238 MB RAM) and Mini 3
+(`bergamot`, experimental: 32-bit armhf userland on an aarch64 kernel, glibc 2.30, ~238 MB RAM).
+It exposes the speaker to Home Assistant over the ESPHome Native API (port 6053; plaintext until a
+Noise key is provisioned, then Noise) and to Music Assistant as a Sendspin player (port 8928); on
+the Midi its Zigbee radio runs pulsar's own firmware (`radio/`): a deCONZ-protocol network
+coordinator for Zigbee2MQTT / ZHA (port 6638) or a router in another network (e.g. Zigbee2MQTT).
+Wake word, command spotting and echo cancellation use the firmware's own proprietary libraries,
+loaded with `dlopen` at runtime; they are never copied into the repo. Stations on one LAN
+arbitrate the wake word over UDP broadcast (port 6054) so that only the one that heard it loudest
+answers.
 
 ## Layout
 
@@ -41,7 +43,7 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 | `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install (incl. `/etc/init.d/S99zpulsar`), health check |
 | `ssh/` | `build.sh` (static dropbear + sftp-server), `start.sh` (device side) |
 | `radio/` | Zigbee firmware for the Midi radio on the Telink Zigbee SDK (C): `build.sh` (pinned SDK + toolchain, `sdk.patch`), `Makefile`, `coordinator/` and `router/` (apps), `ybl.c` (host tool: binary → `.ybl`) |
-| `docs/` | `architecture.md` (execution model, rules for all crates, floating point, sendspin-cpp link recipe, per-service behaviour), `stations.md` (station test protocol) |
+| `docs/` | `architecture.md` (execution model, rules for all crates, floating point, sendspin-cpp link recipe, per-service behaviour), `stations.md` (station test protocol), `mini3.md` (Mini 3 hardware facts) |
 | `tools/` | `station.sh` (station lock, stop / start, push, test instance, live swap, dmix cleanup), test clients `esphome_check.py`, `sendspin_server.py`, `deconz_read.py` (Python, `requirements.txt`) |
 
 Git-ignored and never to be published: `backup/` (full device backups), `dump/` (firmware binaries,
@@ -117,11 +119,12 @@ Models are identified by `/proc/device-tree/compatible` (`yandex,<codename>`) bo
 before probing its loaders. The binary is `build/<arch>/pulsar` for the model's first ABI in
 `abis()` whose dynamic loader is on the station (`/lib/ld-linux-aarch64.so.1`,
 `/lib/ld-linux-armhf.so.3`): its usual one, or for the Midi the armhf build on images with only
-that loader (#13). A Lite 2 or Mini 2 without the armhf loader is skipped (no 64-bit userspace
-has been seen on them, and the aarch64 binary needs glibc 2.34). Adding a model: hardware study
-first (ALSA capture layout, VQE preset, spotter channels, LEDs, clock, inputs, earcons), then a
-`Model` in `satellite/crates/pulsar-core/src/model.rs` and `modelName()` / `abis()` entries. A
-second ABI in `abis()` is only for a userspace that has actually been seen on that model.
+that loader (#13). A Lite 2, Mini 2 or Mini 3 without the armhf loader is skipped (no 64-bit
+userspace has been seen on them, and the aarch64 binary needs glibc 2.34). Adding a model:
+hardware study first (ALSA capture layout, VQE preset, spotter channels, LEDs, clock, inputs,
+earcons), then a `Model` in `satellite/crates/pulsar-core/src/model.rs` and `modelName()` /
+`abis()` entries. A second ABI in `abis()` is only for a userspace that has actually been seen on
+that model.
 
 Manual binary update (e.g. over ssh):
 
@@ -197,8 +200,9 @@ From `/system/vendor/quasar/libyandex_evil.so`:
   `YandexVqeC_Create(cfg, "/system/vendor/quasar/vqe_models", 0, nullptr, &vqe)`,
   `YandexVqeC_Process(vqe, mics, nmic * chunk, spk, nspk * chunk)` with float samples in [-1, 1],
   frame-interleaved (Midi: 4 mics + 4 speaker refs, chunk 3072 @ 96 kHz; Lite 2: 2 + 1, chunk
-  1536 @ 48 kHz; Mini 2: 4 + 2 @ 48 kHz), `YandexVqeC_GetOutputChannelData(vqe, type, idx, &ptr,
-  &n)` → 512 samples @ 16 kHz.
+  1536 @ 48 kHz; Mini 2: 4 + 2 @ 48 kHz; Mini 3: 3 + 1, chunk 768 @ 48 kHz),
+  `YandexVqeC_GetOutputChannelData(vqe, type, idx, &ptr, &n)` → 512 samples @ 16 kHz (256 on the
+  Mini 3).
 - Spotter: `spotter_create_multichannel(conf, 16000, n, types, false, &err)`,
   `spotter_submit_raw_data(sp, s16_interleaved, bytes, &err)`. Channel count per type comes from the
   model config. Hit events: 2 and 5.
@@ -364,6 +368,8 @@ with NWK mode but an IEEE address (payload 6 bytes longer than declared): sent a
 | Boot | `S97quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh` | `S99quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh`; `q stop` available | same as the Lite 2 |
 | Zigbee | Telink B91 on `/dev/ttyS2`, reset/boot via `zb_control` (see Zigbee radio) | none | none (no `ttyS2`, no `zb_control`) |
 
+Mini 3 (`bergamot`, experimental): hardware facts and what is unverified in `docs/mini3.md`.
+
 Lite 2 capture: reading and VQE on one thread overrun the 42 ms device buffer, so capture has its
 own thread with a FIFO. A few overruns an hour remain (`capture: Broken pipe, recovering`); they
 are expected.
@@ -463,18 +469,19 @@ port on the station.
   and Sendspin changes are silent; music is not ducked under it.
 - Wake arbitration (switch "Nearest station answers", `state.conf` `nearest_answers=`, default 1):
   the front-end's processing thread (`wake_level_db` in `pulsar-audio/src/frontend.rs`) reports
-  the wake level as the mean of the 8 loudest of the last 47 `VQE_OMNI` frames (post-AEC, no AGC;
-  `VQE_OMNI_WITH_GAIN` loses the distance), rounded to 0.1 dB so both sides compare the same
-  numbers. A claim is one ASCII datagram `pulsar-wake/1 <name> <wake> <busy> <level>`, sent 3×
-  40 ms apart to `255.255.255.255:6054`; the decision comes 250 ms later over claims of the same
-  wake word received up to 500 ms before ours. A claim older than the 250 ms window wins outright
-  (its station already decided and answers); otherwise busy (speaking, announcing, ringing) beats
-  idle, then the higher level, then the larger station name. While arbitrating the ring shows
-  LISTENING, mic audio (the wake word's pre-roll, then live) is buffered and sent after
-  `voice_request_start`, a command word is held; a losing station blocks voice commands for 2.5 s
-  (cleared by its next wake word or dialog). Stations without a voice subscriber do not claim
-  (the wake word shows the usual not-subscribed error). HA's `duplicate_wake_up_detected` error
-  (first phrase per 2 s wins across satellites) is handled silently: no error ring or sound.
+  the wake level as the mean of the 8 loudest of the last 47 blocks of 512 `VQE_OMNI` samples
+  (32 ms; post-AEC, no AGC; `VQE_OMNI_WITH_GAIN` loses the distance), rounded to 0.1 dB so both
+  sides compare the same numbers. A claim is one ASCII datagram
+  `pulsar-wake/1 <name> <wake> <busy> <level>`, sent 3× 40 ms apart to `255.255.255.255:6054`;
+  the decision comes 250 ms later over claims of the same wake word received up to 500 ms before
+  ours. A claim older than the 250 ms window wins outright (its station already decided and
+  answers); otherwise busy (speaking, announcing, ringing) beats idle, then the higher level, then
+  the larger station name. While arbitrating the ring shows LISTENING, mic audio (the wake word's
+  pre-roll, then live) is buffered and sent after `voice_request_start`, a command word is held; a
+  losing station blocks voice commands for 2.5 s (cleared by its next wake word or dialog).
+  Stations without a voice subscriber do not claim (the wake word shows the usual not-subscribed
+  error). HA's `duplicate_wake_up_detected` error (first phrase per 2 s wins across satellites) is
+  handled silently: no error ring or sound.
 - Wake word pre-roll (switch "Command right after wake word", `state.conf` `wake_preroll=`,
   default 1; `pulsar-audio/src/frontend.rs`, details in `docs/architecture.md`): the spotter
   confirms after the word ends, so `FrontendEvent::Wake` carries the audio from the end of the

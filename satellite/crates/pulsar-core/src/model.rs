@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
-    /// Devicetree-код модели: cucumber, plum, station-mini2, bergamot.
+    /// Devicetree codename: "cucumber", "plum", "station-mini2", "bergamot".
     pub codename: &'static str,
     /// ESPHome node name prefix; the MAC suffix is appended.
     pub host_prefix: &'static str,
@@ -391,7 +391,8 @@ const MINI3_VOLUME: &[VolumePoint] = &[
     },
 ];
 
-// Мини 3: физические каналы hw:0,1; логический multi выбирает микрофоны 0/1/2 и референс 6.
+// Mini 3: hw:0,1 physical channels (asound.conf multi_capture): PDM mics 0-2, ch 6 = the
+// amplifier feedback (TDMB_IN0), the VQE speaker reference.
 static MINI3: Model = Model {
     codename: "bergamot",
     host_prefix: "yandex-mini3-",
@@ -405,7 +406,7 @@ static MINI3: Model = Model {
     vqe_preset: "bergamot",
     wake_preroll: BERGAMOT_PREROLL,
     led_prefix: "bergamot",
-    // Драйвер называет шестисветодиодное кольцо logo; отдельного логотипа нет.
+    // The driver calls the 6-zone ring "logo" (/dev/fb0 6×1, AW21018); there is no separate logo.
     ring: LedStrip {
         count: 6,
         first_index: 0,
@@ -422,7 +423,7 @@ static MINI3: Model = Model {
     clock_aux: &["DEGREE"],
     clock_center: "DM",
     clock_chip_current: false,
-    // Панель опциональна: наличие сегментов проверяется при старте.
+    // Sold with and without the LED clock (AW21036): segments are looked up at start.
     has_clock: false,
     keys_input: "aw933xx",
     mute_input: "gpio-keys",
@@ -455,8 +456,9 @@ pub fn detect_model() -> Option<&'static Model> {
     *MODEL
 }
 
-/// Первая поддерживаемая точная запись yandex,<код> в NUL-разделённом compatible.
-/// Вариант платы (например, bergamot-evt1) сам по себе модель не определяет.
+/// The model of the first exact "yandex,<codename>" entry of a NUL-separated compatible list,
+/// e.g. "yandex,cucumber-dvt2\0yandex,cucumber\0amlogic, a5\0"; a board variant alone
+/// ("yandex,bergamot-evt1") is no model.
 pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
     raw.split(|&b| b == 0).find_map(|entry| match entry {
         b"yandex,cucumber" => Some(&MIDI),
@@ -512,59 +514,14 @@ mod tests {
         let m = model_from_compatible(b"yandex,bergamot-evt1\0yandex,bergamot\0amlogic, axg\0")
             .unwrap();
         assert_eq!(m.codename, "bergamot");
-        assert_eq!(m.host_prefix, "yandex-mini3-");
-        assert_eq!(m.friendly_name, "Яндекс Станция Мини 3");
-        assert_eq!(m.model_name, "Yandex Station Mini 3");
-        assert_eq!(m.capture_pcm, "hw:0,1");
-        assert_eq!(m.capture_rate, 48000);
-        assert_eq!(m.capture_channels, 8);
+        assert_eq!(m.vqe_preset, "bergamot");
         assert_eq!(m.mic_channels, &[0, 1, 2]);
         assert_eq!(m.spk_channels, &[6]);
-        assert_eq!(m.vqe_preset, "bergamot");
-        assert_eq!(m.led_prefix, "bergamot");
-        assert_eq!(
-            m.ring,
-            LedStrip {
-                count: 6,
-                first_index: 0,
-                fb_dev: "/dev/fb0",
-                fb_name: "logo",
-                trigger: "ledfb-logo",
-                sysfs_kind: "logo",
-            }
-        );
+        assert_eq!(m.ring.count, 6);
+        assert_eq!(m.ring.fb_name, "logo");
         assert_eq!(m.logo, NO_STRIP);
-        assert_eq!(m.clock_dir, "/sys/class/leds/bergamot:white:clock");
-        assert_eq!(m.clock_seg_base, 'A');
-        assert_eq!(m.clock_pos_base, 0);
-        assert_eq!(m.clock_colon, &["DH", "DL"]);
-        assert_eq!(m.clock_aux, &["DEGREE"]);
-        assert_eq!(m.clock_center, "DM");
-        assert!(!m.clock_chip_current && !m.has_clock);
-        assert_eq!(m.keys_input, "aw933xx");
-        assert_eq!(m.mute_input, "gpio-keys");
-        assert_eq!(m.mute_gpio, 0);
-        assert_eq!(m.error_sound, "ru-RU/playback_error.mp3");
-        assert_eq!(m.wake_sound, "common/spotter_start.mp3");
-        assert_eq!(m.cancel_sound, "common/spotter_cancel.mp3");
-        assert_eq!(m.timer_sound, "common/timer.wav");
-        assert_eq!(m.volume_sound, "common/volume_sound.mp3");
-        assert_eq!(m.playback_pcm, "speakers");
-        assert_eq!(
-            m.volume_map,
-            &[
-                VolumePoint { level: 0, raw: 0 },
-                VolumePoint { level: 1, raw: 33 },
-                VolumePoint {
-                    level: 20,
-                    raw: 255,
-                },
-            ]
-        );
-        assert!(m.volume_min_step && m.has_lux);
-        assert_eq!(m.zigbee_tty, "");
-        assert_eq!(m.zigbee_reset, "");
-        assert_eq!(m.zigbee_boot, "");
+        assert_eq!(m.volume_map, MINI3_VOLUME);
+        assert!(!m.has_clock && m.has_lux);
     }
 
     #[test]

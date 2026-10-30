@@ -39,7 +39,8 @@ const PREROLL_SAMPLES: usize = 16384;
 /// loudest one in the level window.
 const SPEECH_END_RATIO: f32 = 0.01;
 
-/// ALSA buffer in VQE chunks.
+/// ALSA buffer in VQE chunks: 256 ms with 32 ms chunks, 128 ms on the Mini 3 (16 ms); the device
+/// may grant less (Lite 2: 2048 frames).
 const BUFFER_CHUNKS: u64 = 8;
 const READ_WAIT_MS: i32 = 200;
 const REOPEN_DELAY: Duration = Duration::from_secs(2);
@@ -104,18 +105,23 @@ pub fn spawn(
         shared: Arc::new(Shared::new()),
         pipe: None,
         threads: Vec::new(),
+        frame: 0,
         _events: tx.clone(),
     };
     let command_dir = command_model_dir.filter(|d| !d.as_os_str().is_empty());
     let started = match Engine::start(model, &wake_model_dir, command_dir.as_deref()) {
-        Some(eng) => inner
-            .start_threads(model, eng, tx)
-            .inspect_err(|e| error!("audio threads: {e}"))
-            .is_ok(),
+        Some(eng) => {
+            inner.frame = eng.frame();
+            inner
+                .start_threads(model, eng, tx)
+                .inspect_err(|e| error!("audio threads: {e}"))
+                .is_ok()
+        }
         None => false,
     };
     if !started {
         inner.stop();
+        inner.frame = 0;
         error!("microphone front-end failed to start");
     }
     (
@@ -177,6 +183,12 @@ impl FrontendHandle {
             fifo_frames: s.fifo_frames.load(Relaxed),
             dropped_frames: s.dropped_frames.load(Relaxed),
         }
+    }
+
+    /// Samples per [`FrontendEvent::Audio`] chunk (`Engine::frame`); 0 when the front-end did not
+    /// start.
+    pub fn frame(&self) -> usize {
+        self.inner.frame
     }
 
     /// Every block read from ALSA, interleaved as captured (`capture_channels` per frame), goes
@@ -262,6 +274,8 @@ struct Inner {
     shared: Arc<Shared>,
     pipe: Option<Arc<Pipe>>,
     threads: Vec<JoinHandle<()>>,
+    /// Samples per VQE output chunk; 0 without a running engine.
+    frame: usize,
     // Keeps the event channel open: without a front-end, recv() waits forever instead of
     // returning None.
     _events: UnboundedSender<FrontendEvent>,
