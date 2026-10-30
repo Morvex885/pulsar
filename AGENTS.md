@@ -29,7 +29,7 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 | `satellite/crates/pulsar-esphome/` | ESPHome API server: transport (plaintext / Noise), clients and the voice owner (`server.rs`), entities and states (`server/entities.rs`), commands and voice assistant messages (`server/commands.rs`), hand-written protobuf (`proto.rs`), Noise key (`key.rs`); bin `api_selftest`; client `tools/esphome_check.py` |
 | `satellite/crates/pulsar-lan/` | mDNS responder (`mdns.rs`) and the wake word arbiter between stations (`arbiter.rs`: claims over UDP broadcast :6054, 250 ms window, best claim answers); bin `lan_probe` |
 | `satellite/crates/pulsar-audio/` | microphone front-end (`frontend.rs`): capture thread (ALSA → FIFO) + processing thread: Yandex VQE → wake + command spotters → 16 kHz stream; music features of the speaker reference (`spectrum.rs`: 512-point FFT at 16 kHz → 8 bands, loudness, beats as `MusicFrame`) while the visualization can be shown; C API of libyandex_evil (`engine/`); bins `ww_offline`, `frontend_probe` |
-| `satellite/crates/pulsar-media/` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`, dlopen, `gst.rs`), channels Music / Announce on a GLib thread; `Mixer` = ALSA "Master Playback Volume" (softvol of `Model::playback_pcm`: `speakers`, `default` on the Mini 2); bin `player_probe` |
+| `satellite/crates/pulsar-media/` | playback through the firmware's GStreamer (`libquasar_gstreamer.so`, dlopen, `gst.rs`), channels Music / Announce on a GLib thread; Music plays through alsasink, Announce is decoded into an fdsink and played by its own ALSA writer (`pcm_out.rs`: 200 ms prime, no buffering pauses, `Done` after the device played the last sample); `Mixer` = ALSA "Master Playback Volume" (softvol of `Model::playback_pcm`: `speakers`, `default` on the Mini 2); bin `player_probe` |
 | `satellite/crates/pulsar-sendspin/` | Sendspin player on top of sendspin-cpp (C shim in `shim/`, linked statically by `build.rs` in the Makefile builds), own ALSA sink on the playback dmix (`Model::playback_pcm`); roles player, metadata, controller, visualizer (8 log bands 40 Hz–7.6 kHz, loudness, beats → `MusicFrame`); bin `sendspin_probe` |
 | `satellite/crates/pulsar-hw/` | LED ring / logo (framebuffers behind ledfb triggers, or sysfs brightness without one; `leds.rs`: output, case matrix, layer compositor, fades), pure rendering of voice states / one-shots / effects / music styles (`led_fx.rs`), input (touch keys, `SW_MUTE_DEVICE` or a polled sysfs GPIO (`Model::mute_gpio`); `input.rs`); bin `hw_probe` |
 | `satellite/crates/pulsar-clock/` | clock (sysfs segments, per-LED brightness; `clock.rs`: layers), pure rendering of the clock's stock animations and music levels (`clock_fx.rs`), font, light sensor (`ltr308als01`, `light_sensor.rs`) |
@@ -357,7 +357,7 @@ with NWK mode but an IEEE address (payload 6 bytes longer than declared): sent a
 | Clock | `cucumber:white:clock-<seg><digit>`, dimming via chip `current`; no centre dot | `plum:white:clock<SEG><pos>`: A–G × 0–3, colon `DH`+`DL`; `H0..3`, `DEGREE` kept dark (`quasar.cfg` `/leds/clock`); `DM` = centre dot at g height (`Model::clock_center`, extra LED 35 of the stock patterns [inference: position not confirmed by eye]); dimming via per-LED `brightness` 0–255 | wired as `mini2:white:clock<A..G><1..4>`, colon `PLUS1`+`PLUS2`, `DEGREE`/`MINUS` dark (`quasar.cfg`), but the second IS31FL3236 (i2c 0-003f) fails to probe on firmware 0.369: the clock finds no segment (`Model::has_clock` false); its entities exist only when `pulsar_clock::panel_present` finds one at start |
 | Keys | `awinic_sar`: 582 action, 115/114 volume | `aw9610x`: same codes | `sar0_pad0` (aw9610x SAR, event0): same codes |
 | Mic mute | input `mute`: `SW_MUTE_DEVICE` | input `gpio-keys`: `SW_MUTE_DEVICE` (+ `KEY_MUTE`) | no evdev switch: GPIOZ_3 (global 414, pull-up), active low, polled every 100 ms as maind does (`Model::mute_gpio`; exported if needed, no `direction` / `edge` write, used only when already an input) |
-| Light sensor | `ltr308als01` (iio) | same | none (`Model::has_lux` false: no Illuminance entity) |
+| Light sensor | `ltr308als01` (iio) | same | `ltr308als01` on the #38 station (firmware 0.372; `in_intensity_input` = raw / 120, no `/etc/light-sensor.conf`), absent on the #9 station (0.369) [inference: firmware, board revision or device tree; not known which]; `Model::has_lux` false: the Illuminance entity exists only when the sensor opens at start |
 | Volume | "Master Playback Volume" softvol on `speakers` | same names; `speakers` comes from `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) | same control on `default`; `set_volume.sh` is `amixer set 'Master' <percent>%`, so the curve is linear in percent (`volume_min_step` false) |
 | alsa-lib | 1.2.10, versioned | 1.2.1.2, unversioned | 1.2.1.2, unversioned |
 | Earcons | `common/spotter_*.mp3`, `common/volume_sound.mp3`, `timer.wav`, `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` | `common/spotter_start.opus`, `common/spotter_cancel.opus`, `common/volume_sound.opus` [inference: file not confirmed on the station], `common/timer.opus`, `ru-RU/playback_error.opus` (no MP3 decoder in this GStreamer) |
@@ -380,7 +380,9 @@ B,G,R bytes).
 
 Mini 2 notes (firmware 0.369): the clock chip's probe failure (`register write to 0x4F failed
 (error -6)`) is the only reason the clock is dark: the DT node is fine, so a firmware or driver
-fix brings the panel back (`panel_present` then enables its entities at the next start). The mic
+fix brings the panel back (`panel_present` then enables its entities at the next start); the #38
+station (firmware 0.372) has both the panel (28 segments) and the light sensor [inference: what
+differs from the #9 station (firmware, board revision, device tree) is not known]. The mic
 mute button is momentary, but the microphone circuit latches it: GPIOZ_3 reads 0 while the
 microphones are cut and holds that level between presses, so the level is the state; GPIOZ_8
 (419) only pulses high during a press. The button emits no evdev event (`sar0_pad0` carries
@@ -396,8 +398,9 @@ port on the station.
 - Rust, one current-thread tokio runtime with a `LocalSet`: every service is an actor started with
   `pulsar_core::actors::spawn_actor`, driven through a `Clone` handle (commands, never blocking)
   and reporting through an unbounded event channel; the controller owns its state and serves all
-  channels in one `select!`. Blocking and real-time work (capture, VQE, GLib, the Sendspin sink,
-  the radio upload) runs on named `std::thread`s that send events through channels. `unsafe` and
+  channels in one `select!`. Blocking and real-time work (capture, VQE, GLib, the ANNOUNCE output
+  writer and its per-url reader, the Sendspin sink, the radio upload) runs on named `std::thread`s
+  that send events through channels. `unsafe` and
   libc calls live only in `sys.rs` / `ffi.rs` / `gst.rs` and the crash handler. Details, the
   sendspin-cpp link recipe and per-service notes: `docs/architecture.md`.
 - Keep the ESPHome API server pending until a valid `HelloRequest`; probes must not displace HA.
@@ -467,11 +470,22 @@ port on the station.
   wake word received up to 500 ms before ours. A claim older than the 250 ms window wins outright
   (its station already decided and answers); otherwise busy (speaking, announcing, ringing) beats
   idle, then the higher level, then the larger station name. While arbitrating the ring shows
-  LISTENING, mic audio is buffered and sent after `voice_request_start`, a command word is held; a
-  losing station blocks voice commands for 2.5 s (cleared by its next wake word or dialog).
-  Stations without a voice subscriber do not claim (the wake word shows the usual not-subscribed
-  error). HA's `duplicate_wake_up_detected` error (first phrase per 2 s wins across satellites) is
-  handled silently: no error ring or sound.
+  LISTENING, mic audio (the wake word's pre-roll, then live) is buffered and sent after
+  `voice_request_start`, a command word is held; a losing station blocks voice commands for 2.5 s
+  (cleared by its next wake word or dialog). Stations without a voice subscriber do not claim
+  (the wake word shows the usual not-subscribed error). HA's `duplicate_wake_up_detected` error
+  (first phrase per 2 s wins across satellites) is handled silently: no error ring or sound.
+- Wake word pre-roll (switch "Command right after wake word", `state.conf` `wake_preroll=`,
+  default 1; `pulsar-audio/src/frontend.rs`, details in `docs/architecture.md`): the spotter
+  confirms after the word ends, so `FrontendEvent::Wake` carries the audio from the end of the
+  word to the confirming chunk (`Model::wake_preroll` per model and wake word id: chunks since the
+  1st-stage hit, event 3, plus an offset, or a fixed count; measured with the `wake timing:` lines
+  of `frontend_probe`, kept short, settled through HA acceptance). The wake word itself must not
+  reach STT: HA never removes it from the text, and agents then get «Алиса, включи свет». Off,
+  the pre-roll is empty (`FrontendHandle::set_preroll`). After a `Wake` the front-end keeps
+  sending `Audio` until `FrontendHandle::wake_handled` (the controller calls it once per `Wake`,
+  after `on_wake`), so nothing is lost before `set_streaming(true)`; this does not depend on the
+  switch.
 - Clock layers: order in the `pulsar-clock/src/clock.rs` module doc (pairing code > … > time;
   update install keeps it dark from `install_update` until exit). Persisted: `clock_scroll_ms=`,
   `clock_music=`. Player one-shots fire only when the command took effect (`music_pause()` returns

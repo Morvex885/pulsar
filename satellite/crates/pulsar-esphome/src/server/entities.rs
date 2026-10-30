@@ -45,6 +45,7 @@ pub(super) mod key {
     pub const SELECT_CASE_COLOR: u32 = 29;
     pub const ACTION_LED_SHOW: u32 = 30;
     pub const SELECT_CLOCK_MUSIC: u32 = 31;
+    pub const SW_WAKE_PREROLL: u32 = 32;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -120,6 +121,7 @@ pub(super) struct Cache {
     sw_auto_update: BoolState,
     sw_nearest_answers: BoolState,
     sw_voice_indication: BoolState,
+    sw_wake_preroll: BoolState,
     bs_hw_mute: BoolState,
     update: UpdateState,
     update_has: bool,
@@ -151,6 +153,7 @@ impl Cache {
             sw_auto_update: BoolState::default(),
             sw_nearest_answers: BoolState::default(),
             sw_voice_indication: BoolState::default(),
+            sw_wake_preroll: BoolState::default(),
             bs_hw_mute: BoolState::default(),
             update: UpdateState::default(),
             update_has: false,
@@ -308,6 +311,13 @@ impl Server {
             key::SW_VOICE_INDICATION,
             "Voice indication",
             "mdi:led-on",
+            cfg,
+        ));
+        out.push(switch(
+            "command_right_after_wake_word",
+            key::SW_WAKE_PREROLL,
+            "Command right after wake word",
+            "mdi:skip-backward",
             cfg,
         ));
         let number = |oid, key, name, icon, (min, max, step): (f32, f32, f32), unit| {
@@ -679,12 +689,13 @@ impl Server {
         let to = Some(id);
         let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
         let c = &self.cache;
-        let (mic, clock, auto, nearest, voice, hw) = (
+        let (mic, clock, auto, nearest, voice, preroll, hw) = (
             c.sw_microphones,
             c.sw_clock,
             c.sw_auto_update,
             c.sw_nearest_answers,
             c.sw_voice_indication,
+            c.sw_wake_preroll,
             c.bs_hw_mute,
         );
         let (lux, bri, scroll, speed) = (c.lux, c.clock_bri, c.clock_scroll, c.led_speed);
@@ -696,6 +707,7 @@ impl Server {
         self.send_bool(msg::SWITCH_STATE, key::SW_AUTO_UPDATE, auto, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_NEAREST_ANSWERS, nearest, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_VOICE_INDICATION, voice, to);
+        self.send_bool(msg::SWITCH_STATE, key::SW_WAKE_PREROLL, preroll, to);
         self.send_update(to);
         self.send_bool(msg::BINARY_SENSOR_STATE, key::BS_HW_MIC_MUTE, hw, to);
         if has_lux {
@@ -821,6 +833,7 @@ impl Server {
                     SwitchId::VoiceIndication => {
                         (&mut c.sw_voice_indication, key::SW_VOICE_INDICATION)
                     }
+                    SwitchId::WakePreroll => (&mut c.sw_wake_preroll, key::SW_WAKE_PREROLL),
                 };
                 *s = BoolState { has: true, v };
                 let s = *s;

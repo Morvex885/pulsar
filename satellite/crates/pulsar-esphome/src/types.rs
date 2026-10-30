@@ -253,6 +253,7 @@ pub enum SwitchId {
     AutoUpdate = 3,
     NearestAnswers = 4,
     VoiceIndication = 5,
+    WakePreroll = 6,
 }
 
 #[repr(u32)]

@@ -327,7 +327,7 @@ fn volume_click_gating() {
     for phase in [Phase::Listening, Phase::Speaking] {
         assert!(!click(step.0, step.1, phase), "{phase:?}");
     }
-    // A held key at the top or bottom; f32 5 % steps down end at 7.45e-9 before 0.
+    // A held key at the top or bottom; older builds saved 7.45e-9 for 0 to state.conf.
     assert!(!click((1.0, false), (1.0, false), Phase::Idle));
     assert!(!click((7.45e-9, false), (0.0, false), Phase::Idle));
     // A key at 0 while muted unmutes: that is a change.

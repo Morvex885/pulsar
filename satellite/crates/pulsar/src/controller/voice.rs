@@ -107,7 +107,7 @@ impl Controller {
 
     // ---------------- wake word ----------------
 
-    pub(super) fn on_wake(&mut self, phrase: &str, level_db: f32) {
+    pub(super) fn on_wake(&mut self, phrase: &str, level_db: f32, preroll: Vec<i16>) {
         if self.mic_muted() {
             return;
         }
@@ -127,14 +127,14 @@ impl Controller {
         }
         // Without the HA pipeline this station could win and stay silent: it does not take part.
         if !self.arbitration_on() || !self.api.voice_subscribed() {
-            return self.answer_wake(phrase, Vec::new());
+            return self.answer_wake(phrase, preroll);
         }
         self.arbitrating = true;
         // A station that lost the previous wake word may win this one.
         self.commands_blocked_until_ms = 0;
         self.arb_phrase = phrase.to_owned();
         self.arb_level = level_db;
-        self.arb_audio.clear();
+        self.arb_audio = preroll;
         self.arb_command.clear();
         self.mic.set_streaming(true);
         self.update_ui();
@@ -753,8 +753,8 @@ impl Controller {
             }
             VoiceCommand::Resume => self.music_resume(),
             VoiceCommand::Louder | VoiceCommand::Quieter => {
-                let step = if c == VoiceCommand::Louder { 0.1 } else { -0.1 };
-                self.set_volume(self.st.volume + step, true);
+                let up = c == VoiceCommand::Louder;
+                self.set_volume(pulsar_media::mixer::step_alice(self.st.volume, up), true);
             }
             VoiceCommand::Next | VoiceCommand::Prev => {
                 let (t, shot) = if c == VoiceCommand::Next {

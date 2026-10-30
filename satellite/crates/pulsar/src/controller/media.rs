@@ -193,8 +193,13 @@ impl Controller {
                 MediaCommand::Mute | MediaCommand::Unmute => {
                     self.set_muted(c == MediaCommand::Mute);
                 }
-                MediaCommand::VolumeUp => self.set_volume(self.st.volume + 0.05, false),
-                MediaCommand::VolumeDown => self.set_volume(self.st.volume - 0.05, false),
+                MediaCommand::VolumeUp | MediaCommand::VolumeDown => {
+                    let up = c == MediaCommand::VolumeUp;
+                    self.set_volume(
+                        pulsar_media::mixer::step_level(self.model, self.st.volume, up),
+                        false,
+                    );
+                }
                 _ => debug!("media command {} ignored", c as u32),
             }
         }

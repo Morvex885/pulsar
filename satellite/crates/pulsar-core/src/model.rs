@@ -20,6 +20,9 @@ pub struct Model {
     pub mic_channels: &'static [u32],
     pub spk_channels: &'static [u32],
     pub vqe_preset: &'static str,
+    /// Pre-roll per wake word model: audio between the end of the wake word and its
+    /// confirmation, sent ahead of the request. Ids not listed get none.
+    pub wake_preroll: &'static [WakePreroll],
 
     /// Prefix of the per-channel sysfs LEDs "<led_prefix>:<color>:<ring|logo><index>".
     pub led_prefix: &'static str,
@@ -70,13 +73,16 @@ pub struct Model {
     /// Stock volume curve: platform level -> raw value (0..255) of the softvol "Master Playback
     /// Volume" on `playback_pcm`, piecewise linear between the points; the first point is
     /// level 0 (raw 0), the last one the top level. quasar.cfg volume_capability
-    /// .volume_manager_settings.platformToAlsaMap; the platform level steps by 5 %
-    /// (changeStepPercent).
+    /// .volume_manager_settings.platformToAlsaMap. One platform level is 5 % on the 20-level maps;
+    /// maind's Alice volume (0..10, "громче" / "тише") is platform level / 2 rounded half up.
+    /// quasar.cfg changeStepPercent is the step of maind's gradual volume change
+    /// (start_volume_change), not of the keys or the voice words.
     pub volume_map: &'static [VolumePoint],
     /// true: any audible volume is at least the map's second point (the stock firmware never
     /// sets the raw values below it).
     pub volume_min_step: bool,
-    /// false: no ambient light sensor (no Illuminance entity, the sensor is not opened).
+    /// false: the station may lack the ambient light sensor; the Illuminance entity then exists
+    /// only when the sensor opens at start, and a missing sensor is logged at info.
     pub has_lux: bool,
 
     /// Zigbee radio: Telink co-processor on a UART; its reset and boot lines are GPIO value
@@ -108,6 +114,70 @@ pub struct VolumePoint {
     pub level: i32,
     pub raw: i32,
 }
+
+/// Pre-roll of one wake word model (`spotter_models/activation/<id>`), in 32 ms VQE chunks
+/// ending with the confirming chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WakePreroll {
+    pub id: &'static str,
+    pub rule: PrerollRule,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrerollRule {
+    /// (chunks since the 1st-stage hit) + `offset`, at least 0; `fallback` chunks when no
+    /// 1st-stage hit preceded the confirmation.
+    FirstStage { offset: i32, fallback: u32 },
+    /// Always this many chunks.
+    Fixed(u32),
+}
+
+// Midi, frontend_probe 2026-10-28, one talker at 1-2 m: "alisa" confirms with event 5 and the
+// 1st-stage hit (event 3) always comes in the same chunk, so it anchors nothing; "yandex"
+// confirms with event 2 and never reports event 3. Both get a fixed length. Words reach
+// VQE_OMNI at -54..-63 dB, near the noise floor, so the end of an isolated word is often not
+// found: confirmation 0..5 chunks after it, mostly 2..3 ("alisa", 10 words), 0..3 ("yandex",
+// 11 words). Readings this close to the noise floor are unreliable, so the typical reading is
+// used instead of the shortest; checked through HA (see the PR).
+const CUCUMBER_PREROLL: &[WakePreroll] = &[
+    WakePreroll {
+        id: "alisa",
+        rule: PrerollRule::Fixed(2),
+    },
+    WakePreroll {
+        id: "yandex",
+        rule: PrerollRule::Fixed(2),
+    },
+];
+// Lite 2, frontend_probe 2026-10-28, one talker at 1-2 m: both models confirm with event 2
+// (1st stage) and never report a 1st-stage hit (event 3), so the length is fixed. Chunks from
+// the end of an isolated word (VQE_OMNI 20 dB below its peak) to the confirmation, over words
+// louder than -55 dB (quieter ones have their noise floor within 20 dB): "alisa" 3..8,
+// "yandex" 4..9. The shortest one is used, so the word does not reach STT. Through HA,
+// "yandex" with no pre-roll lost the start of the command ("который час" -> "час").
+// The Mini 2 ships the Lite 2's spotter models and uses these too (not measured on it).
+const PLUM_PREROLL: &[WakePreroll] = &[
+    WakePreroll {
+        id: "alisa",
+        rule: PrerollRule::Fixed(3),
+    },
+    WakePreroll {
+        id: "yandex",
+        rule: PrerollRule::Fixed(4),
+    },
+];
+// Mini 3: not measured. Its VQE chunk is 16 ms, so these are the Lite 2's lengths in time
+// (96 ms "alisa", 128 ms "yandex").
+const BERGAMOT_PREROLL: &[WakePreroll] = &[
+    WakePreroll {
+        id: "alisa",
+        rule: PrerollRule::Fixed(6),
+    },
+    WakePreroll {
+        id: "yandex",
+        rule: PrerollRule::Fixed(8),
+    },
+];
 
 const NO_STRIP: LedStrip = LedStrip {
     count: 0,
@@ -142,6 +212,7 @@ static MIDI: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5, 6, 7],
     vqe_preset: "cucumber",
+    wake_preroll: CUCUMBER_PREROLL,
     led_prefix: "cucumber",
     ring: LedStrip {
         count: 24,
@@ -205,6 +276,7 @@ static LITE2: Model = Model {
     mic_channels: &[0, 2],
     spk_channels: &[6],
     vqe_preset: "plum",
+    wake_preroll: PLUM_PREROLL,
     led_prefix: "plum",
     ring: LedStrip {
         count: 3,
@@ -270,6 +342,7 @@ static MINI2: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5],
     vqe_preset: "yandexmini_2",
+    wake_preroll: PLUM_PREROLL,
     led_prefix: "mini2",
     ring: LedStrip {
         count: 6,
@@ -302,6 +375,7 @@ static MINI2: Model = Model {
     playback_pcm: "default",
     volume_map: MINI2_VOLUME,
     volume_min_step: false,
+    // ltr308als01 seen on the #38 station (firmware 0.372), absent on the #9 one (0.369).
     has_lux: false,
     zigbee_tty: "",
     zigbee_reset: "",
@@ -329,6 +403,7 @@ static MINI3: Model = Model {
     mic_channels: &[0, 1, 2],
     spk_channels: &[6],
     vqe_preset: "bergamot",
+    wake_preroll: BERGAMOT_PREROLL,
     led_prefix: "bergamot",
     // Драйвер называет шестисветодиодное кольцо logo; отдельного логотипа нет.
     ring: LedStrip {

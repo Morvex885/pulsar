@@ -17,6 +17,7 @@ light_r=  0.25abc
 light_g=.5e1
 nearest_answers=0
 voice_indication=0
+wake_preroll=0
 auto_update=1
 update_attempt=v9.9.9
 wake_word=yandex

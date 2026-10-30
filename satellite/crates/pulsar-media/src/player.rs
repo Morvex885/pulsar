@@ -1,7 +1,8 @@
 //! Audio playback through the GStreamer build bundled with the Yandex firmware into the model's
 //! ALSA playback PCM (`Model::playback_pcm`: dmix + softvol). Two independent channels:
 //!   Music    - media_player content, can be paused / ducked.
-//!   Announce - TTS, announcements, earcons; plays over (ducked) music.
+//!   Announce - TTS, announcements, earcons; plays over (ducked) music. Decoded by its playbin,
+//!              played by the writer of [`crate::pcm_out`] instead of an alsasink.
 //!
 //! Threading: a dedicated thread runs a GMainLoop on the default GMainContext; the bus watches and
 //! timeouts live there, and so does the state machine ([`Machine`], in a thread-local). Handle
@@ -10,7 +11,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::ffi::{CString, c_void};
+use std::ffi::{CStr, CString, c_void};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -20,6 +21,7 @@ use log::{debug, error, info, warn};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::gst::{self, Api, Call, MainLoop, Pipeline};
+use crate::pcm_out::{self, OutEvent, Output};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Channel {
@@ -98,11 +100,6 @@ pub enum PlayerEvent {
 // already arrives for every network source. Stock maind sets use-buffering because its own
 // souphttpsrc ! decodebin pipelines have no queue2.
 const PLAY_FLAGS: u32 = (1 << 1) | (1 << 4);
-// ANNOUNCE network queue (playbin "buffer-duration" -> queue2 max-size-time, default 2 s). queue2
-// starts out buffering and reports 100 % only once it holds that much input (estimated from the
-// input rate), the whole response, or 2 MB. HA's streamed TTS arrives at about the speaking rate,
-// so the default held each answer back by about 2 s; local files (earcons) have no queue2.
-const ANNOUNCE_BUFFER_NS: i64 = 500_000_000;
 // MUSIC retries of an http(s) uri after a network failure (1, 2, 4 s apart), and the playtime
 // after which a failure counts as a new outage rather than as another retry of the same one.
 const MAX_RETRIES: u32 = 3;
@@ -265,6 +262,14 @@ pub(crate) trait Backend: Send {
     fn now_ms(&self) -> i64;
     /// The pipeline's address (message sources are compared with it).
     fn element(&self, ch: Channel) -> *const c_void;
+    /// ANNOUNCE: item `item` of the PCM output starts (the pipeline is in NULL); false when its
+    /// output could not be set up.
+    fn out_begin(&mut self, item: u64) -> bool;
+    /// ANNOUNCE reached EOS and its pipeline is in NULL: the output plays the rest, then reports
+    /// PlayedOut.
+    fn out_end(&mut self);
+    /// ANNOUNCE's pipeline is in NULL: the output drops the current item and stops at once.
+    fn out_flush(&mut self);
 }
 
 /// State shared by the handle (runtime thread) and the GLib thread.
@@ -326,6 +331,8 @@ struct Chan {
     want_play: bool,
     buffering: bool,
     reached_playing: bool,
+    /// ANNOUNCE: the output item of the current url (0 = none).
+    out_gen: u64,
     all_ok: bool,
     /// Network retries of the current url.
     retries: u32,
@@ -350,6 +357,7 @@ impl Chan {
             want_play: false,
             buffering: false,
             reached_playing: false,
+            out_gen: 0,
             all_ok: true,
             retries: 0,
             started_ms: 0,
@@ -367,6 +375,8 @@ pub(crate) struct Machine {
     backend: Box<dyn Backend>,
     shared: Arc<Shared>,
     chans: [Chan; 2],
+    /// Last ANNOUNCE output item.
+    out_gen: u64,
 }
 
 impl Machine {
@@ -375,6 +385,7 @@ impl Machine {
             backend,
             shared,
             chans: [Chan::new(), Chan::new()],
+            out_gen: 0,
         }
     }
 
@@ -406,7 +417,11 @@ impl Machine {
     fn halt(&mut self, ch: Channel, failed: bool) {
         self.cancel_retry(ch);
         self.backend.set_state(ch, GstState::Null);
+        if ch == Channel::Announce {
+            self.backend.out_flush();
+        }
         let c = &mut self.chans[ch.index()];
+        c.out_gen = 0;
         c.active = false;
         c.buffering = false;
         c.urls.clear();
@@ -435,7 +450,21 @@ impl Machine {
             c.urls.len()
         );
         self.backend.set_state(ch, GstState::Null);
+        // After NULL: the fdsink no longer writes the fd the output closes.
+        if ch == Channel::Announce {
+            self.backend.out_flush();
+        }
         self.backend.set_uri(ch, &uri);
+        if ch == Channel::Announce {
+            self.out_gen += 1;
+            let item = self.out_gen;
+            self.chans[ch.index()].out_gen = item;
+            if !self.backend.out_begin(item) {
+                error!("player: ch{} no output for {uri}", ch.index());
+                self.advance(ch, false);
+                return;
+            }
+        }
         let now = self.backend.now_ms();
         let c = &mut self.chans[ch.index()];
         c.buffering = false;
@@ -536,7 +565,13 @@ impl Machine {
         match msg {
             Msg::Eos => {
                 info!("player: ch{i} EOS");
-                self.advance(ch, true);
+                if ch == Channel::Announce {
+                    // Done once the output has played the rest (OutEvent::PlayedOut).
+                    self.backend.set_state(ch, GstState::Null);
+                    self.backend.out_end();
+                } else {
+                    self.advance(ch, true);
+                }
             }
             Msg::Error(err) => {
                 error!(
@@ -554,6 +589,10 @@ impl Machine {
                 }
             }
             Msg::Warning(message) => warn!("player: ch{i} warning: {message}"),
+            // ANNOUNCE's output primes itself: queue2 drains into playsink's queue, so after the
+            // start its level does not show what is left to play, and pausing would cost what
+            // the output holds.
+            Msg::Buffering(_) if ch == Channel::Announce => {}
             Msg::Buffering(pct) => {
                 let buf = pct < 100;
                 if buf != self.chans[i].buffering {
@@ -579,7 +618,8 @@ impl Machine {
                         pos / 1_000_000
                     );
                 }
-                if new == GstState::Playing as i32 {
+                // ANNOUNCE is PLAYING once its output started (OutEvent::Started).
+                if new == GstState::Playing as i32 && ch == Channel::Music {
                     let c = &mut self.chans[i];
                     c.reached_playing = true;
                     if c.want_play && !c.buffering {
@@ -592,6 +632,33 @@ impl Machine {
                 self.apply_target_state(ch);
             }
             Msg::Other => {}
+        }
+    }
+
+    /// Progress of the ANNOUNCE output; events of an item no longer current are dropped.
+    fn on_out(&mut self, ev: OutEvent) {
+        let ch = Channel::Announce;
+        let (OutEvent::Started(item) | OutEvent::PlayedOut(item) | OutEvent::Failed(item)) = ev;
+        let c = &mut self.chans[ch.index()];
+        if !c.active || item != c.out_gen {
+            return;
+        }
+        match ev {
+            OutEvent::Started(_) => {
+                c.reached_playing = true;
+                if c.want_play {
+                    self.set_state(ch, PlayState::Playing);
+                }
+            }
+            OutEvent::PlayedOut(_) => {
+                c.out_gen = 0;
+                info!("player: ch{} played out", ch.index());
+                self.advance(ch, true);
+            }
+            OutEvent::Failed(_) => {
+                c.out_gen = 0;
+                self.advance(ch, false);
+            }
         }
     }
 
@@ -644,7 +711,8 @@ impl Machine {
 
     fn pause(&mut self, ch: Channel) {
         let c = &mut self.chans[ch.index()];
-        if !c.active || !c.want_play {
+        // ANNOUNCE's output plays on regardless, and after EOS its pipeline must stay in NULL.
+        if ch == Channel::Announce || !c.active || !c.want_play {
             return;
         }
         c.want_play = false;
@@ -653,7 +721,7 @@ impl Machine {
 
     fn resume(&mut self, ch: Channel) {
         let c = &mut self.chans[ch.index()];
-        if !c.active || c.want_play {
+        if ch == Channel::Announce || !c.active || c.want_play {
             return;
         }
         c.want_play = true;
@@ -728,6 +796,11 @@ pub(crate) fn on_bus(tag: usize, msg: &gst::Message) {
     });
 }
 
+/// ANNOUNCE output event, delivered on the GLib thread.
+fn on_out(ev: OutEvent) {
+    with_machine(|m| m.on_out(ev));
+}
+
 /// GLib timeout `tag`; true keeps it.
 pub(crate) fn on_timer(tag: usize) -> bool {
     Timer::from_tag(tag)
@@ -738,7 +811,9 @@ pub(crate) fn on_timer(tag: usize) -> bool {
 /// The firmware's GStreamer: one playbin per channel.
 struct GstBackend {
     api: &'static Api,
+    // Dropped before `out`: the pipelines are in NULL when the output closes the fdsink's fd.
     pipes: [Pipeline; 2],
+    out: Output,
 }
 
 impl Backend for GstBackend {
@@ -754,7 +829,11 @@ impl Backend for GstBackend {
     }
 
     fn set_volume(&mut self, ch: Channel, v: f64) {
-        self.pipes[ch.index()].set_volume(v);
+        match ch {
+            Channel::Music => self.pipes[ch.index()].set_volume(v),
+            // ANNOUNCE's playbin stays at 1.0: its output applies the gain.
+            Channel::Announce => self.out.set_gain(v),
+        }
     }
 
     fn query_position(&mut self, ch: Channel) -> Option<i64> {
@@ -788,6 +867,22 @@ impl Backend for GstBackend {
     fn element(&self, ch: Channel) -> *const c_void {
         self.pipes[ch.index()].addr()
     }
+
+    fn out_begin(&mut self, item: u64) -> bool {
+        let Some(fd) = self.out.begin(item) else {
+            return false;
+        };
+        self.pipes[Channel::Announce.index()].set_out_fd(fd);
+        true
+    }
+
+    fn out_end(&mut self) {
+        self.out.end();
+    }
+
+    fn out_flush(&mut self) {
+        self.out.flush();
+    }
 }
 
 /// Where handle commands run.
@@ -820,17 +915,26 @@ impl Drop for GlibThread {
     }
 }
 
+// The fdsink of ANNOUNCE's output (pcm_out); playsink converts to its caps.
+const OUT_SINK: &CStr = c"pcmout";
+
 fn new_pipeline(api: &'static Api, ch: Channel, pcm: &str) -> Option<Pipeline> {
-    let desc = format!(
-        "playbin name=ch{} audio-sink=\"alsasink device={pcm}\"",
-        ch.index()
-    );
+    let sink = match ch {
+        Channel::Music => format!("alsasink device={pcm}"),
+        Channel::Announce => format!(
+            "capsfilter caps=\\\"{}\\\" ! fdsink name={} sync=false",
+            pcm_out::CAPS,
+            OUT_SINK.to_string_lossy()
+        ),
+    };
+    let desc = format!("playbin name=ch{} audio-sink=\"{sink}\"", ch.index());
     let mut p = Pipeline::launch(api, &CString::new(desc).ok()?)?;
+    if ch == Channel::Announce && !p.find_out_sink(OUT_SINK) {
+        error!("player: ch{} has no output sink", ch.index());
+        return None;
+    }
     p.set_flags(PLAY_FLAGS);
     p.set_volume(1.0);
-    if ch == Channel::Announce {
-        p.set_buffer_duration(ANNOUNCE_BUFFER_NS);
-    }
     p.add_bus_watch(ch.index());
     Some(p)
 }
@@ -854,8 +958,12 @@ fn start(shared: &Arc<Shared>, pcm: &str) -> Option<GlibThread> {
         new_pipeline(api, Channel::Music, pcm)?,
         new_pipeline(api, Channel::Announce, pcm)?,
     ];
+    let out = Output::spawn(
+        pcm,
+        Box::new(move |ev| gst::idle_add(api, Box::new(move || on_out(ev)))),
+    )?;
     let main_loop = Arc::new(MainLoop::new(api)?);
-    let machine = Machine::new(Box::new(GstBackend { api, pipes }), Arc::clone(shared));
+    let machine = Machine::new(Box::new(GstBackend { api, pipes, out }), Arc::clone(shared));
     let ml = Arc::clone(&main_loop);
     let thread = std::thread::Builder::new()
         .name("gst".into())
@@ -939,6 +1047,7 @@ impl PlayerHandle {
         id
     }
 
+    /// MUSIC only; ANNOUNCE ignores pause and resume.
     pub fn pause(&self, ch: Channel) {
         self.invoke(move |m| m.pause(ch));
     }
@@ -1180,6 +1289,16 @@ mod tests {
         fn element(&self, _: Channel) -> *const c_void {
             std::ptr::null()
         }
+        fn out_begin(&mut self, item: u64) -> bool {
+            self.log(format!("out begin {item}"));
+            true
+        }
+        fn out_end(&mut self) {
+            self.log("out end".into());
+        }
+        fn out_flush(&mut self) {
+            self.log("out flush".into());
+        }
     }
 
     struct QueueExec(Rc<RefCell<VecDeque<Call>>>);
@@ -1229,6 +1348,10 @@ mod tests {
 
         fn state_changed(&self, ch: Channel, s: GstState) {
             self.msg(ch, Msg::StateChanged { new: s as i32 });
+        }
+
+        fn out(&self, ev: OutEvent) {
+            with_machine(|m| m.on_out(ev));
         }
 
         fn events(&mut self) -> Vec<PlayerEvent> {
@@ -1321,17 +1444,38 @@ mod tests {
         let id =
             r.h.play(Announce, urls(&["/a.wav", "http://192.168.1.50/b.flac"]));
         r.pump();
-        r.state_changed(Announce, GstState::Playing);
-        r.msg(Announce, Msg::Eos);
+        // The output's fd changes only while the pipeline is in NULL.
         assert_eq!(
-            r.events(),
+            r.calls(),
             [
-                State(Announce, Loading),
-                State(Announce, Playing),
-                State(Announce, Loading)
+                "ch1 Null",
+                "out flush",
+                "ch1 uri file:///a.wav",
+                "out begin 1",
+                "ch1 Playing"
             ]
         );
-        r.calls();
+        r.state_changed(Announce, GstState::Playing);
+        r.out(OutEvent::Started(1));
+        r.msg(Announce, Msg::Eos);
+        assert_eq!(r.calls(), ["ch1 Null", "out end"]);
+        // The next url starts once the output has played this one out.
+        assert_eq!(
+            r.events(),
+            [State(Announce, Loading), State(Announce, Playing)]
+        );
+        r.out(OutEvent::PlayedOut(1));
+        assert_eq!(
+            r.calls(),
+            [
+                "ch1 Null",
+                "out flush",
+                "ch1 uri http://192.168.1.50/b.flac",
+                "out begin 2",
+                "ch1 Playing"
+            ]
+        );
+        assert_eq!(r.events(), [State(Announce, Loading)]);
         // ANNOUNCE never retries, even a 5xx.
         r.msg(
             Announce,
@@ -1340,7 +1484,7 @@ mod tests {
                 Some((7, 5)),
             )),
         );
-        assert_eq!(r.calls(), ["ch1 Null"]);
+        assert_eq!(r.calls(), ["ch1 Null", "out flush"]);
         assert!(r.timers().is_empty());
         assert_eq!(
             r.events(),
@@ -1350,6 +1494,57 @@ mod tests {
                 Done { id, ok: false }
             ]
         );
+    }
+
+    #[test]
+    fn announce_ignores_buffering_and_output_events_of_replaced_items() {
+        let mut r = Rig::new();
+        let a = r.h.play(Announce, urls(&["http://192.168.1.50/a.flac"]));
+        r.pump();
+        r.calls();
+        // queue2's level does not hold ANNOUNCE, and a PLAYING pipeline is not audible yet.
+        r.msg(Announce, Msg::Buffering(10));
+        r.state_changed(Announce, GstState::Playing);
+        assert!(r.calls().is_empty());
+        assert_eq!(r.events(), [State(Announce, Loading)]);
+        let b = r.h.play(Announce, urls(&["/b.wav"]));
+        r.pump();
+        assert_eq!(r.events(), [Done { id: a, ok: false }]);
+        r.calls();
+        r.out(OutEvent::Started(1));
+        r.out(OutEvent::PlayedOut(1));
+        assert!(r.calls().is_empty());
+        assert!(r.events().is_empty());
+        r.out(OutEvent::Started(2));
+        assert_eq!(r.events(), [State(Announce, Playing)]);
+        r.out(OutEvent::Failed(2));
+        assert_eq!(
+            r.events(),
+            [
+                State(Announce, Failed),
+                State(Announce, Idle),
+                Done { id: b, ok: false }
+            ]
+        );
+        // After the list ended, a late event of its item changes nothing.
+        r.out(OutEvent::PlayedOut(2));
+        assert!(r.events().is_empty());
+    }
+
+    #[test]
+    fn announce_ignores_pause_and_resume() {
+        let mut r = Rig::new();
+        r.h.play(Announce, urls(&["http://192.168.1.50/a.flac"]));
+        r.pump();
+        r.msg(Announce, Msg::Eos);
+        r.calls();
+        r.events();
+        // After EOS the pipeline stays in NULL until the output played out.
+        r.h.pause(Announce);
+        r.h.resume(Announce);
+        r.pump();
+        assert!(r.calls().is_empty());
+        assert!(r.events().is_empty());
     }
 
     #[test]

@@ -58,6 +58,37 @@ pub fn from_raw(model: &Model, raw: i64) -> f32 {
     1.0
 }
 
+/// Volume one platform level (`Model::volume_map`) above (`up`) or below `v`: the keys and HA's
+/// volume up / down.
+pub fn step_level(model: &Model, v: f32, up: bool) -> f32 {
+    let m = model.volume_map;
+    if m.len() < 2 {
+        return clamp_unit(v);
+    }
+    grid_step(v, m[m.len() - 1].level, up)
+}
+
+/// Volume one Alice level above (`up`) or below `v`: "громче" / "тише". maind's Alice volume is
+/// 0..10 (platform level / 2 rounded half up, on the 20-level maps).
+pub fn step_alice(v: f32, up: bool) -> f32 {
+    grid_step(v, 10, up)
+}
+
+/// The next point of a scale of `grid` steps above or below `v`. A volume between points (HA
+/// slider, Music Assistant) moves to the next one, and repeated steps stay exact: f32 sums of
+/// ±0.05 drift, and a volume a hair above 0 plays at the lowest stock step (`volume_min_step`)
+/// while the clock and HA show 0.
+fn grid_step(v: f32, grid: i32, up: bool) -> f32 {
+    let p = clamp_unit(v) * grid as f32;
+    // Within 1/1000 of a point is on it: earlier f32 steps leave ~1e-7 of error.
+    let point = if up {
+        (p + 1e-3).floor() as i32 + 1
+    } else {
+        (p - 1e-3).ceil() as i32 - 1
+    };
+    point.clamp(0, grid) as f32 / grid as f32
+}
+
 // The curve of builds before the stock map (alsamixer's "mapped volume" over a -60..0 dB
 // control): dB = 60 * log10(0.1 + 0.9 v). state.conf keeps volume= on it for those builds.
 fn legacy_raw(v: f32) -> i64 {
@@ -181,6 +212,11 @@ impl Mixer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pulsar_core::model::model_from_compatible;
+
+    fn midi() -> &'static Model {
+        model_from_compatible(b"yandex,cucumber\0").unwrap()
+    }
 
     #[test]
     fn volume_is_clamped_like_cxx() {
@@ -199,5 +235,59 @@ mod tests {
         assert_eq!(legacy_raw(f32::NAN), 255);
         assert_eq!(legacy_volume(255), 1.0);
         assert_eq!(legacy_volume(0), 0.0);
+    }
+
+    #[test]
+    fn steps_from_a_level_move_exactly_one() {
+        for c in [
+            &b"yandex,cucumber\0"[..],
+            b"yandex,plum\0",
+            b"yandex,station-mini2\0",
+        ] {
+            let m = model_from_compatible(c).unwrap();
+            for k in 0..=20 {
+                let v = k as f32 / 20.0;
+                assert_eq!(step_level(m, v, true), (k + 1).min(20) as f32 / 20.0);
+                assert_eq!(step_level(m, v, false), (k - 1).max(0) as f32 / 20.0);
+            }
+        }
+        for k in 0..=10 {
+            let v = k as f32 / 10.0;
+            assert_eq!(step_alice(v, true), (k + 1).min(10) as f32 / 10.0);
+            assert_eq!(step_alice(v, false), (k - 1).max(0) as f32 / 10.0);
+        }
+    }
+
+    #[test]
+    fn steps_from_between_levels_go_to_the_next_level() {
+        let m = midi();
+        assert_eq!(step_level(m, 0.07, false), 0.05);
+        assert_eq!(step_level(m, 0.07, true), 0.1);
+        assert_eq!(step_level(m, 0.33, true), 0.35);
+        assert_eq!(step_level(m, 0.33, false), 0.3);
+        assert_eq!(step_alice(0.05, true), 0.1);
+        assert_eq!(step_alice(0.15, false), 0.1);
+        assert_eq!(step_alice(0.33, false), 0.3);
+        // f32 drift right next to a level counts as that level.
+        assert_eq!(step_level(m, 0.150_000_1, false), 0.1);
+        assert_eq!(step_level(m, 0.149_999_9, true), 0.2);
+        assert_eq!(step_alice(0.199_999_9, true), 0.3);
+    }
+
+    #[test]
+    fn steps_down_reach_exact_silence() {
+        let m = midi();
+        let mut v = 0.15;
+        for _ in 0..3 {
+            v = step_level(m, v, false);
+        }
+        assert_eq!(v, 0.0);
+        let mut v = 0.3;
+        for _ in 0..3 {
+            v = step_alice(v, false);
+        }
+        assert_eq!(v, 0.0);
+        assert_eq!(step_level(m, 1.0, true), 1.0);
+        assert_eq!(step_alice(0.0, false), 0.0);
     }
 }

@@ -446,7 +446,8 @@ async def cmd_scenario_entities(client, args):
     def st(oid):
         return orig[oid].state if orig.get(oid) is not None else None
 
-    switches = ["microphones", "clock_display", "nearest_station_answers", "voice_indication"]
+    switches = ["microphones", "clock_display", "nearest_station_answers", "voice_indication",
+                "command_right_after_wake_word"]
     if st("hardware_mic_mute"):
         # Under the mute button's mute "on" is refused: the switch comes back off.
         await expect(w, "switch microphones -> True (refused: mute button)", k["microphones"], lambda: client.switch_command(k["microphones"], True), lambda s: not s.state)
