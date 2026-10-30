@@ -458,6 +458,8 @@ async def cmd_scenario_entities(client, args):
         # Under the mute button's mute "on" is refused: the switch comes back off.
         await expect(w, "switch microphones -> True (refused: mute button)", k["microphones"], lambda: client.switch_command(k["microphones"], True), lambda s: not s.state)
         switches.remove("microphones")
+    if "clock_auto_brightness" in k:  # only when the light sensor opened at start
+        switches.append("clock_auto_brightness")
     for oid in switches:
         if oid not in k:
             continue

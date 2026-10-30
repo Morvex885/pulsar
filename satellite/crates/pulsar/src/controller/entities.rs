@@ -67,6 +67,7 @@ impl Controller {
         self.publish_microphones();
         let api = &self.api;
         api.publish_switch(SwitchId::Clock, self.st.clock_on);
+        api.publish_switch(SwitchId::ClockAutoBrightness, self.st.clock_auto_brightness);
         api.publish_switch(SwitchId::AutoUpdate, self.st.auto_update);
         api.publish_switch(SwitchId::NearestAnswers, self.st.nearest_answers);
         api.publish_switch(SwitchId::VoiceIndication, self.st.voice_indication);
@@ -156,6 +157,10 @@ impl Controller {
                 self.st.clock_on = state;
                 self.clock.set_enabled(state);
                 self.update_music();
+            }
+            SwitchId::ClockAutoBrightness => {
+                self.st.clock_auto_brightness = state;
+                self.clock.set_auto_brightness(state);
             }
             SwitchId::AutoUpdate => self.st.auto_update = state,
             SwitchId::NearestAnswers => self.st.nearest_answers = state,

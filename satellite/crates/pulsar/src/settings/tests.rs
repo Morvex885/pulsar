@@ -2,7 +2,7 @@
 // and Settings::save of controller.cpp, copied verbatim into a throwaway host harness built with
 // `zig c++ -std=c++20 -O2`. save_*.conf: `save` of the values below; load_*.out: `load` of
 // load_*.in, then `save`. Edited by hand since: `wake_preroll` (after `clock_music`; 0 in
-// load_odd.in).
+// load_odd.in); `clock_auto_brightness` (after `wake_preroll`).
 
 use super::*;
 
@@ -323,4 +323,16 @@ fn strtoul_hex_matches_libc() {
     ] {
         assert_eq!(strtoul_hex(s), want, "{s:?}");
     }
+}
+
+#[test]
+fn clock_auto_brightness_is_always_written() {
+    let mut s = Settings::default();
+    assert!(s.clock_auto_brightness);
+    assert!(s.serialize().ends_with("clock_auto_brightness=1\n"));
+    s.parse(b"clock_auto_brightness=0\n");
+    assert!(!s.clock_auto_brightness);
+    assert!(s.serialize().ends_with("clock_auto_brightness=0\n"));
+    s.parse(b"clock_auto_brightness=1\n");
+    assert!(s.clock_auto_brightness);
 }

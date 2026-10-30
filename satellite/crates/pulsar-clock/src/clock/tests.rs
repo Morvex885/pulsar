@@ -567,6 +567,63 @@ async fn actor_draws_commands_and_stops_with_the_handles() {
 }
 
 #[tokio::test]
+async fn auto_brightness_off_ignores_the_light() {
+    // Midi layout: the level is the chips' current, written only when it changes (the periodic
+    // full rewrite covers the segments alone).
+    let (m, root) = temp_model!("auto_bri", b"yandex,cucumber\0", "clock-");
+    for d in 0..DIGITS {
+        for s in 0..SEGS {
+            root.led("clock-", &Leds::seg_name(m, d, s));
+        }
+    }
+    let chip = root.0.join("chip");
+    std::fs::create_dir_all(&chip).unwrap();
+    let current = chip.join("current");
+    std::fs::write(&current, "").unwrap();
+    std::os::unix::fs::symlink(&chip, root.0.join("clock-a1/device")).unwrap();
+    // The next level the actor writes while this task yields.
+    let next = || async {
+        for _ in 0..200 {
+            let v = std::fs::read_to_string(&current).unwrap();
+            if !v.is_empty() {
+                std::fs::write(&current, "").unwrap();
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("no level written");
+    };
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let clock = spawn(m);
+            assert_eq!(take(&current), "255");
+            // Dark room, auto brightness on: 0.02 of full.
+            clock.set_ambient_lux(0.0);
+            assert_eq!(next().await, "5");
+            clock.set_auto_brightness(false);
+            assert_eq!(next().await, "255");
+            // A reading while off writes nothing but still feeds the dimmer: switching back on
+            // applies the new light.
+            let mut dimmer = AmbientDimmer::new();
+            dimmer.update(0.0);
+            assert!(dimmer.update(1000.0));
+            let (half, half_lit) = (level(0.5, 1.0), level(0.5, dimmer.factor()));
+            assert!(![5, 255].contains(&half) && ![3, 5, 255, half].contains(&half_lit));
+            clock.set_ambient_lux(1000.0);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert_eq!(take(&current), "");
+            clock.set_brightness(0.5);
+            assert_eq!(next().await, half.to_string());
+            clock.set_auto_brightness(true);
+            assert_eq!(next().await, half_lit.to_string());
+            drop(clock);
+            assert!(actors::join_all(Duration::from_secs(1)).await);
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn unavailable_clock_is_a_no_op() {
     let (m, _root) = temp_model!("none", b"yandex,plum\0", "none-");
     let local = tokio::task::LocalSet::new();

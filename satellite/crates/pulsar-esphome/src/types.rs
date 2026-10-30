@@ -54,12 +54,15 @@ pub struct ApiConfig {
     pub clock_music_styles: Vec<String>,
     /// Select «Zigbee role» options; empty: no Zigbee entities (no radio).
     pub zigbee_modes: Vec<String>,
-    /// false: no Clock display / Clock brightness / Clock text speed / Clock text / Clock face /
-    /// Clock music entities, no clock_show_text / clock_show_face actions, none of their states
-    /// sent.
+    /// false: no Clock display / Clock brightness / Clock auto brightness / Clock text speed /
+    /// Clock text / Clock face / Clock music entities, no clock_show_text / clock_show_face
+    /// actions, none of their states sent.
     pub has_clock: bool,
-    /// false: no Illuminance sensor, no lux states (the model has no ltr308als01).
+    /// false: no Illuminance sensor or lux states.
     pub has_lux: bool,
+    /// false: no Clock auto brightness switch or its states (listed only with `has_clock` as
+    /// well).
+    pub has_auto_brightness: bool,
     /// The model has wake-word pre-roll rules: the switch "Command right after wake word".
     pub has_wake_preroll: bool,
     /// The model has a readable hardware microphone mute switch/key.
@@ -89,6 +92,7 @@ impl Default for ApiConfig {
             has_wake_preroll: true,
             has_hw_mic_mute: true,
             has_buttons: true,
+            has_auto_brightness: true,
             key_path: None,
         }
     }
@@ -263,6 +267,7 @@ pub enum SwitchId {
     NearestAnswers = 4,
     VoiceIndication = 5,
     WakePreroll = 6,
+    ClockAutoBrightness = 7,
 }
 
 #[repr(u32)]

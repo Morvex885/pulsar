@@ -41,6 +41,8 @@ pub struct Settings {
     pub mic_muted: bool,
     pub clock_on: bool,
     pub clock_brightness: f32,
+    /// Clock level follows the light sensor, with `clock_brightness` as the ceiling.
+    pub clock_auto_brightness: bool,
     /// Clock text scroll step.
     pub clock_scroll_ms: i32,
     /// User ring light.
@@ -84,6 +86,7 @@ impl Default for Settings {
             mic_muted: false,
             clock_on: true,
             clock_brightness: 1.0,
+            clock_auto_brightness: true,
             clock_scroll_ms: 400,
             light: LightState::default(),
             wake_word: "alisa".into(),
@@ -141,6 +144,7 @@ impl Settings {
                 b"mic_muted" => self.mic_muted = on,
                 b"clock_on" => self.clock_on = on,
                 b"clock_brightness" => self.clock_brightness = fv,
+                b"clock_auto_brightness" => self.clock_auto_brightness = on,
                 // C++ int(float): truncation (Rust saturates where C++ is undefined).
                 b"clock_scroll_ms" => self.clock_scroll_ms = (fv as i32).clamp(100, 2000),
                 b"light_on" => self.light.on = on,
@@ -180,6 +184,7 @@ impl Settings {
     }
 
     /// The file as C++ `Settings::save` writes it: every key, in its order.
+    /// `wake_preroll` and `clock_auto_brightness` were added after the C++ reference fixtures.
     pub fn serialize(&self) -> String {
         let f = |v: f32| g6(f64::from(v));
         let b = |v: bool| u8::from(v);
@@ -189,7 +194,7 @@ impl Settings {
              light_b={}\nlight_effect={}\nwake_word={}\ntz={}\nauto_update={}\nupdate_attempt={}\n\
              zigbee_role={}\nzigbee_flash_failed={:x}\nnearest_answers={}\nmusic_viz={}\n\
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
-             wake_preroll={}\n",
+             wake_preroll={}\nclock_auto_brightness={}\n",
             f(self.volume),
             f(self.volume_legacy),
             b(self.muted),
@@ -216,6 +221,7 @@ impl Settings {
             self.led_case_color,
             self.clock_music,
             b(self.wake_preroll),
+            b(self.clock_auto_brightness),
         )
     }
 
