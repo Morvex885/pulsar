@@ -216,6 +216,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
         PathBuf::from(format!("{MODELS}{}", a.wake)),
         Some(PathBuf::from(COMMAND_MODEL)),
     );
+    let frame = h.frame();
     h.set_commands(a.commands);
     h.set_streaming(a.stream);
     h.set_music_analysis(a.music);
@@ -233,6 +234,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let (mut audio, mut music, mut beats, mut wakes, mut commands) = (0u64, 0u64, 0u64, 0u64, 0u64);
     let (mut audio_samples_ok, mut loudness) = (true, 0f32);
+    let mut audio_samples = 0usize;
     let mut prev = FrontendStats::default();
     let mut prev_counts = (0u64, 0u64);
     let mut first: Option<(Instant, FrontendStats, u64, u64)> = None;
@@ -255,8 +257,8 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
                 }
                 Some(FrontendEvent::Audio(pcm)) => {
                     audio += 1;
-                    // 512 samples (32 ms) on the Midi and Lite 2, 256 (16 ms) on the Mini.
-                    audio_samples_ok &= matches!(pcm.len(), 256 | 512);
+                    audio_samples_ok &= pcm.len() == frame;
+                    audio_samples += pcm.len();
                 }
                 Some(FrontendEvent::Music(f)) => {
                     music += 1;
@@ -303,14 +305,14 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
         r.finish()?;
     }
     out!(
-        "done: {:.1} s, chunks {}, audio {}{}, music {} (beats {beats}), wake {wakes}, command {commands}, captured {} frames, dropped {} frames",
+        "done: {:.1} s, chunks {}, audio {} x {frame} samples ({audio_samples} total){}, music {} (beats {beats}), wake {wakes}, command {commands}, captured {} frames, dropped {} frames",
         secs(start),
         s.chunks,
         audio,
         if audio_samples_ok {
-            ""
+            String::new()
         } else {
-            " (not 256/512 samples each)"
+            format!(" (not {frame} samples each)")
         },
         music,
         s.captured_frames,
@@ -330,7 +332,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
             );
         }
     }
-    Ok(s.chunks > 0)
+    Ok(s.chunks > 0 && audio_samples_ok && (!a.stream || audio > 0) && (!a.music || music > 0))
 }
 
 fn secs(start: Instant) -> f64 {

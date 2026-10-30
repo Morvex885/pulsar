@@ -16,6 +16,8 @@ func modelName(code string) string {
 		return "Yandex Station Lite 2"
 	case "station-mini2":
 		return "Yandex Station Mini 2"
+	case "bergamot":
+		return "Yandex Station Mini 3"
 	case "yandexmini":
 		return "Yandex Station Mini"
 	}
@@ -26,15 +28,16 @@ func modelName(code string) string {
 // supported. The installed binary is build/<arch>/pulsar for the first ABI whose dynamic loader
 // is on the station. A second ABI is only for a userspace actually seen on that model: some Midi
 // images run a 32-bit userspace on the 64-bit kernel (#13) and need the armhf build (its ALSA
-// ABI is the one in audio/alsa_abi.h, #14). Lite 2, Mini 2 and Mini stay armhf-only: no 64-bit
-// userspace has been seen on them, and the aarch64 binary needs glibc 2.34 — on a miss it would
-// crash-loop back to the Yandex stack (no .prev on a first install). The armhf build targets
-// glibc 2.23, the Mini's; the 2.30 userlands of the Lite 2 and Mini 2 run it as well.
+// ABI is the one in audio/alsa_abi.h, #14). Lite 2, Mini 2, Mini 3 and Mini stay armhf-only: no
+// 64-bit userspace has been seen on them, and the aarch64 binary needs glibc 2.34 — on a miss it
+// would crash-loop back to the Yandex stack (no .prev on a first install). The armhf build
+// targets glibc 2.23, the Mini's; the 2.30 userlands of the Lite 2, Mini 2 and Mini 3 run it as
+// well.
 func abis(code string) []string {
 	switch code {
 	case "cucumber":
 		return []string{"aarch64", "armhf"}
-	case "plum", "station-mini2", "yandexmini":
+	case "plum", "station-mini2", "bergamot", "yandexmini":
 		return []string{"armhf"}
 	}
 	return nil

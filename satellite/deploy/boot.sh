@@ -17,7 +17,7 @@ pidof supervise.sh >/dev/null 2>&1 && exit 0  # never two supervisors
 # Supported models only (see satellite/crates/pulsar-core/src/model.rs); anything else keeps the
 # Yandex stack. The first-generation Mini has no yandex,* compatibility entry: the Amlogic S420
 # board id alone is not Yandex-specific, so quasar.cfg must also name the yandexmini device.
-if ! tr '\0' '\n' </proc/device-tree/compatible | grep -qxE 'yandex,(cucumber|plum|station-mini2)'; then
+if ! tr '\0' '\n' </proc/device-tree/compatible | grep -qxE 'yandex,(cucumber|plum|station-mini2|bergamot)'; then
   [ "$(tr -d '\0' </proc/device-tree/amlogic-dt-id 2>/dev/null)" = axg_s420_v03 ] &&
     grep -qE '"deviceType"[[:space:]]*:[[:space:]]*"yandexmini"' /system/vendor/quasar/quasar.cfg 2>/dev/null ||
     exit 0

@@ -5,9 +5,9 @@
 //! - VQE functions return a `YandexVqeC_Error*` (null on success);
 //! - spotter functions take a trailing `spotter_error**`, set on failure;
 //! - VQE I/O is float in [-1, 1], frame-interleaved; Process consumes GetInputChunkSize() frames
-//!   (Midi: 3072 @ 96 kHz, Lite 2: 1536 @ 48 kHz) and yields GetProcessingFrame() samples
-//!   (512 @ 16 kHz) per output channel; output channel types follow
-//!   voicetech.AudioInputChannelType;
+//!   (Midi: 3072 @ 96 kHz, Lite 2: 1536 @ 48 kHz, Mini 3 and Mini: 768 @ 48 kHz) and yields
+//!   GetProcessingFrame() samples (512 @ 16 kHz, 256 on the Mini 3 and Mini) per output channel;
+//!   output channel types follow voicetech.AudioInputChannelType;
 //! - spotter input is s16le interleaved in the channel order given to
 //!   spotter_create_multichannel.
 

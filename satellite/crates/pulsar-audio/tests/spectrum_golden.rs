@@ -1,11 +1,8 @@
-//! SpectrumAnalyzer golden data (tests/golden/spectrum.txt): a sine scenario (three tones and
-//! noise, then a fade-out), silence (with a quiet tone fading through the silence threshold) and
-//! a beat sequence (80 Hz kicks, strong, weak and one too early), on the Lite 2 layout (48 kHz,
-//! chunk 1536, 1 speaker channel), the Midi one (96 kHz, chunk 3072, 4 channels) and the Mini one
-//! (48 kHz, chunk 768, 2 channels). The inputs are integer samples, generated here exactly as by
-//! the C++ generator. The Lite 2 and Midi rows are the C++ binary's output; the Mini rows are the
-//! same scenario through the fixed Rust analyzer, whose 16 ms time constants are derived from the
-//! 32 ms ones (the C++ daemon applies them per chunk).
+//! SpectrumAnalyzer against the C++ analyzer (tests/golden/spectrum.txt): a sine scenario
+//! (three tones and noise, then a fade-out), silence (with a quiet tone fading through the
+//! silence threshold) and a beat sequence (80 Hz kicks, strong, weak and one too early), on the
+//! Lite 2 layout (48 kHz, chunk 1536, 1 speaker channel) and the Midi one (96 kHz, chunk 3072,
+//! 4 channels). The inputs are integer samples, generated here exactly as by the C++ generator.
 
 use std::f64::consts::PI;
 
@@ -21,7 +18,7 @@ struct Layout {
     nspk: usize,
 }
 
-const LAYOUTS: [Layout; 3] = [
+const LAYOUTS: [Layout; 2] = [
     Layout {
         name: "lite2",
         rate: 48000,
@@ -33,12 +30,6 @@ const LAYOUTS: [Layout; 3] = [
         rate: 96000,
         chunk: 3072,
         nspk: 4,
-    },
-    Layout {
-        name: "mini",
-        rate: 48000,
-        chunk: 768,
-        nspk: 2,
     },
 ];
 const SCENARIOS: [(&str, usize); 3] = [("sine", 60), ("silence", 40), ("beats", 128)];
@@ -106,7 +97,7 @@ fn sample(
 }
 
 #[test]
-fn matches_the_golden_data() {
+fn matches_the_cxx_analyzer() {
     let mut golden = GOLDEN.lines().filter(|l| !l.starts_with('#'));
     let mut max_diff = 0f32;
     let mut beats = 0;
@@ -141,7 +132,7 @@ fn matches_the_golden_data() {
                     let d = (w - v).abs();
                     // Bit-exact on the host the data was made on (glibc 2.39); another glibc's
                     // sinf / cosf / log10f may differ by an ulp.
-                    assert!(d <= 1e-6, "{at}: column {j}: {v} vs golden {w}");
+                    assert!(d <= 1e-6, "{at}: column {j}: {v} vs C++ {w}");
                     max_diff = max_diff.max(d);
                 }
             }
@@ -149,5 +140,5 @@ fn matches_the_golden_data() {
     }
     assert!(golden.next().is_none(), "golden data has more chunks");
     assert!(beats > 10, "{beats} beats");
-    eprintln!("max difference to the golden data: {max_diff:e}, {beats} beats");
+    eprintln!("max difference to the C++ analyzer: {max_diff:e}, {beats} beats");
 }

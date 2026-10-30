@@ -120,8 +120,8 @@ fn run() -> u8 {
             return 1;
         }
     };
-    // Samples per spotter channel and chunk: the VQE output frame, which differs per preset.
-    let out_frame = match usize::try_from(vqe.frame()) {
+    // Samples per spotter channel and chunk: 512, 256 on the Mini 3 and Mini.
+    let frame = match usize::try_from(vqe.frame()) {
         Ok(n @ 1..) => n,
         _ => {
             out!("cfg: processing frame {}", vqe.frame());
@@ -167,7 +167,7 @@ fn run() -> u8 {
     let (nmic, nspk) = (mic_ch.len(), spk_ch.len());
     let mut raw = vec![0u8; frames * cap * 2];
     let mut input = vec![0i16; frames * cap];
-    let mut sbuf = vec![0i16; out_frame * nch];
+    let mut sbuf = vec![0i16; frame * nch];
     let mut mics = vec![0f32; frames * nmic];
     let mut spk = vec![0f32; frames * nspk];
     let (mut t, mut spk_e, mut out_e, mut next_report) = (0f64, 0f64, 0f64, 1f64);
@@ -201,7 +201,7 @@ fn run() -> u8 {
                     return 1;
                 }
             };
-            for (i, &x) in d.iter().take(out_frame).enumerate() {
+            for (i, &x) in d.iter().take(frame).enumerate() {
                 let v = x * 32768.0;
                 // Truncated, unlike the daemon's lrint: the C++ tool's conversion.
                 sbuf[i * nch + k] = if v > 32767.0 {
