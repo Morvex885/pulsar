@@ -1,8 +1,9 @@
 //! Buttons via evdev (devices matched by name in /proc/bus/input/devices, names per Model).
 //! Station Midi: touch keys "awinic_sar", mute switch "mute"; Station Lite 2: touch keys
-//! "aw9610x", mute switch "gpio-keys"; Station Mini 2: touch keys "sar0_pad0", no mute switch
-//! device: the latched mute line is a GPIO (`Model::mute_gpio`, low = muted), sampled every
-//! 100 ms. All use the same key codes and switch:
+//! "aw9610x", mute switch "gpio-keys"; Station Mini 3: touch keys "aw933xx", mute switch
+//! "gpio-keys"; Station Mini 2: touch keys "sar0_pad0", no mute switch device: the latched mute
+//! line is a GPIO (`Model::mute_gpio`, low = muted), sampled every 100 ms. All use the same key
+//! codes and switch:
 //!
 //! touch keys (capacitive, EV_KEY only; Midi KEY bitmap "40 0 0 0 0 0 0 0 c000000000000 0"):
 //!   KEY_VOICECOMMAND (582) -> Action     (maind: "ACTIVATE")

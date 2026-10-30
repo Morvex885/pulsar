@@ -23,8 +23,6 @@ use pulsar_audio::engine::{
 
 const DEFAULT_MODEL: &str = "/system/vendor/quasar/spotter_models/activation/alisa";
 const WAV_HEADER: u64 = 44;
-// Samples per spotter channel and chunk (the VQE output frame).
-const SPOTTER_FRAME: usize = 512;
 
 // Output is line by line, as the C++ tool's unbuffered stdout; a closed pipe is ignored.
 macro_rules! out {
@@ -121,6 +119,14 @@ fn run() -> u8 {
             return 1;
         }
     };
+    // Samples per spotter channel and chunk: 512, 256 on the Mini 3.
+    let frame = match usize::try_from(vqe.frame()) {
+        Ok(n @ 1..) => n,
+        _ => {
+            out!("cfg: processing frame {}", vqe.frame());
+            return 1;
+        }
+    };
 
     let conf = match SpotterConf::read(&lib, &model_dir) {
         Ok(c) => c,
@@ -160,7 +166,7 @@ fn run() -> u8 {
     let (nmic, nspk) = (mic_ch.len(), spk_ch.len());
     let mut raw = vec![0u8; frames * cap * 2];
     let mut input = vec![0i16; frames * cap];
-    let mut sbuf = vec![0i16; SPOTTER_FRAME * nch];
+    let mut sbuf = vec![0i16; frame * nch];
     let mut mics = vec![0f32; frames * nmic];
     let mut spk = vec![0f32; frames * nspk];
     let (mut t, mut spk_e, mut out_e, mut next_report) = (0f64, 0f64, 0f64, 1f64);
@@ -194,7 +200,7 @@ fn run() -> u8 {
                     return 1;
                 }
             };
-            for (i, &x) in d.iter().take(SPOTTER_FRAME).enumerate() {
+            for (i, &x) in d.iter().take(frame).enumerate() {
                 let v = x * 32768.0;
                 // Truncated, unlike the daemon's lrint: the C++ tool's conversion.
                 sbuf[i * nch + k] = if v > 32767.0 {

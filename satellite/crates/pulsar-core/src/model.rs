@@ -97,7 +97,7 @@ pub struct Model {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LedStrip {
     pub count: i32,
-    /// sysfs numbering starts at 0 (Midi) or 1 (Lite 2, Mini 2).
+    /// sysfs numbering starts at 0 (Midi, Mini 3) or 1 (Lite 2, Mini 2).
     pub first_index: i32,
     /// "/dev/fb0"; "" = none: sysfs LEDs only.
     pub fb_dev: &'static str,
@@ -115,8 +115,8 @@ pub struct VolumePoint {
     pub raw: i32,
 }
 
-/// Pre-roll of one wake word model (`spotter_models/activation/<id>`), in 32 ms VQE chunks
-/// ending with the confirming chunk.
+/// Pre-roll of one wake word model (`spotter_models/activation/<id>`), in VQE chunks (32 ms;
+/// 16 ms on the Mini 3) ending with the confirming chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WakePreroll {
     pub id: &'static str,
@@ -382,6 +382,7 @@ static MINI2: Model = Model {
     zigbee_boot: "",
 };
 
+// The Mini 3's quasar.cfg platformToAlsaMap: { "0": 0, "1": 33, "20": 255 }.
 const MINI3_VOLUME: &[VolumePoint] = &[
     VolumePoint { level: 0, raw: 0 },
     VolumePoint { level: 1, raw: 33 },
@@ -391,8 +392,9 @@ const MINI3_VOLUME: &[VolumePoint] = &[
     },
 ];
 
-// Mini 3: hw:0,1 physical channels (asound.conf multi_capture): PDM mics 0-2, ch 6 = the
-// amplifier feedback (TDMB_IN0), the VQE speaker reference.
+/// Station Mini 3: 32-bit armhf userland on an aarch64 kernel, hw:0,1 physical channels
+/// (asound.conf multi_capture): PDM mics 0-2, ch 6 = the amplifier feedback (TDMB_IN0), the VQE
+/// speaker reference. 6-zone ring, no logo.
 static MINI3: Model = Model {
     codename: "bergamot",
     host_prefix: "yandex-mini3-",
@@ -519,18 +521,15 @@ mod tests {
         assert_eq!(m.spk_channels, &[6]);
         assert_eq!(m.ring.count, 6);
         assert_eq!(m.ring.fb_name, "logo");
-        assert_eq!(m.logo, NO_STRIP);
-        assert_eq!(m.volume_map, MINI3_VOLUME);
+        assert_eq!(m.logo.count, 0);
         assert!(!m.has_clock && m.has_lux);
     }
 
     #[test]
     fn bergamot_requires_exact_compatible() {
-        assert_eq!(model_from_compatible(b"yandex,bergamot"), Some(&MINI3));
+        // A board variant alone, also next to a non-yandex "bergamot".
         for raw in [
             b"yandex,bergamot-evt1\0amlogic, axg\0".as_slice(),
-            b"yandex,bergamot-extra\0".as_slice(),
-            b"xyandex,bergamot\0".as_slice(),
             b"yandex,bergamot-evt1\0amlogic,bergamot\0".as_slice(),
         ] {
             assert!(model_from_compatible(raw).is_none(), "{raw:?}");

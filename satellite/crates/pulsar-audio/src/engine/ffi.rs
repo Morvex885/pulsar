@@ -7,8 +7,7 @@
 //! - VQE I/O is float in [-1, 1], frame-interleaved; Process consumes GetInputChunkSize() frames
 //!   (Midi: 3072 @ 96 kHz, Lite 2: 1536 @ 48 kHz, Mini 3: 768 @ 48 kHz) and yields
 //!   GetProcessingFrame() samples (512 @ 16 kHz, 256 on the Mini 3) per output channel; output
-//!   channel types follow
-//!   voicetech.AudioInputChannelType;
+//!   channel types follow voicetech.AudioInputChannelType;
 //! - spotter input is s16le interleaved in the channel order given to
 //!   spotter_create_multichannel.
 

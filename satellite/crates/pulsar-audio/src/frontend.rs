@@ -787,7 +787,10 @@ fn processing(
         }
 
         if shared.detect.load(Relaxed) {
-            first_stage_age = first_stage_age.map(|a| a + 1).filter(|&a| a < LEVEL_CHUNKS);
+            // Kept for the level window's 1.5 s, whatever the VQE chunk.
+            first_stage_age = first_stage_age
+                .map(|a| a + 1)
+                .filter(|&a| a * frame < LEVEL_CHUNKS * LEVEL_SAMPLES);
             let spotted = eng.feed_wake();
             match spotted.stage {
                 Stage::FirstStageHit => first_stage_age = Some(0),

@@ -189,8 +189,8 @@ README, "Обновление из Home Assistant"). What must not break:
   supervisor). Station tests follow `docs/stations.md` (lock, test instance, volume cap, cleanup).
 - No volume changes or test sounds on a live speaker without the owner's consent; tests that play
   audio must cap volume (≤ 0.2 on the Mixer scale, raw ≤ 82).
-- `/tmp` is tmpfs (1 GB RAM on the Midi, 237 MB on the Lite 2, 238 MB on the Mini 2): remove test
-  files afterwards.
+- `/tmp` is tmpfs (1 GB RAM on the Midi, 237 MB on the Lite 2, 238 MB on the Mini 2 and Mini 3):
+  remove test files afterwards.
 
 ## Yandex libraries (reverse-engineered C API, see `satellite/crates/pulsar-audio/src/engine/`)
 

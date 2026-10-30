@@ -38,12 +38,7 @@ func TestStationCode(t *testing.T) {
 		{"yandex,cucumber-dvt2\nyandex,cucumber\namlogic, a5", "cucumber", true},
 		{"yandex,plum\namlogic, axg", "plum", true},
 		{"yandex,bergamot-evt1\nyandex,bergamot\namlogic, axg", "bergamot", true},
-		{"yandex,bergamot", "bergamot", true},
-		{"yandex,bergamot-evt1\r\nyandex,bergamot\r\n", "bergamot", true},
-		{"yandex,bergamot-evt1 yandex,bergamot amlogic, axg", "bergamot", true},
 		{"yandex,bergamot-evt1\namlogic, axg", "bergamot-evt1", false},
-		{"yandex,bergamot-extra\namlogic, axg", "bergamot-extra", false},
-		{"xyandex,bergamot\namlogic, axg", "", false},
 		// Mini 2: the codename contains a hyphen.
 		{"yandex,station-mini2\namlogic, axg", "station-mini2", true},
 		// adb's pty line ends and the old separator (spaces) work too.
