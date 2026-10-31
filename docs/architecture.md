@@ -112,8 +112,8 @@ flowchart LR
    описаны у кода.
 6. Не держать `RefCell`-borrow через `.await`. Состояние актора хранится по значению в его задаче.
 7. Логи пишутся через `log::{debug,info,warn,error}!`, бэкенд — в `pulsar-core`. Утилита, чей
-   крейт-бинарь назван не `pulsar*`, вызывает `pulsar_core::add_own_target(module_path!())`, иначе
-   её записи считаются чужими.
+   крейт-бинарь назван не `pulsar*`, вызывает `pulsar_core::add_own_target(module_path!())` (рядом
+   с `init_logger()`, порядок не важен), иначе её записи считаются чужими.
 8. `unsafe` и все вызовы `libc` (включая `std::env::set_var`) живут только в модулях
    `sys.rs` / `ffi.rs` (в `pulsar-media` таким же FFI-модулем служит `gst.rs`),
    `pulsar-core/src/compat.rs` и в обработчике крашей.
