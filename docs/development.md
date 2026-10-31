@@ -8,16 +8,15 @@
 
 ## Сборка
 
-Список инструментов хоста и их установка — README,
-[«Сборка из исходников»](../README.md#сборка-из-исходников). Пины, совпадающие с CI
-(`.github/workflows/build.yml`):
+Инструменты хоста, их версии и установка — README,
+[«Сборка из исходников»](../README.md#сборка-из-исходников); версии cargo-zigbuild и zig там
+совпадают с CI (`.github/workflows/build.yml`). Чего в README нет:
 
-- **cargo-zigbuild 0.24.0** — для сборки под станции и для `make check`.
-- **zig 0.14.1** (другой путь — `make ZIG=/path/to/zig`). Сборка под архитектуру (`ARCH=…` и
-  цель по умолчанию) отклоняет zig 0.11–0.13: их armhf-сборки C++ в release (sendspin-cpp) падают
-  до `main`.
+- Сборка под архитектуру (`ARCH=…` и цель по умолчанию) отклоняет zig 0.11–0.13: их armhf-сборки
+  C++ в release (sendspin-cpp) падают до `main`.
 - **`make check` берёт zig любой версии**: clippy под станции только проверяет типы, а из C
-  компилирует лишь `ring` в build-скриптах. Для `make check` нужен и C-компилятор хоста (`cc`).
+  компилирует лишь `ring` в build-скриптах. cargo-zigbuild и C-компилятор хоста (`cc`) ему тоже
+  нужны.
 
 Выходы `make -C satellite` на каждую архитектуру, `satellite/build/<arch>/`:
 
@@ -58,8 +57,7 @@ go -C installer run . <ip>[:port]    # установить или обнови�
 ```
 
 В чекауте установщик сначала сам вызывает `make` (с `--ssh` — и `ssh/build.sh`). Флаги — usage в
-[`../installer/main.go`](../installer/main.go). Установщик пропускает станцию, где adb не root
-(`id -u`).
+[`../installer/main.go`](../installer/main.go).
 
 **Детект модели — три места, которые должны совпадать:** демон (`detect_model()` в
 [`../satellite/crates/pulsar-core/src/model.rs`](../satellite/crates/pulsar-core/src/model.rs)),
@@ -71,9 +69,9 @@ go -C installer run . <ip>[:port]    # установить или обнови�
 `/system/vendor/quasar/quasar.cfg` (почему одного id мало — [hardware.md, «Модели»](hardware.md#модели)).
 Новая модель добавляется во все три места.
 
-**Выбор ABI:** ставится `build/<arch>/pulsar` первой ABI модели из `abis()`, чей динамический
-загрузчик есть на станции; вторая ABI в `abis()` — только для userspace, действительно встреченного
-на этой модели (обоснование — комментарий у `abis()`).
+**Выбор сборки** (aarch64 или armhf) — комментарий у `abis()` в
+[`../installer/probe.go`](../installer/probe.go). Правило: вторая ABI в `abis()` — только для
+userspace, действительно встреченного на этой модели.
 
 **Раскладка `/data/pulsar`:** `pulsar`, `pulsar.prev`, `pulsar.bad`, `boot.sh`, `supervise.sh`,
 `ctl.sh`, `state.conf`, `api_key`, `enabled`, `sendspin/`, `zigbee-coordinator.ybl`,
@@ -99,7 +97,8 @@ go -C installer run . <ip>[:port]    # установить или обнови�
 ждёт каждый) → скрипт прошивки: `S97quasar` (Миди), `S99quasar` (Лайт 2; Мини 2 — по данным
 контрибьюторов), `S99onboot.sh` (Мини, по данным контрибьюторов) → `onboot.sh` (adbd через
 `activate_adb.sh check`, quasar в фоне; возвращается) → `S99zpulsar` → `boot.sh` в фоне →
-ожидание quasar, `q stop` → `supervise.sh`. Мини 3 (`bergamot`) поддерживают `boot.sh` и
+ожидание quasar, `/system/vendor/quasar/q stop` (`q` есть на Лайт 2; Мини 2 — по данным
+контрибьюторов) → `supervise.sh`. Мини 3 (`bergamot`) поддерживают `boot.sh` и
 установщик, но скрипт прошивки Мини 3 не записан. Условия, при которых `boot.sh` не трогает стек
 Яндекса, — в его заголовке и комментариях.
 
@@ -118,13 +117,12 @@ ssh root@<ip> 'cd /data/pulsar && cp pulsar pulsar.prev &&
 зависшего dmix lock); здесь он не пересказывается. Механизм зависшего dmix lock —
 [hardware.md, «Зависший dmix lock»](hardware.md#зависший-dmix-lock).
 
-Контракт строк лога `supervise.sh` с health check установщика (`healthCheck()` в
-[`../installer/deploy.go`](../installer/deploy.go)): после маркера установки в логе есть
-`=== start`, и начиная с первого из них — ровно одна такая строка (новый демон), процесс `pulsar`
-жив, а сбоем считаются `=== CRASH`, `=== exit` и `=== supervise`. Строка
-`=== alsa: removed stale dmix lock (…)`, которую
-`supervise.sh` пишет перед запуском, если что-то удалил, — штатная очистка и сбоем считаться не
-должна.
+Контракт строк лога (`supervise.sh`, crash-отчёт демона, маркер установщика) с health check
+установщика (`healthCheck()` в [`../installer/deploy.go`](../installer/deploy.go)): после маркера
+установки в логе есть `=== start`, и начиная с первого из них — ровно одна такая строка (новый
+демон), процесс `pulsar` жив, а сбоем считаются `=== CRASH` (пишет демон), `=== exit` и
+`=== supervise`. Строка `=== alsa: removed stale dmix lock (…)`, которую `supervise.sh` пишет перед
+запуском, если что-то удалил, — штатная очистка и сбоем считаться не должна.
 
 ## Обновления из HA
 

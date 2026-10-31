@@ -3,7 +3,7 @@
 Справочник по радио Zigbee Станции Миди: железо, внешние прошивки и бутлоадер Яндекса, форматы
 образов, карта flash, ключи `state.conf`, особенности стека и клиентов deCONZ. Здесь нет пересказа
 кода: поведение кода — в коде, обоснования — в комментариях у кода. Пошаговая работа с радио —
-skill `zigbee-radio`, правила для живых станций — docs/stations.md, пункт «Радио Zigbee».
+skill `zigbee-radio`, правила для живых станций — [stations.md](stations.md), пункт «Радио Zigbee».
 
 На Миди радио работает на собственной прошивке pulsar: это либо координатор сети с протоколом
 deCONZ для Zigbee2MQTT / ZHA, либо роутер в чужой сети (например, Zigbee2MQTT). Где что лежит:
@@ -13,8 +13,9 @@ deCONZ для Zigbee2MQTT / ZHA, либо роутер в чужой сети (�
   [`lib.rs`](../satellite/crates/pulsar-zigbee/src/lib.rs).
 - `../radio/` — прошивки pulsar на Telink Zigbee SDK (коммит закреплён в
   [`build.sh`](../radio/build.sh)), лицензия Apache-2.0 (см.
-  [`common/board_cfg.h`](../radio/common/board_cfg.h)). Сборка описана в
-  [«Сборка»](development.md#сборка).
+  [`common/board_cfg.h`](../radio/common/board_cfg.h)). Сборка — заголовок
+  [`../radio/build.sh`](../radio/build.sh) и
+  [README.md, «Сборка из исходников»](../README.md#сборка-из-исходников).
 
 ## Радио Миди
 

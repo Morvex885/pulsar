@@ -91,8 +91,9 @@ maind играет звук громкости (sound 45, SimpleVolumeTonePlayer
 слова до подтверждающего чанка.
 
 1. Замер: `frontend_probe` на станции, один говорящий в 1–2 м, отдельные слова для каждой модели
-   wake word. На каждое срабатывание печатается строка `wake timing:`; смысл полей — в `///` у
-   `SPEECH_END_RATIO`, `speech_end_chunks` и `preroll_chunks` в `frontend.rs`.
+   wake word. На каждое срабатывание печатается строка `wake timing:`; смысл полей — в коде у
+   `first_stage_age` (функция `processing`), `LevelHistory::speech_end`, `preroll_chunks` и
+   `Chunks` в `frontend.rs`.
 2. Значение берут с недолётом, чтобы само слово не попало в STT (HA его не вырезает, см.
    [«Голосовой ассистент HA (ESPHome)»](#голосовой-ассистент-ha-esphome)). Если слова заметно
    громче шумового пола (Лайт 2), берут самый короткий замер по громким словам. Если слова у

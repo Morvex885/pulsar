@@ -436,10 +436,9 @@ make -C satellite check                              # проверки на к�
 go -C installer run . 192.168.1.50                  # установщик из копии репозитория; сам вызывает make
 ```
 
-Makefile отказывается работать с zig 0.11–0.13. Результат: `satellite/build/<arch>/pulsar`
-(без отладочной информации — его и ставит установщик) и рядом `pulsar.debug` с
-символами для разбора отчётов о падениях. Версия берётся из `git describe` и видна в
-`pulsar --version` и в HA (сущность «Version»).
+Результат: `satellite/build/<arch>/pulsar` (без отладочной информации — его и ставит установщик) и
+рядом `pulsar.debug` с символами для разбора отчётов о падениях. Версия берётся из `git describe`
+и видна в `pulsar --version` и в HA (сущность «Version»).
 
 При первой сборке скачиваются зависимости: крейты Rust (версии зафиксированы в
 `satellite/Cargo.lock`) и sendspin-cpp с его библиотеками (`satellite/third_party/fetch.sh`, тоже

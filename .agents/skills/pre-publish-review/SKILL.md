@@ -13,12 +13,13 @@ description: Обязательное ревью перед git push, gh pr crea
 
 ## Диапазон
 
-`origin/main...HEAD` плюс контекст тронутых файлов (читать файлы целиком вокруг изменений).
+`origin/main...HEAD` (скрипту — `origin/main..HEAD`, см. шаг 0) плюс контекст тронутых файлов
+(читать файлы целиком вокруг изменений).
 Для релиза — от прошлого тега (`git describe --tags --abbrev=0 --match 'v*'`).
 
 ## Шаг 0: авторство
 
-`tools/check-authorship.sh <диапазон>` (в CI — job `commits`). Нарушение чинить:
+`tools/check-authorship.sh origin/main..HEAD` (для релиза — от прошлого тега; в CI — job `commits`). Нарушение чинить:
 `git commit --amend --reset-author` или rebase с удалением AI-трейлеров. Чужой `--author` не
 подставлять. Переписывание уже запушенной истории и force push — только с согласия пользователя.
 До кода 0 дальше не идти.

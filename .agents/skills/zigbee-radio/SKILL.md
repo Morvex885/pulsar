@@ -10,7 +10,7 @@ description: Сборка и прошивка Zigbee-радио Станции �
 
 ## 1. Сборка образов
 
-`radio/build.sh` (требования — комментарий в начале скрипта; нужны `libc6:i386`, `unzip`) →
+`radio/build.sh` (требования к системе — комментарий в начале скрипта) →
 `radio/out/zigbee-coordinator.ybl`, `radio/out/zigbee-router.ybl`.
 
 ## 2. Утилита на станции
@@ -26,24 +26,25 @@ description: Сборка и прошивка Zigbee-радио Станции �
 
 Радио держит либо демон, либо тестовый экземпляр, либо `zigbee_probe`: перед ним — `stop` и, если
 запускали, `test-stop`. Утилиту и образ отправить командой `push` (попадут в `/tmp/pulsar-test/`),
-запуск — по ssh.
+запуск — `ssh "$PULSAR_MIDI" /tmp/pulsar-test/zigbee_probe …` (то же ssh-назначение, что у
+`station.sh`).
 
 ## 3. Чтение
 
-Только по правилам пункта «Радио Zigbee»: `tools/deconz_read.py` против порта `zigbee_probe` или
-тестового экземпляра, не против живого демона.
+Только по правилам `docs/stations.md`, пункт «Радио Zigbee»: `tools/deconz_read.py` против порта
+`zigbee_probe` или тестового экземпляра, не против живого демона.
 
 ## 4. Прошивка (необратимо)
 
 1. Только после явного подтверждения пользователя в этой сессии; lock и `stop` — по `station-test`.
-2. Образ — только текущей роли из `state.conf` (`zigbee_role`, `docs/zigbee.md`, «Роли и
-   state.conf»); при `off` не прошивать.
+2. Образ — только текущей роли из `state.conf`; при роли `off` не прошивать
+   (`docs/stations.md`, пункт «Радио Zigbee»; образы — `docs/zigbee.md`, «Образы .ybl и бутлоадер»).
 3. `push` образа → `zigbee_probe flash /tmp/pulsar-test/<образ>` → `zigbee_probe info`.
-4. Проверка: версия в `info` совпадает с `version 0x…` из строки `writing …` команды `flash`;
-   семейство — старший байт версии: `0x50` роутер, `0x51` координатор. Иное — остановиться и
-   сообщить.
+4. Проверка: версия в `info` совпадает с `version 0x…` из строки `writing …` команды `flash`.
+   Расхождение — остановиться и сообщить.
 5. При `start` демон сверяет версию в радио с образом роли `/data/pulsar/zigbee-<роль>.ybl` и при
-   расхождении прошивает радио обратно (`decide` в `satellite/crates/pulsar-zigbee/src/service.rs`).
-   Образ другой версии живёт только до `start`.
+   расхождении прошивает радио обратно (`decide` в `satellite/crates/pulsar-zigbee/src/service.rs`,
+   там же исключения: нет образа, ранее отвергнутая версия). Образ другой версии живёт только до
+   такого `start`.
 6. Линии reset и boot по номеру GPIO не трогать (`docs/zigbee.md`, «Радио Миди»).
 7. Завершение — по `station-test`: `start` → `cleanup` → `unlock`.

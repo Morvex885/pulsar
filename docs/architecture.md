@@ -98,7 +98,7 @@
    - Символы dlopen резолвятся один раз в структуру указателей на функции.
    - Раскладки C-структур — `#[repr(C)]` с compile-time `assert!(core::mem::offset_of!(…) == …)`
      под `#[cfg(target_arch)]`.
-9. Комментарии в коде — [AGENTS.md, «Правила кода»](../AGENTS.md).
+9. Комментарии в коде — [AGENTS.md, «Правила кода»](../AGENTS.md#правила-кода).
 10. Должен проходить `make -C satellite check` (состав — target `check` в `satellite/Makefile`).
 
 ## Плавающая точка (FMA)

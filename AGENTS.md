@@ -53,7 +53,9 @@ radio/build.sh
 ssh/build.sh
 ```
 
-- Пины инструментов, выходы и версия — [docs/development.md, «Сборка»](docs/development.md#сборка).
+- Версии инструментов — [README.md, «Сборка из исходников»](README.md#сборка-из-исходников);
+  выходы, версия бинаря и ограничения на zig —
+  [docs/development.md, «Сборка»](docs/development.md#сборка).
 - `make -C satellite check` должен проходить. Хостовые тесты покрывают Rust-крейты и установщик;
   поведение железа проверяется на станции (skill `station-test`).
 - Перед `git push`, `gh pr create` и тегом `v*` пройти skill `pre-publish-review` до чистого раунда.
@@ -62,7 +64,8 @@ ssh/build.sh
 
 - **Акторы и неблокирующие handle** — [docs/architecture.md, «Модель
   исполнения»](docs/architecture.md#модель-исполнения).
-- **`unsafe` и libc** — только в модулях из п. 8 «Модели исполнения».
+- **`unsafe` и libc** — только в модулях из
+  [docs/architecture.md, «Модель исполнения»](docs/architecture.md#модель-исполнения), п. 8.
 - **`mul_add` не добавлять и не убирать** — [«Плавающая точка
   (FMA)»](docs/architecture.md#плавающая-точка-fma).
 - **`state.conf` совместим с `.prev`** — [«state.conf и откат на
@@ -101,9 +104,10 @@ ssh/build.sh
   Проприетарные библиотеки, модели и конфиги прошивки — тоже.
 - **Авторство.** Автор и коммиттер — человек, от чьего имени идёт работа, со своей настроенной git
   identity. Агент не меняет `git config user.*` и не подставляет чужой `--author`. В author,
-  committer и `Co-authored-by:` нет AI (Claude, Codex, Copilot, Cursor, Devin, Gemini, Aider, Kimi
-  …), в сообщении нет строк «Generated with …»; `Co-authored-by:` людей разрешён. Проверка —
-  `tools/check-authorship.sh <A..B>`, в CI — job `commits`.
+  committer и трейлерах `*-by:` (`Co-authored-by:`, `Assisted-by:` …) нет AI (Claude, Codex,
+  Copilot, Cursor, Devin, Gemini, Aider, Kimi …); в сообщении нет подписей «Generated with <AI>».
+  `Co-authored-by:` людей разрешён. Проверка — `tools/check-authorship.sh <A..B>`, в CI — job
+  `commits`.
 
 ## Безопасность станций
 
@@ -124,8 +128,9 @@ ssh/build.sh
 - Не открывать ESPHome API к станции, которую использует Home Assistant: тест — на отдельном бинаре
   на другом порту при остановленном сервисе (`ctl.sh disable` или остановка супервизора).
 - Без согласия владельца — никаких изменений громкости и тестовых звуков на живой колонке; тесты со
-  звуком ограничивают громкость: ≤ 0.2 на шкале `Mixer`, raw ≤ 82.
+  звуком ограничивают громкость: ≤ 0.2 на шкале `Mixer`, raw ≤ 82; выше — только с явного
+  разрешения владельца.
 - `/tmp` — небольшой tmpfs (размеры — [docs/hardware.md, «RAM и
   tmpfs»](docs/hardware.md#ram-и-tmpfs)): тестовые файлы удалять.
-- Живые тесты — только по [docs/stations.md](docs/stations.md) (lock, тестовый экземпляр, лимит
-  громкости, очистка), процедура — skill `station-test`.
+- Живые тесты — только по [docs/stations.md](docs/stations.md) (lock, тестовый экземпляр, очистка),
+  процедура — skill `station-test`.

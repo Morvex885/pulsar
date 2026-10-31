@@ -36,7 +36,8 @@ description: Выпуск релиза pulsar (тег vX.Y.Z, GitHub release). �
 
 1. Run по тегу (`gh run watch` без ID в неинтерактивной сессии не работает):
    `id=$(gh run list --workflow build --branch vX.Y.Z --limit 1 --json databaseId -q '.[0].databaseId')`,
-   затем `gh run watch "$id" --exit-status`.
+   затем `gh run watch "$id" --exit-status`. Сразу после push run может ещё не появиться (`id`
+   пуст): подождать и повторить `gh run list`.
 2. Упал — `gh run view "$id" --log-failed`, сообщить пользователю, релиз не править молча.
 3. `gh release view vX.Y.Z --json assets`: набор ассетов — как в `docs/development.md`,
    «CI и релизы», и в `.github/workflows/build.yml`, job `release` (шаг `gh release create`).
