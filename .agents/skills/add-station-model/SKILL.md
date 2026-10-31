@@ -27,8 +27,8 @@ description: >-
 1. Страница модели в вики: https://hackalice.me/devices .
 2. На станции: `uname -a`, `cat /proc/device-tree/model`, `cat /proc/device-tree/compatible`,
    `cat /proc/device-tree/amlogic-dt-id`, `cat /proc/mtd`, `cat /proc/cpuinfo`,
-   `ls /sys/bus/i2c/devices`, `cat /system/vendor/quasar/VERSION`, `deviceType` из
-   `/system/vendor/quasar/quasar.cfg`.
+   `cat /proc/meminfo`, `df /tmp`, `ls /sys/bus/i2c/devices`,
+   `cat /system/vendor/quasar/VERSION`, `deviceType` из `/system/vendor/quasar/quasar.cfg`.
 3. Userland: загрузчики `ls /lib/ld-linux-*`, версия glibc, `aplay -l`, `arecord -l`,
    `/etc/asound.conf`, пресет VQE, каталог `spotter_models/`.
 4. Периферия: `/sys/class/leds`, `/dev/fb*`, `/proc/bus/input/devices`, датчик освещённости,
@@ -81,12 +81,13 @@ description: >-
 
 ## 4. Документация
 
-- Колонка в таблице `docs/hardware.md`, «Модели»: с источником (контрибьютор и PR) и ссылкой на
-  вики.
+- `docs/hardware.md`, «Модели»: колонка модели с источником (контрибьютор и PR) и ссылкой на вики.
+- `docs/hardware.md`, «Источники»: пункт модели (контрибьютор, PR, вики).
+- `docs/hardware.md`, «RAM и tmpfs»: строка модели.
 - Экспериментальная модель — отдельный `docs/<model>.md` по образцу `docs/mini3.md`.
 - `README.md`: таблица моделей в шапке, «Требования» (модель и прошивка), раздел «Модели:
-  особенности» и остальные перечисления моделей (`grep -n '<соседняя модель>' README.md`) —
-  добавить новую модель.
+  особенности», список имён устройств `yandex-<префикс>-xxxxxx` в «Установке» и остальные
+  перечисления моделей (`grep -n '<соседняя модель>' README.md`) — добавить новую модель.
 - Правила текста — `AGENTS.md`, «Документация».
 
 ## 5. Проверка

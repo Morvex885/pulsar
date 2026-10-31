@@ -90,8 +90,9 @@ userspace, действительно встреченного на этой м�
 - `state.conf` — формат и совместимость с `.prev`: [architecture.md, «state.conf и откат на
   .prev»](architecture.md#stateconf-и-откат-на-prev).
 - `api_key` — Noise PSK ESPHome: base64 от 32 байт, режим 0600. Пишут автонастройка HA (по API) или
-  `ctl.sh api-key`. Нет файла — API без шифрования; повреждённый файл — API не поднимается (fail
-  closed); детали — [`../satellite/crates/pulsar-esphome/src/key.rs`](../satellite/crates/pulsar-esphome/src/key.rs).
+  `ctl.sh api-key`. Нет файла — API без шифрования; повреждённый файл — сервер работает, но не
+  пускает ни одного клиента (fail closed: случайный ключ вместо отката на plaintext); детали —
+  [`../satellite/crates/pulsar-esphome/src/key.rs`](../satellite/crates/pulsar-esphome/src/key.rs).
 - `enabled` — пока файл есть, `boot.sh` и супервизор держат pulsar вместо стека Яндекса.
 - `asound.conf` (Мини) пишет только установщик. Обновление из HA меняет лишь бинарник и образы
   радио, поэтому правка `satellite/deploy/asound.conf` доходит до станции только при повторном
