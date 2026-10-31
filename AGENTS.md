@@ -37,7 +37,10 @@ Assistant через ESPHome Native API, Music Assistant через Sendspin, н
 | тесты на станциях | [docs/stations.md](docs/stations.md) | `station-test` |
 | поведение для пользователя | [README.md](README.md) | — |
 
-Каталоги и крейты — [docs/architecture.md, «Workspace»](docs/architecture.md#workspace).
+Каталоги: `satellite/` — [docs/architecture.md, «Workspace»](docs/architecture.md#workspace);
+`installer/`, `satellite/deploy/`, `ssh/` — [docs/development.md](docs/development.md); `radio/` —
+[docs/zigbee.md](docs/zigbee.md); `tools/` — [docs/stations.md](docs/stations.md) и skill
+`station-test`.
 
 ## Сборка и проверки
 
