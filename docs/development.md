@@ -8,9 +8,22 @@
 
 ## Сборка
 
-Инструменты хоста, их версии и установка — README,
-[«Сборка из исходников»](../README.md#сборка-из-исходников); версии cargo-zigbuild и zig там
-совпадают с CI (`.github/workflows/build.yml`).
+Сборка — на Linux или WSL2 (кросс-компиляция через cargo-zigbuild; на macOS демон не собирается).
+Здесь единственный источник версий инструментов; они совпадают с CI
+(`.github/workflows/build.yml`):
+
+- [rustup](https://rustup.rs/) — сам ставит нужную версию Rust и обе цели из
+  `satellite/rust-toolchain.toml`;
+- cargo-zigbuild 0.24.0: `cargo install cargo-zigbuild --locked --version 0.24.0`;
+- [zig 0.14.1](https://ziglang.org/download/) — компоновщик и C/C++-компилятор для станций; другой
+  zig — `make -C satellite ZIG=/путь/к/zig`. Цель armhf — glibc 2.23 (userland Мини); на Лайт 2,
+  Мини 2, Мини 3 и образах Миди с 32-битным userland glibc 2.30, и сборка запускается и там.
+  Цель aarch64 — glibc 2.36 (обычный userland Миди);
+- `make`, `git`, `curl`, `patch`, компилятор C для хоста (`cc`); для sendspin-cpp (единственная
+  C++-часть сборки) — `cmake` ≥ 3.16 и `ninja` (можно поставить через `uv tool install cmake
+  ninja`);
+- [Go](https://go.dev/dl/) 1.27+ (`installer/go.mod`) — для установщика из копии репозитория;
+- `adb` из Android platform-tools.
 
 - **`make check` берёт zig любой версии**: clippy под станции только проверяет типы, а из C
   компилирует лишь `ring` в build-скриптах. cargo-zigbuild и C-компилятор хоста (`cc`) ему тоже

@@ -45,6 +45,30 @@
 | `update_probe` | HTTPS-клиент и апдейтер без демона |
 | `zigbee_probe` | радио Миди без демона: координатор с сервером deCONZ, идентификация и запись прошивки |
 
+### Потоки данных
+
+Схема демона; число микрофонов, PCM захвата и его частота зависят от модели
+([hardware.md, «Модели»](hardware.md#модели)).
+
+```mermaid
+flowchart LR
+  mics[микрофоны + опорный сигнал динамиков<br/>ALSA-захват по модели] --> vqe[VQE Яндекса<br/>libyandex_evil.so]
+  vqe --> wake[спотер «Алиса»]
+  vqe --> cmd[спотер команд]
+  vqe -->|16 кГц| api[ESPHome API :6053]
+  wake --> ctl[Controller]
+  cmd --> ctl
+  api <--> ha[Home Assistant]
+  ctl --> player[GStreamer прошивки]
+  ss[Sendspin :8928] <--> ma[Music Assistant]
+  ss --> alsa[ALSA dmix]
+  player --> alsa
+  ctl --> hw[кольцо, часы/датчик — если есть, кнопки]
+  zb[Zigbee-модуль Telink<br/>/dev/ttyS2] <--> dz[deCONZ :6638]
+  dz <--> zha[ZHA / Zigbee2MQTT]
+  zb -.->|роль Router| z2m[чужая сеть Zigbee<br/>Zigbee2MQTT / ZHA]
+```
+
 ## Модель исполнения
 
 Нормативно для всех крейтов; код ссылается на номера пунктов.

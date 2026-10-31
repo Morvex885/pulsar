@@ -14,8 +14,8 @@ deCONZ для Zigbee2MQTT / ZHA, либо роутер в чужой сети (�
 - `../radio/` — прошивки pulsar на Telink Zigbee SDK (коммит закреплён в
   [`build.sh`](../radio/build.sh)), лицензия Apache-2.0 (см.
   [`common/board_cfg.h`](../radio/common/board_cfg.h)). Сборка — заголовок
-  [`../radio/build.sh`](../radio/build.sh) и
-  [README.md, «Сборка из исходников»](../README.md#сборка-из-исходников).
+  [`../radio/build.sh`](../radio/build.sh) (требования к системе) и
+  [«Сборка»](development.md#сборка) (инструменты хоста).
 
 ## Радио Миди
 

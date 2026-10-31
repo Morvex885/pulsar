@@ -37,8 +37,7 @@ Assistant через ESPHome Native API, Music Assistant через Sendspin, н
 | тесты на станциях | [docs/stations.md](docs/stations.md) | `station-test` |
 | поведение для пользователя | [README.md](README.md) | — |
 
-Каталоги и крейты — [docs/architecture.md, «Workspace»](docs/architecture.md#workspace) и
-[README.md, «Как это устроено»](README.md#как-это-устроено).
+Каталоги и крейты — [docs/architecture.md, «Workspace»](docs/architecture.md#workspace).
 
 ## Сборка и проверки
 
@@ -53,8 +52,7 @@ radio/build.sh
 ssh/build.sh
 ```
 
-- Версии инструментов — [README.md, «Сборка из исходников»](README.md#сборка-из-исходников);
-  выходы, версия бинаря и zig для `make check` —
+- Версии инструментов, выходы, версия бинаря и zig для `make check` —
   [docs/development.md, «Сборка»](docs/development.md#сборка).
 - `make -C satellite check` должен проходить. Хостовые тесты покрывают Rust-крейты и установщик;
   поведение железа проверяется на станции (skill `station-test`).
