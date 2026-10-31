@@ -543,3 +543,17 @@ port on the station.
   make / `ssh/build.sh` in a checkout). The pure parts (init script `initScript`, rootfs check
   `rootfsGuard` / `rootMountRW`, rootkeeper clean-up `unhookRootkeeper` / `hookActive` /
   `checkRootkeeper`) are covered by `autostart_test.go` and `rootkeeper_test.go`; keep them pure.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues at RisinT96/pulsar. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default triage labels are used. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses a single-context layout. See `docs/agents/domain.md`.
