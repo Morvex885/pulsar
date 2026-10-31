@@ -436,7 +436,7 @@ make -C satellite check                              # проверки на к�
 go -C installer run . 192.168.1.50                  # установщик из копии репозитория; сам вызывает make
 ```
 
-Makefile отказывается работать с zig 0.13 и более ранними. Результат: `satellite/build/<arch>/pulsar`
+Makefile отказывается работать с zig 0.11–0.13. Результат: `satellite/build/<arch>/pulsar`
 (без отладочной информации — его и ставит установщик) и рядом `pulsar.debug` с
 символами для разбора отчётов о падениях. Версия берётся из `git describe` и видна в
 `pulsar --version` и в HA (сущность «Version»).
@@ -599,7 +599,8 @@ satellite/
 installer/                установщик pulsar-install (Go): поиск колонок, adb, установка, миграция
 radio/                    прошивки координатора и роутера для Zigbee-модуля Миди (Telink Zigbee SDK)
 ssh/                      сборка и запуск dropbear
-docs/                     архитектура демона и протокол тестов на колонках (для разработчиков)
+docs/                     справочник для разработчиков: архитектура, голос, железо, Zigbee, разработка, тесты на колонках
+AGENTS.md, .agents/skills/ правила и процедуры (skills) для разработчиков и агентов
 tools/                    station.sh и тестовые клиенты ESPHome, Sendspin и deCONZ (Python)
 ```
 

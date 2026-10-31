@@ -37,12 +37,8 @@ Assistant через ESPHome Native API, Music Assistant через Sendspin, н
 | тесты на станциях | [docs/stations.md](docs/stations.md) | `station-test` |
 | поведение для пользователя | [README.md](README.md) | — |
 
-Каталоги: `satellite/` — Cargo workspace демона (`crates/`, `deploy/` — `dist.sh` на хосте,
-`boot.sh` / `supervise.sh` / `ctl.sh` на станции, `third_party/` — закреплённые зависимости и
-обвязка sendspin-cpp); `installer/` — `pulsar-install` (Go): поиск станций, adb, установка, health
-check; `radio/` — прошивки Zigbee-радио Миди на Telink Zigbee SDK (C); `ssh/` — статический
-dropbear; `tools/` — `station.sh` и тестовые клиенты `esphome_check.py`, `sendspin_server.py`,
-`deconz_read.py`.
+Каталоги и крейты — [docs/architecture.md, «Workspace»](docs/architecture.md#workspace) и
+[README.md, «Как это устроено»](README.md#как-это-устроено).
 
 ## Сборка и проверки
 
@@ -66,14 +62,13 @@ ssh/build.sh
 
 - **Акторы и неблокирующие handle** — [docs/architecture.md, «Модель
   исполнения»](docs/architecture.md#модель-исполнения).
-- **`unsafe` и libc** только в `sys.rs` / `ffi.rs` / `gst.rs`, `pulsar-core/src/compat.rs` (шим
-  `getrandom`) и crash-обработчике — там же, п. 8.
+- **`unsafe` и libc** — только в модулях из п. 8 «Модели исполнения».
 - **`mul_add` не добавлять и не убирать** — [«Плавающая точка
   (FMA)»](docs/architecture.md#плавающая-точка-fma).
-- **`state.conf` совместим с `.prev`**, новые ключи — с безопасными умолчаниями, когда нужен
-  `persist_now()` — [«state.conf и откат на .prev»](docs/architecture.md#stateconf-и-откат-на-prev).
-- **Зависимости** пинятся в `[workspace.dependencies]` (`satellite/Cargo.toml`); новая внешняя
-  зависимость — только с обоснованием.
+- **`state.conf` совместим с `.prev`** — [«state.conf и откат на
+  .prev»](docs/architecture.md#stateconf-и-откат-на-prev).
+- **Зависимости** пинятся точной версией в `[workspace.dependencies]` (`satellite/Cargo.toml`);
+  новая внешняя зависимость — только с обоснованием.
 - **Код под архитектуру** целиком, со всеми хелперами, под `#[cfg(target_arch = …)]`: мёртвого кода
   на других целях нет (`clippy -D warnings` на хосте и обеих станционных целях).
 - **Комментарии** объясняют факты устройства, ограничения и «почему», а не «что». Новые — на

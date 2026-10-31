@@ -1,41 +1,49 @@
 ---
 name: zigbee-radio
-description: Прошивка и чтение Zigbee-радио Станции Миди (Telink B91): сборка radio/build.sh, zigbee_probe info/flash, tools/deconz_read.py. Use for zigbee firmware, radio flash, zigbee_probe, ybl, coordinator, router, deconz, Z2M, ZHA.
+description: Сборка и прошивка Zigbee-радио Станции Миди (Telink B91), чтение через zigbee_probe и tools/deconz_read.py. Ключевые слова: zigbee firmware, radio flash, zigbee_probe, ybl, coordinator, router, deconz, Z2M, ZHA.
 ---
 
 # Zigbee-радио (Миди)
 
-Факты (роли, протокол, граничные случаи) — `docs/zigbee.md`; сборка — `docs/development.md`, «Сборка».
-Всё на станции — по skill `station-test` (lock + `stop`).
+Факты (роли, протокол, образы) — `docs/zigbee.md`. Всё на станции — по skill `station-test`; правила
+чтения и прошивки — `docs/stations.md`, пункт «Радио Zigbee».
 
 ## 1. Сборка образов
 
-`radio/build.sh` (нужны `libc6:i386`, `unzip`; подробности — комментарий в начале скрипта) →
+`radio/build.sh` (требования — комментарий в начале скрипта; нужны `libc6:i386`, `unzip`) →
 `radio/out/zigbee-coordinator.ybl`, `radio/out/zigbee-router.ybl`.
 
 ## 2. Утилита на станции
 
-`zigbee_probe` из `satellite/crates/pulsar-zigbee/src/bin/zigbee_probe.rs` (`make ARCH=<arch> tools`):
+`zigbee_probe` (`satellite/crates/pulsar-zigbee/src/bin/zigbee_probe.rs`):
+`make -C satellite ARCH=<arch> tools` → `satellite/build/<arch>/tools/zigbee_probe`
+(`AGENTS.md`, «Сборка и проверки»). Режимы:
 
 - `zigbee_probe info` — версия работающей прошивки;
-- `zigbee_probe [port]` — deCONZ-сервер прошивки-координатора (по умолчанию 6639; демон — 6638);
-- `zigbee_probe flash <image.ybl>` — запись образа.
+- `zigbee_probe [port]` — deCONZ-сервер прошивки-координатора (порт по умолчанию — в заголовке
+  файла);
+- `zigbee_probe flash <image.ybl>` — запись образа; в выводе строка `writing … (version 0x…)`.
 
-Демон не должен работать в роли Zigbee: оба драйвят один `ttyS2` (`stop` обязателен).
+Радио держит либо демон, либо тестовый экземпляр, либо `zigbee_probe`: перед ним — `stop` и, если
+запускали, `test-stop`. Утилиту и образ отправить командой `push` (попадут в `/tmp/pulsar-test/`),
+запуск — по ssh.
 
-## 3. Чтение (безопасно)
+## 3. Чтение
 
-- Только `tools/deconz_read.py` против порта `zigbee_probe` (при остановленном сервисе) или тестового
-  экземпляра (16638). **Никогда против 6638** живого демона: подключение вытесняет Z2M/ZHA.
-- Запрещены: zigpy, `ControllerApplication`, write parameter, смена network state.
+Только по правилам пункта «Радио Zigbee»: `tools/deconz_read.py` против порта `zigbee_probe` или
+тестового экземпляра, не против живого демона.
 
 ## 4. Прошивка (необратимо)
 
-- Только после явного подтверждения пользователя в этой сессии.
-- Шить только образ текущей роли из `/data/pulsar/state.conf` (`zigbee_role=`):
-  `pulsar-coordinator` → `zigbee-coordinator.ybl`, `router` → `zigbee-router.ybl`.
-  Роль `off` — не шить.
-- GPIO по номеру не трогать; сброс и boot-линии знает только `zigbee_probe`.
-- После прошивки `zigbee_probe info`: семейство `0x50` — роутер, `0x51` — координатор.
-  Другое значение — остановиться, сообщить.
-- Завершение — по `station-test`: `start` → `cleanup` → `unlock`.
+1. Только после явного подтверждения пользователя в этой сессии; lock и `stop` — по `station-test`.
+2. Образ — только текущей роли из `state.conf` (`zigbee_role`, `docs/zigbee.md`, «Роли и
+   state.conf»); при `off` не прошивать.
+3. `push` образа → `zigbee_probe flash /tmp/pulsar-test/<образ>` → `zigbee_probe info`.
+4. Проверка: версия в `info` совпадает с `version 0x…` из строки `writing …` команды `flash`;
+   семейство — старший байт версии: `0x50` роутер, `0x51` координатор. Иное — остановиться и
+   сообщить.
+5. При `start` демон сверяет версию в радио с образом роли `/data/pulsar/zigbee-<роль>.ybl` и при
+   расхождении прошивает радио обратно (`decide` в `satellite/crates/pulsar-zigbee/src/service.rs`).
+   Образ другой версии живёт только до `start`.
+6. Линии reset и boot по номеру GPIO не трогать (`docs/zigbee.md`, «Радио Миди»).
+7. Завершение — по `station-test`: `start` → `cleanup` → `unlock`.

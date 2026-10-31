@@ -440,7 +440,8 @@ static MINI2: Model = Model {
     mute_gpio: 414,
     action_key: 582,
     mute_key: 0,
-    // This firmware's GStreamer has no MP3 decoder; every earcon ships as .opus.
+    // В GStreamer этой прошивки нет декодера MP3, поэтому earcons берутся в .opus; наличие
+    // volume_sound.opus на станции не подтверждено.
     error_sound: "ru-RU/playback_error.opus",
     wake_sound: "common/spotter_start.opus",
     cancel_sound: "common/spotter_cancel.opus",

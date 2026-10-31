@@ -63,7 +63,7 @@ go -C installer run . <ip>[:port]    # установить или обнови�
 
 **Детект модели — три места, которые должны совпадать:** демон (`detect_model()` в
 [`../satellite/crates/pulsar-core/src/model.rs`](../satellite/crates/pulsar-core/src/model.rs)),
-установщик (`modelName()` / `abis()` / `stationCode()` в
+установщик (`modelName()` / `abis()` / `stationCode()` и особый маркер Мини в `probe()` в
 [`../installer/probe.go`](../installer/probe.go)) и
 [`../satellite/deploy/boot.sh`](../satellite/deploy/boot.sh) (список кодовых имён `yandex,<codename>`
 из `/proc/device-tree/compatible`). У Мини записи `yandex,*` нет, и все три места требуют ОБА
@@ -100,8 +100,8 @@ go -C installer run . <ip>[:port]    # установить или обнови�
 контрибьюторов), `S99onboot.sh` (Мини, по данным контрибьюторов) → `onboot.sh` (adbd через
 `activate_adb.sh check`, quasar в фоне; возвращается) → `S99zpulsar` → `boot.sh` в фоне →
 ожидание quasar, `q stop` → `supervise.sh`. Мини 3 (`bergamot`) поддерживают `boot.sh` и
-установщик, но скрипт прошивки Мини 3 не записан ([mini3.md](mini3.md)). Условия, при которых
-`boot.sh` не трогает стек Яндекса, — в его заголовке и комментариях.
+установщик, но скрипт прошивки Мини 3 не записан. Условия, при которых `boot.sh` не трогает стек
+Яндекса, — в его заголовке и комментариях.
 
 **Ручная замена бинарника** (ssh — после `pulsar-install --ssh`; через adb — `adb push`):
 
@@ -111,19 +111,17 @@ ssh root@<ip> 'cd /data/pulsar && cp pulsar pulsar.prev &&
   mv pulsar.new pulsar && ./ctl.sh restart'
 ```
 
-Рабочий бинарник сохраняется как `.prev` до замены — на нём держится автоматический откат.
-
 ## Супервизор
 
 Контракт — заголовок [`../satellite/deploy/supervise.sh`](../satellite/deploy/supervise.sh)
-(коды выхода, короткие сбои, откат на `.prev`, возврат стека Яндекса, ротация лога, очистка stale
-dmix lock); здесь он не пересказывается. Exit 0 — не сбой, только если демон проработал не меньше
-`MINUP` секунд; exit 0 раньше считается коротким сбоем. Механизм stale dmix lock —
-[hardware.md, «Stale dmix lock»](hardware.md#stale-dmix-lock).
+(коды выхода, короткие сбои, откат на `.prev`, возврат стека Яндекса, ротация лога, очистка
+зависшего dmix lock); здесь он не пересказывается. Механизм зависшего dmix lock —
+[hardware.md, «Зависший dmix lock»](hardware.md#зависший-dmix-lock).
 
 Контракт строк лога `supervise.sh` с health check установщика (`healthCheck()` в
-[`../installer/deploy.go`](../installer/deploy.go)): в логе нового демона (после маркера установки
-и его `=== start`) сбоем считаются `=== CRASH`, `=== exit` и `=== supervise`. Строка
+[`../installer/deploy.go`](../installer/deploy.go)): после маркера установки в логе есть
+`=== start`, и начиная с первого из них — ровно одна такая строка (новый демон), процесс `pulsar`
+жив, а сбоем считаются `=== CRASH`, `=== exit` и `=== supervise`. Строка
 `=== alsa: removed stale dmix lock (…)`, которую
 `supervise.sh` пишет перед запуском, если что-то удалил, — штатная очистка и сбоем считаться не
 должна.
@@ -156,10 +154,9 @@ dmix lock); здесь он не пересказывается. Exit 0 — не
 
 ## Диагностика
 
-При падении демон пишет в лог (`/tmp/pulsar.log`) отчёт, начинающийся с `=== CRASH`. Бинарник
-собран non-PIE (`-C relocation-model=static`), поэтому адреса в отчёте абсолютные и разбираются
-`addr2line -f -e` по `satellite/build/<arch>/pulsar.debug` той же сборки (для релиза —
-`pulsar-<arch>.debug`). `handler=` — адрес `pulsar_crash_handler`; aarch64 добавляет цепочку
-frame pointer'ов (`fp:`), armhf даёт только pc/lr. Формат — заголовок
-[`../satellite/crates/pulsar/src/crash.rs`](../satellite/crates/pulsar/src/crash.rs); процедура
-разбора — skill `crash-decode`.
+При падении демон пишет в лог (`/tmp/pulsar.log`) отчёт, начинающийся с `=== CRASH`. Контракт:
+бинарник собран non-PIE (`-C relocation-model=static`), поэтому адреса в отчёте абсолютные и
+разбираются `addr2line -f -e` только по `pulsar.debug` той же сборки
+(`satellite/build/<arch>/pulsar.debug`; для релиза — ассет `pulsar-<arch>.debug`). Формат отчёта —
+заголовок [`../satellite/crates/pulsar/src/crash.rs`](../satellite/crates/pulsar/src/crash.rs);
+процедура разбора — skill `crash-decode`.

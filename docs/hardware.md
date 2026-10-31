@@ -8,20 +8,19 @@
 ## Источники
 
 - **Миди и Лайт 2** — станции мейнтейнера. По этим двум моделям данные авторитетны.
-- **Мини 2** — данные контрибьюторов: [#9](https://github.com/Morvex885/pulsar/issues/9) (ste4ik),
-  [#43](https://github.com/Morvex885/pulsar/issues/43) (станция из
-  [#38](https://github.com/Morvex885/pulsar/issues/38)).
-- **Мини 3** — данные контрибьютора из [#30](https://github.com/Morvex885/pulsar/issues/30)
+- **Мини 2** — данные контрибьюторов: PR [#9](https://github.com/Morvex885/pulsar/pull/9)
+  (ste4ik) и станция из issue [#38](https://github.com/Morvex885/pulsar/issues/38) (данные —
+  в PR [#43](https://github.com/Morvex885/pulsar/pull/43)).
+- **Мини 3** — данные контрибьютора из PR [#30](https://github.com/Morvex885/pulsar/pull/30)
   (andytrofimov). Модель экспериментальная, её профиль описан в [mini3.md](mini3.md).
-- **Мини** (первое поколение) — данные контрибьютора из
-  [#35](https://github.com/Morvex885/pulsar/issues/35) (devqcf).
+- **Мини** (первое поколение) — данные контрибьютора из PR
+  [#35](https://github.com/Morvex885/pulsar/pull/35) (devqcf).
 
 Данные контрибьюторов здесь не перепроверены, и вики по этим моделям может оказаться точнее:
-[Миди](https://hackalice.me/devices/station-midi/),
-[Лайт 2](https://hackalice.me/devices/station-lite2/),
 [Мини 2](https://hackalice.me/devices/station-mini2/),
 [Мини 3](https://hackalice.me/devices/station-mini3/),
-[Мини](https://hackalice.me/devices/station-mini/).
+[Мини](https://hackalice.me/devices/station-mini/). Вики по Миди и Лайт 2 — в строке «Вики»
+таблицы [«Модели»](#модели).
 
 ## Библиотеки Яндекса (C API)
 
@@ -64,7 +63,7 @@ Wake word, командный спотер и эхоподавление раб�
 
 | | Миди (`cucumber`) | Лайт 2 (`plum`) | Мини 2 (`station-mini2`) | Мини (`yandexmini`) |
 |---|---|---|---|---|
-| Источник | станция мейнтейнера | станция мейнтейнера | контрибьюторы: [#9](https://github.com/Morvex885/pulsar/issues/9), [#43](https://github.com/Morvex885/pulsar/issues/43) | контрибьютор: [#35](https://github.com/Morvex885/pulsar/issues/35) |
+| Источник | станция мейнтейнера | станция мейнтейнера | контрибьюторы, не перепроверено: [#9](https://github.com/Morvex885/pulsar/pull/9), станция из [#38](https://github.com/Morvex885/pulsar/issues/38) | контрибьютор, не перепроверено: [#35](https://github.com/Morvex885/pulsar/pull/35) |
 | Вики | [station-midi](https://hackalice.me/devices/station-midi/) | [station-lite2](https://hackalice.me/devices/station-lite2/) | [station-mini2](https://hackalice.me/devices/station-mini2/) | [station-mini](https://hackalice.me/devices/station-mini/) |
 | SoC / userland | Amlogic A5, aarch64, glibc 2.36; на части образов прошивки userland 32-bit armhf | Amlogic AXG, Cortex-A53, userland 32-bit armhf, glibc 2.30, ядро 4.9 | Amlogic AXG, ядро aarch64 4.9.68, userland 32-bit armhf, glibc 2.30 | Amlogic AXG (`amlogic-dt-id = axg_s420_v03` — id референсной платы Amlogic S420, не яндексовский), Cortex-A53, userland 32-bit armhf, glibc 2.23, ядро 4.9 |
 | Хранилище | `/data` — отдельный раздел на несколько ГБ | `/data` → `/bkupgrade/data` (ubifs, свободно ~81 МБ; на ubifs rename доходит до флеша раньше несинхронизированных данных); rootfs ubifs ro, заполнен на 87 % | `/data` → `/bkupgrade/data` (ubifs, свободно ~20 МБ); rootfs ubifs ro, заполнен на 83 % | `/data` → `/bkupgrade/data` (ubifs, свободно ~61 МБ); rootfs ubifs ro |
@@ -73,20 +72,19 @@ Wake word, командный спотер и эхоподавление раб�
 | VQE | пресет `cucumber`: 4 микрофона, 4 референса, 96 кГц, чанк 3072 → 512 @ 16 кГц | `plum`: 2 микрофона, 1 референс, 48 кГц, чанк 1536 → 512 @ 16 кГц; выходы 1, 2, 4, 6, 8, 9 | `yandexmini_2`: 4 микрофона, 2 референса, 48 кГц; чанк не записан | `yandexmini`: 4 микрофона, 2 референса, 48 кГц, чанк 768 → 256 @ 16 кГц |
 | Спотеры | `alisa`: типы 0, 3, 4; `command`: тип 0 | `alisa` / `yandex`: типы 0 и 4 (по 1 каналу); `command`: тип 0. Модели в `spotter_models/` настроены под plum | тот же архив `spotter_models/`, что у Лайт 2; не замерялись | те же модели прошивки; не замерялись |
 | Кольцо | `/dev/fb0` 24×1 + `/dev/fb1` (логотип) 6×1, BGR | `/dev/fb0` «YNDX LED ring» 3×1, 24 bpp, BGR; trigger `led_ring_fb`; sysfs `plum:<color>:ring1..3`; логотипа нет. См. [«Лайт 2: светодиоды»](#лайт-2-светодиоды) | ни framebuffer, ни trigger: sysfs `mini2:<color>:ring1..6` (IS31FL3236 на i2c 1-003c); логотипа нет | шесть RGB-светодиодов за IS31FL3236-совместимым контроллером на `/dev/i2c-0`, адрес 0x3c; ни framebuffer, ни логотипа |
-| Часы | `cucumber:white:clock-<seg><digit>`, яркость задаётся `current` чипа; центральной точки нет | `plum:white:clock<SEG><pos>`: A–G × 0–3, двоеточие `DH`+`DL`; `H0..3` и `DEGREE` погашены (`quasar.cfg` `/leds/clock`); `DM` — центральная точка на высоте сегмента g, дополнительный LED 35 штатных паттернов [inference: положение на глаз не подтверждено] | разведены как `mini2:white:clock<A..G><1..4>`, двоеточие `PLUS1`+`PLUS2`, `DEGREE`/`MINUS` погашены (`quasar.cfg`); второй IS31FL3236 (i2c 0-003f) на прошивке 0.369 не определяется, см. [«Мини 2»](#мини-2) | нет |
+| Часы | `cucumber:white:clock-<seg><digit>`, яркость задаётся `current` чипа; центральной точки нет | `plum:white:clock<SEG><pos>`: A–G × 0–3, двоеточие `DH`+`DL`; `H0..3` и `DEGREE` погашены (`quasar.cfg` `/leds/clock`); `DM` — центральная точка на высоте сегмента g, дополнительный LED 35 штатных паттернов [inference: положение на глаз не подтверждено]; яркость — `brightness` сегмента, 0–255 | разведены как `mini2:white:clock<A..G><1..4>`, двоеточие `PLUS1`+`PLUS2`, `DEGREE`/`MINUS` погашены (`quasar.cfg`); второй IS31FL3236 (i2c 0-003f) на прошивке 0.369 не определяется, см. [«Мини 2»](#мини-2) | нет |
 | Кнопки | `awinic_sar`: 582 — действие, 115/114 — громкость | `aw9610x`: те же коды | `sar0_pad0` (SAR aw9610x, event0): те же коды | `adc_keypad`: только `KEY_MUTE` 113; нет ни сенсорной кнопки действия, ни кнопок громкости |
 | Отключение микрофонов | input `mute`: `SW_MUTE_DEVICE` | input `gpio-keys`: `SW_MUTE_DEVICE` (+ `KEY_MUTE`) | переключателя evdev нет: GPIOZ_3 (глобальный 414, подтяжка вверх), активный уровень низкий; см. [«Мини 2»](#мини-2) | аппаратного отключения нет: кнопка только шлёт `KEY_MUTE` |
 | Датчик освещённости | `ltr308als01` (iio) | то же | см. [«Мини 2»](#мини-2) | нет |
-| Громкость | softvol «Master Playback Volume» на `speakers` | те же имена; `speakers` создаёт `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) | тот же контрол на `default`; `set_volume.sh` — это `amixer set 'Master' <percent>%`, т. е. кривая линейна в процентах | программная: ALSA-мастера, который ослаблял бы выход, нет; громкость применяет демон по той же кривой в дБ, что у softvol остальных моделей |
-| Затворы выхода | нет | нет | — | `/sys/class/tdm_state/amp_table` и `aux_amp` = 1, ALSA `SPK mute` = 1. dmix выключает `amp_table`, когда закрывается последний клиент; само открытие PCM может их сбросить; драйвер обнуляет `amp_table` при закрытии PCM. В простое выход закрыт (`aux_amp` остаётся 1), поэтому затворы открывают перед каждым стартом |
+| Громкость | softvol «Master Playback Volume» на `speakers` | те же имена; `speakers` создаёт `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) | тот же контрол на `default`; `set_volume.sh` — это `amixer set 'Master' <percent>%`, т. е. кривая линейна в процентах | ALSA-мастера, который ослаблял бы выход, нет |
+| Затворы выхода | нет | нет | — | `/sys/class/tdm_state/amp_table` и `aux_amp` = 1, ALSA `SPK mute` = 1. dmix выключает `amp_table`, когда закрывается последний клиент; само открытие PCM может их сбросить; драйвер обнуляет `amp_table` при закрытии PCM. В простое выход закрыт (`aux_amp` остаётся 1) |
 | alsa-lib | 1.2.10, версионированная (см. ниже) | 1.2.1.2, неверсионированная | 1.2.1.2, неверсионированная | версионированная, `/system/vendor/quasar/libs/libasound.so.2` — вне путей поиска загрузчика |
-| Загрузка (сток) | `S97quasar` → `onboot.sh` | `S99quasar` → `onboot.sh`; есть `q stop` | как у Лайт 2 | `S99onboot.sh` → штатный стек |
 | Zigbee | Telink B91 на `/dev/ttyS2`, reset/boot через `zb_control`; см. [zigbee.md, «Радио Миди»](zigbee.md#радио-миди) | нет | нет (ни `ttyS2`, ни `zb_control`) | нет |
 
 Мини 3 (`bergamot`, экспериментальная): подтверждённые факты и то, что не проверено, — в
 [mini3.md](mini3.md).
 
-Цепочка загрузки целиком (вместе с `S99zpulsar`) описана в
+Цепочка загрузки (стоковые init-скрипты прошивки и `S99zpulsar`) описана в
 [development.md, «Установка и станция»](development.md#установка-и-станция).
 
 alsa-lib на armhf-образах Миди версионированная (ALSA_0.9 + ALSA_0.9.0rc4). Там обычные имена
@@ -102,9 +100,9 @@ alsa-lib на armhf-образах Миди версионированная (AL
 
 ### Лайт 2: буфер захвата
 
-PDM-захват допускает буфер не больше 2048 кадров (~42 мс при 8 каналах S16), поэтому чтение
-захвата идёт в отдельном потоке. Несколько переполнений в час всё равно остаются
-(`capture: Broken pipe, recovering`), это ожидаемо.
+Буфер PDM-захвата — не больше 2048 кадров (~42 мс при 8 каналах S16): чтение захвата вместе с VQE
+в одном потоке его переполняет. Несколько переполнений в час (`capture: Broken pipe, recovering`)
+остаются и при отдельном потоке чтения, это ожидаемо.
 
 ### Лайт 2: светодиоды
 
@@ -128,8 +126,8 @@ Trigger `led_ring_fb` масштабирует каждый канал по до
   уровень и есть состояние. GPIOZ_8 (419) только даёт импульс высокого уровня во время нажатия.
   Событий evdev кнопка не шлёт (`sar0_pad0` отдаёт только 582/115/114), а нажатие не обновляет
   `data/is_speaker_muted`, поэтому этот файл как состояние не годится.
-- В GStreamer этой прошивки нет декодера MP3, поэтому earcons берутся в `.opus`;
-  `common/volume_sound.opus` [inference: наличие файла на станции не подтверждено].
+- В GStreamer этой прошивки нет декодера MP3; стоковые earcons — в `.opus`
+  (`common/volume_sound.opus` [inference: наличие файла на станции не подтверждено]).
 - До порта на Rust на железе с C++-демоном из #9 проверено: загрузка пресета VQE и захват,
   wake word → конвейер HA → TTS, воспроизведение через 32-битный GStreamer прошивки на `default`,
   Sendspin с Music Assistant, кольцо, сенсорные кнопки, громкость, отключение микрофонов через
@@ -138,28 +136,28 @@ Trigger `led_ring_fb` масштабирует каждый канал по до
 
 ### RAM и tmpfs
 
-`/tmp` на станциях — tmpfs, поэтому тестовые файлы в нём занимают RAM; после сессии их удаляют
-(AGENTS.md, «Безопасность станций»).
+`/tmp` на станциях — tmpfs: тестовые файлы в нём занимают RAM.
 
 | Модель | RAM | Источник |
 |---|---|---|
 | Миди | ~1 ГБ | мейнтейнер |
 | Лайт 2 | 237 МБ | мейнтейнер |
 | Мини 2 | 238 МБ | контрибьюторы, не перепроверено |
-| Мини 3 | ~238 МБ | контрибьютор, не перепроверено |
+| Мини 3 | см. [mini3.md](mini3.md) | контрибьютор, не перепроверено |
 | Мини | 236 МБ, tmpfs ~118 МБ | контрибьютор, не перепроверено |
 
-### Stale dmix lock
+### Зависший dmix lock
 
-Если процесс убит во время воспроизведения, все следующие плееры молчат до перезагрузки, и
-перезапуск демона не помогает. Причина — dmix в alsa-lib прошивки: shm-сегмент остаётся со
-счётчиком клиентов, который уже никто не уменьшит. Механизм подробно описан в заголовке
+Зависший dmix lock (stale dmix lock): если процесс убит во время воспроизведения, все следующие
+плееры молчат до перезагрузки, и перезапуск демона не помогает. Причина — dmix в alsa-lib
+прошивки: shm-сегмент остаётся со счётчиком клиентов, который уже никто не уменьшит. Механизм
+подробно описан в заголовке
 [`../satellite/deploy/supervise.sh`](../satellite/deploy/supervise.sh); там он прописан для Миди и
 Лайт 2.
 
 Ключи IPC:
 
-- `speakers` прошивки (Миди, Лайт 2; у Мини 3 — тот же `ipc_key 1024`, см. [mini3.md](mini3.md)):
+- `speakers` прошивки (Миди, Лайт 2; ключ у Мини 3 — в [mini3.md](mini3.md)):
   shm 0x400 (`ipc_key 1024`), 0x401 (буфер микширования), семафор 0x400;
 - `minidmix` у Мини (`ipc_key 2277` в [`../satellite/deploy/asound.conf`](../satellite/deploy/asound.conf)):
   shm 0x8e5, 0x8e6, семафор 0x8e5;

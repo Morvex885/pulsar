@@ -1,37 +1,36 @@
 ---
 name: crash-decode
-description: Расшифровка краш-отчёта pulsar (=== CRASH) в строки исходников через addr2line и pulsar.debug. Use for crash, SIGSEGV, backtrace, addr2line, pulsar.debug, symbolize, crash report, fp chain.
+description: Расшифровка краш-отчёта pulsar (=== CRASH) в строки исходников через addr2line и pulsar.debug. Ключевые слова: crash, SIGSEGV, backtrace, addr2line, pulsar.debug, symbolize, crash report, fp chain.
 ---
 
 # Расшифровка краша
 
-Формат отчёта — `satellite/crates/pulsar/src/crash.rs`; почему адреса абсолютные (non-PIE) —
-`satellite/Makefile` (`relocation-model=static`). Станцию не трогаем: отчёт читаем из лога.
+Контракт (non-PIE, абсолютные адреса, `.debug` той же сборки) — `docs/development.md`,
+«Диагностика». Формат отчёта — заголовок `satellite/crates/pulsar/src/crash.rs`. Станцию не трогаем:
+отчёт читаем из лога.
 
 ## 1. Найти отчёт
 
-`=== CRASH` в `tools/station.sh <станция> log N` (под `station-test`, чтение) или в
-`/tmp/pulsar.log`. Строка: `=== CRASH <сигнал> addr=… pc=… lr=… handler=…`; на aarch64 следующая
-строка `fp: <адрес> <адрес> …`.
+`=== CRASH` в `tools/station.sh <станция> log N` (под `station-test`, только чтение) или в
+`/tmp/pulsar.log`. Лог ротируется: старый отчёт может лежать в `/tmp/pulsar.log.1`.
 
 ## 2. Взять debug-файл той же сборки
 
-- Релиз: ассет `pulsar-<arch>.debug` тега, который показывает `pulsar --version`.
-- Локально: `satellite/build/<arch>/pulsar.debug` **того же коммита** (иначе адреса не совпадут).
+- Релиз: ассет `pulsar-<arch>.debug` того тега, который показывает `pulsar --version`.
+- Локально: `satellite/build/<arch>/pulsar.debug` **того же коммита**.
 
 ## 3. Сверка
 
-`nm pulsar.debug | grep pulsar_crash_handler` должен дать адрес = `handler=` из отчёта. Не совпал →
-другая сборка, расшифровка бессмысленна: найти правильный `.debug`.
+`nm pulsar.debug | grep ' T pulsar_crash_handler$'` должен дать адрес = `handler=` из отчёта. Не
+совпал — другая сборка, расшифровка бессмысленна: найти правильный `.debug`.
 
 ## 4. Расшифровка
 
-`addr2line -f -C -e pulsar.debug <адреса>`:
+`addr2line -f -C -e pulsar.debug <адреса>`, адреса — из строк отчёта (какие поля есть на какой
+архитектуре — в заголовке `crash.rs`): `pc`, `lr` и, где есть, цепочка `fp:`.
 
-- aarch64: `pc`, `lr` и все адреса цепочки `fp:`;
-- armhf: `pc` и `lr` (цепочки нет).
-
-Host-`addr2line` не берёт чужую архитектуру → `llvm-addr2line` с теми же флагами.
+Если host-`addr2line` не распознаёт архитектуру — `llvm-addr2line` или `<triple>-addr2line` с теми же
+флагами.
 
 ## 5. Результат
 

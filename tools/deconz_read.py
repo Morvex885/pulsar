@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only deCONZ client for pulsar's coordinator (docs/stations.md, "Радио Zigbee").
+"""Read-only deCONZ client for pulsar's coordinator (docs/stations.md, пункт «Радио Zigbee»).
 
 Raw SLIP over TCP, only these commands: 0x0D version, 0x07 device state, 0x0A read parameter
 (MAC address, PAN ID, extended PAN ID, current channel, NWK update id, protocol version). It never

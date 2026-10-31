@@ -9,9 +9,9 @@
 
 ## Workspace
 
-`satellite/` — Cargo workspace: `Cargo.toml` (все внешние зависимости закреплены в нём),
-`Cargo.lock` (коммитится; все вызовы cargo идут с `--locked`), `rust-toolchain.toml`, `Makefile`
-(кросс-сборки через cargo-zigbuild, `make check`).
+`satellite/` — Cargo workspace: `Cargo.toml`, `Cargo.lock` (коммитится; сборка, clippy и тесты
+идут с `--locked`), `rust-toolchain.toml`, `Makefile` (кросс-сборки через cargo-zigbuild,
+`make check`).
 
 | Крейт | Ответственность |
 |---|---|
@@ -169,4 +169,5 @@
   экземпляр работает рядом с запущенным демоном (`tools/station.sh test-start`, см.
   [stations.md](stations.md)).
 - При ненулевом offset mDNS не запускается: HA и Music Assistant тестовый экземпляр не видят.
-- Сервисы получают порт в конфиге от контроллера; своих номеров портов у них нет.
+- Порты задаёт контроллер и передаёт сервисам в конфиге; умолчания конфигов
+  (`ApiConfig::default`) демон не использует.

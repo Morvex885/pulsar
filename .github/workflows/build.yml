@@ -95,7 +95,10 @@ jobs:
       - run: make -C satellite check
 
   commits:
-    # Авторство коммитов PR: без AI (AGENTS.md, «Git»). Обязательная проверка ruleset'а main.
+    # Авторство коммитов PR: без AI (AGENTS.md, «Git»). Скрипт берётся из базы PR: иначе PR мог бы
+    # подменить его на `exit 0` и пройти собственную проверку; из PR он запускается, только если
+    # в базе его ещё нет. Имя job — обязательная проверка ruleset'а main: не переименовывать (как у
+    # job `build`).
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -103,7 +106,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - run: tools/check-authorship.sh "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+      - env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if git cat-file -e "$BASE:tools/check-authorship.sh" 2>/dev/null; then
+            git show "$BASE:tools/check-authorship.sh" | sh -s -- "$BASE..$HEAD_SHA"
+          else
+            tools/check-authorship.sh "$BASE..$HEAD_SHA"
+          fi
 
   radio:
     # Zigbee firmware (router, coordinator) for the Midi's radio (Telink B91), installed next to the daemon.

@@ -1,12 +1,15 @@
 ---
 name: pre-publish-review
-description: Обязательное ревью перед git push, gh pr create и тегом v*: авторство, сборка, код, архитектура, безопасность, безопасность станций, доки, тесты; раунды до чистого прохода. Use for review before push, pre-publish, PR review, check-authorship, review rounds.
+description: Обязательное ревью перед git push, gh pr create и тегом v*: авторство, сборка, код, архитектура, безопасность, безопасность станций, доки, тесты; раунды до чистого прохода. Ключевые слова: pre-publish review, review before push, PR review, check-authorship, review rounds.
 ---
 
 # Ревью перед публикацией
 
 Обязательно перед `git push`, `gh pr create`, тегом `v*`. Правила — `AGENTS.md` («Правила кода»,
 «Документация», «Git», «Безопасность станций»), `docs/architecture.md`.
+
+`git push` и `gh pr create` — только по просьбе пользователя или с его явного подтверждения;
+чистый раунд ревью сам по себе их не разрешает.
 
 ## Диапазон
 
@@ -17,7 +20,8 @@ description: Обязательное ревью перед git push, gh pr crea
 
 `tools/check-authorship.sh <диапазон>` (в CI — job `commits`). Нарушение чинить:
 `git commit --amend --reset-author` или rebase с удалением AI-трейлеров. Чужой `--author` не
-подставлять. До кода 0 дальше не идти.
+подставлять. Переписывание уже запушенной истории и force push — только с согласия пользователя.
+До кода 0 дальше не идти.
 
 ## Оси (у каждой свой независимый ревьюер)
 
@@ -46,5 +50,5 @@ description: Обязательное ревью перед git push, gh pr crea
 
 ## Итог
 
-Число раундов и список вне рамок. Только после этого `push` / `gh pr create` / тег (тег — по skill
-`release`).
+Число раундов и список вне рамок. Затем — `push` / `gh pr create` по подтверждению пользователя
+(тег — по skill `release`).

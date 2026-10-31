@@ -15,9 +15,10 @@ use pulsar_core::volume::{clamp_unit, from_raw, to_raw};
 
 const MASTER: &str = "Master Playback Volume";
 
-/// The master volume control. Without it (open failed, logged) `available()` is false and the
-/// volume is kept in memory only. Software-volume models (`Model::software_volume`) have no
-/// control: `available()` is true and the controller applies the volume as a channel gain.
+/// Мастер-громкость. Без контрола (открыть не удалось, это в логе) `available()` ложно, и громкость
+/// хранится только в памяти. У моделей с программной громкостью (`Model::software_volume`)
+/// контрола нет: `available()` истинно, и контроллер применяет громкость как усиление каналов.
+/// Не актор: геттеры сразу отдают значение последнего вызова `set_*`.
 pub struct Mixer {
     model: &'static Model,
     ctl: Option<Ctl>,

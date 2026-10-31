@@ -90,6 +90,7 @@ pub struct UpdaterHandle {
 }
 
 impl UpdaterHandle {
+    /// Синхронный: `check()` / `install()` ставят флаг сразу, сбрасывает его актор перед событием.
     pub fn busy(&self) -> bool {
         self.busy.get()
     }
