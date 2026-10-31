@@ -10,7 +10,7 @@
 
 Инструменты хоста, их версии и установка — README,
 [«Сборка из исходников»](../README.md#сборка-из-исходников); версии cargo-zigbuild и zig там
-совпадают с CI (`.github/workflows/build.yml`). Чего в README нет:
+совпадают с CI (`.github/workflows/build.yml`).
 
 - Сборка под архитектуру (`ARCH=…` и цель по умолчанию) отклоняет zig 0.11–0.13: их armhf-сборки
   C++ в release (sendspin-cpp) падают до `main`.
@@ -156,5 +156,5 @@ ssh root@<ip> 'cd /data/pulsar && cp pulsar pulsar.prev &&
 бинарник собран non-PIE (`-C relocation-model=static`), поэтому адреса в отчёте абсолютные и
 разбираются `addr2line -f -e` только по `pulsar.debug` той же сборки
 (`satellite/build/<arch>/pulsar.debug`; для релиза — ассет `pulsar-<arch>.debug`). Формат отчёта —
-заголовок [`../satellite/crates/pulsar/src/crash.rs`](../satellite/crates/pulsar/src/crash.rs);
-процедура разбора — skill `crash-decode`.
+[`../satellite/crates/pulsar/src/crash.rs`](../satellite/crates/pulsar/src/crash.rs) (заголовок и
+запись полей в обработчике); процедура разбора — skill `crash-decode`.

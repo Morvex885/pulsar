@@ -420,9 +420,8 @@ pulsar отдаёт модуль по протоколу deCONZ (ConBee/RaspBee)
 - cargo-zigbuild 0.24.0: `cargo install cargo-zigbuild --locked --version 0.24.0`;
 - [zig 0.14.1](https://ziglang.org/download/) — компоновщик и C/C++-компилятор для колонок
   (aarch64/glibc 2.36 — обычный userspace Миди; 32-битный armhf/glibc 2.23 — Мини, а также Лайт 2,
-  Мини 2, Мини 3 и образы Миди с 32-битным userspace, у которых glibc 2.30). zig 0.13 не подходит:
-  собранные им 32-битные программы падают при запуске. Другой zig можно указать как
-  `ZIG=/путь/к/zig`;
+  Мини 2, Мини 3 и образы Миди с 32-битным userspace, у которых glibc 2.30). Другой zig можно
+  указать как `ZIG=/путь/к/zig`;
 - `make`, `git`, `curl`, `patch`, компилятор C для хоста (`cc`), а для библиотеки Sendspin
   (sendspin-cpp, единственная C++-часть сборки) — `cmake` ≥ 3.16 и `ninja`
   (их можно поставить через `uv tool install cmake ninja`);

@@ -32,9 +32,14 @@ description: Добавление новой модели станции Янд�
    `/etc/asound.conf`, пресет VQE, каталог `spotter_models/`.
 4. Периферия: `/sys/class/leds`, `/dev/fb*`, `/proc/bus/input/devices`, датчик освещённости,
    earcons.
-5. Без `Model` из утилит работает только `alsa_abi_probe` (ABI alsa-lib, без звука) и сырая запись
-   `arecord` (пример — в заголовке `satellite/crates/pulsar-audio/src/bin/ww_offline.rs`):
-   остальные утилиты сразу выходят на неизвестной модели.
+5. Без `Model` из утилит с железом работает только `alsa_abi_probe` (ABI alsa-lib, без звука):
+   `frontend_probe`, `ww_offline`, `hw_probe`, `player_probe`, `sendspin_probe` и `zigbee_probe` на
+   неизвестной модели сразу выходят. Сетевые `lan_probe`, `update_probe`, `api_selftest` модель не
+   определяют и работают. Сырая запись захвата:
+   `arecord -D <pcm> -f S16_LE -c <каналы> -r <частота> -d <секунды> /tmp/pulsar-test/capture.wav`
+   (`<pcm>`, каналы и частота — из п. 1 и строки «Захват» таблицы `docs/hardware.md`, «Модели»).
+   `ww_offline` читает только S16_LE; если захват модели 32-битный (S32_LE, как у Мини), такую
+   запись он не разберёт — до `Model` её можно только сохранить для изучения.
 
 ## 2. Код (места должны совпадать)
 

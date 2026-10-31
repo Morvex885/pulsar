@@ -2,11 +2,11 @@
 //! station's service stopped).
 //! usage: sendspin_probe [port=18928] [name=pulsar-test] [seconds=120] [state_dir=/tmp/pulsar-test/sendspin]
 //!
-//! Starts the service and prints its events (stdout; the service logs to stderr). 3 s after a
-//! server connects it sends the transport command NEXT once. On hardware-volume models the
-//! device's "Master Playback Volume" is capped at raw 82 (0.2 on the Mixer scale,
-//! docs/stations.md) for the run and restored afterwards; the Mini has no such control and uses
-//! the same software volume 0.2 through the model's dmix sink.
+//! Запускает сервис и печатает его события (stdout; сервис пишет лог в stderr). Через 3 с после
+//! подключения сервера один раз шлёт транспортную команду NEXT. На моделях с аппаратной громкостью
+//! «Master Playback Volume» устройства на время прогона ограничивается raw 82 (0.2 по шкале Mixer,
+//! см. AGENTS.md, «Безопасность станций») и затем восстанавливается; у Мини такого контрола нет, и
+//! та же программная громкость 0.2 идёт через dmix-sink модели.
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 

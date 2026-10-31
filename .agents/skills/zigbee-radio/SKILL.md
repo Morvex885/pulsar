@@ -31,14 +31,14 @@ description: Сборка и прошивка Zigbee-радио Станции �
 
 ## 3. Чтение
 
-Только по правилам `docs/stations.md`, пункт «Радио Zigbee»: `tools/deconz_read.py` против порта
-`zigbee_probe` или тестового экземпляра, не против живого демона.
+Правила чтения — `docs/stations.md`, пункт «Радио Zigbee»: `tools/deconz_read.py` с портом
+`zigbee_probe` или тестового экземпляра.
 
 ## 4. Прошивка (необратимо)
 
 1. Только после явного подтверждения пользователя в этой сессии; lock и `stop` — по `station-test`.
-2. Образ — только текущей роли из `state.conf`; при роли `off` не прошивать
-   (`docs/stations.md`, пункт «Радио Zigbee»; образы — `docs/zigbee.md`, «Образы .ybl и бутлоадер»).
+2. Какой образ можно шить — `docs/stations.md`, пункт «Радио Zigbee»; образы —
+   `docs/zigbee.md`, «Образы .ybl и бутлоадер».
 3. `push` образа → `zigbee_probe flash /tmp/pulsar-test/<образ>` → `zigbee_probe info`.
 4. Проверка: версия в `info` совпадает с `version 0x…` из строки `writing …` команды `flash`.
    Расхождение — остановиться и сообщить.
@@ -47,4 +47,4 @@ description: Сборка и прошивка Zigbee-радио Станции �
    там же исключения: нет образа, ранее отвергнутая версия). Образ другой версии живёт только до
    такого `start`.
 6. Линии reset и boot по номеру GPIO не трогать (`docs/zigbee.md`, «Радио Миди»).
-7. Завершение — по `station-test`: `start` → `cleanup` → `unlock`.
+7. Завершение — порядок в `docs/stations.md`, пункт «Lock».

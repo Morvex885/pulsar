@@ -35,8 +35,9 @@ description: Тестирование pulsar на живых станциях Я
 ## 4. Тестовый экземпляр
 
 1. Сборка: `make -C satellite ARCH=<arch>` (`AGENTS.md`, «Сборка и проверки»).
-2. `push satellite/build/<arch>/pulsar` → `stop` → `test-start`
-   (`docs/stations.md`, пункт «Тестовый экземпляр демона»).
+2. Последовательность: `push satellite/build/<arch>/pulsar` → `stop` → `test-start` → тест →
+   `test-stop` → `start`. Тесты ESPHome API идут только на тестовом экземпляре
+   (`docs/stations.md`, пункт «Аппаратные тесты»).
 3. Клиент: `tools/esphome_check.py --host <ip> --port 16053 <command>`; команды (`dump`, `commands`,
    `voice-fake`, `announce`, `timer`, `set-key`, `scenario-*`) — в `--help` и docstring скрипта.
 4. Лог тестового экземпляра: `test-log [N]`; лог демона: `log [N]`.
