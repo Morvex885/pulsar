@@ -723,8 +723,10 @@ impl Controller {
                 ""
             }
         );
-        // A word in the dialog's own window ends the dialog first; one held through an
-        // arbitration in SPEAKING / IDLE leaves the answer playing.
+        // Слово в окне самого диалога сначала завершает диалог; удержанное через арбитраж в
+        // SPEAKING / IDLE оставляет ответ играть. Слово может распознаться уже после barge-in
+        // («Алиса, тише» во время ответа, наблюдалось 53 мс) и тогда отменяет новый диалог;
+        // см. docs/voice.md, «Командный спотер».
         if after_wake {
             self.finish_interaction();
         }
@@ -743,6 +745,8 @@ impl Controller {
                     self.update_duck();
                     self.update_ui();
                 } else if self.music_pause() {
+                    // «стоп», «хватит» и «пауза» — одно действие над музыкой, как в стоке;
+                    // см. docs/voice.md, «Командный спотер».
                     self.clock.play(ClockShot::Pause);
                 }
             }

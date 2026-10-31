@@ -1,0 +1,165 @@
+# Разработка
+
+Справочник по сборке, CI и релизам, установке на станцию, супервизору, обновлениям из HA, правилам
+`installer/` и crash-отчёту: пины, контракты между компонентами и версиями, внешнее поведение. Чего
+здесь нет: команд проверки и правил репозитория (AGENTS.md), протокола работы на живых станциях
+([stations.md](stations.md)), фактов железа ([hardware.md](hardware.md)); поведение кода — в коде,
+обоснования — в комментариях у кода.
+
+## Сборка
+
+Список инструментов хоста и их установка — README,
+[«Сборка из исходников»](../README.md#сборка-из-исходников). Пины, совпадающие с CI
+(`.github/workflows/build.yml`):
+
+- **cargo-zigbuild 0.24.0** — для сборки под станции и для `make check`.
+- **zig 0.14.1** (другой путь — `make ZIG=/path/to/zig`). Сборка под архитектуру (`ARCH=…` и
+  цель по умолчанию) отклоняет zig 0.11–0.13: их armhf-сборки C++ в release (sendspin-cpp) падают
+  до `main`.
+- **`make check` берёт zig любой версии**: clippy под станции только проверяет типы, а из C
+  компилирует лишь `ring` в build-скриптах. Для `make check` нужен и C-компилятор хоста (`cc`).
+
+Выходы `make -C satellite` на каждую архитектуру, `satellite/build/<arch>/`:
+
+- `pulsar` — стрипнутый, именно он ставится на станцию;
+- `pulsar.debug` — нестрипнутый, с таблицами строк, для разбора crash-отчёта (см.
+  [«Диагностика»](#диагностика)).
+
+`ssh/build.sh` собирает dropbear и sftp-server для `pulsar-install --ssh` и архивов релиза.
+
+Версия бинарника — `git describe --tags --match 'v*' --always --dirty`
+([`../satellite/Makefile`](../satellite/Makefile), `VERSION`). Учитываются только релизные теги
+`v*`: апдейтер разбирает версию как `vX.Y.Z[-N-g<hash>]` и сверяет `--version` нового бинарника с
+тегом релиза.
+
+## CI и релизы
+
+Push тега `v*` публикует релиз (job `release` в `.github/workflows/build.yml`). Имена ассетов —
+постоянный контракт; от них зависят:
+
+| Ассет | Кто зависит |
+|---|---|
+| `pulsar-windows-amd64.zip`, `pulsar-macos-{arm64,amd64}.tar.gz`, `pulsar-linux-{amd64,arm64}.tar.gz` | ссылки README `releases/latest/download/…`; внутри — раскладка репозитория (собирает [`../satellite/deploy/dist.sh`](../satellite/deploy/dist.sh)), по которой `pulsar-install` находит бинарники, образы радио и скрипты рядом с собой |
+| `pulsar-<arch>.bin` (`aarch64`, `armhf`) | апдейтер: `releases/download/<tag>/pulsar-<arch>.bin` |
+| `zigbee-coordinator.ybl`, `zigbee-router.ybl` | апдейтер (только Миди; релиз без образа обновляется без него); архивы — `radio/out/zigbee-*.ybl` для установщика. Сами образы — [zigbee.md, «Образы .ybl и бутлоадер»](zigbee.md#образы-ybl-и-бутлоадер) |
+| `SHA256SUMS` | апдейтер сверяет по нему `.bin` и `.ybl` |
+| `pulsar-<arch>.debug` | разбор crash-отчёта бинарника из релиза |
+
+Тег должен совпадать с `git describe` бинарника: job `build` собирает из чекаута тега с полной
+историей (`fetch-depth: 0`), поэтому совпадает. Пользователям предлагаются только стабильные релизы
+(не черновики и не пре-релизы) — как их находит апдейтер, см.
+[«Обновления из HA»](#обновления-из-ha).
+
+## Установка и станция
+
+```sh
+go -C installer run . --list         # найти станции и определить модель, ничего не ставить
+go -C installer run . <ip>[:port]    # установить или обновить
+```
+
+В чекауте установщик сначала сам вызывает `make` (с `--ssh` — и `ssh/build.sh`). Флаги — usage в
+[`../installer/main.go`](../installer/main.go). Установщик пропускает станцию, где adb не root
+(`id -u`).
+
+**Детект модели — три места, которые должны совпадать:** демон (`detect_model()` в
+[`../satellite/crates/pulsar-core/src/model.rs`](../satellite/crates/pulsar-core/src/model.rs)),
+установщик (`modelName()` / `abis()` / `stationCode()` в
+[`../installer/probe.go`](../installer/probe.go)) и
+[`../satellite/deploy/boot.sh`](../satellite/deploy/boot.sh) (список кодовых имён `yandex,<codename>`
+из `/proc/device-tree/compatible`). У Мини записи `yandex,*` нет, и все три места требуют ОБА
+признака: `/proc/device-tree/amlogic-dt-id` = `axg_s420_v03` и `deviceType=yandexmini` в
+`/system/vendor/quasar/quasar.cfg` (почему одного id мало — [hardware.md, «Модели»](hardware.md#модели)).
+Новая модель добавляется во все три места.
+
+**Выбор ABI:** ставится `build/<arch>/pulsar` первой ABI модели из `abis()`, чей динамический
+загрузчик есть на станции; вторая ABI в `abis()` — только для userspace, действительно встреченного
+на этой модели (обоснование — комментарий у `abis()`).
+
+**Раскладка `/data/pulsar`:** `pulsar`, `pulsar.prev`, `pulsar.bad`, `boot.sh`, `supervise.sh`,
+`ctl.sh`, `state.conf`, `api_key`, `enabled`, `sendspin/`, `zigbee-coordinator.ybl`,
+`zigbee-router.ybl` (Миди), `asound.conf` (только Мини).
+
+- `.prev` — цель отката супервизора; `.bad` — бинарник, заменённый откатом после crash-цикла.
+- `state.conf` — формат и совместимость с `.prev`: [architecture.md, «state.conf и откат на
+  .prev»](architecture.md#stateconf-и-откат-на-prev).
+- `api_key` — Noise PSK ESPHome: base64 от 32 байт, режим 0600. Пишут автонастройка HA (по API) или
+  `ctl.sh api-key`. Нет файла — API без шифрования; повреждённый файл — API не поднимается (fail
+  closed); детали — [`../satellite/crates/pulsar-esphome/src/key.rs`](../satellite/crates/pulsar-esphome/src/key.rs).
+- `enabled` — пока файл есть, `boot.sh` и супервизор держат pulsar вместо стека Яндекса.
+- `asound.conf` (Мини) пишет только установщик. Обновление из HA меняет лишь бинарник и образы
+  радио, поэтому правка `satellite/deploy/asound.conf` доходит до станции только при повторном
+  запуске `pulsar-install`.
+- Вне `/data` — только `/etc/init.d/S99zpulsar` (автозапуск; пишет установщик, правила —
+  AGENTS.md, «Безопасность станций»).
+- Лог: `/tmp/pulsar.log` (`ctl.sh log N`; ротация — заголовок `supervise.sh`). Путь — общий
+  контракт `supervise.sh`, `ctl.sh`, установщика (health check) и `tools/station.sh`. `/tmp` —
+  tmpfs: [hardware.md, «RAM и tmpfs»](hardware.md#ram-и-tmpfs).
+
+**Цепочка загрузки:** busybox init → `rcS` (запускает `/etc/init.d/S??*` по порядку с `start` и
+ждёт каждый) → скрипт прошивки: `S97quasar` (Миди), `S99quasar` (Лайт 2; Мини 2 — по данным
+контрибьюторов), `S99onboot.sh` (Мини, по данным контрибьюторов) → `onboot.sh` (adbd через
+`activate_adb.sh check`, quasar в фоне; возвращается) → `S99zpulsar` → `boot.sh` в фоне →
+ожидание quasar, `q stop` → `supervise.sh`. Мини 3 (`bergamot`) поддерживают `boot.sh` и
+установщик, но скрипт прошивки Мини 3 не записан ([mini3.md](mini3.md)). Условия, при которых
+`boot.sh` не трогает стек Яндекса, — в его заголовке и комментариях.
+
+**Ручная замена бинарника** (ssh — после `pulsar-install --ssh`; через adb — `adb push`):
+
+```sh
+scp satellite/build/<arch>/pulsar root@<ip>:/data/pulsar/pulsar.new
+ssh root@<ip> 'cd /data/pulsar && cp pulsar pulsar.prev &&
+  mv pulsar.new pulsar && ./ctl.sh restart'
+```
+
+Рабочий бинарник сохраняется как `.prev` до замены — на нём держится автоматический откат.
+
+## Супервизор
+
+Контракт — заголовок [`../satellite/deploy/supervise.sh`](../satellite/deploy/supervise.sh)
+(коды выхода, короткие сбои, откат на `.prev`, возврат стека Яндекса, ротация лога, очистка stale
+dmix lock); здесь он не пересказывается. Exit 0 — не сбой, только если демон проработал не меньше
+`MINUP` секунд; exit 0 раньше считается коротким сбоем. Механизм stale dmix lock —
+[hardware.md, «Stale dmix lock»](hardware.md#stale-dmix-lock).
+
+Контракт строк лога `supervise.sh` с health check установщика (`healthCheck()` в
+[`../installer/deploy.go`](../installer/deploy.go)): в логе нового демона (после маркера установки
+и его `=== start`) сбоем считаются `=== CRASH`, `=== exit` и `=== supervise`. Строка
+`=== alsa: removed stale dmix lock (…)`, которую
+`supervise.sh` пишет перед запуском, если что-то удалил, — штатная очистка и сбоем считаться не
+должна.
+
+## Обновления из HA
+
+`pulsar-update`, сущности «Firmware» и «Auto update»; поведение для пользователя — README,
+[«Обновление из Home Assistant»](../README.md#обновление-из-home-assistant). Что нельзя сломать:
+
+1. **Имена ассетов** — постоянны, см. [«CI и релизы»](#ci-и-релизы).
+2. **Поиск последнего релиза** — через редирект `https://github.com/<repo>/releases/latest` на
+   `/releases/tag/<tag>` (GitHub отдаёт так новейший стабильный релиз), а не через REST API: его
+   лимит 60 запросов в час на публичный IP исчерпывается станциями за общим выходом VPN / CGNAT.
+3. **Маркер `update_attempt=<tag>` в `state.conf`** записывается на диск до подмены бинарника и
+   стирается новым бинарником, если его версия равна `<tag>`. Маркер, оставшийся под другой
+   версией, значит, что `supervise.sh` откатил релиз: автообновление этот тег больше не ставит
+   (вручную — можно). Ключ читают и пишут разные версии демона.
+
+## Правила installer/
+
+- `installer/` (Go) — единственный установщик на стороне хоста.
+- Только стандартная библиотека Go и `golang.org/x/net`; из инструментов хоста — только adb (плюс
+  `make` и `ssh/build.sh` в чекауте).
+- Команды на станции — строки busybox sh через `sh()` в [`../installer/adb.go`](../installer/adb.go)
+  (adb shell + маркер `__rc=`); одна команда — не больше 4 КБ на этих прошивках.
+- `adb shell` на прошивках станций — pty: в выводе `\r`, канал не binary-safe (бинарные данные —
+  только `adb push` / `adb pull`), код выхода всегда 0 (настоящий передаётся маркером `__rc=`).
+- Чистые части (текст init-скрипта, проверка защищённости корневой ФС, чистка `rootkeeper.sh`)
+  покрыты `autostart_test.go` и `rootkeeper_test.go`; они должны оставаться чистыми.
+
+## Диагностика
+
+При падении демон пишет в лог (`/tmp/pulsar.log`) отчёт, начинающийся с `=== CRASH`. Бинарник
+собран non-PIE (`-C relocation-model=static`), поэтому адреса в отчёте абсолютные и разбираются
+`addr2line -f -e` по `satellite/build/<arch>/pulsar.debug` той же сборки (для релиза —
+`pulsar-<arch>.debug`). `handler=` — адрес `pulsar_crash_handler`; aarch64 добавляет цепочку
+frame pointer'ов (`fp:`), armhf даёт только pc/lr. Формат — заголовок
+[`../satellite/crates/pulsar/src/crash.rs`](../satellite/crates/pulsar/src/crash.rs); процедура
+разбора — skill `crash-decode`.

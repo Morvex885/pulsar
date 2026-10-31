@@ -1,5 +1,10 @@
 # Мини 3 (`bergamot`) — экспериментальный профиль
 
+Что наблюдалось на двух Мини 3 и что проверено в работе pulsar, а что нет. Как pulsar использует
+эти данные, здесь не описано — это профиль [`MINI3`](../satellite/crates/pulsar-core/src/model.rs):
+поведение кода — в коде, обоснования — в комментариях у кода. Это данные контрибьютора, не
+авторитетные (авторитетны только Миди и Лайт 2, [hardware.md](hardware.md)).
+
 Статус: экспериментальный; ручной запуск демона и воспроизведение проверены на одной станции.
 Не Mini 3 Pro. Обследованы две Мини 3 с одинаковой прошивкой
 `0.369.1.50.4794652521.20261021.117` и совместимостями
@@ -10,30 +15,28 @@
 
 | Узел | Наблюдение / источник |
 | --- | --- |
-| ABI | Linux 4.9.68 aarch64, loader `/lib/ld-linux-armhf.so.3`, glibc 2.30; installer выбирает только armhf (сборка под glibc 2.23 Мини; на Мини 3 после этой смены не запускалась) |
+| ABI | Linux 4.9.68 aarch64, loader `/lib/ld-linux-armhf.so.3`, glibc 2.30 (сборка под glibc 2.23 Мини; на Мини 3 после этой смены не запускалась) |
 | RAM | MemTotal около 238 MiB |
 | Capture | `/etc/asound.conf`: `multi_capture` из `hw:0,1`, 8 физических каналов: микрофоны PDM0–2 на каналах 0/1/2, канал 6 — `HW feedback (TDMB_IN0)`, обратный сигнал усилителя (референс динамика для VQE) |
 | VQE | preset `bergamot`, 3 mic + 1 spk: 768 capture frames @ 48000 Hz → 256 samples @ 16000 Hz, 16 ms |
-| Playback | ALSA `speakers` -> `dmix_speakers` -> `hw:0,0`, stereo 48000 Hz; у `dmix_speakers` `ipc_key 1024` (= 0x400), так что очистка зависшего dmix-лока в `supervise.sh` и `tools/station.sh` её покрывает |
+| Playback | ALSA `speakers` -> `dmix_speakers` -> `hw:0,0`, stereo 48000 Hz; у `dmix_speakers` `ipc_key 1024` (= 0x400) |
 | Volume | `Master` mono, 0..255; карта штатного конфига 0->0, 1->33, 20->255 |
 | Ring | `/dev/fb0`, имя `logo`, 6x1, 24 bpp (AW21018); `bergamot:<цвет>:logo0..5`, trigger `ledfb-logo`; отдельного логотипа нет |
-| Clock | продаётся с часами (AW21036) и без них; `bergamot:white:clock<A..G><0..3>`, `DH`/`DL`, `DM`, `DEGREE`; присутствие панели проверяется при старте |
+| Clock | продаётся с часами (AW21036) и без них; `bergamot:white:clock<A..G><0..3>`, `DH`/`DL`, `DM`, `DEGREE` |
 | Keys | evdev `aw933xx`, bitmap содержит action/volume up/down |
 | Mic mute | evdev `gpio-keys`, SW_MUTE_DEVICE; начальное состояние прочитано |
 | Lux | IIO `ltr308als01` |
 | Earcons | `common/spotter_start.mp3`, `spotter_cancel.mp3`, `volume_sound.mp3`, `timer.wav` (по заголовку это MP3), `ru-RU/playback_error.mp3` [inference: GStreamer прошивки декодирует MP3, раз штатные earcons — MP3; в логе pulsar не проверено] |
 | Models | Штатные каталоги `spotter_models/activation/alisa` и `spotter_models/command` существуют |
-| Пре-ролл | `alisa` 6, `yandex` 8 чанков по 16 мс: длины Лайт 2 во времени, не замерялись |
 
 В обеих станциях совпали SHA256 `libyandex_evil.so`, `libtflite.so`, `quasar.cfg` и
 `asound.conf`. Проприетарные библиотеки, модели, сырые конфиги и персональные сведения
-в патч не входят. Пресет берётся именно `bergamot`, не от Мини 2/Лайт 2.
+в патч не входят (общее правило — [AGENTS.md](../AGENTS.md), «Git»).
 
 ## Runtime-проверки
 
 ALSA ABI probe прошёл (`alias=yes`). В 20 s frontend smoke: 1248 аудиоблоков по 256
-сэмплов, 624 music frames, 0 dropped; music 31.23 fps. FFT накапливает два VQE-блока,
-а wake-level сохраняет прежнее окно 47 × 32 ms и арифметику 512-сэмпловых блоков.
+сэмплов, 624 music frames, 0 dropped; music 31.23 fps.
 HA подключился по ESPHome API с автоматической выдачей Noise key. TTS через HA доходит
 до EOS. Очередь Music Assistant играет через Sendspin FLAC 48 kHz stereo → ALSA
 `speakers`: 60.5 s записи в устройство, 0 xruns, в том числе с HA TTS поверх музыки.
@@ -51,7 +54,7 @@ MA произошло автоматически. Это не акустичес
   микрофонами.
 - Часы, их яркость и датчик освещённости; вариант без часов.
 - MP3-earcons в логе pulsar.
-- Длины пре-ролла (строки `wake timing:`).
+- Длины пре-ролла (строки `wake timing:`): в профиле — длины Лайт 2 во времени, не замерялись.
 - Установка через `pulsar-install` от начала до конца и автозапуск после перезагрузки.
 
 Источники: замеры автора PR #30 на двух станциях;

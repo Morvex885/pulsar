@@ -482,6 +482,8 @@ func healthCheck(s string, changed bool, mark string) bool {
 				n++
 			}
 		}
+		// Строка «=== alsa: removed stale dmix lock» от supervise.sh — штатная очистка, не сбой, и
+		// в условии ниже не учитывается; см. docs/development.md, «Супервизор».
 		if shTo(os.Stdout, s, "pidof pulsar >/dev/null") != nil || n != 1 ||
 			strings.Contains(log, "=== CRASH") || strings.Contains(log, "=== exit") || strings.Contains(log, "=== supervise") {
 			bad = true

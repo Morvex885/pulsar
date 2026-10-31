@@ -62,10 +62,11 @@ pub struct SpotterLayout {
     pub vqe: Vec<i32>,
 }
 
-/// Layout from the per-type channel counts of a spotter config
-/// (spotter_conf_get_required_channel_count); `main_vqe` feeds type 0. Measured offline on the
-/// device: the wake-word model works with VQE_OMNI_WITH_GAIN, the command model only with
-/// VQE_OMNI (10/14 synthetic commands vs 0/14 with the AGC'd channel).
+/// Раскладка каналов по числу каналов каждого типа в конфиге споттера
+/// (spotter_conf_get_required_channel_count); `main_vqe` питает тип 0. Измерено `ww_offline` на
+/// захвате станции: модель wake-слова работает с VQE_OMNI_WITH_GAIN, командная — только с
+/// VQE_OMNI (10/14 синтетических команд против 0/14 с каналом после AGC). При смене раскладки
+/// каналов перемерить.
 pub fn spotter_layout(counts: &[i64; SPOTTER_TYPES], main_vqe: i32) -> SpotterLayout {
     let mut l = SpotterLayout::default();
     for (t, &n) in counts.iter().enumerate() {

@@ -94,6 +94,17 @@ jobs:
             cargo install cargo-zigbuild --locked --force --version 0.24.0
       - run: make -C satellite check
 
+  commits:
+    # Авторство коммитов PR: без AI (AGENTS.md, «Git»). Обязательная проверка ruleset'а main.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: tools/check-authorship.sh "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
   radio:
     # Zigbee firmware (router, coordinator) for the Midi's radio (Telink B91), installed next to the daemon.
     runs-on: ubuntu-24.04

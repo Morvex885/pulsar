@@ -118,7 +118,7 @@ fn main() -> ExitCode {
     };
     pulsar_core::init_logger();
     pulsar_core::add_own_target(module_path!());
-    // As the daemon (ARCHITECTURE "Execution model" 1).
+    // Как в демоне: см. docs/architecture.md, «Модель исполнения», п. 1.
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(4)
