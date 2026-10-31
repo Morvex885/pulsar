@@ -64,6 +64,8 @@ pub struct Settings {
     pub voice_indication: bool,
     /// Audio between the end of the wake word and its confirmation goes ahead of the request.
     pub wake_preroll: bool,
+    /// Maximum wait for speech after an answer; 0 disables automatic continuation.
+    pub followup_duration_s: u32,
     /// Stem of `pulsar_hw::case_colors()`, "" = none.
     pub led_case_color: String,
     /// Release being installed. Still set after a restart into another version: that release
@@ -98,6 +100,7 @@ impl Default for Settings {
             led_speed: 1.0,
             voice_indication: true,
             wake_preroll: true,
+            followup_duration_s: pulsar_esphome::FOLLOWUP_DURATION_MAX_S,
             led_case_color: String::new(),
             update_attempt: String::new(),
             zigbee_role: Mode::Off,
@@ -171,6 +174,16 @@ impl Settings {
                 }
                 b"voice_indication" => self.voice_indication = on,
                 b"wake_preroll" => self.wake_preroll = on,
+                b"followup_duration_s" => {
+                    if let Ok(seconds) = v.trim().parse::<f32>()
+                        && seconds.is_finite()
+                    {
+                        self.followup_duration_s = seconds
+                            .round()
+                            .clamp(0.0, pulsar_esphome::FOLLOWUP_DURATION_MAX_S as f32)
+                            as u32;
+                    }
+                }
                 b"led_case_color" => self.led_case_color = v,
                 _ => {}
             }
@@ -194,7 +207,7 @@ impl Settings {
              light_b={}\nlight_effect={}\nwake_word={}\ntz={}\nauto_update={}\nupdate_attempt={}\n\
              zigbee_role={}\nzigbee_flash_failed={:x}\nnearest_answers={}\nmusic_viz={}\n\
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
-             wake_preroll={}\nclock_auto_brightness={}\n",
+             wake_preroll={}\nclock_auto_brightness={}\nfollowup_duration_s={}\n",
             f(self.volume),
             f(self.volume_legacy),
             b(self.muted),
@@ -222,6 +235,7 @@ impl Settings {
             self.clock_music,
             b(self.wake_preroll),
             b(self.clock_auto_brightness),
+            self.followup_duration_s,
         )
     }
 

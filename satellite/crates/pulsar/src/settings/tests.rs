@@ -2,7 +2,7 @@
 // and Settings::save of controller.cpp, copied verbatim into a throwaway host harness built with
 // `zig c++ -std=c++20 -O2`. save_*.conf: `save` of the values below; load_*.out: `load` of
 // load_*.in, then `save`. Edited by hand since: `wake_preroll` (after `clock_music`; 0 in
-// load_odd.in); `clock_auto_brightness` (after `wake_preroll`).
+// load_odd.in); `clock_auto_brightness` (after `wake_preroll`); `followup_duration_s` (30).
 
 use super::*;
 
@@ -329,10 +329,43 @@ fn strtoul_hex_matches_libc() {
 fn clock_auto_brightness_is_always_written() {
     let mut s = Settings::default();
     assert!(s.clock_auto_brightness);
-    assert!(s.serialize().ends_with("clock_auto_brightness=1\n"));
+    assert!(
+        s.serialize()
+            .lines()
+            .any(|line| line == "clock_auto_brightness=1")
+    );
     s.parse(b"clock_auto_brightness=0\n");
     assert!(!s.clock_auto_brightness);
-    assert!(s.serialize().ends_with("clock_auto_brightness=0\n"));
+    assert!(
+        s.serialize()
+            .lines()
+            .any(|line| line == "clock_auto_brightness=0")
+    );
     s.parse(b"clock_auto_brightness=1\n");
     assert!(s.clock_auto_brightness);
+}
+
+#[test]
+fn followup_duration_defaults_roundtrips_and_rejects_non_finite_values() {
+    let mut st = Settings::default();
+    st.parse(b"unknown_old_setting=1\n");
+    assert_eq!(
+        st.followup_duration_s,
+        pulsar_esphome::FOLLOWUP_DURATION_MAX_S
+    );
+    for seconds in [0, 7, pulsar_esphome::FOLLOWUP_DURATION_MAX_S] {
+        st.followup_duration_s = seconds;
+        let mut loaded = Settings::default();
+        loaded.parse(st.serialize().as_bytes());
+        assert_eq!(loaded.followup_duration_s, seconds);
+    }
+    st.followup_duration_s = 7;
+    for value in ["NaN", "inf", "-inf", "garbage", "", "7junk"] {
+        st.parse(format!("followup_duration_s={value}\n").as_bytes());
+        assert_eq!(st.followup_duration_s, 7, "{value}");
+    }
+    for (value, expected) in [("-1", 0), ("7.6", 8), ("999999", 30)] {
+        st.parse(format!("followup_duration_s={value}\n").as_bytes());
+        assert_eq!(st.followup_duration_s, expected);
+    }
 }

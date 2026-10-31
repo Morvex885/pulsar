@@ -131,15 +131,20 @@ async fn selftest_matches_cxx_golden_bytes() {
             loop {
                 let m = p.recv().await.unwrap();
                 let done = m.0 == msg::LIST_DONE;
-                got.push(m);
+                // The follow-up Number is Rust-only and checked separately below.
+                if m.0 != msg::LIST_NUMBER
+                    || field(&m.1, 2).map(|f| f.u32()) != Some(key::NUMBER_FOLLOWUP_DURATION)
+                {
+                    got.push(m);
+                }
                 if done {
                     break;
                 }
             }
             p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
-            while got.len() < golden.len() {
-                got.push(p.recv().await.unwrap());
-            }
+            got.extend(p.sync().await.into_iter().filter(|(t, m)| {
+                *t != msg::NUMBER_STATE || state_key(m) != Some(key::NUMBER_FOLLOWUP_DURATION)
+            }));
             assert!(p.sync().await.is_empty());
             assert_eq!(got.len(), golden.len());
             for (i, (g, r)) in golden.iter().zip(&got).enumerate() {
@@ -708,9 +713,10 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
                 }
                 keys.push(field(&m, 2).unwrap().u32());
             }
-            // 14 entities plus the led_show service; no clock, Lux, wake pre-roll, hardware MUTE,
+            // 15 entities plus the led_show service; no clock, Lux, wake pre-roll, hardware MUTE,
             // case colour or Button entities.
-            assert_eq!(keys.len(), 15, "keys: {keys:?}");
+            assert_eq!(keys.len(), 16, "keys: {keys:?}");
+            assert!(keys.contains(&key::NUMBER_FOLLOWUP_DURATION));
             assert!(keys.contains(&key::ACTION_LED_SHOW));
             let absent = [
                 key::SW_CLOCK,
@@ -906,4 +912,90 @@ async fn eof_with_pending_batch_still_answers_everything() {
             assert_eq!(done, 300);
         })
         .await;
+}
+
+#[tokio::test]
+async fn followup_duration_is_universal_config_and_replays_its_state() {
+    for has_clock in [true, false] {
+        local()
+            .run_until(async {
+                let (id, mut cfg) = selftest("now");
+                cfg.has_clock = has_clock;
+                let (h, mut rx, port) = start_with(id, cfg);
+                let mut p = Peer::connect(port).await;
+                p.hello("HA").await;
+                event(&mut rx).await;
+                p.send(msg::LIST_ENTITIES_REQ, &Writer::new()).await;
+                let mut found = false;
+                loop {
+                    let (t, m) = p.recv().await.unwrap();
+                    if t == msg::LIST_DONE {
+                        break;
+                    }
+                    if t == msg::LIST_NUMBER
+                        && field(&m, 2).unwrap().u32() == key::NUMBER_FOLLOWUP_DURATION
+                    {
+                        found = true;
+                        assert_eq!(field(&m, 1).unwrap().str(), "followup_duration");
+                        assert_eq!(field(&m, 3).unwrap().str(), "Follow-up duration");
+                        assert_eq!(field(&m, 6).map_or(0.0, |f| f.flt()), 0.0);
+                        assert_eq!(field(&m, 7).unwrap().flt(), FOLLOWUP_DURATION_MAX_S as f32);
+                        assert_eq!(field(&m, 8).unwrap().flt(), 1.0);
+                        assert_eq!(field(&m, 10).unwrap().u32(), 1); // configuration
+                        assert_eq!(field(&m, 11).unwrap().str(), "s");
+                    }
+                }
+                assert!(found);
+                h.publish_number(NumberId::FollowupDuration, 30.0);
+                p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+                let initial = p.sync().await;
+                let (_, m) = initial
+                    .iter()
+                    .find(|(t, m)| {
+                        *t == msg::NUMBER_STATE
+                            && state_key(m) == Some(key::NUMBER_FOLLOWUP_DURATION)
+                    })
+                    .unwrap();
+                assert_eq!(field(m, 2).unwrap().flt(), 30.0);
+                for (input, expected) in [
+                    (-1.0, Some(0.0)),
+                    (0.0, Some(0.0)),
+                    (7.6, Some(8.0)),
+                    (50.0, Some(30.0)),
+                    (f32::NAN, None),
+                    (f32::INFINITY, None),
+                ] {
+                    p.send(
+                        msg::NUMBER_CMD,
+                        &kv(key::NUMBER_FOLLOWUP_DURATION, |w| w.flt(2, input, true)),
+                    )
+                    .await;
+                    let got = drain(&mut p, &mut rx).await;
+                    assert_eq!(
+                        got,
+                        expected
+                            .map(|v| ApiEvent::Number(NumberId::FollowupDuration, v))
+                            .into_iter()
+                            .collect::<Vec<_>>()
+                    );
+                }
+                for value in [0.0, 7.0] {
+                    h.publish_number(NumberId::FollowupDuration, value);
+                    let pushed = p.sync().await;
+                    let (_, m) = pushed
+                        .iter()
+                        .find(|(_, m)| state_key(m) == Some(key::NUMBER_FOLLOWUP_DURATION))
+                        .unwrap();
+                    assert_eq!(field(m, 2).map_or(0.0, |f| f.flt()), value);
+                    p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+                    let replayed = p.sync().await;
+                    let (_, m) = replayed
+                        .iter()
+                        .find(|(_, m)| state_key(m) == Some(key::NUMBER_FOLLOWUP_DURATION))
+                        .unwrap();
+                    assert_eq!(field(m, 2).map_or(0.0, |f| f.flt()), value);
+                }
+            })
+            .await;
+    }
 }
