@@ -7,7 +7,7 @@
 |---|---|---|---|
 | Станция Миди | `cucumber` | проверена мейнтейнером | станция мейнтейнера |
 | Станция Лайт 2 | `plum` | проверена мейнтейнером | станция мейнтейнера |
-| Станция Мини 2 | `station-mini2` | экспериментально, см. [Мини 2](#мини-2) | контрибьюторы: [#9](https://github.com/Morvex885/pulsar/pull/9), [#43](https://github.com/Morvex885/pulsar/pull/43) |
+| Станция Мини 2 | `station-mini2` | экспериментально, см. [Мини 2](#мини-2) | контрибьюторы: [#9](https://github.com/Morvex885/pulsar/pull/9), станция из [#38](https://github.com/Morvex885/pulsar/issues/38) |
 | Станция Мини 3 | `bergamot` | экспериментально, см. [профиль](https://github.com/Morvex885/pulsar/blob/main/docs/mini3.md) | контрибьютор: [#30](https://github.com/Morvex885/pulsar/pull/30) |
 | Станция Мини | `yandexmini` | по данным контрибьютора, см. [Мини](#мини) | контрибьютор: [#35](https://github.com/Morvex885/pulsar/pull/35) |
 
@@ -417,7 +417,7 @@ pulsar отдаёт модуль по протоколу deCONZ (ConBee/RaspBee)
 /data/pulsar/ctl.sh log 100   # журнал (/tmp/pulsar.log)
 /data/pulsar/ctl.sh restart
 /data/pulsar/ctl.sh reload    # перезапустить и надзорный скрипт (после обновления supervise.sh)
-/data/pulsar/ctl.sh api-key   # ключ шифрования API: показать / задать / clear
+/data/pulsar/ctl.sh api-key   # задан ли ключ шифрования API (сам ключ не выводится); см. ниже
 /data/pulsar/ctl.sh disable   # вернуть стек Яндекса, в том числе после перезагрузки
 /data/pulsar/ctl.sh enable
 /data/pulsar/pulsar --version
@@ -437,8 +437,8 @@ pulsar отдаёт модуль по протоколу deCONZ (ConBee/RaspBee)
 Задать ключ вручную (base64 от 32 байт, как в ESPHome) или убрать его:
 
 ```sh
-/data/pulsar/ctl.sh api-key <base64>   # затем ввести тот же ключ в HA
-/data/pulsar/ctl.sh api-key clear
+/data/pulsar/ctl.sh api-key <base64>   # задать ключ, демон перезапустится; затем ввести его в HA
+/data/pulsar/ctl.sh api-key clear      # удалить ключ, демон перезапустится
 ```
 
 После смены или удаления ключа вручную HA попросит переавторизовать устройство. **Внимание:**
