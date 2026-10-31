@@ -585,3 +585,68 @@ fn microphones_mutes() {
     // The button never sets the software mute.
     assert!(!sw_mute_after_button(false, true));
 }
+
+#[test]
+fn followup_needs_ha_request_success_and_nonzero_duration() {
+    let mut f = Followup::default();
+    assert_eq!(f.wait_ms(true, 30, false), None);
+    f.on_event(VaEvent::IntentEnd, true);
+    assert_eq!(f.wait_ms(true, 30, false), Some(30_000));
+    assert_eq!(f.wait_ms(true, 7, false), Some(7_000));
+    assert_eq!(f.wait_ms(true, 0, false), None);
+    assert_eq!(f.wait_ms(false, 30, false), None);
+    assert_eq!(f.wait_ms(true, 30, true), None); // timer ringing or mic muted
+    f.on_event(VaEvent::IntentEnd, false);
+    assert_eq!(f.wait_ms(true, 30, false), None);
+}
+
+#[test]
+fn followup_error_after_true_cannot_reopen_after_successful_tts() {
+    let mut f = Followup::default();
+    f.on_event(VaEvent::IntentEnd, true);
+    f.on_event(VaEvent::Error, false);
+    assert_eq!(f.wait_ms(true, 30, false), None);
+    f.on_event(VaEvent::IntentEnd, true); // even a late intent cannot undo the error
+    assert_eq!(f.wait_ms(true, 30, false), None);
+    f.on_event(VaEvent::RunStart, false);
+    f.on_event(VaEvent::IntentEnd, true);
+    assert_eq!(f.wait_ms(true, 30, false), Some(30_000));
+}
+
+#[tokio::test(start_paused = true)]
+async fn followup_wait_is_not_extended_by_events_and_ends_on_speech() {
+    use pulsar_core::Timers;
+    use tokio::time::{Duration, advance, timeout};
+    let mut f = Followup::default();
+    f.on_event(VaEvent::IntentEnd, true);
+    let mut timers = Timers::new();
+    timers.set((), f.wait_ms(true, 7, false).unwrap());
+    for ev in [
+        VaEvent::RunStart,
+        VaEvent::SttStart,
+        VaEvent::IntentProgress,
+    ] {
+        advance(Duration::from_secs(2)).await;
+        if f.on_event(ev, false) {
+            timers.cancel(());
+        }
+    }
+    assert!(
+        timeout(Duration::from_millis(999), timers.next())
+            .await
+            .is_err()
+    );
+    advance(Duration::from_millis(1)).await;
+    assert!(
+        timeout(Duration::from_millis(1), timers.next())
+            .await
+            .is_ok()
+    );
+    // Speech at the end of the window cancels the wait, not the user's utterance.
+    timers.set((), 1000);
+    if f.on_event(VaEvent::SttVadStart, false) {
+        timers.cancel(());
+    }
+    advance(Duration::from_secs(60)).await;
+    assert!(!timers.is_set(()));
+}

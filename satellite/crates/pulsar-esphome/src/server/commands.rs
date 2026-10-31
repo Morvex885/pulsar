@@ -257,6 +257,10 @@ impl Server {
             key::NUMBER_CLOCK_BRI => (NumberId::ClockBrightness, v.clamp(0.0, 100.0)),
             key::NUMBER_CLOCK_SCROLL => (NumberId::ClockScroll, v.clamp(100.0, 2000.0)),
             key::NUMBER_LED_SPEED => (NumberId::LedSpeed, v.clamp(LED_SPEED_MIN, LED_SPEED_MAX)),
+            key::NUMBER_FOLLOWUP_DURATION if v.is_finite() => (
+                NumberId::FollowupDuration,
+                v.round().clamp(0.0, crate::FOLLOWUP_DURATION_MAX_S as f32),
+            ),
             _ => return,
         };
         self.emit(ApiEvent::Number(id, v));

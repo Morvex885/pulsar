@@ -40,7 +40,7 @@ const TIMER_RING_MAX_MS: i64 = 15 * 60 * 1000;
 // command segmenter ends speech capture after at most 15 s of audio. Between INTENT_START and
 // INTENT_END nothing arrives (ESPHome forwards INTENT_PROGRESS only once, when TTS streaming
 // starts), and conversation agents (LLMs with tool calls) may think for a minute or more.
-const LISTEN_TIMEOUT_MS: u64 = 30_000;
+const LISTEN_TIMEOUT_MS: u64 = pulsar_esphome::FOLLOWUP_DURATION_MAX_S as u64 * 1000;
 const PROCESS_TIMEOUT_MS: u64 = 120_000;
 // Updates: releases of this repository on GitHub. The first check waits for the network
 // after boot; an automatic install waits until the speaker is idle (it restarts the daemon).
@@ -75,6 +75,8 @@ enum Tk {
     UiAfterError,
     /// Ends a LISTENING / PROCESSING phase HA never advances.
     Watchdog,
+    /// No speech started in the follow-up window.
+    FollowupWait,
     /// The shown running HA timer runs out.
     TimerTick,
     /// Next round of the timer ring.
@@ -182,7 +184,7 @@ pub struct Controller {
     /// A run's TTS_START left HA's assist satellite "responding" until AnnounceFinished, also
     /// when nothing plays here, and that report is still to be sent (`send_tts_report`).
     tts_report_owed: bool,
-    continue_conversation: bool,
+    followup: logic::Followup,
     /// An HA announcement (assist or media player) plays on ANNOUNCE.
     announcing: bool,
     ducked: bool,
@@ -585,7 +587,7 @@ impl Controller {
             tts_url: String::new(),
             tts_played: false,
             tts_report_owed: false,
-            continue_conversation: false,
+            followup: logic::Followup::default(),
             announcing: false,
             ducked: false,
             closing_earcon: false,
@@ -729,6 +731,10 @@ impl Controller {
         match k {
             Tk::UiAfterNotSubscribed | Tk::UiAfterError => self.update_ui(),
             Tk::Watchdog => self.abort_dialog("no progress from Home Assistant, giving up"),
+            Tk::FollowupWait => {
+                info!("follow-up: no speech started, ending conversation");
+                self.finish_interaction();
+            }
             Tk::TimerTick => self.show_timers(),
             Tk::RingTick => self.ring_timer(),
             Tk::UpdateCheck => self.check_update(),

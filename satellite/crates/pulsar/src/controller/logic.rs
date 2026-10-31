@@ -414,6 +414,33 @@ pub fn strip_deleted(exe: &OsStr) -> &OsStr {
     }
 }
 
+/// HA must request another turn; an error cannot be undone by a late intent event.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Followup {
+    requested: bool,
+    failed: bool,
+}
+
+impl Followup {
+    /// Returns whether speech has started and its wait timer must be cancelled.
+    pub fn on_event(&mut self, event: VaEvent, continue_conversation: bool) -> bool {
+        match event {
+            VaEvent::RunStart => *self = Self::default(),
+            VaEvent::IntentEnd => self.requested = continue_conversation && !self.failed,
+            VaEvent::Error => {
+                self.failed = true;
+                self.requested = false;
+            }
+            _ => {}
+        }
+        event == VaEvent::SttVadStart
+    }
+
+    pub fn wait_ms(&self, ok: bool, seconds: u32, blocked: bool) -> Option<u64> {
+        (ok && self.requested && !blocked && seconds > 0).then_some(u64::from(seconds) * 1000)
+    }
+}
+
 /// Pipeline events carry no run id. HA ends a run it replaces (barge-in: our new start cancels
 /// the old run) with a RUN_END sent before the new run's RUN_START, so until RUN_START every
 /// event belongs to the replaced run.

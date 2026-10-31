@@ -47,6 +47,7 @@ pub(super) mod key {
     pub const SELECT_CLOCK_MUSIC: u32 = 31;
     pub const SW_WAKE_PREROLL: u32 = 32;
     pub const SW_CLOCK_AUTO_BRI: u32 = 33;
+    pub const NUMBER_FOLLOWUP_DURATION: u32 = 34;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -131,6 +132,7 @@ pub(super) struct Cache {
     clock_bri: FloatState,
     clock_scroll: FloatState,
     led_speed: FloatState,
+    followup_duration: FloatState,
     clock_text: StrState,
     clock_face: StrState,
     zigbee_mode: StrState,
@@ -164,6 +166,7 @@ impl Cache {
             clock_bri: FloatState::default(),
             clock_scroll: FloatState::default(),
             led_speed: FloatState::default(),
+            followup_duration: FloatState::default(),
             clock_text: StrState::default(),
             clock_face: StrState::default(),
             zigbee_mode: StrState::default(),
@@ -365,6 +368,14 @@ impl Server {
             "mdi:speedometer",
             (LED_SPEED_MIN, LED_SPEED_MAX, 0.05),
             "×",
+        ));
+        out.push(number(
+            "followup_duration",
+            key::NUMBER_FOLLOWUP_DURATION,
+            "Follow-up duration",
+            "mdi:microphone-message",
+            (0.0, crate::FOLLOWUP_DURATION_MAX_S as f32, 1.0),
+            "s",
         ));
         let select = |oid, key, name, icon, options: &[String], category: Option<u32>| {
             let mut w = Writer::new();
@@ -780,6 +791,12 @@ impl Server {
             );
         }
         self.send_float(msg::NUMBER_STATE, key::NUMBER_LED_SPEED, speed, to);
+        self.send_float(
+            msg::NUMBER_STATE,
+            key::NUMBER_FOLLOWUP_DURATION,
+            self.cache.followup_duration,
+            to,
+        );
         self.send_cached_str(
             msg::SELECT_STATE,
             key::SELECT_MUSIC_VIZ,
@@ -925,10 +942,15 @@ impl Server {
                     NumberId::ClockBrightness => (&mut c.clock_bri, key::NUMBER_CLOCK_BRI),
                     NumberId::ClockScroll => (&mut c.clock_scroll, key::NUMBER_CLOCK_SCROLL),
                     NumberId::LedSpeed => (&mut c.led_speed, key::NUMBER_LED_SPEED),
+                    NumberId::FollowupDuration => {
+                        (&mut c.followup_duration, key::NUMBER_FOLLOWUP_DURATION)
+                    }
                 };
                 *s = FloatState { has: true, v };
                 let s = *s;
-                if on && (has_clock || matches!(id, NumberId::LedSpeed)) {
+                if on
+                    && (has_clock || matches!(id, NumberId::LedSpeed | NumberId::FollowupDuration))
+                {
                     self.send_float(msg::NUMBER_STATE, key, s, None);
                 }
             }

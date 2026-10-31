@@ -282,13 +282,17 @@ pub enum BinarySensorId {
     HwMicMute = 1,
 }
 
-/// Clock brightness 0..100 %, clock scroll 100..2000 ms, LED speed 0.25..4 ×.
+/// Existing maximum LISTENING watchdog window, also the follow-up duration UI limit.
+pub const FOLLOWUP_DURATION_MAX_S: u32 = 30;
+
+/// Clock brightness 0..100 %, clock scroll 100..2000 ms, LED speed 0.25..4 ×; follow-up 0..30 s.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NumberId {
     ClockBrightness = 1,
     ClockScroll = 2,
     LedSpeed = 3,
+    FollowupDuration = 4,
 }
 
 #[repr(u32)]
