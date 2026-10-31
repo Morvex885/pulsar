@@ -514,6 +514,76 @@ static MINI3: Model = Model {
     zigbee_boot: "",
 };
 
+/// Station Mini 3 Pro: aarch64 userland (glibc 2.36), unlike the armhf Mini 3. maind captures from
+/// `default` = pcm.loopback = hw:0,2 (quasar.cfg `audiod`: 3 mics + 1 spk, S16 @ 48 kHz, preset
+/// "pickle"): 4 channels there are mics 0–2 and the amplifier reference on ch 3. hw:0,1
+/// ("PDM-dummy-mics") has the same mics without the reference (its ch 3 duplicates ch 2).
+/// 16-zone RGB ring (/dev/fb1) + 6-zone logo (/dev/fb0), both ledfb; LED clock and Zigbee left
+/// off for now.
+static MINI3PRO: Model = Model {
+    codename: "pickle",
+    host_prefix: "yandex-mini3pro-",
+    friendly_name: "Яндекс Станция Мини 3 Про",
+    model_name: "Yandex Station Mini 3 Pro",
+    capture_pcm: "hw:0,2",
+    capture_rate: 48000,
+    capture_channels: 4,
+    capture_format: CaptureFormat::S16,
+    mic_channels: &[0, 1, 2],
+    spk_channels: &[3],
+    vqe_preset: "pickle",
+    led_prefix: "pickle",
+    ring: LedStrip {
+        count: 16,
+        first_index: 0,
+        fb_dev: "/dev/fb1",
+        fb_name: "ring",
+        trigger: "ledfb-ring",
+        sysfs_kind: "ring",
+        i2c_dev: "",
+        i2c_addr: 0,
+    },
+    logo: LedStrip {
+        count: 6,
+        first_index: 0,
+        fb_dev: "/dev/fb0",
+        fb_name: "logo",
+        trigger: "ledfb-logo",
+        sysfs_kind: "logo",
+        i2c_dev: "",
+        i2c_addr: 0,
+    },
+    clock_dir: "/sys/class/leds/pickle:white:clock",
+    clock_seg_base: 'A',
+    clock_pos_base: 0,
+    clock_colon: &["DH", "DL"],
+    clock_aux: &["DEGREE"],
+    clock_center: "DM",
+    clock_chip_current: false,
+    has_clock: false,
+    keys_input: "aw933xx",
+    mute_input: "mute",
+    mute_gpio: 0,
+    action_key: 582,
+    mute_key: 0,
+    error_sound: "ru-RU/playback_error.mp3",
+    wake_sound: "common/spotter_start.mp3",
+    cancel_sound: "common/spotter_cancel.mp3",
+    timer_sound: "common/timer.wav",
+    volume_sound: "common/volume_sound.mp3",
+    playback_pcm: "speakers",
+    alsa_config: "",
+    alsa_lib: "",
+    software_volume: false,
+    amp_enable_paths: &[],
+    volume_map: MINI3_VOLUME,
+    volume_min_step: true,
+    has_lux: true,
+    zigbee_tty: "",
+    zigbee_reset: "",
+    zigbee_boot: "",
+};
+
 impl Model {
     /// Process-wide ALSA setup, before any thread or audio library is started. Only the Mini sets
     /// ALSA_CONFIG_PATH: its dmix PCM lives in /data/pulsar/asound.conf (put there by
@@ -593,6 +663,7 @@ pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
         b"yandex,prune" => Some(&PRUNE),
         b"yandex,station-mini2" => Some(&MINI2),
         b"yandex,bergamot" => Some(&MINI3),
+        b"yandex,pickle" => Some(&MINI3PRO),
         _ => None,
     })
 }
