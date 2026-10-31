@@ -1,6 +1,7 @@
 ---
 name: add-station-model
-description: Добавление новой модели станции Яндекса в pulsar: read-only сбор данных с неизвестной станции, предварительная Model в pulsar-core, измерения, установщик, boot.sh, docs/hardware.md. Ключевые слова: new model, add station model, devicetree codename, hackalice wiki, alsa_abi_probe, frontend_probe, ww_offline, hw_probe, experimental profile.
+description: >-
+  Добавление новой модели станции Яндекса в pulsar: read-only сбор данных с неизвестной станции, предварительная Model в pulsar-core, измерения, установщик, boot.sh, docs/hardware.md. Ключевые слова: new model, add station model, devicetree codename, hackalice wiki, alsa_abi_probe, frontend_probe, ww_offline, hw_probe, experimental profile.
 ---
 
 # Новая модель станции

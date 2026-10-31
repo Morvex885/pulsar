@@ -1,6 +1,7 @@
 ---
 name: pre-publish-review
-description: Обязательное ревью перед git push, gh pr create и тегом v*: авторство, сборка, код, архитектура, безопасность, безопасность станций, доки, тесты; раунды до чистого прохода. Ключевые слова: pre-publish review, review before push, PR review, check-authorship, review rounds.
+description: >-
+  Обязательное ревью перед git push, gh pr create и тегом v*: авторство, сборка, код, архитектура, безопасность, безопасность станций, доки, тесты; раунды до чистого прохода. Ключевые слова: pre-publish review, review before push, PR review, check-authorship, review rounds.
 ---
 
 # Ревью перед публикацией

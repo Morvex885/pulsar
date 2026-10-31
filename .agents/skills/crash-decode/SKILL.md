@@ -1,6 +1,7 @@
 ---
 name: crash-decode
-description: Расшифровка краш-отчёта pulsar (=== CRASH) в строки исходников через addr2line и pulsar.debug. Ключевые слова: crash, SIGSEGV, backtrace, addr2line, pulsar.debug, symbolize, crash report, fp chain.
+description: >-
+  Расшифровка краш-отчёта pulsar (=== CRASH) в строки исходников через addr2line и pulsar.debug. Ключевые слова: crash, SIGSEGV, backtrace, addr2line, pulsar.debug, symbolize, crash report, fp chain.
 ---
 
 # Расшифровка краша

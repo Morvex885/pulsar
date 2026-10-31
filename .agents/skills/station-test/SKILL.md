@@ -1,6 +1,7 @@
 ---
 name: station-test
-description: Тестирование pulsar на живых станциях Яндекса (Миди, Лайт 2, Мини) через tools/station.sh: lock, остановка демона, тестовый экземпляр, probe-утилиты, живая подмена, очистка. Ключевые слова: station test, live station, lock, stop, test-start, swap, restore, cleanup, esphome_check, dmix, hardware probe.
+description: >-
+  Тестирование pulsar на живых станциях Яндекса (Миди, Лайт 2, Мини) через tools/station.sh: lock, остановка демона, тестовый экземпляр, probe-утилиты, живая подмена, очистка. Ключевые слова: station test, live station, lock, stop, test-start, swap, restore, cleanup, esphome_check, dmix, hardware probe.
 ---
 
 # Тест на живой станции

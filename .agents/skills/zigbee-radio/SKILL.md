@@ -1,6 +1,7 @@
 ---
 name: zigbee-radio
-description: Сборка и прошивка Zigbee-радио Станции Миди (Telink B91), чтение через zigbee_probe и tools/deconz_read.py. Ключевые слова: zigbee firmware, radio flash, zigbee_probe, ybl, coordinator, router, deconz, Z2M, ZHA.
+description: >-
+  Сборка и прошивка Zigbee-радио Станции Миди (Telink B91), чтение через zigbee_probe и tools/deconz_read.py. Ключевые слова: zigbee firmware, radio flash, zigbee_probe, ybl, coordinator, router, deconz, Z2M, ZHA.
 ---
 
 # Zigbee-радио (Миди)

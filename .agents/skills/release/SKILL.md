@@ -1,6 +1,7 @@
 ---
 name: release
-description: Выпуск релиза pulsar (тег vX.Y.Z, GitHub release). Только по явной просьбе пользователя. Ключевые слова: release, tag, version bump, git tag, gh release, publish, SHA256SUMS, release assets.
+description: >-
+  Выпуск релиза pulsar (тег vX.Y.Z, GitHub release). Только по явной просьбе пользователя. Ключевые слова: release, tag, version bump, git tag, gh release, publish, SHA256SUMS, release assets.
 ---
 
 # Релиз
