@@ -2,7 +2,9 @@
 
 Как устроен код в `satellite/`: workspace, модель исполнения (tokio, акторы, потоки), правила для
 всех крейтов, плавающая точка, линковка sendspin-cpp и заметки о поведении сервисов. Сигнатуры
-описаны в rustdoc крейтов; здесь — то, что из одного файла не видно.
+описаны в rustdoc крейтов; здесь — то, что из одного файла не видно. Аппаратные факты и C API
+прошивки: [hardware.md](hardware.md); протокол радио: [zigbee.md](zigbee.md);
+установка и релизы: [development.md](development.md).
 
 ## Workspace
 
@@ -305,6 +307,13 @@ println!("cargo:rustc-link-lib=c++");
   событие `MdnsTxtChanged`. IP для сенсора «IP address» берётся из
   `pulsar_core::net::best_interface()`.
 
+- Keep the ESPHome API server pending until a valid `HelloRequest`; probes must not displace HA.
+
+- ESPHome API: up to 4 clients after a valid hello; states go to all subscribers, the voice
+  pipeline to the most recent client still subscribed to it: when that one unsubscribes or
+  disconnects, the previous subscriber gets it back (`ApiEvent::VoiceSubscribed(false)` then
+  `(true)` on every hand-over), so a probe never leaves HA without the pipeline.
+
 ### `pulsar-lan`
 
 - mDNS: если 5353 занят без `SO_REUSEADDR`/`SO_REUSEPORT`, респондер берёт эфемерный порт и только
@@ -316,6 +325,22 @@ println!("cargo:rustc-link-lib=c++");
   `claim_id` при cancel и сопоставляет события по id.
 - `spawn_traced` (только для `lan_probe`): тот же сервис плюс канал отвеченных вопросов mDNS /
   принятых чужих claims.
+
+- Wake arbitration (switch "Nearest station answers", `state.conf` `nearest_answers=`, default 1):
+  the front-end's processing thread (`wake_level_db` in `pulsar-audio/src/frontend.rs`) reports
+  the wake level as the mean of the 8 loudest of the last 47 blocks of 512 `VQE_OMNI` samples
+  (32 ms; post-AEC, no AGC; `VQE_OMNI_WITH_GAIN` loses the distance), rounded to 0.1 dB so both
+  sides compare the same numbers. A claim is one ASCII datagram
+  `pulsar-wake/1 <name> <wake> <busy> <level>`, sent 3× 40 ms apart to `255.255.255.255:6054`;
+  the decision comes 250 ms later over claims of the same wake word received up to 500 ms before
+  ours. A claim older than the 250 ms window wins outright (its station already decided and
+  answers); otherwise busy (speaking, announcing, ringing) beats idle, then the higher level, then
+  the larger station name. While arbitrating the ring shows LISTENING, mic audio (the wake word's
+  pre-roll, then live) is buffered and sent after `voice_request_start`, a command word is held; a
+  losing station blocks voice commands for 2.5 s (cleared by its next wake word or dialog).
+  Stations without a voice subscriber do not claim (the wake word shows the usual not-subscribed
+  error). HA's `duplicate_wake_up_detected` error (first phrase per 2 s wins across satellites) is
+  handled silently: no error ring or sound.
 
 ### `pulsar-audio`
 
@@ -398,6 +423,21 @@ println!("cargo:rustc-link-lib=c++");
   (`aux_amp` остаётся 1), поэтому включение стоит перед каждым стартом. Sink — `mini` из
   `/data/pulsar/asound.conf` (dmix).
 
+- Volume: `Mixer` maps 0..1 to the stock curve in `Model::volume_map`. `state.conf` has
+  `volume2=` (stock curve, authoritative) and `volume=` (same raw level on the pre-curve mapping, for
+  binaries rolled back to `.prev`); without `volume2=`, `volume=` is converted once. For
+  `software_volume` models (Mini), both keys store the same normalized 0..1 level; no raw
+  control value is involved. Mute zeroes channel and Sendspin gains on all models; on models
+  with an ALSA master control it also writes softvol raw 0 (still -60 dB, not silence). Local
+  changes (keys, voice words) play `Model::volume_sound` (`common/volume_sound.mp3`) on ANNOUNCE
+  (maind's SimpleVolumeTonePlayer: every change except its sources "other" and "smart_tts") when
+  the level (in whole percent) or mute changed, outside LISTENING / SPEAKING and arbitration and
+  never over an announcement, the timer ring or a closing earcon (`logic::want_volume_click`); HA
+  and Sendspin changes are silent; music is not ducked under it. Software-volume models (the
+  Mini) get their master gain from the same 60 dB stock curve, linear in dB
+  (`pulsar_core::volume::master_gain`): level 1 ≈ -48.5 dB, one 5 % step = 2.55 dB; HA and the
+  Sendspin sink use it too.
+
 ### `pulsar-sendspin`
 
 - Без sendspin-cpp (host-сборка, cfg `sendspin_ffi` не задан) `spawn` отдаёт
@@ -414,6 +454,20 @@ println!("cargo:rustc-link-lib=c++");
   `/system/vendor/quasar/ledconfigs/<stem>.json` и работает и без открытых LED.
 - `spawn_input` отдаёт `Err`, если не открылось ни одно устройство.
 - `spawn_light_sensor` отдаёт первое значение сразу.
+
+- Clock layers: order in the `pulsar-clock/src/clock.rs` module doc (pairing code > … > time;
+  an accepted update install keeps it dark until the current binary exits on success, then
+  `supervise.sh` starts the new binary; on failure, `install_failed()` restores the clock
+  without exiting). Persisted: `clock_scroll_ms=`,
+  `clock_music=`, `clock_auto_brightness=`. Player one-shots fire only when the command took
+  effect (`music_pause()` returns whether something played; next / previous when Sendspin
+  accepted the transport command).
+
+- LED layers: order in the `pulsar-hw/src/leds.rs` module doc and `active_layer`. Output:
+  `(v · ambient dim)²`, case matrix (`led_case_color=`, rows = output R, G, B [inference:
+  orientation not confirmed by eye]), × 0.8. Music: Sendspin visualizer frames win while they keep
+  coming (`pulsar_core::SENDSPIN_FRESH_MS` 500 ms, shared with the clock), else the
+  speaker-reference analysis, which only runs while the visualization is shown.
 
 ### `pulsar-zigbee`
 
@@ -432,6 +486,34 @@ println!("cargo:rustc-link-lib=c++");
   контроллер, который не начинает установку, пока id проверки не обработан.
 - Когда закрыты все handle (выход демона), установка в процессе отменяется: до `--version` и
   замены бинаря она прерывается (`pulsar.new` удаляется), уже идущая замена завершается.
+
+- При выходе контроллер очищает `update_attempt`, если установка ещё не завершилась успешно.
+
+### Контроллер голосового диалога
+
+- Voice phases LISTENING/PROCESSING are bounded by a watchdog (30 s / 120 s without a pipeline
+  event; ESPHome forwards INTENT_PROGRESS only once, so nothing arrives while the agent thinks);
+  any new path into those phases must go through `start_pipeline`.
+
+- Pipeline events carry no run id. While awaiting RUN_START, `RunBinding::accept` drops
+  ordinary events and the replaced run's RUN_END. If no active run was replaced, RUN_END
+  is accepted even before RUN_START: HA may end the request without starting a pipeline.
+  In IDLE, events accepted by the binding are ignored except TTS_START: it records the
+  outstanding report and calls `send_tts_report(false)` so HA does not keep waiting.
+  `finish_interaction` sends `voice_request_stop` when the dialog's run is still active.
+
+- HA's assist satellite stays "responding" from a run's TTS_START until AnnounceFinished, also
+  when nothing plays (`send_tts_report`): sent once when the answer ends or is cut short, for a
+  TTS_START that arrives after the dialog ended, and always before the next
+  `voice_request_start` (HA applies it by forcing idle). Dropped while an assist announcement's
+  completion is pending (its own AnnounceFinished ends the wait; one more would end the
+  announcement's wait early); media player announcements send none. It belongs to the voice
+  owner's run: dropped when the link is lost, and the server drops one sent after an owner change
+  until the next `voice_request_start` (`voice_answer_finished`, like stop and audio), since the
+  next subscriber could be waiting for an announcement.
+
+- Отменяемые ответы сопоставляются не только по id запроса, но и с текущим диалогом /
+  объявлением (`dialog`, `announce_seq`).
 
 ## Порты и тестовый режим
 
