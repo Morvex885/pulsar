@@ -19,8 +19,8 @@ description: >-
 - Стек Яндекса останавливается `/system/vendor/quasar/q stop` (возврат — `q start`): только с
   согласия владельца и с обязательным возвратом. `ctl.sh disable` не подходит: он, наоборот, запускает
   стек Яндекса, а на неизвестной модели pulsar не установлен.
-- После добавления модели — добавить её цель в `tools/station.sh` и дальше работать по skill
-  `station-test`.
+- После добавления модели — добавить её цель в `tools/station.sh`, перечни целей в skill
+  `station-test` и пункт «Громкость» в `docs/stations.md`; дальше работать по skill `station-test`.
 
 ## 1. Сбор данных (read-only)
 
@@ -29,8 +29,9 @@ description: >-
    `cat /proc/device-tree/amlogic-dt-id`, `cat /proc/mtd`, `cat /proc/cpuinfo`,
    `cat /proc/meminfo`, `df /tmp`, `ls /sys/bus/i2c/devices`,
    `cat /system/vendor/quasar/VERSION`, `deviceType` из `/system/vendor/quasar/quasar.cfg`.
-3. Userland: загрузчики `ls /lib/ld-linux-*`, версия glibc, `aplay -l`, `arecord -l`,
-   `/etc/asound.conf`, пресет VQE, каталог `spotter_models/`.
+3. Userland: загрузчики `ls /lib/ld-linux-*`, версия glibc, `ls /etc/init.d`, `aplay -l`,
+   `arecord -l`, `/etc/asound.conf` (в том числе `ipc_key` dmix), пресет VQE, каталог
+   `spotter_models/`.
 4. Периферия: `/sys/class/leds`, `/dev/fb*`, `/proc/bus/input/devices`, датчик освещённости,
    earcons.
 5. Без `Model` из утилит с железом работает только `alsa_abi_probe` (ABI alsa-lib, без звука):
@@ -66,6 +67,12 @@ description: >-
   проверки в `probe()` (`installer/probe.go`) и `boot.sh`.
 - Правило «три места» (`model.rs`, `installer/probe.go`, `boot.sh`) — `docs/development.md`,
   «Установка и станция».
+- Стоковый init-скрипт (`ls /etc/init.d`): `/etc/init.d/S99zpulsar` должен сортироваться после него
+  (`installer/autostart.go`); запись о нём — в цепочке загрузки, `docs/development.md`, «Установка и
+  станция».
+- Ключ dmix: если в `/etc/asound.conf` станции свой `ipc_key`, добавить его в `clear_dmix`
+  (`satellite/deploy/supervise.sh`) и `cleanup` (`tools/station.sh`); иначе зависший lock не
+  снимется (`docs/hardware.md`, «Зависший dmix lock»).
 
 ## 3. Измерения
 
@@ -88,8 +95,12 @@ description: >-
 - `README.md`: таблица моделей в шапке, «Требования» (модель и прошивка), раздел «Модели:
   особенности», список имён устройств `yandex-<префикс>-xxxxxx` в «Установке» и остальные
   перечисления моделей (`grep -n '<соседняя модель>' README.md`) — добавить новую модель.
+- `docs/development.md`, «Установка и станция» (цепочка загрузки): стоковый init-скрипт модели;
+  `docs/hardware.md`, «Зависший dmix lock»: ключи IPC модели.
 - Правила текста — `AGENTS.md`, «Документация».
 
 ## 5. Проверка
 
-`make -C satellite check` и `go -C installer test ./...`; затем skill `pre-publish-review`.
+`make -C satellite check` и `go -C installer test ./...`; затем
+`git grep -n -i -e '<соседняя модель>' -e '<codename соседа>'` по всему репозиторию — каждое найденное
+место проверить (перечни моделей, цели, ключи); затем skill `pre-publish-review`.
