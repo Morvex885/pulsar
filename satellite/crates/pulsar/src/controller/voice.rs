@@ -225,6 +225,7 @@ impl Controller {
         self.listen_started_ms = now_ms();
         self.tts_url.clear();
         self.tts_played = false;
+        self.clear_speech_display();
         self.continue_conversation = false;
         self.update_duck();
         if earcon {
@@ -294,12 +295,44 @@ impl Controller {
                 if get("tts_start_streaming") == "1" {
                     self.play_tts();
                 }
+                if let Some(encoded) = data.get("display_marks")
+                    && let Some(marks) = super::speech_marks::parse(encoded)
+                {
+                    self.speech_marks = marks;
+                    self.speech_latch = None;
+                    self.clock.set_speech_number(String::new());
+                    if self.speech_started_ms != 0 {
+                        self.update_speech_mark();
+                    }
+                }
             }
             VaEvent::IntentEnd => {
                 self.continue_conversation = get("continue_conversation") == "1";
+                if self.speech_marks.is_empty() {
+                    self.speech_marks = super::speech_marks::from_text(get("speech"));
+                    if self.speech_started_ms != 0 {
+                        self.update_speech_mark();
+                    }
+                }
             }
-            VaEvent::TtsStart => self.tts_report_owed = true,
+            VaEvent::TtsStart => {
+                self.tts_report_owed = true;
+                if self.speech_marks.is_empty() {
+                    self.speech_marks = super::speech_marks::from_text(get("text"));
+                    if self.speech_started_ms != 0 {
+                        self.update_speech_mark();
+                    }
+                }
+            }
             VaEvent::TtsEnd => {
+                if let Some(encoded) = data.get("display_marks") {
+                    self.speech_marks = super::speech_marks::parse(encoded).unwrap_or_default();
+                    self.speech_latch = None;
+                    self.clock.set_speech_number(String::new());
+                    if self.speech_started_ms != 0 {
+                        self.update_speech_mark();
+                    }
+                }
                 if !get("url").is_empty() {
                     self.tts_url = get("url").to_owned();
                 }
@@ -347,6 +380,55 @@ impl Controller {
         self.play_announce(vec![url], Pending::Tts { dialog });
     }
 
+    fn clear_speech_display(&mut self) {
+        self.timers.cancel(Tk::SpeechMark);
+        self.speech_marks.clear();
+        self.speech_started_ms = 0;
+        self.speech_latch = None;
+        self.clock.set_speech_number(String::new());
+    }
+
+    pub(super) fn update_speech_mark(&mut self) {
+        if self.speech_started_ms == 0 {
+            self.clear_speech_display();
+            return;
+        }
+        if self.speech_marks.is_empty() {
+            // Streaming audio can start before INTENT_END or TTS_START supplies its text.
+            self.timers.cancel(Tk::SpeechMark);
+            self.clock.set_speech_number(String::new());
+            self.speech_latch = None;
+            return;
+        }
+        let now = now_ms();
+        if now < self.speech_started_ms {
+            self.timers
+                .set(Tk::SpeechMark, (self.speech_started_ms - now) as u64);
+            return;
+        }
+        let elapsed = now - self.speech_started_ms;
+        let previous = self.speech_latch.map(|(index, _)| index);
+        let step = super::speech_marks::shown(
+            &self.speech_marks,
+            elapsed,
+            self.speech_latch,
+            i64::from(self.st.clock_scroll_ms),
+        );
+        if step.show != previous {
+            let text = step.show.map_or_else(String::new, |i| {
+                super::speech_marks::positioned(i, &self.speech_marks[i].display)
+            });
+            self.clock.set_speech_number(text);
+        }
+        self.speech_latch = step.latch;
+        if let Some(until) = step.wake {
+            self.timers
+                .set(Tk::SpeechMark, (until - elapsed).max(1) as u64);
+        } else {
+            self.clear_speech_display();
+        }
+    }
+
     /// A cut-short or failed answer does not reopen the microphone, nor does a ringing timer.
     fn tts_finished(&mut self, ok: bool) {
         self.send_tts_report(ok);
@@ -355,7 +437,7 @@ impl Controller {
             self.start_pipeline("", false, Vec::new());
             return;
         }
-        self.finish_interaction();
+        self.finish_interaction_inner(ok);
     }
 
     /// Sends the AnnounceFinished owed since the run's TTS_START, at most once. Dropped while an
@@ -376,6 +458,10 @@ impl Controller {
     }
 
     pub(super) fn finish_interaction(&mut self) {
+        self.finish_interaction_inner(false);
+    }
+
+    fn finish_interaction_inner(&mut self, hold_number: bool) {
         // The dialog may end before its run does (answer cut short, cancel, timeout): stop the
         // run so HA does not go on generating; whatever it still sends is dropped while idle.
         if (self.run.run_active || self.run.awaiting_run_start) && !self.stop_sent {
@@ -383,6 +469,22 @@ impl Controller {
             self.stop_sent = true;
         }
         self.run.awaiting_run_start = false;
+        if hold_number {
+            if let Some((index, until)) = self.speech_latch {
+                let elapsed = (now_ms() - self.speech_started_ms).max(0);
+                if elapsed < until {
+                    self.speech_marks.truncate(index + 1);
+                    self.timers
+                        .set(Tk::SpeechMark, (until - elapsed).max(1) as u64);
+                } else {
+                    self.clear_speech_display();
+                }
+            } else {
+                self.clear_speech_display();
+            }
+        } else {
+            self.clear_speech_display();
+        }
         self.send_tts_report(false);
         self.mic.set_streaming(self.arbitrating);
         self.phase = Phase::Idle;

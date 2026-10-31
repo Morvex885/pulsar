@@ -83,6 +83,11 @@ pub struct PlayId(pub u64);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlayerEvent {
     State(Channel, PlayState),
+    /// Estimated first sample time, on the monotonic clock, after ALSA starts PCM playback.
+    PcmStarted {
+        id: PlayId,
+        started_ms: i64,
+    },
     /// Exactly once per `play()`: ok = every url played to its end. A list cut short by `stop()`
     /// or by a later `play()` on the same channel gets ok = false, sent by that call itself (so
     /// it precedes anything the new playback reports). Intended difference from C++: a list that
@@ -643,14 +648,18 @@ impl Machine {
     /// Progress of the ANNOUNCE output; events of an item no longer current are dropped.
     fn on_out(&mut self, ev: OutEvent) {
         let ch = Channel::Announce;
-        let (OutEvent::Started(item) | OutEvent::PlayedOut(item) | OutEvent::Failed(item)) = ev;
+        let item = match ev {
+            OutEvent::Started(item, _) | OutEvent::PlayedOut(item) | OutEvent::Failed(item) => item,
+        };
         let c = &mut self.chans[ch.index()];
         if !c.active || item != c.out_gen {
             return;
         }
         match ev {
-            OutEvent::Started(_) => {
+            OutEvent::Started(_, started_ms) => {
+                let id = c.item;
                 c.reached_playing = true;
+                self.shared.send(PlayerEvent::PcmStarted { id, started_ms });
                 if c.want_play {
                     self.set_state(ch, PlayState::Playing);
                 }
@@ -1106,7 +1115,7 @@ mod tests {
 
     use Channel::{Announce, Music};
     use PlayState::{Error as Failed, Idle, Loading, Paused, Playing};
-    use PlayerEvent::{Done, State};
+    use PlayerEvent::{Done, PcmStarted, State};
 
     fn unescape(s: &str) -> String {
         let mut out = String::new();
@@ -1481,13 +1490,17 @@ mod tests {
             ]
         );
         r.state_changed(Announce, GstState::Playing);
-        r.out(OutEvent::Started(1));
+        r.out(OutEvent::Started(1, 0));
         r.msg(Announce, Msg::Eos);
         assert_eq!(r.calls(), ["ch1 Null", "out end"]);
         // The next url starts once the output has played this one out.
         assert_eq!(
             r.events(),
-            [State(Announce, Loading), State(Announce, Playing)]
+            [
+                State(Announce, Loading),
+                PcmStarted { id, started_ms: 0 },
+                State(Announce, Playing)
+            ]
         );
         r.out(OutEvent::PlayedOut(1));
         assert_eq!(
@@ -1536,12 +1549,21 @@ mod tests {
         r.pump();
         assert_eq!(r.events(), [Done { id: a, ok: false }]);
         r.calls();
-        r.out(OutEvent::Started(1));
+        r.out(OutEvent::Started(1, 0));
         r.out(OutEvent::PlayedOut(1));
         assert!(r.calls().is_empty());
         assert!(r.events().is_empty());
-        r.out(OutEvent::Started(2));
-        assert_eq!(r.events(), [State(Announce, Playing)]);
+        r.out(OutEvent::Started(2, 0));
+        assert_eq!(
+            r.events(),
+            [
+                PcmStarted {
+                    id: b,
+                    started_ms: 0
+                },
+                State(Announce, Playing)
+            ]
+        );
         r.out(OutEvent::Failed(2));
         assert_eq!(
             r.events(),

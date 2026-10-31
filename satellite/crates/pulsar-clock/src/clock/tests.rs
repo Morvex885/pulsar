@@ -23,6 +23,26 @@ fn text_frame(s: &str) -> Frame {
     glyph_frame(g, colon)
 }
 
+#[test]
+fn spoken_number_respects_clock_and_dialog_lifecycle() {
+    let mut l = Layers::new();
+    l.enabled = false;
+    l.set_ui_state(UiState::Speaking, NOW);
+    l.set_speech_number("-9", NOW);
+    assert_eq!(l.compose(NOW, wall).0, Frame::default());
+    l.enabled = true;
+    assert_eq!(l.compose(NOW, wall).0, text_frame("-9"));
+    l.show_code("1234".into(), NOW);
+    assert_ne!(l.compose(NOW, wall).0, text_frame("-9"));
+    l.code.clear();
+    l.set_ui_state(UiState::TimerRing, NOW);
+    assert_eq!(l.compose(NOW, wall).0, clock_fx::render(Anim::Ringing, 0));
+    l.set_ui_state(UiState::Idle, NOW);
+    assert_eq!(l.compose(NOW, wall).0, text_frame("-9"));
+    l.set_speech_number("", NOW);
+    assert_eq!(l.compose(NOW, wall).0, time_frame());
+}
+
 fn bands(x: f32) -> MusicFrame {
     MusicFrame {
         bands: [x; 8],

@@ -30,10 +30,10 @@
 //! (`Model::clock_center`). No global current: maind dims through the per-segment brightness
 //! value (0..255), and so do we.
 //!
-//! Content, first active wins: pairing code (even when disabled) > volume number > voice state
+//! Content, first active wins: pairing code > volume number > spoken number > voice state
 //! (TIMER_RING always, LISTENING / THINKING / SPEAKING with voice indication on) > update install
 //! (dark) > one-shot > timer countdown > temporary layer > Text / Face > music levels > time.
-//! Disabled: dark.
+//! Disabled: dark, except pairing.
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd as _;
@@ -195,6 +195,8 @@ struct Layers {
     /// Temporary layer (actions).
     overlay: Option<Content>,
     overlay_until: i64,
+    /// A number aligned with the current spoken answer; does not change the clock switch.
+    speech_number: Option<Content>,
     scroll_ms: i64,
     ui: UiState,
     voice_indication: bool,
@@ -232,6 +234,7 @@ impl Layers {
             base: None,
             overlay: None,
             overlay_until: 0,
+            speech_number: None,
             scroll_ms: 400,
             ui: UiState::Idle,
             voice_indication: true,
@@ -283,6 +286,15 @@ impl Layers {
         } else {
             self.base = Some(Content::Text { cells, since: now });
         }
+    }
+
+    fn set_speech_number(&mut self, utf8: &str, now: i64) {
+        let cells = font::layout_text(utf8.as_bytes());
+        self.speech_number = if cells.is_empty() {
+            None
+        } else {
+            Some(Content::Text { cells, since: now })
+        };
     }
 
     fn set_face(&mut self, index: i32, now: i64) {
@@ -430,14 +442,32 @@ impl Layers {
             let g = font::code_glyphs(self.code.as_bytes(), now - self.code_since, CODE_PAGE_MS);
             return (glyph_frame(g, false), 0);
         }
+        if self.enabled && now < self.flash_until {
+            let g = font::number_glyphs(self.flash_value);
+            return (glyph_frame(g, false), self.flash_until - now);
+        }
         if !self.enabled {
             return (Frame::default(), 0);
         }
+        // Timer ringing always wins over spoken numbers.
+        if self.voice == Some(Anim::Ringing) {
+            return (
+                clock_fx::render(Anim::Ringing, now - self.voice_t0),
+                FX_FRAME_MS - (now - self.voice_t0) % FX_FRAME_MS,
+            );
+        }
+        if let Some(number) = &self.speech_number {
+            let (g, colon) = number.glyphs(now, self.scroll_ms);
+            let step = number.step(self.scroll_ms);
+            let next = if step == 0 {
+                0
+            } else {
+                step - (now - number.since()) % step
+            };
+            return (glyph_frame(g, colon), next);
+        }
         let frame_step = |t0: i64| FX_FRAME_MS - (now - t0) % FX_FRAME_MS;
-        if now < self.flash_until {
-            let g = font::number_glyphs(self.flash_value);
-            (glyph_frame(g, false), self.flash_until - now)
-        } else if let Some(v) = self.voice {
+        if let Some(v) = self.voice {
             (
                 clock_fx::render(v, now - self.voice_t0),
                 frame_step(self.voice_t0),
@@ -692,6 +722,7 @@ enum Cmd {
     ShowCode(String),
     ClearCode,
     SetText(String),
+    SetSpeechNumber(String),
     SetFace(i32),
     SetScrollMs(i32),
     ShowTemporaryText(String, i32),
@@ -775,6 +806,7 @@ impl Clock {
             Cmd::ShowCode(digits) => l.show_code(digits, now),
             Cmd::ClearCode => l.code.clear(),
             Cmd::SetText(s) => l.set_text(&s, now),
+            Cmd::SetSpeechNumber(s) => l.set_speech_number(&s, now),
             Cmd::SetFace(i) => l.set_face(i, now),
             Cmd::SetScrollMs(ms) => l.set_scroll_ms(ms),
             Cmd::ShowTemporaryText(s, secs) => l.show_temporary_text(&s, secs, now),
@@ -929,6 +961,11 @@ impl ClockHandle {
     /// each other; `set_text("")` / `set_face(-1)` clear only their own kind.
     pub fn set_text(&self, utf8: String) {
         self.send(Cmd::SetText(utf8));
+    }
+
+    /// Show a number during speech when the clock switch is on. Empty clears it.
+    pub fn set_speech_number(&self, utf8: String) {
+        self.send(Cmd::SetSpeechNumber(utf8));
     }
 
     /// Index into `face_names()`; -1 = none.
