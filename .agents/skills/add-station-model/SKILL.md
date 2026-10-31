@@ -36,10 +36,10 @@ description: Добавление новой модели станции Янд�
    `frontend_probe`, `ww_offline`, `hw_probe`, `player_probe`, `sendspin_probe` и `zigbee_probe` на
    неизвестной модели сразу выходят. Сетевые `lan_probe`, `update_probe`, `api_selftest` модель не
    определяют и работают. Сырая запись захвата:
-   `arecord -D <pcm> -f S16_LE -c <каналы> -r <частота> -d <секунды> /tmp/pulsar-test/capture.wav`
-   (`<pcm>`, каналы и частота — из п. 1 и строки «Захват» таблицы `docs/hardware.md`, «Модели»).
-   `ww_offline` читает только S16_LE; если захват модели 32-битный (S32_LE, как у Мини), такую
-   запись он не разберёт — до `Model` её можно только сохранить для изучения.
+   `mkdir -p /tmp/pulsar-test && arecord -D <pcm> -f <формат> -c <каналы> -r <частота> -d <секунды>
+   /tmp/pulsar-test/capture.wav` (`<формат>` — S16_LE или S32_LE; `<pcm>`, формат, каналы и
+   частота — из п. 1 и строки «Захват» таблицы `docs/hardware.md`, «Модели»). `ww_offline` читает
+   только S16_LE; запись S32_LE (как у Мини) до `Model` можно только сохранить.
 
 ## 2. Код (места должны совпадать)
 
