@@ -8,9 +8,8 @@
 
 ## Сборка
 
-Сборка — на Linux или WSL2 (кросс-компиляция через cargo-zigbuild; на macOS демон не собирается).
-Здесь единственный источник версий инструментов; они совпадают с CI
-(`.github/workflows/build.yml`):
+Сборка — на Linux или WSL2 (кросс-компиляция через cargo-zigbuild); сборка демона на macOS не
+поддерживается. Версии инструментов совпадают с CI (`.github/workflows/build.yml`):
 
 - [rustup](https://rustup.rs/) — сам ставит нужную версию Rust и обе цели из
   `satellite/rust-toolchain.toml`;
@@ -18,9 +17,9 @@
 - [zig 0.14.1](https://ziglang.org/download/) — компоновщик и C/C++-компилятор для станций; другой
   zig — `make -C satellite ZIG=/путь/к/zig`. Цель armhf — glibc 2.23 (userland Мини), цель aarch64
   — glibc 2.36 (обычный userland Миди); glibc станций — [hardware.md, «Модели»](hardware.md#модели);
-- `make`, `git`, `curl`, `patch`, компилятор C для хоста (`cc`); для sendspin-cpp (единственная
-  C++-часть сборки) — `cmake` ≥ 3.16 и `ninja` (`uv tool install cmake` и `uv tool install
-  ninja`);
+- `make`, `git`, `curl`, `patch`, компилятор C для хоста (`cc`); для sendspin-cpp
+  ([«Линковка C++ (sendspin-cpp)»](architecture.md#линковка-c-sendspin-cpp)) — `cmake` ≥ 3.16 и
+  `ninja` (`uv tool install cmake`, `uv tool install ninja`);
 - [Go](https://go.dev/dl/) 1.27+ (`installer/go.mod`) — для установщика из копии репозитория;
 - `adb` из Android platform-tools.
 

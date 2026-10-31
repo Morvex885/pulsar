@@ -26,8 +26,9 @@
 
 Wake word, командный спотер и эхоподавление работают на проприетарных библиотеках прошивки.
 Демон загружает их через `dlopen` во время работы, в репозиторий они не копируются
-(AGENTS.md, «Git»). C API восстановлен реверсом `maind`, а сигнатуры, которые использует код,
-лежат в [`../satellite/crates/pulsar-audio/src/engine/`](../satellite/crates/pulsar-audio/src/engine/).
+([AGENTS.md](../AGENTS.md#git), «Git»). C API восстановлен реверсом `maind`, а сигнатуры, которые
+использует код, лежат в
+[`../satellite/crates/pulsar-audio/src/engine/`](../satellite/crates/pulsar-audio/src/engine/).
 
 `libyandex_evil.so` лежит в `/system/vendor/quasar/libs/` вместе с `libtflite.so` и
 `libiconv.so`.
@@ -100,7 +101,7 @@ alsa-lib на armhf-образах Миди версионированная (AL
 
 ### Лайт 2: буфер захвата
 
-Буфер PDM-захвата — не больше 2048 кадров (~42 мс при 8 каналах S16): чтение захвата вместе с VQE
+Буфер PDM-захвата — не больше 2048 кадров (~42 мс при 48 кГц): чтение захвата вместе с VQE
 в одном потоке его переполняет. Несколько переполнений в час (`capture: Broken pipe, recovering`)
 остаются и при отдельном потоке чтения, это ожидаемо.
 

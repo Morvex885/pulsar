@@ -1,5 +1,5 @@
-//! Sendspin player without the daemon, for tools/sendspin_server.py (run with the
-//! station's service stopped).
+//! Sendspin-плеер без демона, для tools/sendspin_server.py (запускать при остановленном сервисе
+//! станции).
 //! usage: sendspin_probe [port=18928] [name=pulsar-test] [seconds=120] [state_dir=/tmp/pulsar-test/sendspin]
 //!
 //! Запускает сервис и печатает его события (stdout; сервис пишет лог в stderr). Через 3 с после

@@ -30,7 +30,7 @@ description: >-
 1. **Авторство и приватность**: скрипт; в диффе нет IP, MAC, серийников, токенов, логов станций и
    ничего из `backup/ dump/ re/ ref/`.
 2. **Сборка и тесты**: `make -C satellite check`; installer — `go -C installer vet ./...` и
-   `go -C installer test ./...`; radio — `radio/build.sh`.
+   `go -C installer test ./...`; radio — `radio/build.sh`; ssh — `ssh/build.sh`.
 3. **Код**: логика, гонки, краевые случаи, обработка ошибок, устаревшие id событий.
 4. **Архитектура**: соответствие `docs/architecture.md` и `AGENTS.md`, «Правила кода».
 5. **Безопасность**: вход из сети (ESPHome, deCONZ, Sendspin, UDP арбитра, HTTPS апдейтера),
