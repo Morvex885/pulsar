@@ -17,7 +17,8 @@ description: >-
   `заблокирован: нет PULSAR_<X>` (`docs/stations.md`, пункт «Адреса»), дальше не идти.
 - `tools/station.sh` знает только `midi|lite2|mini`. Для Мини 2 и Мини 3 (модель уже поддержана) цели
   в нём нет: сначала добавить её (сам скрипт, перечни целей в этом skill и пункт «Громкость» в
-  `docs/stations.md`). Для модели, неизвестной установщику, — skill `add-station-model`.
+  `docs/stations.md`; ключ dmix модели — `add-station-model`, п. 2, «Ключ dmix»). Для модели,
+  неизвестной установщику, — skill `add-station-model`.
 - Вызов: `PULSAR_TAG=<метка> tools/station.sh <midi|lite2|mini> <команда>`. Начать с `status`
   (ничего не меняет): кто держит lock, режим станции.
 

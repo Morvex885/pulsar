@@ -19,8 +19,8 @@ description: >-
 - Стек Яндекса останавливается `/system/vendor/quasar/q stop` (возврат — `q start`): только с
   согласия владельца и с обязательным возвратом. `ctl.sh disable` не подходит: он, наоборот, запускает
   стек Яндекса, а на неизвестной модели pulsar не установлен.
-- После добавления модели — добавить её цель в `tools/station.sh`, перечни целей в skill
-  `station-test` и пункт «Громкость» в `docs/stations.md`; дальше работать по skill `station-test`.
+- После добавления модели — добавить её цель по skill `station-test`, «Допуск», и дальше работать по
+  нему.
 
 ## 1. Сбор данных (read-only)
 
@@ -70,7 +70,8 @@ description: >-
 - Стоковый init-скрипт (`ls /etc/init.d`): `/etc/init.d/S99zpulsar` должен сортироваться после него
   (`installer/autostart.go`); запись о нём — в цепочке загрузки, `docs/development.md`, «Установка и
   станция».
-- Ключ dmix: если в `/etc/asound.conf` станции свой `ipc_key`, добавить его в `clear_dmix`
+- Ключ dmix: если `ipc_key` dmix воспроизведения модели (в `/etc/asound.conf` станции или в своём
+  asound.conf установщика) не 1024 и не 2277 — добавить его в `clear_dmix`
   (`satellite/deploy/supervise.sh`) и `cleanup` (`tools/station.sh`); иначе зависший lock не
   снимется (`docs/hardware.md`, «Зависший dmix lock»).
 
@@ -101,6 +102,11 @@ description: >-
 
 ## 5. Проверка
 
-`make -C satellite check` и `go -C installer test ./...`; затем
-`git grep -n -i -e '<соседняя модель>' -e '<codename соседа>'` по всему репозиторию — каждое найденное
-место проверить (перечни моделей, цели, ключи); затем skill `pre-publish-review`.
+`make -C satellite check` и `go -C installer test ./...`. Затем найти остальные места по всему
+репозиторию и проверить каждое (перечни моделей, цели, ключи):
+
+```sh
+git grep -n -i -e '<соседняя модель>' -e '<она же по-английски>' -e '<идентификатор, напр. lite2>' -e '<codename>'
+```
+
+Затем skill `pre-publish-review`.
