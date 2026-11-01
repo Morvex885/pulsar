@@ -17,20 +17,21 @@ concurrency:
 jobs:
   commits:
     # Имя job — обязательная проверка ruleset'а main: не переименовывать.
-    # Скрипт берётся из базы PR: иначе PR мог бы подменить его на `exit 0` и пройти собственную
-    # проверку. Версия из PR запускается, только если в базе скрипта нет или он не умеет `--text`.
+    # Скрипт берётся с вершины базовой ветки, а не из PR: иначе PR мог бы подменить его на `exit 0`
+    # и пройти собственную проверку. Вершина, а не base.sha: PR со старой базой проверяется текущими
+    # правилами. Копия из PR — только если в базовой ветке скрипта нет вовсе.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: script from PR base
+      - name: script from base branch
         env:
-          BASE: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          if git cat-file -e "$BASE:tools/check-authorship.sh" 2>/dev/null; then
-            git show "$BASE:tools/check-authorship.sh" > "$RUNNER_TEMP/base.sh"
+          if git cat-file -e "origin/$BASE_REF:tools/check-authorship.sh" 2>/dev/null; then
+            git show "origin/$BASE_REF:tools/check-authorship.sh" > "$RUNNER_TEMP/base.sh"
           else
             cp tools/check-authorship.sh "$RUNNER_TEMP/base.sh"
           fi
@@ -46,6 +47,10 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr.txt"
-          s="$RUNNER_TEMP/base.sh"
-          grep -q -e '--text' "$s" || s=tools/check-authorship.sh
-          sh "$s" --text "$RUNNER_TEMP/pr.txt"
+          # Скрипт базовой ветки без `--text` бывает только до мержа PR, который этот режим добавил:
+          # копию из PR для текста не запускаем, проверку пропускаем с предупреждением.
+          if grep -q -e '--text' "$RUNNER_TEMP/base.sh"; then
+            sh "$RUNNER_TEMP/base.sh" --text "$RUNNER_TEMP/pr.txt"
+          else
+            echo "::warning::check-authorship базовой ветки не умеет --text: заголовок и описание PR не проверены"
+          fi
