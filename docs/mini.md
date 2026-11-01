@@ -48,3 +48,4 @@
   (`frontend_probe --record`), RUNPATH у `libquasar_gstreamer.so`, полный цикл на колонке.
 - Направление анимаций кольца относительно штатного (порядок зон — на
   [вики](https://hackalice.me/devices/station-mini/)) на колонке не сверялось.
+- Пре-ролл: не замерялся.
