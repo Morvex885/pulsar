@@ -96,6 +96,7 @@ case "$cmd" in
     for f; do b=$(basename "$f"); up "$f" "$T/$b"; done ;;
   test-start)
     own
+    # Один уровень для всех моделей: у Мини громкость программная, по той же шкале в дБ.
     vol=0.2
     # A quoted heredoc: no local shell expansion and no nested quotes in the remote command.
     r sh -s -- "$T" "$D" "$vol" "$station" <<'EOF'
@@ -105,6 +106,7 @@ vol=$3
 station=$4
 ! pidof supervise.sh >/dev/null || { echo 'run stop first' >&2; exit 1; }
 [ -x "$T/pulsar" ] || { echo 'push pulsar first' >&2; exit 1; }
+# api_key не копируется: тестовый экземпляр отдаёт plaintext API, ключ клиенту не нужен.
 grep -v -e '^volume=' -e '^volume2=' -e '^volume_curve=' -e '^muted=' -e '^auto_update=' -e '^update_attempt=' \
   "$D/state.conf" > "$T/state.conf" 2>/dev/null || true
 printf 'volume2=%s\nmuted=0\nauto_update=0\n' "$vol" >> "$T/state.conf"
@@ -132,6 +134,7 @@ EOF
     own
     # The installed binary is kept as pulsar.orig and serves as .prev meanwhile, so a rollback by
     # supervise.sh lands on it; the owner's .prev waits in pulsar.prev.orig.
+    # df -P: busybox `df -k` переносит строку при длинном имени устройства.
     r "[ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
        [ \$(df -Pk $D | awk 'NR==2 {print \$4}') -gt 30000 ] || { echo 'less than 30 MB free in $D' >&2; exit 1; }
        cd $D && { [ -f pulsar.orig ] || cp -p pulsar pulsar.orig; } \
@@ -141,6 +144,7 @@ EOF
        && mv pulsar.new pulsar && sync && ./ctl.sh restart" ;;
   restore)
     own
+    # Если после краш-цикла supervise.sh удалил enabled (give_back), станцию возвращает ctl.sh enable.
     r "cd $D && [ -f pulsar.orig ] || { echo 'no pulsar.orig' >&2; exit 1; }
        cd $D && cp -p pulsar.orig pulsar.tmp && mv pulsar.tmp pulsar && rm -f pulsar.orig || exit 1
        if [ -f pulsar.prev.orig ]; then mv pulsar.prev.orig pulsar.prev; fi

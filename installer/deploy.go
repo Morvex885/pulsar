@@ -482,6 +482,7 @@ func healthCheck(s string, changed bool, mark string) bool {
 				n++
 			}
 		}
+		// «=== alsa:» от supervise.sh — не сбой; см. docs/development.md, «Супервизор».
 		if shTo(os.Stdout, s, "pidof pulsar >/dev/null") != nil || n != 1 ||
 			strings.Contains(log, "=== CRASH") || strings.Contains(log, "=== exit") || strings.Contains(log, "=== supervise") {
 			bad = true

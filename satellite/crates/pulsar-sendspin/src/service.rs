@@ -149,13 +149,15 @@ pub struct SendspinHandle {
 }
 
 impl SendspinHandle {
-    /// A Sendspin audio stream is playing on this speaker (a stream end without "stopped" is
-    /// reported 1 s late; see `hold`).
+    /// На этом динамике играет аудиопоток Sendspin (конец потока без «stopped» сообщается на 1 с
+    /// позже; см. `hold`). Значение меняет актор (колбэки начала/конца потока, обновление группы
+    /// со «stopped», разрыв, найденный в `poll`): сразу после команды геттер отдаёт прежнее.
     pub fn streaming(&self) -> bool {
         self.streaming.get()
     }
 
-    /// A Sendspin server (e.g. Music Assistant) is connected: the library's own atomic flag.
+    /// Sendspin-сервер (например, Music Assistant) подключён: атомарный флаг, который пишет поток
+    /// библиотеки; чтение (acquire) не блокирует.
     pub fn connected(&self) -> bool {
         self.client.is_connected()
     }

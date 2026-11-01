@@ -88,7 +88,8 @@ impl ZigbeeHandle {
         self.shared.flashing.get()
     }
 
-    /// One line for Home Assistant, e.g. "router: in network 0x1A2B as 0x0001, channel 15".
+    /// Одна строка для Home Assistant, например «router: in network 0x1A2B as 0x0001, channel 15».
+    /// Начальный статус задан синхронно в `spawn`, дальше его меняет актор.
     pub fn status(&self) -> String {
         self.shared.status.borrow().clone()
     }

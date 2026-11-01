@@ -262,13 +262,14 @@ pub fn owns_music(
         || (sendspin_connected && recent(sendspin_ended_since))
 }
 
-/// Command words have no arbitration between stations: every station that hears one acts on it.
-/// Without the wake word a station takes "стоп" (it stops only what it plays itself), the volume
-/// words while it sounds (answer, announcement, timer ring) or owns music, and transport only for
-/// its own music. After the wake word (the dialog's window, or a word held through an arbitration
-/// this station won) every command goes. In a dialog past that window (`in_dialog`: LISTENING /
-/// PROCESSING after `after_wake` ended) only "стоп" goes and cancels the dialog: the other words
-/// belong to the request.
+/// У командных слов нет арбитража между станциями: каждая станция, что их слышит, действует.
+/// Без wake-слова станция принимает «стоп» (останавливает только то, что играет сама), слова
+/// громкости — пока звучит (ответ, объявление, звонок таймера) или владеет музыкой, и транспорт —
+/// только для своей музыки. После wake-слова (окно диалога или слово, удержанное через выигранный
+/// этой станцией арбитраж) проходит любая команда. В диалоге за пределами этого окна (`in_dialog`:
+/// LISTENING / PROCESSING после конца `after_wake`) проходит только «стоп» и отменяет диалог:
+/// остальные слова — часть запроса. Принятый компромисс: «стоп»-слово внутри запроса
+/// («хватит ли …») тоже отменяет диалог.
 pub fn command_allowed(
     c: VoiceCommand,
     wake: bool,

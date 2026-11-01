@@ -112,8 +112,9 @@ fn load_matrix(dir: &str, stem: &str) -> Option<Matrix> {
     parse_matrix(&std::fs::read_to_string(format!("{dir}{stem}.json")).ok()?)
 }
 
-/// Stock format: {"type": "matrix", "matrix": [[r0], [r1], [r2]]}; the key counts, not the type
-/// value. The first nine numbers after the key's '[' (up to a '}') are the rows.
+/// Штатный формат: {"type": "matrix", "matrix": [[r0], [r1], [r2]]}; важен ключ, а не значение
+/// type. Строки — первые девять чисел после '[' ключа (до '}'). Ориентация (строки = выход R, G,
+/// B) — предположение, на глаз не подтверждено.
 fn parse_matrix(text: &str) -> Option<Matrix> {
     const KEY: &str = "\"matrix\"";
     let bytes = text.as_bytes();
