@@ -6,13 +6,12 @@
 ([AGENTS.md, «Документация»](../AGENTS.md#документация)).
 
 Обследованы две станции с прошивкой `0.369.1.50.4794652521.20261021.117`; у обеих совпали SHA256
-`libyandex_evil.so`, `libtflite.so`, `quasar.cfg` и `asound.conf`. Акустическое качество AEC
-отдельно не измерялось.
+`libyandex_evil.so`, `libtflite.so`, `quasar.cfg` и `asound.conf`.
 
 ## Userland и хранилище
 
-Загрузчик `/lib/ld-linux-armhf.so.3`. armhf-сборка (цель — glibc 2.23 Мини)
-запускалась: `frontend_probe` из `504830d` ([#30](https://github.com/Morvex885/pulsar/pull/30)).
+Загрузчик — `/lib/ld-linux-armhf.so.3`. Сборка armhf (цель — glibc 2.23, как у Мини) запускалась:
+`frontend_probe` из `504830d` ([#30](https://github.com/Morvex885/pulsar/pull/30)).
 
 ## Звук
 
