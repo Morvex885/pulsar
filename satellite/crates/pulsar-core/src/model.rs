@@ -211,12 +211,14 @@ const PLUM_PREROLL: &[WakePreroll] = &[
         rule: PrerollRule::Fixed(4),
     },
 ];
-// Mini 3: not measured. Its VQE chunk is 16 ms, so these are the Lite 2's lengths in time
-// (96 ms "alisa", 128 ms "yandex").
+// Мини 3: «alisa» — замер из #30 у шумового пола, поэтому берётся типичное значение, а не самое
+// короткое (см. docs/mini3.md, «Звук», и docs/voice.md, «Пре-ролл: методика измерения»); приёмка
+// через HA не проводилась. «yandex» не замерялся: длина Лайт 2 во времени (128 мс при чанке VQE
+// 16 мс).
 const BERGAMOT_PREROLL: &[WakePreroll] = &[
     WakePreroll {
         id: "alisa",
-        rule: PrerollRule::Fixed(6),
+        rule: PrerollRule::Fixed(3),
     },
     WakePreroll {
         id: "yandex",
@@ -246,8 +248,7 @@ const STOCK_VOLUME: &[VolumePoint] = &[
     },
 ];
 
-/// Station Midi: aarch64, 4 mics + 4 speaker reference channels at 96 kHz, 24-LED ring + 6-LED
-/// logo, clock on two aw21036/aw21012 chips.
+/// Станция Миди: см. docs/midi.md.
 static MIDI: Model = Model {
     codename: "cucumber",
     host_prefix: "yandex-midi-",
@@ -320,10 +321,7 @@ static MIDI: Model = Model {
     zigbee_boot: "/sys/devices/platform/zigbee/zb-boot/value",
 };
 
-/// Station Lite 2: 32-bit userland, 2 PDM mics (capture channels 0 and 2) + speaker feedback
-/// (channel 6) at 48 kHz on hw:0,1 (layout of multi_capture_raw in /etc/asound.conf), 3-LED
-/// ring, clock LEDs "plum:white:clock<A..H><0..3>" + DH/DL (colon), DM, DEGREE (quasar.cfg
-/// /leds/clock).
+/// Станция Лайт 2: см. docs/lite2.md.
 static LITE2: Model = Model {
     codename: "plum",
     host_prefix: "yandex-lite2-",
@@ -392,14 +390,7 @@ const MINI2_VOLUME: &[VolumePoint] = &[
     },
 ];
 
-/// Station Mini 2: Amlogic AXG, 32-bit armhf userland on an aarch64 kernel. Capture is the
-/// 6-channel "default" multi device of /etc/asound.conf: 4 PDM mics on channels 0..3 (hw:0,1
-/// channels 0/2/4/6) and the 2 TDM amplifier loopback channels on 4/5 (hw:0,0). Playback goes to
-/// "default" (softvol "Master" over dmix_spk_plug); there is no "speakers" PCM. The ring is 6 RGB
-/// LEDs of an IS31FL3236 without an ledfb trigger (sysfs brightness only). The clock is wired as
-/// "mini2:white:clock<A..G><1..4>" + PLUS1/PLUS2 (colon), DEGREE/MINUS (quasar.cfg /leds/clock),
-/// but its IS31FL3236 (i2c 0-003f) does not probe on firmware 0.369. No light sensor. Mic mute
-/// has no evdev switch: the button is momentary and the mic circuit latches the mute on GPIOZ_3.
+/// Станция Мини 2: см. docs/mini2.md.
 static MINI2: Model = Model {
     codename: "station-mini2",
     host_prefix: "yandex-mini2-",
@@ -435,12 +426,11 @@ static MINI2: Model = Model {
     has_clock: false,
     keys_input: "sar0_pad0",
     mute_input: "",
-    // GPIOZ_3: pull-up, held low by the mic circuit while the microphones are cut (maind polls
-    // it); GPIOZ_8 only pulses during a press.
+    // GPIOZ_3: см. docs/mini2.md, «Кнопки и микрофоны».
     mute_gpio: 414,
     action_key: 582,
     mute_key: 0,
-    // Earcons в .opus: см. docs/hardware.md, «Мини 2».
+    // Earcons в .opus: см. docs/mini2.md, «Звук».
     error_sound: "ru-RU/playback_error.opus",
     wake_sound: "common/spotter_start.opus",
     cancel_sound: "common/spotter_cancel.opus",
@@ -454,18 +444,14 @@ static MINI2: Model = Model {
     amp_enable_paths: &[],
     volume_map: MINI2_VOLUME,
     volume_min_step: false,
-    // ltr308als01 seen on the #38 station (firmware 0.372), absent on the #9 one (0.369).
+    // Датчик есть не на всех станциях: см. docs/mini2.md, «Светодиоды и часы».
     has_lux: false,
     zigbee_tty: "",
     zigbee_reset: "",
     zigbee_boot: "",
 };
 
-/// Station Mini (first generation): 32-bit userland, 4 PDM mics (capture channels 0..3) and two
-/// speaker references (channels 6 and 7) at 48 kHz on hw:0,2. Channels 4/5 carry a large DC offset
-/// (the "micUnknownChannels" of quasar.cfg) and are not fed to the VQE. Playback is hw:0,0: it is
-/// the only output with the speaker loopback on channels 6/7. The ring is six RGB LEDs behind an
-/// IS31FL3236-compatible controller at i2c-0/0x3c (no framebuffer, no clock).
+/// Станция Мини (первое поколение): см. docs/mini.md.
 static MINI: Model = Model {
     codename: "yandexmini",
     host_prefix: "yandex-mini-",
@@ -546,9 +532,7 @@ const MINI3_VOLUME: &[VolumePoint] = &[
     },
 ];
 
-/// Station Mini 3: 32-bit armhf userland on an aarch64 kernel, hw:0,1 physical channels
-/// (asound.conf multi_capture): PDM mics 0-2, ch 6 = the amplifier feedback (TDMB_IN0), the VQE
-/// speaker reference. 6-zone ring, no logo.
+/// Станция Мини 3: см. docs/mini3.md.
 static MINI3: Model = Model {
     codename: "bergamot",
     host_prefix: "yandex-mini3-",

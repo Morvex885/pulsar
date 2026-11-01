@@ -32,7 +32,7 @@ Assistant через ESPHome Native API, Music Assistant через Sendspin, н
 |---|---|---|
 | код демона: крейты, модель исполнения, FMA, `state.conf`, порты | [docs/architecture.md](docs/architecture.md) | — |
 | голос: HA voice assistant, стоковый maind, арбитраж, пре-ролл | [docs/voice.md](docs/voice.md) | — |
-| железо, библиотеки Яндекса, новая модель | [docs/hardware.md](docs/hardware.md), [docs/mini3.md](docs/mini3.md) | `add-station-model` |
+| железо: указатель моделей и вики, библиотеки Яндекса, новая модель; факты модели — `docs/<модель>.md` | [docs/hardware.md](docs/hardware.md) | `add-station-model` |
 | Zigbee (Миди), прошивки `radio/` | [docs/zigbee.md](docs/zigbee.md) | `zigbee-radio` |
 | сборка, CI, установщик, супервизор, обновления, релиз, падение | [docs/development.md](docs/development.md) | `release`, `crash-decode` |
 | тесты на станциях | [docs/stations.md](docs/stations.md) | `station-test` |
@@ -89,8 +89,12 @@ ssh/build.sh
 - Каждый факт — в одном месте, остальные ссылаются (`docs/<файл>.md, «<раздел>»`; якоря должны
   разрешаться). Новый факт — в doc своей подсистемы; в `AGENTS.md` — только правила для любой
   задачи.
-- По железу авторитетны Миди и Лайт 2 (станции мейнтейнера); по остальным моделям —
-  [docs/hardware.md, «Источники»](docs/hardware.md#источники).
+- Факты железа (SoC, ядро, чипы и шины, имена sysfs, коды кнопок) берутся из вики hackalice.me
+  (страницы моделей — [docs/hardware.md, «Модели»](docs/hardware.md#модели)) и в docs не
+  повторяются. В doc модели — только то, чего в вики нет: замеры, контракты и особенности, на
+  которых стоит код, статус проверок. При расхождении с вики свой факт остаётся, только если за ним
+  замер мейнтейнера (Миди, Лайт 2) или сырой вывод контрибьютора, с пометкой «расходится с вики»;
+  иначе удаляется.
 
 ## Git
 
