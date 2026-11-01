@@ -15,8 +15,10 @@
   `satellite/rust-toolchain.toml`;
 - cargo-zigbuild 0.24.0: `cargo install cargo-zigbuild --locked --version 0.24.0`;
 - [zig 0.14.1](https://ziglang.org/download/) — компоновщик и C/C++-компилятор для станций; другой
-  zig — `make -C satellite ZIG=/путь/к/zig`. Цель armhf — glibc 2.23 (userland Мини), цель aarch64
-  — glibc 2.36 (обычный userland Миди); glibc станций — [hardware.md, «Модели»](hardware.md#модели);
+  zig — `make -C satellite ZIG=/путь/к/zig`; сборки под станции отклоняют zig 0.11–0.13: их
+  armhf-сборки C++ в release (sendspin-cpp) падают до `main`. Цель armhf — glibc 2.23 (userland
+  Мини), цель aarch64 — glibc 2.36 (обычный userland Миди); glibc станций —
+  [hardware.md, «Модели»](hardware.md#модели);
 - `make`, `git`, `curl`, `patch`, компилятор C для хоста (`cc`); для sendspin-cpp
   ([«Линковка C++ (sendspin-cpp)»](architecture.md#линковка-c-sendspin-cpp)) — `cmake` ≥ 3.16 и
   `ninja` (`uv tool install cmake`, `uv tool install ninja`);
