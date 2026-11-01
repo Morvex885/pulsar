@@ -74,8 +74,8 @@ flowchart LR
 Нормативно для всех крейтов; код ссылается на номера пунктов.
 
 1. В процессе один рантайм tokio `current_thread` и `LocalSet`. Все асинхронные задачи
-   порождаются через `pulsar_core::actors::spawn_actor`, `tokio::spawn` не используется;
-   блокирующая работа уходит в `tokio::task::spawn_blocking`.
+   порождаются через `pulsar_core::actors::spawn_actor`, `tokio::spawn` не используется
+   (`tokio::task::spawn_blocking` этим правилом не запрещён; блокирующие циклы — п. 4).
 2. Каждый сервис устроен одинаково:
    - `pub fn spawn(cfg…) -> (XHandle, UnboundedReceiver<XEvent>)`; сервис без событий возвращает
      только handle.
