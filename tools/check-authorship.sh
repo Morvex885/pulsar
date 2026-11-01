@@ -71,15 +71,16 @@ check_msg() {
             v=${v#"${v%%[! ]*}"}
             if is_ai_name "$v"; then
                 n=${line%%:*}
-                echo "$1 ${n#"${n%%[! ]*}"}: $v"
+                # printf, а не echo: echo в dash раскрывает `\c` в тексте и съел бы маркер «bad».
+                printf '%s\n' "$1 ${n#"${n%%[! ]*}"}: $v"
                 echo bad
             fi
         elif printf '%s\n' "$line" | grep -qiE "$BOTBLOCK"; then
-            echo "$1 message: $line"
+            printf '%s\n' "$1 message: $line"
             echo bad
         elif printf '%s\n' "$line" | grep -qiE "$SIGN" &&
             { is_ai "$line" || printf '%s\n' "$line" | grep -qiE "$SIGNAMB"; }; then
-            echo "$1 message: $line"
+            printf '%s\n' "$1 message: $line"
             echo bad
         fi
     done
@@ -95,7 +96,7 @@ trap 'exit 2' HUP INT TERM
 
 if [ "$mode" = text ]; then
     if [ ! -r "$2" ]; then
-        echo "check-authorship: cannot read '$2'" >&2
+        printf '%s\n' "check-authorship: cannot read '$2'" >&2
         exit 2
     fi
     # Описание PR из веб-интерфейса GitHub приходит с CRLF: \r мешал бы сравнению имени целиком.
@@ -104,7 +105,7 @@ if [ "$mode" = text ]; then
     check_msg pr <"$tmp" >"$out"
 else
     if ! git log --format='%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e' "$1" >"$tmp"; then
-        echo "check-authorship: git log failed for '$1'" >&2
+        printf '%s\n' "check-authorship: git log failed for '$1'" >&2
         exit 2
     fi
 
@@ -129,7 +130,7 @@ else
         for pair in "author:$an" "author:$ae" "committer:$cn" "committer:$ce"; do
             v=${pair#*:}
             if is_ai_name "$v"; then
-                echo "$short ${pair%%:*}: $v"
+                printf '%s\n' "$short ${pair%%:*}: $v"
                 echo bad
             fi
         done
