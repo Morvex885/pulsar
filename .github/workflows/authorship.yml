@@ -17,9 +17,11 @@ concurrency:
 jobs:
   commits:
     # Имя job — обязательная проверка ruleset'а main: не переименовывать.
-    # Скрипт берётся с вершины базовой ветки, а не из PR: иначе PR мог бы подменить его на `exit 0`
-    # и пройти собственную проверку. Вершина, а не base.sha: PR со старой базой проверяется текущими
-    # правилами. Копия из PR — только если в базовой ветке скрипта нет вовсе.
+    # Скрипт берётся с вершины базовой ветки, а не из PR: правка скрипта в PR не ослабит проверку
+    # этого же PR. Правку самого workflow (pull_request берёт его из merge-коммита PR) этим не
+    # закрыть — её ловит ревью. Вершина, а не base.sha: base.sha не обновляется при мерже main в
+    # ветку PR, и диапазон захватил бы чужие коммиты main; PR со старой базой проверяется текущими
+    # правилами. Копия из PR — только если в базовой ветке скрипта нет вовсе, и тогда без `--text`.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -34,12 +36,13 @@ jobs:
             git show "origin/$BASE_REF:tools/check-authorship.sh" > "$RUNNER_TEMP/base.sh"
           else
             cp tools/check-authorship.sh "$RUNNER_TEMP/base.sh"
+            echo "PR_COPY=1" >> "$GITHUB_ENV"
           fi
       - name: commits
         env:
-          BASE: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: sh "$RUNNER_TEMP/base.sh" "$BASE..$HEAD_SHA"
+        run: sh "$RUNNER_TEMP/base.sh" "origin/$BASE_REF..$HEAD_SHA"
       - name: PR title and body
         # Текст PR — только через env: подстановка `${{ }}` прямо в скрипт дала бы инъекцию команд.
         env:
@@ -47,10 +50,10 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr.txt"
-          # Скрипт базовой ветки без `--text` бывает только до мержа PR, который этот режим добавил:
-          # копию из PR для текста не запускаем, проверку пропускаем с предупреждением.
-          if grep -q -e '--text' "$RUNNER_TEMP/base.sh"; then
+          # Без `--text` в скрипте базовой ветки (до мержа PR, который этот режим добавил) или без
+          # скрипта в ней вовсе текст не проверяем: копию из PR для текста не запускаем.
+          if [ -z "${PR_COPY:-}" ] && grep -q -e '--text' "$RUNNER_TEMP/base.sh"; then
             sh "$RUNNER_TEMP/base.sh" --text "$RUNNER_TEMP/pr.txt"
           else
-            echo "::warning::check-authorship базовой ветки не умеет --text: заголовок и описание PR не проверены"
+            echo "::warning::заголовок и описание PR не проверены: в базовой ветке нет check-authorship.sh с --text"
           fi
