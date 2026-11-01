@@ -211,12 +211,14 @@ const PLUM_PREROLL: &[WakePreroll] = &[
         rule: PrerollRule::Fixed(4),
     },
 ];
-// Mini 3: not measured. Its VQE chunk is 16 ms, so these are the Lite 2's lengths in time
-// (96 ms "alisa", 128 ms "yandex").
+// Мини 3: «alisa» — замер из #30 у шумового пола, поэтому берётся типичное значение, а не самое
+// короткое (см. docs/mini3.md, «Звук», и docs/voice.md, «Пре-ролл: методика измерения»); приёмка
+// через HA не проводилась. «yandex» не замерялся: длина Лайт 2 во времени (128 мс при чанке VQE
+// 16 мс).
 const BERGAMOT_PREROLL: &[WakePreroll] = &[
     WakePreroll {
         id: "alisa",
-        rule: PrerollRule::Fixed(6),
+        rule: PrerollRule::Fixed(3),
     },
     WakePreroll {
         id: "yandex",
