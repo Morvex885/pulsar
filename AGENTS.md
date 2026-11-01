@@ -10,8 +10,9 @@ Assistant через ESPHome Native API, Music Assistant через Sendspin, н
 - Канон для агентов — этот файл и `.agents/skills/<name>/SKILL.md` (формат
   [agentskills.io](https://agentskills.io): frontmatter `name`, `description`).
 - Инструменту, который не читает оригинал, добавляется только симлинк (сейчас `.claude/skills →
-  ../.agents/skills`). Конфигов под конкретные инструменты в репозитории нет: не создавать
-  `CLAUDE.md`, `.claude/settings.json`, `.codex/`, вложенные `AGENTS.md`.
+  ../.agents/skills`). Конфигов под конкретные агенты разработки в репозитории нет: не создавать
+  `CLAUDE.md`, `.claude/settings.json`, `.codex/`, вложенные `AGENTS.md`. Конфиги сервисов CI и
+  ревью (`.coderabbit.yaml`) к этому запрету не относятся.
 - На Windows без `core.symlinks` симлинк не работает: читать `.agents/skills/` напрямую.
 - `AGENTS.md` держать ≤ 16 KiB (у части агентов лимит чтения 32 KiB). Здесь только правила для любой
   задачи; новые факты идут в `docs/`.
@@ -95,7 +96,8 @@ ssh/build.sh
 
 - `main` — единственная долгоживущая ветка, защищена ruleset: без прямых push, force push и
   удаления. Изменения — через PR с зелёными `build (aarch64)`, `build (armhf)` и `commits`; только
-  squash или rebase (линейная история).
+  squash (линейная история). Сообщение squash-коммита — заголовок и описание PR, поэтому они
+  подчиняются тем же правилам, что и сообщения коммитов (см. «Авторство»).
 - Работа — в короткой ветке `feat/…`, `fix/…`, `docs/…`; ветка удаляется при мерже. Теги `v*` нельзя
   сдвинуть или удалить.
 - Персональные данные не попадают в репозиторий: никаких реальных IP, MAC, серийников, имён Wi-Fi,
@@ -108,9 +110,10 @@ ssh/build.sh
   `GitHub` у мержей через веб-интерфейс — правилом не запрещены; скрипт их пропускает. Агент не
   меняет `git config user.*` и не подставляет чужой `--author`. В author,
   committer и трейлерах `*-by:` (`Co-authored-by:`, `Assisted-by:` …) нет AI (Claude, Codex,
-  Copilot, Cursor, Devin, Gemini, Aider, Kimi …); в сообщении нет подписей «Generated with <AI>».
-  `Co-authored-by:` людей разрешён. Проверка — `tools/check-authorship.sh <A..B>`, в CI — job
-  `commits`.
+  Copilot, Cursor, Devin, Gemini, Aider, Kimi …); в сообщении, заголовке и описании PR нет подписей
+  «Generated with <AI>» и сводки бота ревью («Summary by CodeRabbit»). `Co-authored-by:` людей
+  разрешён. Проверка — `tools/check-authorship.sh <A..B>` для коммитов и `--text <файл>` для
+  заголовка и описания PR; в CI — job `commits`.
 
 ## Безопасность станций
 

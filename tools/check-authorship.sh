@@ -1,14 +1,22 @@
 #!/bin/sh
-# Проверка авторства коммитов диапазона: ни автор, ни коммиттер, ни трейлеры `*-by:`,
-# ни подпись в сообщении не должны указывать на AI-инструмент.
-# Правило: AGENTS.md, раздел «Git»; в CI его исполняет job `commits` (build.yml).
-# Скрипт обязан работать в busybox/dash, поэтому только POSIX sh. CI запускает его и через
-# `sh -s` (версия из базы PR), поэтому скрипт не читает stdin и не опирается на $0.
+# Проверка авторства: ни автор, ни коммиттер, ни трейлеры `*-by:`, ни подпись в сообщении не
+# должны указывать на AI-инструмент. Режим `--text` проверяет так же заголовок и описание PR:
+# при squash-мерже они становятся сообщением коммита в main.
+# Правило: AGENTS.md, раздел «Git»; в CI его исполняет job `commits` (authorship.yml).
+# Скрипт обязан работать в busybox/dash, поэтому только POSIX sh.
 
-if [ $# -ne 1 ]; then
-    echo "usage: tools/check-authorship.sh <A..B>" >&2
+usage() {
+    echo "usage: tools/check-authorship.sh <A..B> | --text <file>" >&2
     exit 2
-fi
+}
+
+case $# in
+    # Опция вместо диапазона — ошибка вызова: иначе `--text` без файла ушёл бы в git log как
+    # опция и проверил бы всю историю вместо текста PR.
+    1) case $1 in -*) usage ;; esac; mode=range ;;
+    2) [ "$1" = --text ] || usage; mode=text ;;
+    *) usage ;;
+esac
 
 # Имена сравниваются целыми словами: подстрока ловила бы людей («Haider» — aider, «Kimiko» — kimi).
 # dependabot[bot] сюда не попадает намеренно: это легитимный автор обновлений.
@@ -32,6 +40,12 @@ SIGN='^[^[:alnum:]]*generated[- ](with|by)'
 # Двусмысленное имя сразу после подписи — тоже AI, хотя слова-маркера рядом нет:
 # «Generated with Cursor», «Generated with [Claude](...)».
 SIGNAMB="^[^[:alnum:]]*generated[- ](with|by)[^[:alnum:]]*($AMBIG)([^[:alnum:]]|\$)"
+# Сводка, которую CodeRabbit дописывает в описание PR: заголовок «Summary by CodeRabbit» и
+# HTML-маркеры «release notes by coderabbit.ai». При squash-мерже она ушла бы в сообщение коммита.
+# Ловятся только строки самого блока: упоминание сводки в обычном тексте нарушением не считается.
+# Обрамление перечислено явно, а не `[^[:alnum:]]`: вне UTF-8-локали (busybox grep, LC_ALL=C)
+# кириллица не считается буквой, и русская фраза с цитатой заголовка ловилась бы как блок.
+BOTBLOCK='^[[:space:]#>*_]*summary by coderabbit[[:space:]*_:]*$|^[[:space:]]*<!--.*release notes by coderabbit\.ai'
 
 # is_ai TEXT: есть ли в тексте признак AI (без правила «имя целиком равно токену»).
 is_ai() {
@@ -50,6 +64,30 @@ is_ai_name() {
     printf '%s\n' "$n" | grep -qiE "^($AMBIG)\$"
 }
 
+# check_msg PREFIX: строки сообщения со stdin; нарушения печатаются с префиксом и маркером «bad».
+check_msg() {
+    # Последняя строка без перевода строки — тоже строка: файл из редактора часто без него.
+    while IFS= read -r line || [ -n "$line" ]; do
+        if printf '%s\n' "$line" | grep -qiE "$TRAILER"; then
+            v=${line#*:}
+            v=${v#"${v%%[! ]*}"}
+            if is_ai_name "$v"; then
+                n=${line%%:*}
+                # printf, а не echo: echo в dash раскрывает `\c` в тексте и съел бы маркер «bad».
+                printf '%s\n' "$1 ${n#"${n%%[! ]*}"}: $v"
+                echo bad
+            fi
+        elif printf '%s\n' "$line" | grep -qiE "$BOTBLOCK"; then
+            printf '%s\n' "$1 message: $line"
+            echo bad
+        elif printf '%s\n' "$line" | grep -qiE "$SIGN" &&
+            { is_ai "$line" || printf '%s\n' "$line" | grep -qiE "$SIGNAMB"; }; then
+            printf '%s\n' "$1 message: $line"
+            echo bad
+        fi
+    done
+}
+
 # Код возврата git теряется в конвейере, поэтому сначала вывод во временный файл.
 tmp=$(mktemp) || exit 2
 out=$(mktemp) || exit 2
@@ -58,56 +96,53 @@ out=$(mktemp) || exit 2
 trap 'rm -f "$tmp" "$out"' EXIT
 trap 'exit 2' HUP INT TERM
 
-if ! git log --format='%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e' "$1" >"$tmp"; then
-    echo "check-authorship: git log failed for '$1'" >&2
-    exit 2
-fi
+if [ "$mode" = text ]; then
+    if [ ! -r "$2" ]; then
+        printf '%s\n' "check-authorship: cannot read '$2'" >&2
+        exit 2
+    fi
+    # Описание PR из веб-интерфейса GitHub приходит с CRLF: \r мешал бы сравнению имени целиком.
+    # Ошибка чтения в конвейере потерялась бы, поэтому сначала во временный файл.
+    tr -d '\r' <"$2" >"$tmp" || exit 2
+    check_msg pr <"$tmp" >"$out"
+else
+    if ! git log --format='%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e' "$1" >"$tmp"; then
+        printf '%s\n' "check-authorship: git log failed for '$1'" >&2
+        exit 2
+    fi
 
-bad=0
-# Записи разделены RS (\036), поля — US (\037).
-us=$(printf '\037')
-soh=$(printf '\001')
+    # Записи разделены RS (\036), поля — US (\037).
+    us=$(printf '\037')
+    soh=$(printf '\001')
 
-# Одна запись = одна строка: иначе многострочное сообщение не прочитать построчным read.
-tr '\n\036' '\001\n' <"$tmp" | while IFS= read -r rec; do
-    [ -n "$rec" ] || continue
-    # Первый коммит после RS начинается с \001 (перевод строки после предыдущего %x1e).
-    case $rec in "$soh"*) rec=${rec#?} ;; esac
-    case $rec in *"$us"*) ;; *) continue ;; esac
-    rest=$rec
-    sha=${rest%%"$us"*};  rest=${rest#*"$us"}
-    an=${rest%%"$us"*};   rest=${rest#*"$us"}
-    ae=${rest%%"$us"*};   rest=${rest#*"$us"}
-    cn=${rest%%"$us"*};   rest=${rest#*"$us"}
-    ce=${rest%%"$us"*};   msg=${rest#*"$us"}
-    short=$(printf '%s' "$sha" | cut -c1-7)
+    # Одна запись = одна строка: иначе многострочное сообщение не прочитать построчным read.
+    tr '\n\036' '\001\n' <"$tmp" | while IFS= read -r rec; do
+        [ -n "$rec" ] || continue
+        # Первый коммит после RS начинается с \001 (перевод строки после предыдущего %x1e).
+        case $rec in "$soh"*) rec=${rec#?} ;; esac
+        case $rec in *"$us"*) ;; *) continue ;; esac
+        rest=$rec
+        sha=${rest%%"$us"*};  rest=${rest#*"$us"}
+        an=${rest%%"$us"*};   rest=${rest#*"$us"}
+        ae=${rest%%"$us"*};   rest=${rest#*"$us"}
+        cn=${rest%%"$us"*};   rest=${rest#*"$us"}
+        ce=${rest%%"$us"*};   msg=${rest#*"$us"}
+        short=$(printf '%s' "$sha" | cut -c1-7)
 
-    for pair in "author:$an" "author:$ae" "committer:$cn" "committer:$ce"; do
-        v=${pair#*:}
-        if is_ai_name "$v"; then
-            echo "$short ${pair%%:*}: $v"
-            echo bad
-        fi
-    done
-
-    printf '%s\n' "$msg" | tr '\001' '\n' | while IFS= read -r line; do
-        if printf '%s\n' "$line" | grep -qiE "$TRAILER"; then
-            v=${line#*:}
-            v=${v#"${v%%[! ]*}"}
+        for pair in "author:$an" "author:$ae" "committer:$cn" "committer:$ce"; do
+            v=${pair#*:}
             if is_ai_name "$v"; then
-                n=${line%%:*}
-                echo "$short ${n#"${n%%[! ]*}"}: $v"
+                printf '%s\n' "$short ${pair%%:*}: $v"
                 echo bad
             fi
-        elif printf '%s\n' "$line" | grep -qiE "$SIGN" &&
-            { is_ai "$line" || printf '%s\n' "$line" | grep -qiE "$SIGNAMB"; }; then
-            echo "$short message: $line"
-            echo bad
-        fi
-    done
-done >"$out"
+        done
+
+        printf '%s\n' "$msg" | tr '\001' '\n' | tr -d '\r' | check_msg "$short"
+    done >"$out"
+fi
 
 # Маркер «bad» отделяем от сообщений о нарушениях.
 grep -v '^bad$' "$out"
+bad=0
 if grep -q '^bad$' "$out"; then bad=1; fi
 exit "$bad"
