@@ -44,8 +44,9 @@ description: >-
 3. Клиент: `tools/esphome_check.py --host <ip> --port 16053 <command>`; команды (`dump`, `commands`,
    `voice-fake`, `announce`, `timer`, `set-key`, `scenario-*`) — в `--help` и docstring скрипта.
 4. Лог тестового экземпляра: `test-log [N]`; лог демона: `log [N]`.
-5. `test-start` заново кладёт в `/tmp/pulsar-test/` образы радио со станции: образ, отправленный
-   туда `push`, нужно отправить после `test-start`, если он нужен тесту.
+5. `test-start` кладёт в `/tmp/pulsar-test/` образы радио со станции поверх отправленных `push`;
+   новую сборку радио через тестовый экземпляр не проверить — только `zigbee_probe` (skill
+   `zigbee-radio`).
 
 ## 5. Probe-утилиты
 

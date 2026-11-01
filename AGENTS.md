@@ -104,7 +104,9 @@ ssh/build.sh
   декомпилированный код Яндекса), `ref/` (upstream-чекауты) — в `.gitignore`, не публиковать.
   Проприетарные библиотеки, модели и конфиги прошивки — тоже.
 - **Авторство.** Автор и коммиттер — человек, от чьего имени идёт работа, со своей настроенной git
-  identity. Агент не меняет `git config user.*` и не подставляет чужой `--author`. В author,
+  identity. Служебные идентичности — `dependabot[bot]` (обновления зависимостей) и коммиттер
+  `GitHub` у мержей через веб-интерфейс — правилом не запрещены; скрипт их пропускает. Агент не
+  меняет `git config user.*` и не подставляет чужой `--author`. В author,
   committer и трейлерах `*-by:` (`Co-authored-by:`, `Assisted-by:` …) нет AI (Claude, Codex,
   Copilot, Cursor, Devin, Gemini, Aider, Kimi …); в сообщении нет подписей «Generated with <AI>».
   `Co-authored-by:` людей разрешён. Проверка — `tools/check-authorship.sh <A..B>`, в CI — job
