@@ -1,4 +1,7 @@
-# Сводка CodeRabbit — в его комментарии walkthrough, а не в описании PR: описание PR становится
-# сообщением squash-коммита в main (AGENTS.md, «Git»), и job `commits` валит PR со сводкой бота.
+# Остальные настройки (язык ревью и др.) — из Organization UI CodeRabbit: без `inheritance` этот файл
+# сбросил бы их к умолчаниям схемы.
+inheritance: true
 reviews:
+  # Сводка — в комментарии walkthrough, а не в описании PR: описание PR становится сообщением
+  # squash-коммита в main (AGENTS.md, «Git»), и job `commits` валит PR со сводкой бота.
   high_level_summary_in_walkthrough: true

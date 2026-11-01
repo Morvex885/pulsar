@@ -11,7 +11,9 @@ usage() {
 }
 
 case $# in
-    1) mode=range ;;
+    # Опция вместо диапазона — ошибка вызова: иначе `--text` без файла ушёл бы в git log как
+    # опция и проверил бы всю историю вместо текста PR.
+    1) case $1 in -*) usage ;; esac; mode=range ;;
     2) [ "$1" = --text ] || usage; mode=text ;;
     *) usage ;;
 esac
@@ -38,9 +40,10 @@ SIGN='^[^[:alnum:]]*generated[- ](with|by)'
 # Двусмысленное имя сразу после подписи — тоже AI, хотя слова-маркера рядом нет:
 # «Generated with Cursor», «Generated with [Claude](...)».
 SIGNAMB="^[^[:alnum:]]*generated[- ](with|by)[^[:alnum:]]*($AMBIG)([^[:alnum:]]|\$)"
-# Сводка, которую CodeRabbit дописывает в описание PR («Summary by CodeRabbit» и HTML-маркер
-# «release notes by coderabbit.ai»): при squash-мерже она ушла бы в сообщение коммита.
-BOTBLOCK='(summary|release notes) by coderabbit'
+# Сводка, которую CodeRabbit дописывает в описание PR: заголовок «Summary by CodeRabbit» и
+# HTML-маркеры «release notes by coderabbit.ai». При squash-мерже она ушла бы в сообщение коммита.
+# Ловятся только строки самого блока: упоминание сводки в обычном тексте нарушением не считается.
+BOTBLOCK='^[^[:alnum:]]*summary by coderabbit[^[:alnum:]]*$|^[[:space:]]*<!--.*release notes by coderabbit\.ai'
 
 # is_ai TEXT: есть ли в тексте признак AI (без правила «имя целиком равно токену»).
 is_ai() {
@@ -61,7 +64,8 @@ is_ai_name() {
 
 # check_msg PREFIX: строки сообщения со stdin; нарушения печатаются с префиксом и маркером «bad».
 check_msg() {
-    while IFS= read -r line; do
+    # Последняя строка без перевода строки — тоже строка: файл из редактора часто без него.
+    while IFS= read -r line || [ -n "$line" ]; do
         if printf '%s\n' "$line" | grep -qiE "$TRAILER"; then
             v=${line#*:}
             v=${v#"${v%%[! ]*}"}
@@ -95,7 +99,9 @@ if [ "$mode" = text ]; then
         exit 2
     fi
     # Описание PR из веб-интерфейса GitHub приходит с CRLF: \r мешал бы сравнению имени целиком.
-    tr -d '\r' <"$2" | check_msg pr >"$out"
+    # Ошибка чтения в конвейере потерялась бы, поэтому сначала во временный файл.
+    tr -d '\r' <"$2" >"$tmp" || exit 2
+    check_msg pr <"$tmp" >"$out"
 else
     if ! git log --format='%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e' "$1" >"$tmp"; then
         echo "check-authorship: git log failed for '$1'" >&2
