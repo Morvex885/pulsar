@@ -43,7 +43,9 @@ SIGNAMB="^[^[:alnum:]]*generated[- ](with|by)[^[:alnum:]]*($AMBIG)([^[:alnum:]]|
 # Сводка, которую CodeRabbit дописывает в описание PR: заголовок «Summary by CodeRabbit» и
 # HTML-маркеры «release notes by coderabbit.ai». При squash-мерже она ушла бы в сообщение коммита.
 # Ловятся только строки самого блока: упоминание сводки в обычном тексте нарушением не считается.
-BOTBLOCK='^[^[:alnum:]]*summary by coderabbit[^[:alnum:]]*$|^[[:space:]]*<!--.*release notes by coderabbit\.ai'
+# Обрамление перечислено явно, а не `[^[:alnum:]]`: вне UTF-8-локали (busybox grep, LC_ALL=C)
+# кириллица не считается буквой, и русская фраза с цитатой заголовка ловилась бы как блок.
+BOTBLOCK='^[[:space:]#>*_]*summary by coderabbit[[:space:]*_:]*$|^[[:space:]]*<!--.*release notes by coderabbit\.ai'
 
 # is_ai TEXT: есть ли в тексте признак AI (без правила «имя целиком равно токену»).
 is_ai() {
