@@ -18,6 +18,8 @@ func modelName(code string) string {
 		return "Yandex Station Mini 2"
 	case "bergamot":
 		return "Yandex Station Mini 3"
+	case "pickle":
+		return "Yandex Station Mini 3 Pro"
 	case "yandexmini":
 		return "Yandex Station Mini"
 	}
@@ -32,11 +34,13 @@ func modelName(code string) string {
 // 64-bit userspace has been seen on them, and the aarch64 binary needs glibc 2.34 — on a miss it
 // would crash-loop back to the Yandex stack (no .prev on a first install). The armhf build
 // targets glibc 2.23, the Mini's; the 2.30 userlands of the Lite 2, Mini 2 and Mini 3 run it as
-// well.
+// well. The Mini 3 Pro is the reverse: aarch64-only (glibc 2.36), no armhf loader on it.
 func abis(code string) []string {
 	switch code {
 	case "cucumber":
 		return []string{"aarch64", "armhf"}
+	case "pickle":
+		return []string{"aarch64"}
 	case "plum", "prune", "station-mini2", "bergamot", "yandexmini":
 		return []string{"armhf"}
 	}
