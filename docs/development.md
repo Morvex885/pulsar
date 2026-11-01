@@ -18,7 +18,7 @@
   zig — `make -C satellite ZIG=/путь/к/zig`; сборки под станции отклоняют zig 0.11–0.13: их
   armhf-сборки C++ в release (sendspin-cpp) падают до `main`. Цель armhf — glibc 2.23 (userland
   Мини), цель aarch64 — glibc 2.36 (обычный userland Миди); glibc станций —
-  [hardware.md, «Модели»](hardware.md#модели);
+  вики и docs моделей ([hardware.md, «Модели»](hardware.md#модели));
 - `make`, `git`, `curl`, `patch`, компилятор C для хоста (`cc`); для sendspin-cpp
   ([«Линковка C++ (sendspin-cpp)»](architecture.md#линковка-c-sendspin-cpp)) — `cmake` ≥ 3.16 и
   `ninja` (`uv tool install cmake`, `uv tool install ninja`);
@@ -77,7 +77,7 @@ go -C installer run . <ip>[:port]    # установить или обнови�
 [`../satellite/deploy/boot.sh`](../satellite/deploy/boot.sh) (список кодовых имён `yandex,<codename>`
 из `/proc/device-tree/compatible`). У Мини записи `yandex,*` нет, и все три места требуют ОБА
 признака: `/proc/device-tree/amlogic-dt-id` = `axg_s420_v03` и `deviceType=yandexmini` в
-`/system/vendor/quasar/quasar.cfg` (почему одного id мало — [hardware.md, «Модели»](hardware.md#модели)).
+`/system/vendor/quasar/quasar.cfg` (почему одного id мало — [mini.md, «Userland и хранилище»](mini.md#userland-и-хранилище)).
 Новая модель добавляется во все три места.
 
 **Выбор сборки** (aarch64 или armhf) — комментарий у `abis()` в
