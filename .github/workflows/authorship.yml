@@ -1,0 +1,51 @@
+name: authorship
+
+# Авторство всего, что попадает в main при squash-мерже: коммиты PR, его заголовок и описание
+# (AGENTS.md, «Git»). Отдельный workflow — чтобы правка заголовка или описания (`edited`)
+# перезапускала только эту проверку, а не сборки.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  commits:
+    # Имя job — обязательная проверка ruleset'а main: не переименовывать.
+    # Скрипт берётся из базы PR: иначе PR мог бы подменить его на `exit 0` и пройти собственную
+    # проверку. Версия из PR запускается, только если в базе скрипта нет или он не умеет `--text`.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: script from PR base
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git cat-file -e "$BASE:tools/check-authorship.sh" 2>/dev/null; then
+            git show "$BASE:tools/check-authorship.sh" > "$RUNNER_TEMP/base.sh"
+          else
+            cp tools/check-authorship.sh "$RUNNER_TEMP/base.sh"
+          fi
+      - name: commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: sh "$RUNNER_TEMP/base.sh" "$BASE..$HEAD_SHA"
+      - name: PR title and body
+        # Текст PR — только через env: подстановка `${{ }}` прямо в скрипт дала бы инъекцию команд.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr.txt"
+          s="$RUNNER_TEMP/base.sh"
+          grep -q -e '--text' "$s" || s=tools/check-authorship.sh
+          sh "$s" --text "$RUNNER_TEMP/pr.txt"

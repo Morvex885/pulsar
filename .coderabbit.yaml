@@ -1,0 +1,4 @@
+# Сводка CodeRabbit — в его комментарии walkthrough, а не в описании PR: описание PR становится
+# сообщением squash-коммита в main (AGENTS.md, «Git»), и job `commits` валит PR со сводкой бота.
+reviews:
+  high_level_summary_in_walkthrough: true
