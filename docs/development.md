@@ -78,7 +78,8 @@ go -C installer run . <ip>[:port]    # установить или обнови�
 [`../satellite/deploy/boot.sh`](../satellite/deploy/boot.sh) (список кодовых имён `yandex,<codename>`
 из `/proc/device-tree/compatible`). У Мини записи `yandex,*` нет, и все три места требуют ОБА
 признака: `/proc/device-tree/amlogic-dt-id` = `axg_s420_v03` и `deviceType=yandexmini` в
-`/system/vendor/quasar/quasar.cfg` (почему одного id мало — [mini.md, «Userland и хранилище»](mini.md#userland-и-хранилище)).
+`/system/vendor/quasar/quasar.cfg` (почему одного id мало —
+[mini.md, «Userland и хранилище»](mini.md#userland-и-хранилище)).
 Новая модель добавляется во все три места.
 
 **Выбор сборки** (aarch64 или armhf) — комментарий у `abis()` в

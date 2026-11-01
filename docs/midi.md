@@ -1,7 +1,8 @@
 # Миди (`cucumber`)
 
-Станция мейнтейнера, данные авторитетны. Железо — [вики](https://hackalice.me/devices/station-midi/);
-здесь только то, чего там нет ([AGENTS.md, «Документация»](../AGENTS.md#документация)). Zigbee —
+Станция мейнтейнера, данные авторитетны. Железо —
+[вики](https://hackalice.me/devices/station-midi/); здесь только то, чего там нет
+([AGENTS.md, «Документация»](../AGENTS.md#документация)). Zigbee —
 [zigbee.md, «Радио Миди»](zigbee.md#радио-миди).
 
 ## Userland и хранилище
