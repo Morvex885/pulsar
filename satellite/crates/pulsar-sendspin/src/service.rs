@@ -156,8 +156,8 @@ impl SendspinHandle {
         self.streaming.get()
     }
 
-    /// Sendspin-сервер (например, Music Assistant) подключён: атомарный флаг самой библиотеки,
-    /// acquire-чтение. Читается синхронно из любого потока, без `spawn_blocking`.
+    /// Sendspin-сервер (например, Music Assistant) подключён: атомарный флаг, который пишет поток
+    /// библиотеки; чтение (acquire) не блокирует.
     pub fn connected(&self) -> bool {
         self.client.is_connected()
     }
