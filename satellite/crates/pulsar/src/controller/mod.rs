@@ -6,6 +6,7 @@
 mod entities;
 mod logic;
 mod media;
+mod speech_marks;
 mod voice;
 
 use std::collections::{BTreeMap, HashMap};
@@ -84,6 +85,7 @@ enum Tk {
     UpdateRetry,
     /// Exit after an installed update.
     UpdateExit,
+    SpeechMark,
 }
 
 /// What a `play()` was for: the C++ completion callback and the values it captured.
@@ -179,6 +181,9 @@ pub struct Controller {
     voice_run: u64,
     tts_url: String,
     tts_played: bool,
+    speech_marks: Vec<speech_marks::SpeechMark>,
+    speech_started_ms: i64,
+    speech_latch: Option<(usize, i64)>,
     /// A run's TTS_START left HA's assist satellite "responding" until AnnounceFinished, also
     /// when nothing plays here, and that report is still to be sent (`send_tts_report`).
     tts_report_owed: bool,
@@ -584,6 +589,9 @@ impl Controller {
             voice_run: 0,
             tts_url: String::new(),
             tts_played: false,
+            speech_marks: Vec::new(),
+            speech_started_ms: 0,
+            speech_latch: None,
             tts_report_owed: false,
             continue_conversation: false,
             announcing: false,
@@ -735,11 +743,20 @@ impl Controller {
             Tk::UpdateRetry => self.maybe_auto_update(),
             // exit 0: supervise.sh starts the new binary
             Tk::UpdateExit => self.exit = Some(ExitReason::Updated),
+            Tk::SpeechMark => self.update_speech_mark(),
         }
     }
 
     fn on_player(&mut self, ev: PlayerEvent) {
         match ev {
+            PlayerEvent::PcmStarted { id, started_ms } => {
+                if self.phase == Phase::Speaking
+                    && matches!(self.pending.get(&id), Some(Pending::Tts { dialog }) if *dialog == self.dialog)
+                {
+                    self.speech_started_ms = started_ms;
+                    self.update_speech_mark();
+                }
+            }
             // HA media state follows playback (C++ Player::on_state hook).
             PlayerEvent::State(ch, s) => {
                 if ch == Channel::Music {

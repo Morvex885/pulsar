@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use log::{debug, error, info, warn};
 use pulsar_alsa::{Format, HwRequest, Pcm};
 use pulsar_core::model::Model;
+use pulsar_core::now_ms;
 
 /// The format playsink converts to (capsfilter before the fdsink) and the PCM is opened with.
 pub(crate) const CAPS: &str = "audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=2";
@@ -59,7 +60,7 @@ const DRAIN_SLACK: Duration = Duration::from_millis(500);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum OutEvent {
     /// The first samples went to the device.
-    Started(u64),
+    Started(u64, i64),
     /// The last sample has been played.
     PlayedOut(u64),
     /// The PCM could not be opened or failed for good.
@@ -355,10 +356,6 @@ impl Writer {
                     st = feed.lock();
                 }
                 self.phase = Phase::Playing;
-                if !self.started {
-                    self.started = true;
-                    (self.notify)(OutEvent::Started(item));
-                }
             } else if st.eof {
                 // Nothing left to write: play out what the device holds, if it is open.
                 drop(st);
@@ -377,6 +374,15 @@ impl Writer {
             }
         }
         if self.phase == Phase::Playing {
+            let queued = if self.started {
+                0
+            } else {
+                self.pcm
+                    .as_mut()
+                    .and_then(|p| p.delay().ok())
+                    .unwrap_or(0)
+                    .max(0)
+            };
             let wrote = match self.write(&mut st) {
                 Ok(w) => w,
                 Err(()) => {
@@ -391,6 +397,13 @@ impl Writer {
             );
             drop(st);
             if wrote {
+                if !self.started {
+                    self.started = true;
+                    (self.notify)(OutEvent::Started(
+                        item,
+                        now_ms() + queued * 1000 / i64::from(RATE),
+                    ));
+                }
                 feed.space.notify_all();
             }
             if done {
