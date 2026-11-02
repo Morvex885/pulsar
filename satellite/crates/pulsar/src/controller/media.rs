@@ -15,7 +15,7 @@ impl Controller {
             self.phase,
             self.announcing,
             self.timer_ringing,
-            self.closing_earcon,
+            self.closing_earcon || self.enroll_phrase.is_some(),
         );
         if want == self.ducked {
             return;

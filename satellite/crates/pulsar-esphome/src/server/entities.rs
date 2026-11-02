@@ -10,7 +10,7 @@ use super::{ESPHOME_VERSION, PROJECT_NAME, Server, msg};
 use crate::proto::Writer;
 use crate::types::{
     BinarySensorId, EventId, LightState, MediaState, NumberId, SelectId, SensorId, SwitchId,
-    TextId, TextSensorId, UpdateState,
+    TextId, TextSensorId, UpdateState, VOICE_NAME_MAX_CHARS,
 };
 
 /// Entity keys (fixed32), stable across restarts: HA keys its entities by them.
@@ -53,6 +53,16 @@ pub(super) mod key {
     pub const SELECT_CLOCK_FORMAT: u32 = 35;
     pub const NUMBER_COMMAND_OFFSET: u32 = 36;
     pub const SW_CLOCK_SPOKEN_NUMBERS: u32 = 37;
+    pub const TEXT_SPEAKER: u32 = 38;
+    pub const TEXT_SPEAKER_STATUS: u32 = 39;
+    pub const ACTION_SPEAKER_ENROLL: u32 = 40;
+    pub const ACTION_SPEAKER_FORGET: u32 = 41;
+    pub const TEXT_VOICE_NAME: u32 = 42;
+    pub const BUTTON_VOICE_START: u32 = 43;
+    pub const BUTTON_VOICE_CANCEL: u32 = 44;
+    pub const BUTTON_VOICE_FORGET: u32 = 45;
+    pub const SENSOR_VOICE_PROGRESS: u32 = 46;
+    pub const TEXT_VOICE_PROMPT: u32 = 47;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -143,6 +153,11 @@ pub(super) struct Cache {
     clock_face: StrState,
     zigbee_mode: StrState,
     zigbee_status: StrState,
+    speaker: StrState,
+    speaker_status: StrState,
+    voice_name: StrState,
+    voice_prompt: StrState,
+    voice_progress: FloatState,
     music_viz: StrState,
     case_color: StrState,
     clock_music: StrState,
@@ -179,6 +194,11 @@ impl Cache {
             clock_face: StrState::default(),
             zigbee_mode: StrState::default(),
             zigbee_status: StrState::default(),
+            speaker: StrState::default(),
+            speaker_status: StrState::default(),
+            voice_name: StrState::default(),
+            voice_prompt: StrState::default(),
+            voice_progress: FloatState::default(),
             music_viz: StrState::default(),
             case_color: StrState::default(),
             clock_music: StrState::default(),
@@ -602,6 +622,69 @@ impl Server {
             ));
             out.push(text("zigbee", key::TEXT_ZIGBEE, "Zigbee", "mdi:zigbee"));
         }
+        if self.cfg.has_speaker_id {
+            out.push(text(
+                "speaker",
+                key::TEXT_SPEAKER,
+                "Speaker",
+                "mdi:account-voice",
+            ));
+            out.push(text(
+                "speaker_status",
+                key::TEXT_SPEAKER_STATUS,
+                "Speaker status",
+                "mdi:account-details",
+            ));
+            let mut w = Writer::new();
+            entity_head(&mut w, "voice_name", key::TEXT_VOICE_NAME, "Voice name");
+            w.str(5, "mdi:account-edit", false);
+            w.u32(9, VOICE_NAME_MAX_CHARS, false); // max_length
+            out.push((msg::LIST_TEXT, w));
+            for (oid, k, name, icon) in [
+                (
+                    "voice_start",
+                    key::BUTTON_VOICE_START,
+                    "Start voice recording",
+                    "mdi:microphone-plus",
+                ),
+                (
+                    "voice_cancel",
+                    key::BUTTON_VOICE_CANCEL,
+                    "Cancel voice recording",
+                    "mdi:microphone-off",
+                ),
+                (
+                    "voice_forget",
+                    key::BUTTON_VOICE_FORGET,
+                    "Forget voice",
+                    "mdi:account-remove",
+                ),
+            ] {
+                let mut w = Writer::new();
+                entity_head(&mut w, oid, k, name);
+                w.str(5, icon, false);
+                out.push((msg::LIST_BUTTON, w));
+            }
+            let mut w = Writer::new();
+            entity_head(
+                &mut w,
+                "voice_progress",
+                key::SENSOR_VOICE_PROGRESS,
+                "Voice recording progress",
+            );
+            w.str(5, "mdi:progress-check", false);
+            w.i32(7, 0, false);
+            out.push((msg::LIST_SENSOR, w));
+            let mut w = Writer::new();
+            entity_head(
+                &mut w,
+                "voice_prompt",
+                key::TEXT_VOICE_PROMPT,
+                "Voice recording prompt",
+            );
+            w.str(5, "mdi:text-box-outline", false);
+            out.push((msg::LIST_TEXT_SENSOR, w));
+        }
         // User-defined actions (HA registers esphome.<device>_<name>; every argument is required).
         let action = |name, key, args: &[(&str, u32)]| {
             let mut w = Writer::new();
@@ -625,6 +708,18 @@ impl Server {
                 "clock_show_face",
                 key::ACTION_CLOCK_FACE,
                 &[("face", SERVICE_ARG_STRING), ("seconds", SERVICE_ARG_INT)],
+            ));
+        }
+        if self.cfg.has_speaker_id {
+            out.push(action(
+                "speaker_enroll",
+                key::ACTION_SPEAKER_ENROLL,
+                &[("name", SERVICE_ARG_STRING)],
+            ));
+            out.push(action(
+                "speaker_forget",
+                key::ACTION_SPEAKER_FORGET,
+                &[("name", SERVICE_ARG_STRING)],
             ));
         }
         out.push(action(
@@ -878,6 +973,31 @@ impl Server {
                 to,
             );
         }
+        if self.cfg.has_speaker_id {
+            self.send_cached_str(
+                msg::TEXT_SENSOR_STATE,
+                key::TEXT_SPEAKER,
+                |c| &c.speaker,
+                to,
+            );
+            self.send_cached_str(
+                msg::TEXT_SENSOR_STATE,
+                key::TEXT_SPEAKER_STATUS,
+                |c| &c.speaker_status,
+                to,
+            );
+            self.send_cached_str(msg::TEXT_STATE, key::TEXT_VOICE_NAME, |c| &c.voice_name, to);
+            self.send_cached_str(
+                msg::TEXT_SENSOR_STATE,
+                key::TEXT_VOICE_PROMPT,
+                |c| &c.voice_prompt,
+                to,
+            );
+            let progress = self.cache.voice_progress;
+            if progress.has {
+                self.send_float(msg::SENSOR_STATE, key::SENSOR_VOICE_PROGRESS, progress, to);
+            }
+        }
     }
 
     /// Reads RSSI and the IP into the cache (once at start, then on the 60 s timer only: a
@@ -979,6 +1099,16 @@ impl Server {
                     self.send_float(msg::SENSOR_STATE, key::SENSOR_LUX, s, None);
                 }
             }
+            Publish::Sensor(SensorId::VoiceProgress, v) => {
+                if !self.cfg.has_speaker_id {
+                    return;
+                }
+                c.voice_progress = FloatState { has: true, v };
+                let s = c.voice_progress;
+                if on {
+                    self.send_float(msg::SENSOR_STATE, key::SENSOR_VOICE_PROGRESS, s, None);
+                }
+            }
             Publish::Number(id, v) => {
                 if matches!(id, NumberId::ClockBrightness | NumberId::ClockScroll)
                     && !self.cfg.has_clock
@@ -1062,6 +1192,37 @@ impl Server {
                         self.send_str(msg::TEXT_SENSOR_STATE, key::TEXT_ZIGBEE, &v, true, None);
                     }
                     self.cache.zigbee_status = StrState { has: true, v };
+                }
+            }
+            Publish::Text(TextId::VoiceName, v) => {
+                if self.cfg.has_speaker_id {
+                    if on {
+                        self.send_str(msg::TEXT_STATE, key::TEXT_VOICE_NAME, &v, true, None);
+                    }
+                    self.cache.voice_name = StrState { has: true, v };
+                }
+            }
+            Publish::TextSensor(
+                id @ (TextSensorId::Speaker
+                | TextSensorId::SpeakerStatus
+                | TextSensorId::VoicePrompt),
+                v,
+            ) => {
+                if self.cfg.has_speaker_id {
+                    let k = match id {
+                        TextSensorId::Speaker => key::TEXT_SPEAKER,
+                        TextSensorId::SpeakerStatus => key::TEXT_SPEAKER_STATUS,
+                        _ => key::TEXT_VOICE_PROMPT,
+                    };
+                    if on {
+                        self.send_str(msg::TEXT_SENSOR_STATE, k, &v, true, None);
+                    }
+                    let state = StrState { has: true, v };
+                    match id {
+                        TextSensorId::Speaker => self.cache.speaker = state,
+                        TextSensorId::SpeakerStatus => self.cache.speaker_status = state,
+                        _ => self.cache.voice_prompt = state,
+                    }
                 }
             }
             Publish::Light(st) => {
