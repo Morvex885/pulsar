@@ -171,6 +171,16 @@ impl Server {
             self.emit(ApiEvent::Button(b));
             return true;
         }
+        let voice = match k {
+            key::BUTTON_VOICE_START => Some(ButtonId::VoiceStart),
+            key::BUTTON_VOICE_CANCEL => Some(ButtonId::VoiceCancel),
+            key::BUTTON_VOICE_FORGET => Some(ButtonId::VoiceForget),
+            _ => None,
+        };
+        if let Some(b) = voice {
+            self.emit(ApiEvent::Button(b));
+            return true;
+        }
         if k != key::BUTTON_RESTART {
             return true;
         }
@@ -289,6 +299,10 @@ impl Server {
                 _ => {}
             }
         }
+        if k == key::TEXT_VOICE_NAME {
+            self.emit(ApiEvent::Text(TextId::VoiceName, lossy(s)));
+            return;
+        }
         if k != key::TEXT_CLOCK {
             return;
         }
@@ -372,10 +386,18 @@ impl Server {
                 args.push(a);
             }
         }
-        let want = if k == key::ACTION_LED_SHOW { 3 } else { 2 };
+        let want = match k {
+            key::ACTION_LED_SHOW => 3,
+            key::ACTION_SPEAKER_ENROLL | key::ACTION_SPEAKER_FORGET => 1,
+            _ => 2,
+        };
         if !matches!(
             k,
-            key::ACTION_CLOCK_TEXT | key::ACTION_CLOCK_FACE | key::ACTION_LED_SHOW
+            key::ACTION_CLOCK_TEXT
+                | key::ACTION_CLOCK_FACE
+                | key::ACTION_LED_SHOW
+                | key::ACTION_SPEAKER_ENROLL
+                | key::ACTION_SPEAKER_FORGET
         ) || n_args != want
         {
             warn!("api: bad action call key={k} args={n_args}");
@@ -396,6 +418,18 @@ impl Server {
                 effect,
                 color: lossy(args[1].s),
                 seconds: args[2].i,
+            });
+            return;
+        }
+        if matches!(k, key::ACTION_SPEAKER_ENROLL | key::ACTION_SPEAKER_FORGET) {
+            self.emit(ApiEvent::Action {
+                id: if k == key::ACTION_SPEAKER_ENROLL {
+                    ActionId::SpeakerEnroll
+                } else {
+                    ActionId::SpeakerForget
+                },
+                value: lossy(args[0].s),
+                seconds: 0,
             });
             return;
         }
