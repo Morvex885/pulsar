@@ -59,8 +59,10 @@ const DRAIN_SLACK: Duration = Duration::from_millis(500);
 /// Writer progress of an output item, reported on the GLib thread.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum OutEvent {
-    /// The first samples went to the device.
+    /// Первые сэмплы переданы устройству; оценка начала воспроизведения по монотонным часам.
     Started(u64, i64),
+    /// Оценка начала и длительность PCM без тишины, добавленной при голодании.
+    Progress(u64, i64, i64),
     /// The last sample has been played.
     PlayedOut(u64),
     /// The PCM could not be opened or failed for good.
@@ -136,6 +138,7 @@ impl Output {
             pcm: None,
             phase: Phase::Priming,
             started: false,
+            speech_frames: 0,
             drain_deadline: None,
             pad_left: 0,
             buffer_frames: 0,
@@ -259,6 +262,7 @@ struct Writer {
     phase: Phase,
     /// Started was reported for the current item.
     started: bool,
+    speech_frames: u64,
     drain_deadline: Option<Instant>,
     /// Frames of the end pad still to write.
     pad_left: usize,
@@ -317,6 +321,7 @@ impl Writer {
         }
         self.phase = Phase::Priming;
         self.started = false;
+        self.speech_frames = 0;
         self.drain_deadline = None;
         self.pad_left = 0;
         if let Some(mut pcm) = self.pcm.take() {
@@ -404,6 +409,20 @@ impl Writer {
                         now_ms() + queued * 1000 / i64::from(RATE),
                     ));
                 }
+                let end_ms = (self.speech_frames * 1000 / u64::from(RATE)) as i64;
+                let delay_ms = self
+                    .pcm
+                    .as_mut()
+                    .and_then(|p| p.delay().ok())
+                    .unwrap_or(0)
+                    .max(0)
+                    * 1000
+                    / i64::from(RATE);
+                (self.notify)(OutEvent::Progress(
+                    item,
+                    now_ms() + delay_ms - end_ms,
+                    end_ms,
+                ));
                 feed.space.notify_all();
             }
             if done {
@@ -487,6 +506,7 @@ impl Writer {
             };
             match res {
                 Ok(w) => {
+                    self.speech_frames += w as u64;
                     st.data.drain(..w * FRAME_BYTES);
                     wrote = true;
                 }

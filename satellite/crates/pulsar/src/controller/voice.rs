@@ -386,6 +386,8 @@ impl Controller {
         self.timers.cancel(Tk::SpeechMark);
         self.speech_marks.clear();
         self.speech_started_ms = 0;
+        self.speech_end_ms = None;
+        self.speech_position_ms = 0;
         self.speech_latch = None;
         self.clock.set_speech_number(String::new());
     }
@@ -396,7 +398,7 @@ impl Controller {
             return;
         }
         if self.speech_marks.is_empty() {
-            // Streaming audio can start before INTENT_END or TTS_START supplies its text.
+            // Потоковое аудио может начаться раньше текста в INTENT_END или TTS_START.
             self.timers.cancel(Tk::SpeechMark);
             self.clock.set_speech_number(String::new());
             self.speech_latch = None;
@@ -408,8 +410,17 @@ impl Controller {
                 .set(Tk::SpeechMark, (self.speech_started_ms - now) as u64);
             return;
         }
-        let elapsed = now - self.speech_started_ms;
-        let previous = self.speech_latch.map(|(index, _)| index);
+        let elapsed = super::speech_marks::playback_elapsed(
+            now,
+            self.speech_started_ms,
+            self.speech_end_ms,
+            self.speech_position_ms,
+        );
+        self.speech_position_ms = elapsed;
+        let previous = self
+            .speech_latch
+            .filter(|latch| latch.holding)
+            .map(|latch| latch.index);
         let step = super::speech_marks::shown(
             &self.speech_marks,
             elapsed,
@@ -426,6 +437,9 @@ impl Controller {
         if let Some(until) = step.wake {
             self.timers
                 .set(Tk::SpeechMark, (until - elapsed).max(1) as u64);
+        } else if self.phase == Phase::Speaking {
+            // Поздние точные метки ещё могут заменить расписание; шкалу PCM сохраняем.
+            self.timers.cancel(Tk::SpeechMark);
         } else {
             self.clear_speech_display();
         }
@@ -472,8 +486,22 @@ impl Controller {
         }
         self.run.awaiting_run_start = false;
         if hold_number {
-            if let Some((index, until)) = self.speech_latch {
-                let elapsed = (now_ms() - self.speech_started_ms).max(0);
+            if let Some(super::speech_marks::Latch {
+                index,
+                until,
+                holding: true,
+            }) = self.speech_latch
+            {
+                let now = now_ms();
+                let elapsed = super::speech_marks::playback_elapsed(
+                    now,
+                    self.speech_started_ms,
+                    self.speech_end_ms,
+                    self.speech_position_ms,
+                );
+                // После конца PCM остаток удержания отсчитывается обычным таймером.
+                self.speech_started_ms = now - elapsed;
+                self.speech_end_ms = None;
                 if elapsed < until {
                     self.speech_marks.truncate(index + 1);
                     self.timers

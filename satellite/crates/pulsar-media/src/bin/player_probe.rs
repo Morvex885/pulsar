@@ -192,7 +192,9 @@ impl Probe {
 
     fn event(&mut self, ev: PlayerEvent) -> Step {
         let (id, ok) = match ev {
-            PlayerEvent::PcmStarted { .. } => return Step::Continue,
+            PlayerEvent::PcmStarted { .. } | PlayerEvent::PcmProgress { .. } => {
+                return Step::Continue;
+            }
             PlayerEvent::State(ch, s) => {
                 self.saw_state = true;
                 let name = if ch == Channel::Music {

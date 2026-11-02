@@ -83,10 +83,16 @@ pub struct PlayId(pub u64);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlayerEvent {
     State(Channel, PlayState),
-    /// Estimated first sample time, on the monotonic clock, after ALSA starts PCM playback.
+    /// Оценка момента первого сэмпла по монотонным часам после начала вывода PCM через ALSA.
     PcmStarted {
         id: PlayId,
         started_ms: i64,
+    },
+    /// Прогресс PCM: начало шкалы с учётом пауз и конец переданных сэмплов, мс.
+    PcmProgress {
+        id: PlayId,
+        started_ms: i64,
+        end_ms: i64,
     },
     /// Exactly once per `play()`: ok = every url played to its end. A list cut short by `stop()`
     /// or by a later `play()` on the same channel gets ok = false, sent by that call itself (so
@@ -649,7 +655,10 @@ impl Machine {
     fn on_out(&mut self, ev: OutEvent) {
         let ch = Channel::Announce;
         let item = match ev {
-            OutEvent::Started(item, _) | OutEvent::PlayedOut(item) | OutEvent::Failed(item) => item,
+            OutEvent::Started(item, _)
+            | OutEvent::Progress(item, _, _)
+            | OutEvent::PlayedOut(item)
+            | OutEvent::Failed(item) => item,
         };
         let c = &mut self.chans[ch.index()];
         if !c.active || item != c.out_gen {
@@ -663,6 +672,13 @@ impl Machine {
                 if c.want_play {
                     self.set_state(ch, PlayState::Playing);
                 }
+            }
+            OutEvent::Progress(_, started_ms, end_ms) => {
+                self.shared.send(PlayerEvent::PcmProgress {
+                    id: c.item,
+                    started_ms,
+                    end_ms,
+                });
             }
             OutEvent::PlayedOut(_) => {
                 c.out_gen = 0;
@@ -1436,6 +1452,28 @@ mod tests {
 
     fn urls(u: &[&str]) -> Vec<String> {
         u.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn pcm_progress_belongs_only_to_the_current_item() {
+        let mut r = Rig::new();
+        let id = r.h.play(Announce, urls(&["/a.wav"]));
+        r.pump();
+        r.events();
+        r.out(OutEvent::Progress(1, 1000, 500));
+        assert_eq!(
+            r.events(),
+            [PlayerEvent::PcmProgress {
+                id,
+                started_ms: 1000,
+                end_ms: 500
+            }]
+        );
+        r.h.play(Announce, urls(&["/b.wav"]));
+        r.pump();
+        r.events();
+        r.out(OutEvent::Progress(1, 2000, 1500));
+        assert!(r.events().is_empty());
     }
 
     #[test]
