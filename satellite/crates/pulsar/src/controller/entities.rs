@@ -208,16 +208,17 @@ impl Controller {
                 self.api.publish_number(id, self.st.clock_scroll_ms as f32);
             }
             NumberId::FollowupDuration => {
-                if !value.is_finite() {
+                let Some(s) = pulsar_esphome::followup_duration_s(value) else {
                     return;
-                }
-                self.st.followup_duration_s = value
-                    .round()
-                    .clamp(0.0, pulsar_esphome::FOLLOWUP_DURATION_MAX_S as f32)
-                    as u32;
-                self.api
-                    .publish_number(id, self.st.followup_duration_s as f32);
-                if self.st.followup_duration_s == 0 && self.timers.is_set(Tk::FollowupWait) {
+                };
+                self.st.followup_duration_s = s;
+                self.api.publish_number(id, s as f32);
+                // Ожидание открыто и до STT_START, и без таймера: проверяется по флагу, не по Tk.
+                if s == 0
+                    && self.phase == logic::Phase::Listening
+                    && self.followup.awaiting_speech()
+                {
+                    info!("follow-up: turned off, conversation ends");
                     self.finish_interaction();
                 }
             }

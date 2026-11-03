@@ -430,30 +430,77 @@ pub fn strip_deleted(exe: &OsStr) -> &OsStr {
     }
 }
 
-/// HA must request another turn; an error cannot be undone by a late intent event.
+/// Запас к окну follow-up на задержку STT_VAD_START: VAD HA шлёт его не раньше 0,3 с речи.
+// см. docs/voice.md, «Голосовой ассистент HA (ESPHome)»
+pub const FOLLOWUP_VAD_GRACE_MS: u64 = 1000;
+
+/// Продолжение разговора: следующую реплику должен попросить HA, а ошибку run поздний
+/// INTENT_END не отменяет.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Followup {
+    /// INTENT_END этого run попросил ещё реплику, ошибок в run не было.
     requested: bool,
+    /// В run была ошибка.
     failed: bool,
+    /// В этом run пришёл STT_VAD_START.
+    vad_seen: bool,
+    /// Идёт follow-up-реплика, речь ещё не началась.
+    awaiting_speech: bool,
+    /// Окно этой реплики ограничено таймером. Только если в прошлом run пришёл STT_VAD_START:
+    /// без него таймер нечем снять и он оборвал бы реплику, а тип VAD по STT_START на ESPHome
+    /// не узнать. см. docs/voice.md, «Голосовой ассистент HA (ESPHome)»
+    timed: bool,
 }
 
 impl Followup {
-    /// Returns whether speech has started and its wait timer must be cancelled.
-    pub fn on_event(&mut self, event: VaEvent, continue_conversation: bool) -> bool {
+    pub fn on_event(&mut self, event: VaEvent, continue_conversation: bool) {
         match event {
-            VaEvent::RunStart => *self = Self::default(),
+            // RUN_START follow-up-реплики приходит уже после `next_turn`: её флаги не трогаем.
+            VaEvent::RunStart => {
+                self.requested = false;
+                self.failed = false;
+                self.vad_seen = false;
+            }
             VaEvent::IntentEnd => self.requested = continue_conversation && !self.failed,
             VaEvent::Error => {
                 self.failed = true;
                 self.requested = false;
             }
+            VaEvent::SttVadStart => {
+                self.vad_seen = true;
+                self.awaiting_speech = false;
+            }
             _ => {}
         }
-        event == VaEvent::SttVadStart
     }
 
-    pub fn wait_ms(&self, ok: bool, seconds: u32, blocked: bool) -> Option<u64> {
-        (ok && self.requested && !blocked && seconds > 0).then_some(u64::from(seconds) * 1000)
+    /// Слушать ли следующую реплику после ответа.
+    pub fn should_continue(&self, ok: bool, seconds: u32, blocked: bool) -> bool {
+        ok && self.requested && !blocked && seconds > 0
+    }
+
+    /// Состояние для follow-up-реплики, начатой после этого run.
+    pub fn next_turn(self) -> Self {
+        Self {
+            awaiting_speech: true,
+            timed: self.vad_seen,
+            ..Self::default()
+        }
+    }
+
+    /// Таймер ожидания речи от STT_START follow-up-реплики, мс.
+    pub fn window_ms(&self, seconds: u32) -> Option<u64> {
+        (self.awaiting_speech && self.timed && seconds > 0)
+            .then(|| u64::from(seconds) * 1000 + FOLLOWUP_VAD_GRACE_MS)
+    }
+
+    /// Ошибка — это молчание в follow-up-реплике: диалог закрывается тихо.
+    pub fn silent(&self, code: &str) -> bool {
+        self.awaiting_speech && code == "stt-no-text-recognized"
+    }
+
+    pub fn awaiting_speech(&self) -> bool {
+        self.awaiting_speech
     }
 }
 

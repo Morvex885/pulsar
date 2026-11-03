@@ -280,17 +280,21 @@ impl Controller {
             debug!("voice event {code}: dialog already ended, ignored");
             return;
         }
-        if self
-            .followup
-            .on_event(ev, get("continue_conversation") == "1")
-        {
-            self.timers.cancel(Tk::FollowupWait);
-        }
+        self.followup
+            .on_event(ev, get("continue_conversation") == "1");
         match ev {
             VaEvent::RunStart => {
                 self.tts_url = get("url").to_owned();
                 self.tts_played = false;
             }
+            VaEvent::SttStart => {
+                if self.phase == Phase::Listening
+                    && let Some(ms) = self.followup.window_ms(self.st.followup_duration_s)
+                {
+                    self.timers.set(Tk::FollowupWait, ms);
+                }
+            }
+            VaEvent::SttVadStart => self.timers.cancel(Tk::FollowupWait),
             VaEvent::SttVadEnd | VaEvent::SttEnd => {
                 if ev == VaEvent::SttEnd
                     && matches!(self.phase, Phase::Listening | Phase::Processing)
@@ -331,7 +335,6 @@ impl Controller {
                     self.play_tts();
                 }
             }
-            VaEvent::IntentEnd => {}
             VaEvent::TtsStart => self.tts_report_owed = true,
             VaEvent::TtsEnd => {
                 if !get("url").is_empty() {
@@ -345,6 +348,9 @@ impl Controller {
                     info!(
                         "pipeline: another satellite answers this wake word (HA duplicate wake-up)"
                     );
+                    self.stop_streaming();
+                } else if self.followup.silent(get("code")) {
+                    info!("follow-up: nothing said, conversation ends");
                     self.stop_streaming();
                 } else {
                     warn!("pipeline error: {} {}", get("code"), get("message"));
@@ -374,7 +380,6 @@ impl Controller {
             return;
         }
         self.tts_played = true;
-        self.timers.cancel(Tk::FollowupWait);
         self.phase = Phase::Speaking;
         self.update_ui();
         let url = self.tts_url.clone();
@@ -385,16 +390,15 @@ impl Controller {
     /// A cut-short or failed answer does not reopen the microphone, nor does a ringing timer.
     fn tts_finished(&mut self, ok: bool) {
         self.send_tts_report(ok);
-        if let Some(ms) = self.followup.wait_ms(
+        let followup = self.followup;
+        if followup.should_continue(
             ok,
             self.st.followup_duration_s,
             self.timer_ringing || self.mic_muted(),
         ) {
             self.start_pipeline("", false, Vec::new());
             if self.phase == Phase::Listening {
-                self.timers.set(Tk::FollowupWait, ms);
-                // At the default 30 s the quiet close wins over the inactivity watchdog.
-                self.arm_watchdog();
+                self.followup = followup.next_turn();
             }
             return;
         }

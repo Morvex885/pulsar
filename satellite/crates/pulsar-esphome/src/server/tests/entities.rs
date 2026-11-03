@@ -131,20 +131,15 @@ async fn selftest_matches_cxx_golden_bytes() {
             loop {
                 let m = p.recv().await.unwrap();
                 let done = m.0 == msg::LIST_DONE;
-                // The follow-up Number is Rust-only and checked separately below.
-                if m.0 != msg::LIST_NUMBER
-                    || field(&m.1, 2).map(|f| f.u32()) != Some(key::NUMBER_FOLLOWUP_DURATION)
-                {
-                    got.push(m);
-                }
+                got.push(m);
                 if done {
                     break;
                 }
             }
             p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
-            got.extend(p.sync().await.into_iter().filter(|(t, m)| {
-                *t != msg::NUMBER_STATE || state_key(m) != Some(key::NUMBER_FOLLOWUP_DURATION)
-            }));
+            while got.len() < golden.len() {
+                got.push(p.recv().await.unwrap());
+            }
             assert!(p.sync().await.is_empty());
             assert_eq!(got.len(), golden.len());
             for (i, (g, r)) in golden.iter().zip(&got).enumerate() {
@@ -713,8 +708,8 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
                 }
                 keys.push(field(&m, 2).unwrap().u32());
             }
-            // 15 entities plus the led_show service; no clock, Lux, wake pre-roll, hardware MUTE,
-            // case colour or Button entities.
+            // 15 сущностей и сервис led_show; нет часов, Lux, пре-ролла wake word, аппаратного
+            // MUTE, цвета корпуса и Button.
             assert_eq!(keys.len(), 16, "keys: {keys:?}");
             assert!(keys.contains(&key::NUMBER_FOLLOWUP_DURATION));
             assert!(keys.contains(&key::ACTION_LED_SHOW));
@@ -941,12 +936,12 @@ async fn followup_duration_is_universal_config_and_replays_its_state() {
                         assert_eq!(field(&m, 6).map_or(0.0, |f| f.flt()), 0.0);
                         assert_eq!(field(&m, 7).unwrap().flt(), FOLLOWUP_DURATION_MAX_S as f32);
                         assert_eq!(field(&m, 8).unwrap().flt(), 1.0);
-                        assert_eq!(field(&m, 10).unwrap().u32(), 1); // configuration
+                        assert_eq!(field(&m, 10).unwrap().u32(), 1); // категория config
                         assert_eq!(field(&m, 11).unwrap().str(), "s");
                     }
                 }
                 assert!(found);
-                h.publish_number(NumberId::FollowupDuration, 30.0);
+                h.publish_number(NumberId::FollowupDuration, 10.0);
                 p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
                 let initial = p.sync().await;
                 let (_, m) = initial
@@ -956,12 +951,12 @@ async fn followup_duration_is_universal_config_and_replays_its_state() {
                             && state_key(m) == Some(key::NUMBER_FOLLOWUP_DURATION)
                     })
                     .unwrap();
-                assert_eq!(field(m, 2).unwrap().flt(), 30.0);
+                assert_eq!(field(m, 2).unwrap().flt(), 10.0);
                 for (input, expected) in [
                     (-1.0, Some(0.0)),
                     (0.0, Some(0.0)),
                     (7.6, Some(8.0)),
-                    (50.0, Some(30.0)),
+                    (50.0, Some(10.0)),
                     (f32::NAN, None),
                     (f32::INFINITY, None),
                 ] {

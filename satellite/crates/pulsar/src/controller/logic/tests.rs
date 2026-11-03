@@ -636,15 +636,14 @@ fn microphones_mutes() {
 #[test]
 fn followup_needs_ha_request_success_and_nonzero_duration() {
     let mut f = Followup::default();
-    assert_eq!(f.wait_ms(true, 30, false), None);
+    assert!(!f.should_continue(true, 10, false));
     f.on_event(VaEvent::IntentEnd, true);
-    assert_eq!(f.wait_ms(true, 30, false), Some(30_000));
-    assert_eq!(f.wait_ms(true, 7, false), Some(7_000));
-    assert_eq!(f.wait_ms(true, 0, false), None);
-    assert_eq!(f.wait_ms(false, 30, false), None);
-    assert_eq!(f.wait_ms(true, 30, true), None); // timer ringing or mic muted
+    assert!(f.should_continue(true, 10, false));
+    assert!(!f.should_continue(true, 0, false));
+    assert!(!f.should_continue(false, 10, false));
+    assert!(!f.should_continue(true, 10, true)); // звонит таймер или микрофон выключен
     f.on_event(VaEvent::IntentEnd, false);
-    assert_eq!(f.wait_ms(true, 30, false), None);
+    assert!(!f.should_continue(true, 10, false));
 }
 
 #[test]
@@ -652,48 +651,61 @@ fn followup_error_after_true_cannot_reopen_after_successful_tts() {
     let mut f = Followup::default();
     f.on_event(VaEvent::IntentEnd, true);
     f.on_event(VaEvent::Error, false);
-    assert_eq!(f.wait_ms(true, 30, false), None);
-    f.on_event(VaEvent::IntentEnd, true); // even a late intent cannot undo the error
-    assert_eq!(f.wait_ms(true, 30, false), None);
+    assert!(!f.should_continue(true, 10, false));
+    f.on_event(VaEvent::IntentEnd, true); // поздний INTENT_END ошибку не отменяет
+    assert!(!f.should_continue(true, 10, false));
     f.on_event(VaEvent::RunStart, false);
     f.on_event(VaEvent::IntentEnd, true);
-    assert_eq!(f.wait_ms(true, 30, false), Some(30_000));
+    assert!(f.should_continue(true, 10, false));
 }
 
-#[tokio::test(start_paused = true)]
-async fn followup_wait_is_not_extended_by_events_and_ends_on_speech() {
-    use pulsar_core::Timers;
-    use tokio::time::{Duration, advance, timeout};
+fn run(f: &mut Followup, events: &[VaEvent]) {
+    for &ev in events {
+        f.on_event(ev, true);
+    }
+}
+
+#[test]
+fn followup_window_needs_ha_speech_events() {
+    assert_eq!(Followup::default().window_ms(7), None);
+
     let mut f = Followup::default();
-    f.on_event(VaEvent::IntentEnd, true);
-    let mut timers = Timers::new();
-    timers.set((), f.wait_ms(true, 7, false).unwrap());
-    for ev in [
-        VaEvent::RunStart,
-        VaEvent::SttStart,
-        VaEvent::IntentProgress,
-    ] {
-        advance(Duration::from_secs(2)).await;
-        if f.on_event(ev, false) {
-            timers.cancel(());
-        }
-    }
-    assert!(
-        timeout(Duration::from_millis(999), timers.next())
-            .await
-            .is_err()
+    run(
+        &mut f,
+        &[
+            VaEvent::RunStart,
+            VaEvent::SttStart,
+            VaEvent::SttVadStart,
+            VaEvent::IntentEnd,
+        ],
     );
-    advance(Duration::from_millis(1)).await;
-    assert!(
-        timeout(Duration::from_millis(1), timers.next())
-            .await
-            .is_ok()
+    let mut f = f.next_turn();
+    run(&mut f, &[VaEvent::RunStart, VaEvent::SttStart]);
+    assert_eq!(f.window_ms(7), Some(8_000));
+    assert_eq!(f.window_ms(0), None);
+    f.on_event(VaEvent::SttVadStart, false);
+    assert_eq!(f.window_ms(7), None);
+    assert!(!f.awaiting_speech());
+
+    // Распознаватель со своим VAD: STT_VAD_START не было, окно не ограничивается.
+    let mut f = Followup::default();
+    run(
+        &mut f,
+        &[VaEvent::RunStart, VaEvent::SttStart, VaEvent::IntentEnd],
     );
-    // Speech at the end of the window cancels the wait, not the user's utterance.
-    timers.set((), 1000);
-    if f.on_event(VaEvent::SttVadStart, false) {
-        timers.cancel(());
-    }
-    advance(Duration::from_secs(60)).await;
-    assert!(!timers.is_set(()));
+    let mut f = f.next_turn();
+    f.on_event(VaEvent::RunStart, false);
+    assert_eq!(f.window_ms(7), None);
+    assert!(f.awaiting_speech());
+}
+
+#[test]
+fn followup_silence_is_quiet_only_before_speech() {
+    assert!(!Followup::default().silent("stt-no-text-recognized"));
+    let mut f = Followup::default().next_turn();
+    f.on_event(VaEvent::RunStart, false);
+    assert!(f.silent("stt-no-text-recognized"));
+    assert!(!f.silent("stt-stream-failed"));
+    f.on_event(VaEvent::SttVadStart, false);
+    assert!(!f.silent("stt-no-text-recognized"));
 }
