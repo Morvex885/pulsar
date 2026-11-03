@@ -157,7 +157,7 @@ pub struct Controller {
     phase: Phase,
     /// Start of the current LISTENING phase (commands window).
     listen_started_ms: i64,
-    /// Текущий диалог открыт wake word (не кнопкой, не продолжением разговора и не HA).
+    /// Текущий диалог открыт wake word (не кнопкой, не продолжением диалога и не HA).
     wake_dialog: bool,
     /// Звонок выключили посреди этого диалога «стоп» спотера или wake word, а диалог пошёл дальше.
     ring_stopped_in_dialog: bool,
