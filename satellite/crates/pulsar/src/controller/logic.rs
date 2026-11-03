@@ -237,6 +237,21 @@ pub fn command_of(word: &str) -> Option<VoiceCommand> {
     })
 }
 
+/// Стоп-команда в готовом тексте STT — запасной путь, когда командный спотер пропустил слово.
+/// Фраза сверяется целиком: «хватит ли времени» остаётся запросом к HA. Повтор («стоп, стоп») —
+/// тоже команда; «Алиса» / «Яндекс» впереди допускается на случай, если wake word попал в звук.
+pub fn stt_stop(text: &str) -> bool {
+    let text = text.to_lowercase();
+    let sep = |c: char| {
+        c.is_whitespace()
+            || c.is_ascii_punctuation()
+            || matches!(c, '«' | '»' | '\u{2010}'..='\u{2027}' | '‹' | '›')
+    };
+    let mut words = text.split(sep).filter(|w| !w.is_empty()).peekable();
+    words.next_if(|w| matches!(*w, "алиса" | "яндекс"));
+    words.peek().is_some() && words.all(|w| command_of(w) == Some(VoiceCommand::Stop))
+}
+
 /// Within the window after the wake word that opened this dialog: HA may end the speech of a
 /// short "Алиса, громче" (PROCESSING) before the command spotter confirms the word.
 pub fn after_wake(phase: Phase, now: i64, listen_started_ms: i64) -> bool {
