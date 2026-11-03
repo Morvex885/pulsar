@@ -442,15 +442,14 @@ static MINI: Model = Model {
     // No softvol "speakers" PCM and the hardware "Master" control does not attenuate the output;
     // Controller applies the volume to the GStreamer player channels instead.
     software_volume: true,
-    spk_mute_ctl: "SPK mute",
-    // The stock maind opens the tdm_state amplifier gates; without them the ALSA sink runs but the
-    // speaker stays silent (SPK mute cannot be cleared while amp_table is 0). The driver clears
-    // amp_table when the playback PCM closes (observed idle state), and both sinks close it when
-    // playback ends, so only the next start has to set the gates again.
-    amp_enable_paths: &[
-        "/sys/class/tdm_state/amp_table",
-        "/sys/class/tdm_state/aux_amp",
-    ],
+    // "SPK mute" means what it says on the Mini: writing 1 logs "spk_mute_set: mute flag = 1" and
+    // pulls the spk_mute GPIO low (amplifier muted, amp_table back to 0). Leave it alone.
+    spk_mute_ctl: "",
+    // amp_table = 1 alone opens the amplifier (spk_mute GPIO high, "SPK mute" reads on): the stock
+    // state after boot, which the Yandex stack never changes while it plays. aux_amp is not a gate
+    // here: 1 raises aux_amp_mute and resets amp_table, so it stays at its boot value 0. The driver
+    // clears amp_table when the playback PCM closes, so every start sets it again.
+    amp_enable_paths: &["/sys/class/tdm_state/amp_table"],
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
     has_lux: false,
