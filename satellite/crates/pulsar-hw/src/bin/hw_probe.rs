@@ -218,7 +218,14 @@ fn check_strip(model: &Model, s: &LedStrip, what: &str, fb: [u8; 3]) -> bool {
     let fb_output =
         fb_mode(model, &model.ring) && (model.logo.count == 0 || fb_mode(model, &model.logo));
     let fb_state = if !fb_output {
-        "fb not checked (sysfs output)".to_owned()
+        if sysfs {
+            "fb not checked (sysfs output)".to_owned()
+        } else {
+            // У панели без sysfs-светодиодов framebuffer — единственный проверяемый вывод:
+            // если и он недоступен, панель не проверена и это ошибка, а не PASS.
+            ok = false;
+            "fb not checked (no sysfs LEDs)".to_owned()
+        }
     } else {
         match strip_fb(s) {
             Some(px) if px.iter().all(|p| *p == fb) => "fb ok".to_owned(),
