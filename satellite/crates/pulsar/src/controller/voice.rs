@@ -741,9 +741,13 @@ impl Controller {
             info!("voice command '{word}' held until the wake arbitration ends");
             return;
         }
-        let after_wake = logic::after_wake(self.phase, now_ms(), self.listen_started_ms);
-        // A dialog past the window after its wake word: its words are the request's, except
-        // "стоп".
+        let after_wake = logic::after_wake(
+            self.phase,
+            self.wake_dialog,
+            now_ms(),
+            self.listen_started_ms,
+        );
+        // Без wake word или после его окна слова относятся к запросу, кроме «стоп».
         let in_dialog = matches!(self.phase, Phase::Listening | Phase::Processing) && !after_wake;
         let sounding = self.phase == Phase::Speaking || self.announcing || self.timer_ringing;
         if !logic::command_allowed(
