@@ -819,6 +819,8 @@ async def main():
     args = p.parse_args()
     if not 0.0 <= args.media_volume <= 0.2:
         p.error("--media-volume must be between 0 and 0.2")
+    if not 1 <= args.followup_s <= 10:
+        p.error("--followup-s must be between 1 and 10")
     if args.command == "scenario-persist" and args.install and args.port == LIVE_API_PORT and not args.allow_live_port:
         p.error(f"--install on the live API port {LIVE_API_PORT} replaces the installed daemon; "
                 "use a test instance or pass --allow-live-port")

@@ -191,8 +191,8 @@ impl Settings {
         }
     }
 
-    /// The file as C++ `Settings::save` writes it: every key, in its order.
-    /// `wake_preroll` and `clock_auto_brightness` were added after the C++ reference fixtures.
+    /// Файл в том виде, как его пишет C++ `Settings::save`: все ключи, в его порядке; ключи,
+    /// добавленные после фикстур эталона, перечислены в шапке `settings/tests.rs`.
     pub fn serialize(&self) -> String {
         let f = |v: f32| g6(f64::from(v));
         let b = |v: bool| u8::from(v);

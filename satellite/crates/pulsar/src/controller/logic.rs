@@ -448,7 +448,8 @@ pub struct Followup {
     awaiting_speech: bool,
     /// Окно этой реплики ограничено таймером. Только если в прошлом run пришёл STT_VAD_START:
     /// без него таймер нечем снять и он оборвал бы реплику, а тип VAD по STT_START на ESPHome
-    /// не узнать. см. docs/voice.md, «Голосовой ассистент HA (ESPHome)»
+    /// не узнать.
+    // см. docs/voice.md, «Голосовой ассистент HA (ESPHome)»
     timed: bool,
 }
 
