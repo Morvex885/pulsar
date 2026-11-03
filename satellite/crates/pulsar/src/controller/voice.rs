@@ -10,7 +10,7 @@ use pulsar_lan::arbiter::Claim;
 use pulsar_media::{Channel, PlayState};
 use pulsar_sendspin::Transport;
 
-use super::logic::{self, COMMAND_AFTER_WAKE_MS, HaTimer, Phase, SttStop, VoiceCommand};
+use super::logic::{self, COMMAND_AFTER_WAKE_MS, HaTimer, Phase, VoiceCommand};
 use super::{
     Controller, LISTEN_TIMEOUT_MS, PROCESS_TIMEOUT_MS, Pending, SOUNDS, TIMER_RING_MAX_MS, Tk,
 };
@@ -285,15 +285,16 @@ impl Controller {
             VaEvent::SttVadEnd | VaEvent::SttEnd => {
                 if ev == VaEvent::SttEnd
                     && matches!(self.phase, Phase::Listening | Phase::Processing)
-                    && let Some(kind) = logic::stt_stop(get("text"))
+                    && logic::stt_stop(get("text"))
                 {
-                    info!("voice command: stop word in STT text ({kind:?})");
+                    info!("voice command: stop word in STT text");
                     // Вся фраза — стоп-слово: отдавать HA нечего, диалог кончается и при звонке
-                    // таймера. В диалоге от wake word это «Алиса, стоп» (самого слова в тексте
-                    // нет). Если этот «стоп» уже выключил звонок через спотер, второй раз он не
-                    // применяется: исход не зависит от того, услышал ли слово спотер.
+                    // таймера. Когда прозвучало слово, по тексту не узнать, поэтому действие
+                    // выбирается по тому, чем открыт диалог: от wake word — как «Алиса, стоп»
+                    // (самого wake word в тексте нет), иначе — как «стоп» посреди диалога. Звонок,
+                    // уже выключенный этим «стоп» через спотер, второй раз «стоп» не получает.
                     // см. docs/voice.md, «Пре-ролл: методика измерения»
-                    if kind == SttStop::AfterWake || self.wake_dialog {
+                    if self.wake_dialog {
                         self.finish_interaction();
                         if !self.ring_stopped_in_dialog {
                             self.stop_word(false);

@@ -187,24 +187,24 @@ fn command_words() {
 
 #[test]
 fn stt_stop_words() {
-    for (text, kind) in [
-        ("стоп", SttStop::Bare),
-        (" Хватит! ", SttStop::Bare),
-        ("СТОП.", SttStop::Bare),
-        ("«стоп»", SttStop::Bare),
-        ("‹стоп›", SttStop::Bare),
-        ("“Хватит!”", SttStop::Bare),
-        ("стоп, стоп", SttStop::Bare),
-        ("стоп-стоп", SttStop::Bare),
-        ("Алиса\u{2010}стоп", SttStop::AfterWake),
-        ("Хватит, стоп!", SttStop::Bare),
-        ("Алиса, стоп!", SttStop::AfterWake),
-        ("Яндекс хватит…", SttStop::AfterWake),
-        ("Алиса—стоп", SttStop::AfterWake),
-        ("Яндекс – «стоп».", SttStop::AfterWake),
-        ("Алиса, стоп, стоп", SttStop::AfterWake),
+    for text in [
+        "стоп",
+        " Хватит! ",
+        "СТОП.",
+        "«стоп»",
+        "‹стоп›",
+        "“Хватит!”",
+        "стоп, стоп",
+        "стоп-стоп",
+        "Хватит, стоп!",
+        "Алиса\u{2010}стоп",
+        "Алиса, стоп!",
+        "Яндекс хватит…",
+        "Алиса—стоп",
+        "Яндекс – «стоп».",
+        "Алиса, стоп, стоп",
     ] {
-        assert_eq!(stt_stop(text), Some(kind), "{text:?}");
+        assert!(stt_stop(text), "{text:?}");
     }
     for text in [
         "",
@@ -224,7 +224,7 @@ fn stt_stop_words() {
         "Алиса—стоп—музыку",
         "«хватит ли времени»",
     ] {
-        assert_eq!(stt_stop(text), None, "{text:?}");
+        assert!(!stt_stop(text), "{text:?}");
     }
 }
 

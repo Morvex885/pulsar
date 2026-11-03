@@ -238,17 +238,9 @@ pub fn command_of(word: &str) -> Option<VoiceCommand> {
 }
 
 /// Стоп-команда в готовом тексте STT — запасной путь, когда командный спотер пропустил слово.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SttStop {
-    /// Только стоп-слова: «стоп», «стоп, стоп».
-    Bare,
-    /// Стоп-слова после «Алиса» / «Яндекс».
-    AfterWake,
-}
-
 /// Фраза сверяется целиком: «хватит ли времени» остаётся запросом к HA. Повтор («стоп, стоп») —
-/// тоже команда.
-pub fn stt_stop(text: &str) -> Option<SttStop> {
+/// тоже команда; «Алиса» / «Яндекс» впереди допускается на случай, если wake word попал в звук.
+pub fn stt_stop(text: &str) -> bool {
     let text = text.to_lowercase();
     let sep = |c: char| {
         c.is_whitespace()
@@ -256,18 +248,8 @@ pub fn stt_stop(text: &str) -> Option<SttStop> {
             || matches!(c, '«' | '»' | '\u{2010}'..='\u{2027}' | '‹' | '›')
     };
     let mut words = text.split(sep).filter(|w| !w.is_empty()).peekable();
-    let kind = if words
-        .next_if(|w| matches!(*w, "алиса" | "яндекс"))
-        .is_some()
-    {
-        SttStop::AfterWake
-    } else {
-        SttStop::Bare
-    };
-    words.peek()?;
-    words
-        .all(|w| matches!(w, "стоп" | "хватит"))
-        .then_some(kind)
+    words.next_if(|w| matches!(*w, "алиса" | "яндекс"));
+    words.peek().is_some() && words.all(|w| command_of(w) == Some(VoiceCommand::Stop))
 }
 
 /// Within the window after the wake word that opened this dialog: HA may end the speech of a
