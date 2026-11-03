@@ -907,6 +907,9 @@ fn to_px(c: Col, d: f32, matrix: Option<&Matrix>) -> [u8; 3] {
 struct Compositor {
     n: usize,
     nlogo: usize,
+    /// Раскладка модели: нужна при сбросе слоёв эффектов, чтобы временный эффект панели
+    /// (`led_show` с Radar и т. п.) снова попал в `panel_effect`, а не в кольцевую отрисовку.
+    layout: LedLayout,
     /// Lite 2: no logo, mute shown on the ring.
     short_ring: bool,
     matrix: Option<Matrix>,
@@ -978,6 +981,7 @@ impl Compositor {
         Self {
             n,
             nlogo,
+            layout,
             short_ring: !fx::wide(n),
             matrix: None,
             state: UiState::Idle,
@@ -1092,7 +1096,7 @@ impl Compositor {
                 self.show_col = to_col(color);
                 let seconds = if seconds <= 0 { 5 } else { seconds.min(3600) };
                 self.show_until = now + i64::from(seconds) * 1000;
-                self.show_fx = fx::EffectState::default();
+                self.show_fx = fx::EffectState::default().with_layout(self.layout);
             }
             Cmd::ClearTemporary => {
                 if !self.show_on {

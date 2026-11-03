@@ -100,9 +100,10 @@ pub struct Model {
     /// opened. Empty: no gate.
     pub amp_enable_paths: &'static [&'static str],
     /// ALSA mixer controls (on hw:0) written to the given value in enable_output, after the sysfs
-    /// gates and spk_mute_ctl. The Station 2's amplifier exposes its gain as an ALSA control
-    /// (SY6045S Master, 0..255 where 255 = 0 dB), not as a switch, so its neutral position is
-    /// written here to leave the volume to the softvol. Empty: none.
+    /// gates and spk_mute_ctl. The Station 2's channel gains (SY6045S Ch1 and Ch2 Playback Volume)
+    /// sit at their 0 dB value (159; 255 there is +48 dB and distorts). Its SY6045S Master is left
+    /// alone: hardvold drives it from Master Playback Volume, and writing it here fights that
+    /// daemon (см. docs/station2.md, «Звук»). Empty: none.
     pub amp_mixer_vals: &'static [(&'static str, i64)],
 
     /// Stock volume curve: platform level -> raw value (0..255) of the softvol "Master Playback

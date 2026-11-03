@@ -193,19 +193,26 @@ fn strip_fb(s: &LedStrip) -> Option<Vec<[u8; 3]>> {
 
 /// Checks that every pixel of the strip's framebuffer is `fb` (in framebuffer mode) and that
 /// every LED's sysfs brightness matches it as the model reads it back (within ±3). An I²C ring
-/// (the Mini's) has neither: the check is skipped.
+/// (the Mini's) has neither: the check is skipped. A model with no LED trigger (Station 2's Gowin
+/// panel) has no sysfs LEDs at all, so only the framebuffer is checked — otherwise every missing
+/// brightness file would read as 0 and the check would report FAIL on a correct frame.
 fn check_strip(model: &Model, s: &LedStrip, what: &str, fb: [u8; 3]) -> bool {
     if !s.i2c_dev.is_empty() {
         say(&format!("   check {what}: I²C ring has no read-back, SKIP"));
         return true;
     }
+    let sysfs = !s.trigger.is_empty();
     let want = sysfs_expected(model, fb);
     let mut ok = true;
     let mut got = String::new();
-    for i in 0..s.count {
-        let v = rgb_values(model, s, i);
-        ok &= v.iter().zip(want).all(|(g, w)| (g - w).abs() <= 3);
-        got += &format!(" {},{},{}", v[0], v[1], v[2]);
+    if sysfs {
+        for i in 0..s.count {
+            let v = rgb_values(model, s, i);
+            ok &= v.iter().zip(want).all(|(g, w)| (g - w).abs() <= 3);
+            got += &format!(" {},{},{}", v[0], v[1], v[2]);
+        }
+    } else {
+        got = " (no sysfs LEDs)".to_owned();
     }
     // pulsar-hw uses the framebuffers only if the ring's and the logo's both qualify.
     let fb_output =

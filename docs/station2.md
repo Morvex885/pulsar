@@ -5,9 +5,9 @@
 Железо — [вики](https://hackalice.me/devices/station-2/); здесь только то, чего там нет
 ([AGENTS.md, «Документация»](../AGENTS.md#документация)).
 
-Кодовое имя в device-tree — `yandex,station-midi` (`amlogic-dt-id` = `axg_midi_w1`, `model` =
-`Yandex Station Midi`). Это **не** розничная «Станция Миди» с codename `cucumber`: у Станции 2
-внутреннее имя «Midi». Различить модели нужно по SoC: у Станции 2 Amlogic AXG, а не A5.
+Кодовое имя в device-tree — `yandex,station-midi`. Это **не** розничная «Станция Миди» с
+codename `cucumber`: у Станции 2 внутреннее имя «Midi». Подробности аппаратной идентификации —
+в [вики](https://hackalice.me/devices/station-2/).
 
 ## Userland и хранилище
 
