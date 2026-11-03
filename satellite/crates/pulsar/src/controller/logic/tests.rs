@@ -187,34 +187,41 @@ fn command_words() {
 
 #[test]
 fn stt_stop_words() {
-    for text in [
-        "стоп",
-        " Хватит! ",
-        "СТОП.",
-        "Алиса, стоп!",
-        "Яндекс хватит…",
-        "«стоп»",
-        "Алиса—стоп",
-        "“Хватит!”",
-        "Яндекс – «стоп».",
+    for (text, kind) in [
+        ("стоп", SttStop::Bare),
+        (" Хватит! ", SttStop::Bare),
+        ("СТОП.", SttStop::Bare),
+        ("«стоп»", SttStop::Bare),
+        ("“Хватит!”", SttStop::Bare),
+        ("стоп, стоп", SttStop::Bare),
+        ("Хватит, стоп!", SttStop::Bare),
+        ("Алиса, стоп!", SttStop::AfterWake),
+        ("Яндекс хватит…", SttStop::AfterWake),
+        ("Алиса—стоп", SttStop::AfterWake),
+        ("Яндекс – «стоп».", SttStop::AfterWake),
+        ("Алиса, стоп, стоп", SttStop::AfterWake),
     ] {
-        assert!(stt_stop(text), "{text:?}");
+        assert_eq!(stt_stop(text), Some(kind), "{text:?}");
     }
     for text in [
         "",
+        "…",
         "Алиса",
+        "Алиса, Алиса, стоп",
+        "Стоп, Алиса",
         "алисастоп",
         "хватит ли времени",
         "не стоп",
         "стопка",
         "сколько стоит стоп кран",
+        "стоп-кран",
         "погода",
         "стоп музыку",
         "«стоп музыку»",
         "Алиса—стоп—музыку",
         "«хватит ли времени»",
     ] {
-        assert!(!stt_stop(text), "{text:?}");
+        assert_eq!(stt_stop(text), None, "{text:?}");
     }
 }
 

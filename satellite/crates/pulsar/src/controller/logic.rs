@@ -237,25 +237,37 @@ pub fn command_of(word: &str) -> Option<VoiceCommand> {
     })
 }
 
-/// STT fallback when the local command spotter misses a stop word. Match the whole
-/// utterance so questions such as "хватит ли времени" stay with Home Assistant.
-pub fn stt_stop(text: &str) -> bool {
+/// Стоп-команда в готовом тексте STT — запасной путь, когда командный спотер пропустил слово.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SttStop {
+    /// «стоп»: отмена диалога.
+    Bare,
+    /// «Алиса, стоп»: то же, что слово спотера в окне после wake word.
+    AfterWake,
+}
+
+/// Фраза сверяется целиком: «хватит ли времени» остаётся запросом к HA. Повтор («стоп, стоп») —
+/// тоже команда.
+pub fn stt_stop(text: &str) -> Option<SttStop> {
     let text = text.to_lowercase();
-    let trim = |c: char| {
+    let sep = |c: char| {
         c.is_whitespace()
             || c.is_ascii_punctuation()
             || matches!(c, '«' | '»' | '\u{2010}'..='\u{2027}' | '‹' | '›')
     };
-    let mut text = text.trim_matches(trim);
-    for wake in ["алиса", "яндекс"] {
-        if let Some(rest) = text.strip_prefix(wake)
-            && rest.starts_with(trim)
-        {
-            text = rest.trim_matches(trim);
-            break;
-        }
-    }
-    matches!(text, "стоп" | "хватит")
+    let mut words = text.split(sep).filter(|w| !w.is_empty()).peekable();
+    let kind = if words
+        .next_if(|w| matches!(*w, "алиса" | "яндекс"))
+        .is_some()
+    {
+        SttStop::AfterWake
+    } else {
+        SttStop::Bare
+    };
+    words.peek()?;
+    words
+        .all(|w| matches!(w, "стоп" | "хватит"))
+        .then_some(kind)
 }
 
 /// Within the window after the wake word that opened this dialog: HA may end the speech of a

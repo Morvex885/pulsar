@@ -10,7 +10,7 @@ use pulsar_lan::arbiter::Claim;
 use pulsar_media::{Channel, PlayState};
 use pulsar_sendspin::Transport;
 
-use super::logic::{self, COMMAND_AFTER_WAKE_MS, HaTimer, Phase, VoiceCommand};
+use super::logic::{self, COMMAND_AFTER_WAKE_MS, HaTimer, Phase, SttStop, VoiceCommand};
 use super::{
     Controller, LISTEN_TIMEOUT_MS, PROCESS_TIMEOUT_MS, Pending, SOUNDS, TIMER_RING_MAX_MS, Tk,
 };
@@ -283,12 +283,18 @@ impl Controller {
             VaEvent::SttVadEnd | VaEvent::SttEnd => {
                 if ev == VaEvent::SttEnd
                     && matches!(self.phase, Phase::Listening | Phase::Processing)
-                    && logic::stt_stop(get("text"))
+                    && let Some(kind) = logic::stt_stop(get("text"))
                 {
-                    if self.timer_ringing {
-                        return self.stop_timer_ring();
+                    info!("voice command: stop word in STT text ({kind:?})");
+                    // Вся фраза — стоп-слово: отдавать HA нечего, диалог кончается и при звонке
+                    // таймера. Тогда исход не зависит от того, успел ли спотер выключить звонок.
+                    if kind == SttStop::AfterWake {
+                        self.finish_interaction();
+                        return self.stop_word(false);
                     }
-                    info!("voice dialog cancelled: STT stop word");
+                    if self.timer_ringing {
+                        self.stop_timer_ring();
+                    }
                     return self.cancel_dialog();
                 }
                 self.stop_streaming();
@@ -465,8 +471,9 @@ impl Controller {
         self.play_announce(vec![path], Pending::Earcon { seq });
     }
 
-    /// Cancels a LISTENING / PROCESSING dialog: the action button's short press and "стоп" past
-    /// the window after the wake word. An announcement playing over the dialog goes with it.
+    /// Отменяет диалог LISTENING / PROCESSING: короткое нажатие кнопки действия, «стоп» после окна
+    /// wake word и «стоп» из текста STT. Объявление, играющее поверх диалога, обрывается вместе
+    /// с ним.
     fn cancel_dialog(&mut self) {
         self.interrupt_speech();
         self.play_closing_earcon(format!("{SOUNDS}{}", self.model.cancel_sound));
@@ -740,24 +747,7 @@ impl Controller {
             self.finish_interaction();
         }
         match c {
-            VoiceCommand::Stop => {
-                if self.timer_ringing {
-                    self.stop_timer_ring();
-                } else if in_dialog {
-                    self.cancel_dialog();
-                } else if self.phase == Phase::Speaking {
-                    self.interrupt_speech();
-                    self.finish_interaction();
-                } else if self.announcing {
-                    // A dialog listening meanwhile goes on.
-                    self.interrupt_speech();
-                    self.update_duck();
-                    self.update_ui();
-                } else if self.music_pause() {
-                    // «стоп» = пауза, как в стоке; см. docs/voice.md, «Командный спотер».
-                    self.clock.play(ClockShot::Pause);
-                }
-            }
+            VoiceCommand::Stop => self.stop_word(in_dialog),
             VoiceCommand::Pause => {
                 if self.music_pause() {
                     self.clock.play(ClockShot::Pause);
@@ -780,6 +770,26 @@ impl Controller {
                     info!("'{word}' ignored: no Sendspin queue to skip in");
                 }
             }
+        }
+    }
+
+    /// «стоп» / «хватит» от спотера или из текста STT.
+    fn stop_word(&mut self, in_dialog: bool) {
+        if self.timer_ringing {
+            self.stop_timer_ring();
+        } else if in_dialog {
+            self.cancel_dialog();
+        } else if self.phase == Phase::Speaking {
+            self.interrupt_speech();
+            self.finish_interaction();
+        } else if self.announcing {
+            // A dialog listening meanwhile goes on.
+            self.interrupt_speech();
+            self.update_duck();
+            self.update_ui();
+        } else if self.music_pause() {
+            // «стоп» = пауза, как в стоке; см. docs/voice.md, «Командный спотер».
+            self.clock.play(ClockShot::Pause);
         }
     }
 }
