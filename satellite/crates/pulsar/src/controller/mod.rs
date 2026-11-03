@@ -757,6 +757,14 @@ impl Controller {
 
     fn on_player(&mut self, ev: PlayerEvent) {
         match ev {
+            PlayerEvent::Started { id } => {
+                if self.phase == Phase::Speaking
+                    && matches!(self.pending.get(&id), Some(Pending::Tts { dialog }) if *dialog == self.dialog)
+                {
+                    self.speech_display.start();
+                    self.update_speech_mark();
+                }
+            }
             // HA media state follows playback (C++ Player::on_state hook).
             PlayerEvent::State(ch, s) => {
                 if ch == Channel::Music {
