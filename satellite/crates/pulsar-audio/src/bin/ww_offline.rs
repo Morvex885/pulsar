@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use pulsar_audio::engine::{
-    Lib, LoadError, SPOTTER_RATE, SPOTTER_TO_VQE, SPOTTER_TYPES, Spotter, SpotterConf, VQE_MODELS,
-    Vqe, VqeStep, preload_deps, spotter_layout,
+    Lib, LoadError, SPOTTER_RATE, SPOTTER_TYPES, Spotter, SpotterConf, VQE_MODELS, Vqe, VqeStep,
+    preload_deps, wake_input,
 };
 
 const DEFAULT_MODEL: &str = "/system/vendor/quasar/spotter_models/activation/alisa";
@@ -140,11 +140,19 @@ fn run() -> u8 {
     for (t, n) in counts.iter_mut().enumerate() {
         *n = conf.channel_count(t as i64).unwrap_or(0);
     }
-    let mut layout = spotter_layout(&counts, SPOTTER_TO_VQE[0]);
+    let profile = wake_input(
+        m.codename,
+        model_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default(),
+    );
+    let mut layout = profile.layout(&counts);
     // VT=<type>: every channel from that VQE output (experiments).
     if let Some(vt) = std::env::var_os("VT") {
         layout.vqe.fill(atoi(&vt.to_string_lossy()));
     }
+    out!("channels [{layout}], gain {}", profile.gain());
     let mut sp = match Spotter::create(&conf, SPOTTER_RATE, &layout.types) {
         (Some(sp), _) => sp,
         (None, e) => {
@@ -202,15 +210,7 @@ fn run() -> u8 {
                 }
             };
             for (i, &x) in d.iter().take(frame).enumerate() {
-                let v = x * 32768.0;
-                // Truncated, unlike the daemon's lrint: the C++ tool's conversion.
-                sbuf[i * nch + k] = if v > 32767.0 {
-                    32767
-                } else if v < -32768.0 {
-                    -32768
-                } else {
-                    v as i16
-                };
+                sbuf[i * nch + k] = profile.sample(x);
                 if k == 0 {
                     out_e = f64::from(x).mul_add(f64::from(x), out_e);
                     out_n += 1;

@@ -819,9 +819,8 @@ fn processing(
             continue;
         }
 
-        // VQE_OMNI is cleaned of the station's own playback but has no AGC, so it keeps the
-        // distance to the talker; VQE_OMNI_WITH_GAIN, which the spotter hears, normalizes it
-        // away.
+        // Уровень для арбитража берётся до усиления входов спотера; смена его профиля
+        // не должна менять сравнение уровня между станциями.
         if let Some(d) = eng.output(VQE_OMNI)
             && !d.is_empty()
         {

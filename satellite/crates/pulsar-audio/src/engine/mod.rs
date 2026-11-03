@@ -1,7 +1,6 @@
-//! Yandex VQE (echo cancellation, beamforming, noise reduction) and phrase spotters from the
-//! firmware's libyandex_evil.so. The safe wrappers ([`Lib`], [`Vqe`], [`SpotterConf`],
-//! [`Spotter`]) and [`spotter_layout`] are public for ww_offline; `Engine` is the daemon's use
-//! of them.
+//! VQE и спотеры из libyandex_evil.so прошивки. Безопасные обёртки [`Lib`], [`Vqe`],
+//! [`SpotterConf`], [`Spotter`] и общий профиль [`wake_input`]/[`SpotterInput`] доступны
+//! утилите ww_offline; `Engine` обслуживает фронтенд демона.
 
 #[allow(unsafe_code)]
 mod ffi;
@@ -20,10 +19,7 @@ pub const RAW_MAIN_MIC_SYNC: i32 = 2;
 pub const VQE_OMNI: i32 = 6;
 pub const VQE_OMNI_WITH_GAIN: i32 = 9;
 
-/// Spotter channel type (0..5) -> VQE output feeding it. maind maps spotter types to
-/// {UNKNOWN(main), RAW_MAIN_MIC_SYNC, VQE_OMNI_WITH_GAIN, RAW_AUX_MIC_SYNC, VQE_OMNI,
-/// VQE_BEAMFORMING}; the cucumber preset has no AUX/BEAMFORMING outputs, so the closest available
-/// ones are used. Type 0 (main) is chosen per model: see [`spotter_layout`].
+/// Прежняя раскладка: сохранена для профилей, не прошедших замер с новой таблицей.
 pub const SPOTTER_TO_VQE: [i32; 6] = [
     VQE_OMNI_WITH_GAIN,
     RAW_MAIN_MIC_SYNC,
@@ -62,12 +58,17 @@ pub struct SpotterLayout {
     pub vqe: Vec<i32>,
 }
 
-/// Раскладка каналов по числу каналов каждого типа в конфиге спотера
-/// (spotter_conf_get_required_channel_count); `main_vqe` питает тип 0. Измерено `ww_offline` на
-/// захвате станции: модель wake-слова работает с VQE_OMNI_WITH_GAIN, командная — только с
-/// VQE_OMNI (10/14 синтетических команд против 0/14 с каналом после AGC). При смене раскладки
-/// каналов перемерить.
+/// Прежняя раскладка по счётчикам типов; `main_vqe` питает тип 0.
 pub fn spotter_layout(counts: &[i64; SPOTTER_TYPES], main_vqe: i32) -> SpotterLayout {
+    let mut mapping = SPOTTER_TO_VQE;
+    mapping[0] = main_vqe;
+    layout_for_mapping(counts, &mapping)
+}
+
+fn layout_for_mapping(
+    counts: &[i64; SPOTTER_TYPES],
+    mapping: &[i32; SPOTTER_TYPES],
+) -> SpotterLayout {
     let mut l = SpotterLayout::default();
     for (t, &n) in counts.iter().enumerate() {
         if !(0..TYPE_CHANNELS_LIMIT).contains(&n) {
@@ -75,11 +76,51 @@ pub fn spotter_layout(counts: &[i64; SPOTTER_TYPES], main_vqe: i32) -> SpotterLa
         }
         for _ in 0..n {
             l.types.push(t as i32);
-            l.vqe
-                .push(if t == 0 { main_vqe } else { SPOTTER_TO_VQE[t] });
+            l.vqe.push(mapping[t]);
         }
     }
     l
+}
+
+/// Маршрутизация и общий уровень входов одного спотера.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpotterInput {
+    mapping: [i32; SPOTTER_TYPES],
+    gain: f32,
+}
+
+impl SpotterInput {
+    /// Сохраняет прежние уровни и маршрутизацию непроверенных профилей.
+    pub fn legacy(main_vqe: i32) -> Self {
+        let mut mapping = SPOTTER_TO_VQE;
+        mapping[0] = main_vqe;
+        Self { mapping, gain: 1.0 }
+    }
+
+    pub fn layout(self, counts: &[i64; SPOTTER_TYPES]) -> SpotterLayout {
+        layout_for_mapping(counts, &self.mapping)
+    }
+
+    pub fn gain(self) -> f32 {
+        self.gain
+    }
+
+    /// Усиление до квантования, одинаковое для всех входов спотера.
+    pub fn sample(self, value: f32) -> i16 {
+        scaled_s16(value, self.gain)
+    }
+}
+
+/// См. docs/midi.md, «Входы спотера и проверка усиления».
+pub fn wake_input(codename: &str, wake_id: &str) -> SpotterInput {
+    if codename == "cucumber" && wake_id == "alisa" {
+        SpotterInput {
+            mapping: [6, 7, 5, 8, 2, 3],
+            gain: 10.0,
+        }
+    } else {
+        SpotterInput::legacy(VQE_OMNI_WITH_GAIN)
+    }
 }
 
 impl std::fmt::Display for SpotterLayout {
@@ -97,7 +138,11 @@ impl std::fmt::Display for SpotterLayout {
 
 /// VQE sample in [-1, 1] -> s16 as the C++ daemon converts it (clamped, lrint: ties to even).
 pub(crate) fn to_s16(v: f32) -> i16 {
-    let v = v * 32768.0;
+    scaled_s16(v, 1.0)
+}
+
+fn scaled_s16(v: f32, gain: f32) -> i16 {
+    let v = v * 32768.0 * gain;
     if v > 32767.0 {
         32767
     } else if v < -32768.0 {
@@ -193,6 +238,7 @@ pub(crate) struct Slot {
     vqe: Vec<i32>,
     buf: Vec<i16>,
     last_hit_ms: i64,
+    input: SpotterInput,
 }
 
 impl Slot {
@@ -203,11 +249,12 @@ impl Slot {
             vqe: Vec::new(),
             buf: Vec::new(),
             last_hit_ms: 0,
+            input: SpotterInput::legacy(VQE_OMNI_WITH_GAIN),
         }
     }
 
     /// (Re)creates the spotter from the model in `dir`; the previous one is destroyed first.
-    fn init(&mut self, lib: &Lib, dir: &Path, main_vqe: i32) -> bool {
+    fn init(&mut self, lib: &Lib, dir: &Path, input: SpotterInput) -> bool {
         self.sp = None;
         let conf = match SpotterConf::read(lib, dir) {
             Ok(conf) => conf,
@@ -225,7 +272,8 @@ impl Slot {
                 0
             });
         }
-        let layout = spotter_layout(&counts, main_vqe);
+        self.input = input;
+        let layout = input.layout(&counts);
         self.vqe.clone_from(&layout.vqe);
         let (rate, err) = conf.native_rate();
         if let Some(e) = err {
@@ -241,9 +289,10 @@ impl Slot {
         drop(conf);
         if ok {
             info!(
-                "{} spotter {}: native rate {rate}, channels [{layout}]",
+                "{} spotter {}: native rate {rate}, channels [{layout}], gain {}",
                 self.what,
-                dir.display()
+                dir.display(),
+                input.gain()
             );
         }
         ok
@@ -264,6 +313,7 @@ pub(crate) struct Engine {
     frame: usize,
     /// Id of the wake word model (its directory name, e.g. "alisa").
     wake_id: String,
+    codename: &'static str,
     /// Events 3 / 6 carry the names the stage tracking expects.
     stages: bool,
 }
@@ -341,13 +391,17 @@ impl Engine {
             chunk: chunk_n,
             frame: frame_n,
             wake_id: model_id(wake_dir),
+            codename: model.codename,
             stages,
         };
-        if !eng.wake.init(&lib, wake_dir, VQE_OMNI_WITH_GAIN) {
+        if !eng
+            .wake
+            .init(&lib, wake_dir, wake_input(model.codename, &eng.wake_id))
+        {
             return None;
         }
         if let Some(dir) = command_dir
-            && !eng.cmd.init(&lib, dir, VQE_OMNI)
+            && !eng.cmd.init(&lib, dir, SpotterInput::legacy(VQE_OMNI))
         {
             warn!("command spotter unavailable; voice commands without the wake word are disabled");
         }
@@ -357,7 +411,8 @@ impl Engine {
     /// Switches the wake word model.
     pub fn set_wake_model(&mut self, dir: &Path) -> bool {
         self.wake_id = model_id(dir);
-        self.wake.init(&self.lib, dir, VQE_OMNI_WITH_GAIN)
+        self.wake
+            .init(&self.lib, dir, wake_input(self.codename, &self.wake_id))
     }
 
     /// Id of the current wake word model (`Model::wake_preroll` key).
@@ -427,7 +482,7 @@ fn feed(vqe: &Vqe, frame: usize, s: &mut Slot) -> Spotted {
     s.buf.resize(n * nch, 0);
     for (i, out) in s.buf.chunks_exact_mut(nch).enumerate() {
         for (o, d) in out.iter_mut().zip(&src[..nch]) {
-            *o = to_s16(d[i]);
+            *o = s.input.sample(d[i]);
         }
     }
     if let Err(e) = sp.submit(&s.buf) {
@@ -447,8 +502,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn midi_alisa_routes_bnr_and_raw_with_common_gain() {
+        let profile = wake_input("cucumber", "alisa");
+        let layout = profile.layout(&[1, 0, 0, 1, 1, 0]);
+        assert_eq!(layout.types, [0, 3, 4]);
+        assert_eq!(layout.vqe, [6, 8, 2]);
+        let samples = [0.0001, -0.0002, 0.0003].map(|v| profile.sample(v));
+        assert_eq!(samples, [33, -66, 98]);
+        assert_eq!(profile.sample(0.2), 32767);
+        assert_eq!(profile.sample(-0.2), -32768);
+        assert_eq!(profile.sample(f32::NAN), 0);
+        assert_eq!(profile.sample(2.5 / 327680.0), 2);
+    }
+
+    #[test]
+    fn unmeasured_profiles_and_commands_keep_legacy_inputs() {
+        for (codename, id) in [
+            ("plum", "alisa"),
+            ("bergamot", "alisa"),
+            ("station-mini2", "alisa"),
+            ("yandexmini", "alisa"),
+            ("cucumber", "yandex"),
+        ] {
+            assert_eq!(
+                wake_input(codename, id),
+                SpotterInput::legacy(VQE_OMNI_WITH_GAIN)
+            );
+        }
+        let cmd = SpotterInput::legacy(VQE_OMNI);
+        assert_eq!(cmd.layout(&[1, 0, 0, 0, 0, 0]).vqe, [6]);
+        assert_eq!(cmd.sample(0.01), to_s16(0.01));
+        let alisa = wake_input("cucumber", "alisa");
+        assert_ne!(alisa, wake_input("cucumber", "yandex"));
+        assert_eq!(alisa, wake_input("cucumber", "alisa"));
+    }
+
+    #[test]
     fn layout_from_channel_counts() {
-        // Midi alisa: types 0, 3, 4 (one channel each).
+        // Прежняя раскладка остаётся доступной для сравнения.
         let l = spotter_layout(&[1, 0, 0, 1, 1, 0], VQE_OMNI_WITH_GAIN);
         assert_eq!(l.types, [0, 3, 4]);
         assert_eq!(l.vqe, [9, 2, 6]);
