@@ -157,6 +157,8 @@ pub struct Controller {
     phase: Phase,
     /// Start of the current LISTENING phase (commands window).
     listen_started_ms: i64,
+    /// Текущий диалог открыт wake word (не кнопкой, не продолжением разговора и не HA).
+    wake_dialog: bool,
     hw_mic_muted: bool,
     error_shown: bool,
     // Wake arbitration: the window between our claim and the decision. Microphone audio and a
@@ -570,6 +572,7 @@ impl Controller {
             applied_tz,
             phase: Phase::Idle,
             listen_started_ms: 0,
+            wake_dialog: false,
             hw_mic_muted,
             error_shown: false,
             arbitrating: false,

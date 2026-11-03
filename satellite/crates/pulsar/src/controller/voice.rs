@@ -223,6 +223,7 @@ impl Controller {
         self.run.start();
         self.stop_sent = false;
         self.listen_started_ms = now_ms();
+        self.wake_dialog = !phrase.is_empty();
         self.tts_url.clear();
         self.tts_played = false;
         self.continue_conversation = false;
@@ -288,7 +289,9 @@ impl Controller {
                     info!("voice command: stop word in STT text ({kind:?})");
                     // Вся фраза — стоп-слово: отдавать HA нечего, диалог кончается и при звонке
                     // таймера. Тогда исход не зависит от того, успел ли спотер выключить звонок.
-                    if kind == SttStop::AfterWake {
+                    // В диалоге от wake word «стоп» — это «Алиса, стоп», хотя самого слова в
+                    // тексте нет; см. docs/voice.md, «Пре-ролл: методика измерения».
+                    if kind == SttStop::AfterWake || self.wake_dialog {
                         self.finish_interaction();
                         return self.stop_word(false);
                     }

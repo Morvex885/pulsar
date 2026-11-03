@@ -192,6 +192,7 @@ fn stt_stop_words() {
         (" Хватит! ", SttStop::Bare),
         ("СТОП.", SttStop::Bare),
         ("«стоп»", SttStop::Bare),
+        ("‹стоп›", SttStop::Bare),
         ("“Хватит!”", SttStop::Bare),
         ("стоп, стоп", SttStop::Bare),
         ("Хватит, стоп!", SttStop::Bare),
