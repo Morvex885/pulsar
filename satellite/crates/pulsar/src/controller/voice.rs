@@ -98,7 +98,7 @@ impl Controller {
     /// waiting for an announcement, which that message would end.
     pub(super) fn voice_link_lost(&mut self) {
         self.run.reset();
-        self.continue_conversation = false;
+        self.followup = logic::Followup::default();
         self.tts_report_owed = false;
         if matches!(self.phase, Phase::Listening | Phase::Processing) {
             self.finish_interaction();
@@ -212,6 +212,7 @@ impl Controller {
     pub(super) fn start_pipeline(&mut self, phrase: &str, earcon: bool, preroll: Vec<i16>) {
         // The button, a continued conversation or HA's start_conversation win.
         self.cancel_arbitration();
+        self.timers.cancel(Tk::FollowupWait);
         if !self.api.voice_subscribed() {
             warn!("wake ignored: Home Assistant voice assistant not subscribed");
             self.show_ui(UiState::Error);
@@ -229,7 +230,7 @@ impl Controller {
         self.ring_stopped_in_dialog = false;
         self.tts_url.clear();
         self.tts_played = false;
-        self.continue_conversation = false;
+        self.followup = logic::Followup::default();
         self.update_duck();
         if earcon {
             let sound = format!("{SOUNDS}{}", self.model.wake_sound);
@@ -251,6 +252,7 @@ impl Controller {
     }
 
     fn stop_streaming(&mut self) {
+        self.timers.cancel(Tk::FollowupWait);
         // A wake word heard meanwhile keeps its audio.
         self.mic.set_streaming(self.arbitrating);
         if self.phase == Phase::Listening {
@@ -278,12 +280,21 @@ impl Controller {
             debug!("voice event {code}: dialog already ended, ignored");
             return;
         }
+        self.followup
+            .on_event(ev, get("continue_conversation") == "1");
         match ev {
             VaEvent::RunStart => {
                 self.tts_url = get("url").to_owned();
                 self.tts_played = false;
-                self.continue_conversation = false;
             }
+            VaEvent::SttStart => {
+                if self.phase == Phase::Listening
+                    && let Some(ms) = self.followup.window_ms(self.st.followup_duration_s)
+                {
+                    self.timers.set(Tk::FollowupWait, ms);
+                }
+            }
+            VaEvent::SttVadStart => self.timers.cancel(Tk::FollowupWait),
             VaEvent::SttVadEnd | VaEvent::SttEnd => {
                 if ev == VaEvent::SttEnd
                     && matches!(self.phase, Phase::Listening | Phase::Processing)
@@ -324,9 +335,6 @@ impl Controller {
                     self.play_tts();
                 }
             }
-            VaEvent::IntentEnd => {
-                self.continue_conversation = get("continue_conversation") == "1";
-            }
             VaEvent::TtsStart => self.tts_report_owed = true,
             VaEvent::TtsEnd => {
                 if !get("url").is_empty() {
@@ -340,6 +348,9 @@ impl Controller {
                     info!(
                         "pipeline: another satellite answers this wake word (HA duplicate wake-up)"
                     );
+                    self.stop_streaming();
+                } else if self.followup.silent(get("code")) {
+                    info!("follow-up: nothing said, conversation ends");
                     self.stop_streaming();
                 } else {
                     warn!("pipeline error: {} {}", get("code"), get("message"));
@@ -379,9 +390,16 @@ impl Controller {
     /// A cut-short or failed answer does not reopen the microphone, nor does a ringing timer.
     fn tts_finished(&mut self, ok: bool) {
         self.send_tts_report(ok);
-        if ok && self.continue_conversation && !self.timer_ringing && !self.mic_muted() {
-            self.continue_conversation = false;
+        let followup = self.followup;
+        if followup.should_continue(
+            ok,
+            self.st.followup_duration_s,
+            self.timer_ringing || self.mic_muted(),
+        ) {
             self.start_pipeline("", false, Vec::new());
+            if self.phase == Phase::Listening {
+                self.followup = followup.next_turn();
+            }
             return;
         }
         self.finish_interaction();
@@ -405,6 +423,7 @@ impl Controller {
     }
 
     pub(super) fn finish_interaction(&mut self) {
+        self.timers.cancel(Tk::FollowupWait);
         // The dialog may end before its run does (answer cut short, cancel, timeout): stop the
         // run so HA does not go on generating; whatever it still sends is dropped while idle.
         if (self.run.run_active || self.run.awaiting_run_start) && !self.stop_sent {
@@ -418,7 +437,7 @@ impl Controller {
         self.dialog += 1;
         self.tts_played = false;
         self.tts_url.clear();
-        self.continue_conversation = false;
+        self.followup = logic::Followup::default();
         self.update_duck();
         self.arm_watchdog();
         if self.error_shown {
