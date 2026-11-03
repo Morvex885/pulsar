@@ -325,7 +325,7 @@ impl Controller {
                 },
             ],
             active_wake_words: vec![st.wake_word.clone()],
-            light_effects: strings(pulsar_hw::effect_names()),
+            light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
             clock_faces: with_none(strings(pulsar_clock::face_names())),
             music_styles: strings(pulsar_hw::music_styles()),
             case_colors: with_none(case_colors.clone()),
@@ -343,6 +343,7 @@ impl Controller {
             has_wake_preroll: !model.wake_preroll.is_empty(),
             has_hw_mic_mute: !model.mute_input.is_empty() || model.mute_gpio != 0,
             has_buttons: model.has_button_events(),
+            led_layout: model.led_layout,
             key_path: Some(logic::in_dir(&dir, "api_key")),
             has_auto_brightness: lux_rx.is_some(),
         };

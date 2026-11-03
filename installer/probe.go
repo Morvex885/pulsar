@@ -20,6 +20,8 @@ func modelName(code string) string {
 		return "Yandex Station Mini 3"
 	case "yandexmini":
 		return "Yandex Station Mini"
+	case "station-midi":
+		return "Yandex Station 2"
 	}
 	return ""
 }
@@ -37,7 +39,7 @@ func abis(code string) []string {
 	switch code {
 	case "cucumber":
 		return []string{"aarch64", "armhf"}
-	case "plum", "station-mini2", "bergamot", "yandexmini":
+	case "plum", "station-mini2", "bergamot", "yandexmini", "station-midi":
 		return []string{"armhf"}
 	}
 	return nil

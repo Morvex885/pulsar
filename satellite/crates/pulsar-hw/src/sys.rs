@@ -55,6 +55,12 @@ impl Framebuffer {
         self.file.write_at(buf, 0)
     }
 
+    /// Бит на пиксель фреймбуфера (поле 6 fb_var_screeninfo): 24 для ledfb-лент, 32 для
+    /// панели Gowin Станции 2.
+    pub fn bits_per_pixel(&self) -> u32 {
+        self.var.0[6]
+    }
+
     /// FBIOPAN_DISPLAY: makes the ledfb driver push the framebuffer to the LEDs.
     pub fn pan(&mut self) {
         // SAFETY: as in open(): a framebuffer device, which reads (and may update) the

@@ -14,6 +14,7 @@
 //! unfused. `mul_add` is the same single rounding: fmadd on aarch64, vfma on armhf (built with
 //! `-C target-cpu=cortex-a53`, see the Makefile), a libm fma call on the x86_64 host.
 
+use pulsar_core::model::LedLayout;
 use std::ops::{Add, Mul};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -511,6 +512,7 @@ pub fn volume(v: f32, out: &mut [Col]) {
 #[derive(Clone, Debug)]
 pub struct EffectState {
     rng: u32,
+    layout: LedLayout,
     /// Per LED, seconds since its sparkle started; < 0 idle.
     age: Vec<f32>,
 }
@@ -519,9 +521,224 @@ impl Default for EffectState {
     fn default() -> Self {
         Self {
             rng: 0x9E37_79B9,
+            layout: LedLayout::Ring,
             age: Vec::new(),
         }
     }
+}
+
+impl EffectState {
+    /// Раскладка задаётся при создании слоя и не меняется до его пересоздания.
+    pub fn with_layout(mut self, layout: LedLayout) -> Self {
+        self.layout = layout;
+        self
+    }
+}
+
+/// Физическое положение (столбец, ряд) каждого светодиода панели Станции 2: шахматная сетка
+/// 15×13, индексы 0..83 — панель, 84..87 — четыре центральных светодиода логотипа. Карта — из
+/// вики, см. docs/station2.md, «Светодиоды и часы». Имена восьми 2D-эффектов взяты из
+/// [#29](https://github.com/Morvex885/pulsar/pull/29), их отрисовка — своя.
+const PANEL_XY: [(i8, i8); 88] = [
+    (1, 0),
+    (3, 0),
+    (5, 0),
+    (7, 0),
+    (9, 0),
+    (11, 0),
+    (13, 0),
+    (0, 1),
+    (2, 1),
+    (4, 1),
+    (6, 1),
+    (8, 1),
+    (10, 1),
+    (12, 1),
+    (14, 1),
+    (1, 2),
+    (3, 2),
+    (5, 2),
+    (7, 2),
+    (9, 2),
+    (11, 2),
+    (13, 2),
+    (0, 3),
+    (2, 3),
+    (4, 3),
+    (6, 3),
+    (8, 3),
+    (10, 3),
+    (12, 3),
+    (14, 3),
+    (1, 4),
+    (3, 4),
+    (5, 4),
+    (7, 4),
+    (9, 4),
+    (11, 4),
+    (13, 4),
+    (0, 5),
+    (2, 5),
+    (12, 5),
+    (14, 5),
+    (1, 6),
+    (13, 6),
+    (0, 7),
+    (2, 7),
+    (12, 7),
+    (14, 7),
+    (1, 8),
+    (3, 8),
+    (5, 8),
+    (7, 8),
+    (9, 8),
+    (11, 8),
+    (13, 8),
+    (0, 9),
+    (2, 9),
+    (4, 9),
+    (6, 9),
+    (8, 9),
+    (10, 9),
+    (12, 9),
+    (14, 9),
+    (1, 10),
+    (3, 10),
+    (5, 10),
+    (7, 10),
+    (9, 10),
+    (11, 10),
+    (13, 10),
+    (0, 11),
+    (2, 11),
+    (4, 11),
+    (6, 11),
+    (8, 11),
+    (10, 11),
+    (12, 11),
+    (14, 11),
+    (1, 12),
+    (3, 12),
+    (5, 12),
+    (7, 12),
+    (9, 12),
+    (11, 12),
+    (13, 12),
+    (8, 7),
+    (6, 7),
+    (6, 5),
+    (8, 5),
+];
+
+/// 2D-эффекты панели Станции 2. Панель — сетка, а не кольцо, поэтому эффекты считаются по
+/// физическим координатам светодиодов (`PANEL_XY`), нормированным к −1..1 по широкой оси и к
+/// тому же размаху по короткой: шаг пикселя не измерялся, а рассеиватель всё равно размывает
+/// соседние светодиоды. `c` — цвет пользователя, либо радуга, если он ахроматический.
+/// false — имя не является панельным эффектом.
+fn panel_effect(name: &str, c: Col, bri: f32, t: f64, out: &mut [Col]) -> bool {
+    if !matches!(
+        name,
+        "Radar" | "Ripple" | "Rain" | "Matrix" | "Plasma" | "Waves" | "Spiral" | "Heartbeat"
+    ) {
+        return false;
+    }
+    let sat = c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b);
+    let plain = sat < 0.1;
+    let n = out.len().min(PANEL_XY.len());
+    let tf = t as f32;
+    for (i, o) in out.iter_mut().take(n).enumerate() {
+        let (col, row) = PANEL_XY[i];
+        // Шаг — полстолбца на светодиод (ряды в шахматном порядке), затем нормировка к −1..1.
+        let x = (f32::from(col) - 7.0) / 7.0;
+        let y = (f32::from(row) - 6.0) / 6.0;
+        let r = (x * x + y * y).sqrt();
+        let angle = y.atan2(x);
+        let col_out = match name {
+            "Radar" => {
+                // Луч, делающий оборот за 2 с, с мягко затухающим хвостом.
+                let sweep = (tf * 0.5) % 1.0 * TAU;
+                let d = (sweep - angle).rem_euclid(TAU);
+                let k = if d < 1.2 { (-d * 1.8).exp() } else { 0.0 };
+                let hub = if r < 0.12 { 0.6 } else { 0.0 };
+                if plain {
+                    hsv(tf / 8.0, 1.0, 1.0) * k.max(hub)
+                } else {
+                    c * k.max(hub)
+                }
+            }
+            "Ripple" => {
+                // Кольца, расходящиеся от центра.
+                let k = 0.5 + 0.5 * (TAU * (r * 1.6 - tf * 0.55)).cos();
+                let base = if plain {
+                    hsv((tf / 14.0 + r * 0.15) % 1.0, 1.0, 1.0)
+                } else {
+                    c
+                };
+                base * (k * k * k)
+            }
+            "Rain" | "Matrix" => {
+                // Капли, падающие вниз по столбцу: период и скорость зависят от столбца.
+                let phase = (x * 3.7).sin().abs();
+                let speed = 0.7 + 0.9 * phase;
+                let head = ((tf * speed + phase) % 1.4) - 0.2;
+                let ry = (row as f32) / 12.0;
+                let behind = head - ry;
+                let k = if (0.0..=0.45).contains(&behind) {
+                    (-behind * 5.0).exp()
+                } else {
+                    0.0
+                };
+                if name == "Matrix" {
+                    if behind < 0.06 {
+                        stock(0xd8ffe0, k)
+                    } else {
+                        stock(0x00ff30, k * 0.85)
+                    }
+                } else if plain {
+                    hsv(0.62, 0.9, 1.0) * k
+                } else {
+                    c * k
+                }
+            }
+            "Plasma" => {
+                let v = (x * 2.6 + tf).sin()
+                    + (y * 2.2 + tf * 0.7).sin()
+                    + ((x + y) * 1.8 + tf * 0.5).sin()
+                    + (r * 3.0 - tf * 0.6).sin();
+                hsv((v / 4.0 * 0.35 + 0.55) % 1.0, 1.0, 1.0)
+            }
+            "Waves" => {
+                // Горизонтальные полосы, идущие вверх и искажаемые по x.
+                let k = 0.5 + 0.5 * (TAU * (y * 0.9 - tf * 0.35) + x * 1.4).sin();
+                let base = if plain { hsv(0.55, 0.9, 1.0) } else { c };
+                base * (0.12 + 0.88 * k * k)
+            }
+            "Spiral" => {
+                let k = 0.5 + 0.5 * (angle * 2.0 + r * 4.0 - tf * 3.0).cos();
+                let base = if plain {
+                    hsv((tf / 10.0 + r * 0.2) % 1.0, 1.0, 1.0)
+                } else {
+                    c
+                };
+                base * (k * k)
+            }
+            "Heartbeat" => {
+                // Два радиальных импульса за 1,2 с.
+                let p = (tf % 1.2) / 1.2;
+                let pulse = (-((p - 0.15) / 0.09).powi(2)).exp()
+                    + 0.7 * (-((p - 0.42) / 0.09).powi(2)).exp();
+                let base = if plain { stock(0xff1030, 1.0) } else { c };
+                base * ((-r * r * 2.2).exp() * pulse.min(1.0))
+            }
+            _ => return false,
+        };
+        *o = col_out * bri;
+    }
+    // Светодиоды вне таблицы (на Станции 2 таких нет) остаются тёмными.
+    for o in out.iter_mut().skip(n) {
+        *o = Col::default();
+    }
+    true
 }
 
 /// t: effect phase in s (speed-scaled), dt: its step since the previous frame. bri scales the
@@ -536,6 +753,9 @@ pub fn effect(
     out: &mut [Col],
 ) -> bool {
     let n = out.len();
+    if matches!(st.layout, LedLayout::Station2Panel) && panel_effect(name, c, bri, t, out) {
+        return true;
+    }
     let nf = n as f32;
     match name {
         "Rainbow" => {

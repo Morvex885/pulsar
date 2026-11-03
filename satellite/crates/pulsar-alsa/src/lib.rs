@@ -276,7 +276,8 @@ pub fn set_mixer_integer(name: &str, values: &[i64]) -> Result<(), i32> {
     ctl.write_integers(name, values)
 }
 
-/// Switches the model's output on: the sysfs amplifier gates and the ALSA "SPK mute" mixer.
+/// Switches the model's output on: the sysfs amplifier gates, the ALSA "SPK mute" mixer and the
+/// model's amp_mixer_vals.
 /// Opening a PCM or dmix dropping its last client may switch the gates off again, so this runs
 /// both before and after a device is opened.
 pub fn enable_output(model: &Model) {
@@ -293,6 +294,11 @@ pub fn enable_output(model: &Model) {
             model.spk_mute_ctl,
             strerror(e)
         );
+    }
+    for &(name, val) in model.amp_mixer_vals {
+        if let Err(e) = set_mixer_integer(name, &[val]) {
+            log::warn!("amp: cannot set '{name}' to {val}: {}", strerror(e));
+        }
     }
 }
 

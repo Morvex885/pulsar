@@ -4,6 +4,13 @@
 
 use std::sync::LazyLock;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LedLayout {
+    #[default]
+    Ring,
+    Station2Panel,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
     /// Devicetree codename: "cucumber", "plum", "station-mini2", "bergamot", "yandexmini".
@@ -23,6 +30,8 @@ pub struct Model {
     pub mic_channels: &'static [u32],
     pub spk_channels: &'static [u32],
     pub vqe_preset: &'static str,
+    /// Физическая раскладка светодиодов; определяет тип эффектов и геометрию панели.
+    pub led_layout: LedLayout,
     /// Pre-roll per wake word model: audio between the end of the wake word and its
     /// confirmation, sent ahead of the request. Ids not listed get none.
     pub wake_preroll: &'static [WakePreroll],
@@ -90,6 +99,11 @@ pub struct Model {
     /// Sysfs switches that gate the speaker amplifier; written to "1" before a playback PCM is
     /// opened. Empty: no gate.
     pub amp_enable_paths: &'static [&'static str],
+    /// ALSA mixer controls (on hw:0) written to the given value in enable_output, after the sysfs
+    /// gates and spk_mute_ctl. The Station 2's amplifier exposes its gain as an ALSA control
+    /// (SY6045S Master, 0..255 where 255 = 0 dB), not as a switch, so its neutral position is
+    /// written here to leave the volume to the softvol. Empty: none.
+    pub amp_mixer_vals: &'static [(&'static str, i64)],
 
     /// Stock volume curve: platform level -> raw value (0..255) of the softvol "Master Playback
     /// Volume" on `playback_pcm`, piecewise linear between the points; the first point is
@@ -261,6 +275,7 @@ static MIDI: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5, 6, 7],
     vqe_preset: "cucumber",
+    led_layout: LedLayout::Ring,
     wake_preroll: CUCUMBER_PREROLL,
     led_prefix: "cucumber",
     ring: LedStrip {
@@ -310,6 +325,7 @@ static MIDI: Model = Model {
     software_volume: false,
     spk_mute_ctl: "",
     amp_enable_paths: &[],
+    amp_mixer_vals: &[],
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
     has_lux: true,
@@ -334,6 +350,7 @@ static LITE2: Model = Model {
     mic_channels: &[0, 2],
     spk_channels: &[6],
     vqe_preset: "plum",
+    led_layout: LedLayout::Ring,
     wake_preroll: PLUM_PREROLL,
     led_prefix: "plum",
     ring: LedStrip {
@@ -372,6 +389,7 @@ static LITE2: Model = Model {
     software_volume: false,
     spk_mute_ctl: "",
     amp_enable_paths: &[],
+    amp_mixer_vals: &[],
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
     has_lux: true,
@@ -403,6 +421,7 @@ static MINI2: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5],
     vqe_preset: "yandexmini_2",
+    led_layout: LedLayout::Ring,
     wake_preroll: PLUM_PREROLL,
     led_prefix: "mini2",
     ring: LedStrip {
@@ -442,6 +461,7 @@ static MINI2: Model = Model {
     software_volume: false,
     spk_mute_ctl: "",
     amp_enable_paths: &[],
+    amp_mixer_vals: &[],
     volume_map: MINI2_VOLUME,
     volume_min_step: false,
     // Датчик есть не на всех станциях: см. docs/mini2.md, «Светодиоды и часы».
@@ -465,6 +485,7 @@ static MINI: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[6, 7],
     vqe_preset: "yandexmini",
+    led_layout: LedLayout::Ring,
     // No pre-roll measurements on the Mini: an id without a rule gives an empty pre-roll.
     wake_preroll: &[],
     led_prefix: "",
@@ -514,6 +535,7 @@ static MINI: Model = Model {
         "/sys/class/tdm_state/amp_table",
         "/sys/class/tdm_state/aux_amp",
     ],
+    amp_mixer_vals: &[],
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
     has_lux: false,
@@ -545,6 +567,7 @@ static MINI3: Model = Model {
     mic_channels: &[0, 1, 2],
     spk_channels: &[6],
     vqe_preset: "bergamot",
+    led_layout: LedLayout::Ring,
     wake_preroll: BERGAMOT_PREROLL,
     led_prefix: "bergamot",
     // The driver calls the 6-zone ring "logo" (/dev/fb0 6×1, AW21018); there is no separate logo.
@@ -584,8 +607,81 @@ static MINI3: Model = Model {
     software_volume: false,
     spk_mute_ctl: "",
     amp_enable_paths: &[],
+    amp_mixer_vals: &[],
     volume_map: MINI3_VOLUME,
     volume_min_step: true,
+    has_lux: true,
+    zigbee_tty: "",
+    zigbee_reset: "",
+    zigbee_boot: "",
+};
+
+/// Станция 2 (флагман 2-го поколения): см. docs/station2.md.
+static STATION2: Model = Model {
+    codename: "station-midi",
+    host_prefix: "yandex-station2-",
+    friendly_name: "Яндекс Станция 2",
+    model_name: "Yandex Station 2",
+    capture_pcm: "hw:0,2",
+    capture_rate: 48000,
+    capture_channels: 16,
+    capture_format: CaptureFormat::S16,
+    mic_channels: &[0, 2, 4, 7],
+    spk_channels: &[8, 9],
+    vqe_preset: "yandexmidi",
+    led_layout: LedLayout::Station2Panel,
+    // Пре-ролл не измерялся: id без правила даёт пустой пре-ролл.
+    wake_preroll: &[],
+    led_prefix: "",
+    // 88 светодиодов (индексы 0..87) на /dev/fb0 89×1 32 bpp под контроллером Gowin; 89-й
+    // пиксель (индекс 88) не загорается. Панель — двумерная сетка, поэтому эффекты и сущность
+    // «Light» работают с панелью, а не кольцом: см. docs/station2.md, «Светодиоды и часы».
+    ring: LedStrip {
+        count: 88,
+        first_index: 0,
+        fb_dev: "/dev/fb0",
+        fb_name: "YNDX LED screen",
+        trigger: "",
+        sysfs_kind: "ring",
+        i2c_dev: "",
+        i2c_addr: 0,
+    },
+    logo: NO_STRIP,
+    clock_dir: "",
+    clock_seg_base: 'a',
+    clock_pos_base: 0,
+    clock_colon: &[],
+    clock_aux: &[],
+    clock_center: "",
+    clock_chip_current: false,
+    has_clock: false,
+    keys_input: "midi_touch",
+    mute_input: "gpio-keys",
+    mute_gpio: 0,
+    action_key: 582,
+    mute_key: 0,
+    error_sound: "ru-RU/playback_error.mp3",
+    wake_sound: "common/spotter_start.mp3",
+    cancel_sound: "common/spotter_cancel.mp3",
+    timer_sound: "common/timer.wav",
+    volume_sound: "common/volume_sound.mp3",
+    // Штатный маршрут без дополнительного softvol: см. docs/station2.md, «Звук».
+    playback_pcm: "default",
+    alsa_config: "",
+    alsa_lib: "",
+    software_volume: false,
+    spk_mute_ctl: "SPK mute",
+    amp_enable_paths: &[],
+    // Master усилителя оставляем hardvold; каналы — на заводском уровне 0 дБ:
+    // см. docs/station2.md, «Звук».
+    amp_mixer_vals: &[
+        ("SY6045S Ch1 Playback Volume", 159),
+        ("SY6045S Ch2 Playback Volume", 159),
+    ],
+    // set_volume.sh Яндекса = `amixer set 'Master' <процент>%`: raw = процент от 255, без нижней
+    // ступени — линейная кривая, как у Мини 2 (у неё тот же сценарий без platformToAlsaMap).
+    volume_map: MINI2_VOLUME,
+    volume_min_step: false,
     has_lux: true,
     zigbee_tty: "",
     zigbee_reset: "",
@@ -670,6 +766,7 @@ pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
         b"yandex,plum" => Some(&LITE2),
         b"yandex,station-mini2" => Some(&MINI2),
         b"yandex,bergamot" => Some(&MINI3),
+        b"yandex,station-midi" => Some(&STATION2),
         _ => None,
     })
 }
@@ -774,6 +871,37 @@ mod tests {
         assert_eq!(m.ring.fb_name, "logo");
         assert_eq!(m.logo.count, 0);
         assert!(!m.has_clock && m.has_lux);
+    }
+
+    #[test]
+    fn station_midi_is_station2() {
+        let m = model_from_compatible(b"yandex,station-midi\0amlogic, axg\0").unwrap();
+        assert_eq!(m.codename, "station-midi");
+        assert_eq!(m.ring.count, 88);
+        assert_eq!(m.capture_rate, 48_000);
+        assert_eq!(m.playback_pcm, "default");
+        assert_eq!(m.led_layout, LedLayout::Station2Panel);
+        assert!(!m.has_clock);
+        assert!(m.has_lux);
+        assert_eq!(m.capture_channels, 16);
+        assert_eq!(m.vqe_preset, "yandexmidi");
+    }
+
+    #[test]
+    fn station2_leaves_master_to_hardvold() {
+        let m = model_from_compatible(b"yandex,station-midi\0").unwrap();
+        assert!(
+            !m.amp_mixer_vals
+                .iter()
+                .any(|(name, _)| { *name == "SY6045S Master Playback Volume" })
+        );
+        assert_eq!(
+            m.amp_mixer_vals,
+            &[
+                ("SY6045S Ch1 Playback Volume", 159),
+                ("SY6045S Ch2 Playback Volume", 159),
+            ]
+        );
     }
 
     #[test]

@@ -35,6 +35,7 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         case_colors: s(&["None", "blue"]),
         clock_music_styles: s(&["Off", "Levels"]),
         zigbee_modes: s(&["Coordinator", "Router"]),
+        led_layout: Default::default(),
         has_clock: true,
         has_lux: true,
         has_wake_preroll: true,

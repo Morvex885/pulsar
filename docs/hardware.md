@@ -15,8 +15,11 @@
 | Мини 2 | `station-mini2` | контрибьюторы: [#9](https://github.com/Morvex885/pulsar/pull/9), станция из [#38](https://github.com/Morvex885/pulsar/issues/38) | [station-mini2](https://hackalice.me/devices/station-mini2/) | [mini2.md](mini2.md) |
 | Мини 3 | `bergamot` | контрибьютор: [#30](https://github.com/Morvex885/pulsar/pull/30) | [station-mini3](https://hackalice.me/devices/station-mini3/) | [mini3.md](mini3.md) |
 | Мини | `yandexmini` | контрибьютор: [#35](https://github.com/Morvex885/pulsar/pull/35) | [station-mini](https://hackalice.me/devices/station-mini/) | [mini.md](mini.md) |
+| Станция 2 | `station-midi` | контрибьютор: fenihx | [station-2](https://hackalice.me/devices/station-2/) | [station2.md](station2.md) |
 
-Авторитетны данные Миди и Лайт 2; данные контрибьюторов не перепроверены.
+Авторитетны данные Миди и Лайт 2; данные контрибьюторов не перепроверены. Станция 2 — данные
+контрибьютора: проверены сбор данных и установка
+([station2.md, «Не проверено»](station2.md#не-проверено)).
 
 ## Библиотеки Яндекса (C API)
 
@@ -75,6 +78,7 @@ alsa-lib на armhf-образах Миди версионированная (AL
 | Мини 2 | ~238 МиБ | вики (MemTotal 243996 kB) |
 | Мини 3 | ~238 МиБ | вики (MemTotal 243908 kB) |
 | Мини | ~236 МиБ, tmpfs ~118 МиБ | вики (MemTotal 242028 kB); tmpfs — #35 |
+| Станция 2 | ~490 МиБ | владелец (MemTotal 501664 kB) |
 
 ## Зависший dmix lock
 

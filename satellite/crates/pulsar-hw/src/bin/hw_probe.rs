@@ -145,32 +145,48 @@ fn sysfs_expected(model: &Model, fb: [u8; 3]) -> [i32; 3] {
 }
 
 /// Whether the daemon would drive `s` through its framebuffer: the same test as pulsar-hw
-/// (trigger active on the first red LED, fb named as expected).
+/// (trigger active on the first red LED, fb named as expected). Models without LED trigger
+/// (Station 2's Gowin panel) just check the framebuffer name.
 fn fb_mode(model: &Model, s: &LedStrip) -> bool {
+    let dev = s.fb_dev.rsplit('/').next().unwrap_or(s.fb_dev);
+    let name = pulsar_core::sysfs::read_file(&format!("/sys/class/graphics/{dev}/name"))
+        .unwrap_or_default();
+    let ok = pulsar_core::sysfs::trim(&name) == s.fb_name;
+    if s.trigger.is_empty() {
+        return ok;
+    }
     let trigger = pulsar_core::sysfs::read_file(&format!(
         "/sys/class/leds/{}:red:{}{}/trigger",
         model.led_prefix, s.sysfs_kind, s.first_index
     ))
     .unwrap_or_default();
-    let dev = s.fb_dev.rsplit('/').next().unwrap_or(s.fb_dev);
-    let name = pulsar_core::sysfs::read_file(&format!("/sys/class/graphics/{dev}/name"))
-        .unwrap_or_default();
-    trigger.contains(&format!("[{}]", s.trigger)) && pulsar_core::sysfs::trim(&name) == s.fb_name
+    ok && trigger.contains(&format!("[{}]", s.trigger))
 }
 
-/// The strip's framebuffer as RGB per LED; None when it cannot be read.
+/// The strip's framebuffer as RGB per LED; None when it cannot be read. 32-bpp panels
+/// (Station 2) read 4 bytes per pixel and discard the fourth.
 fn strip_fb(s: &LedStrip) -> Option<Vec<[u8; 3]>> {
     let n = usize::try_from(s.count).ok()?;
-    let mut bgr = vec![0u8; n * 3];
+    let bpp = std::fs::read_to_string("/sys/class/graphics/fb0/bits_per_pixel")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(24);
+    let bytes_per_px = if bpp == 32 { 4 } else { 3 };
+    let mut raw = vec![0u8; n * bytes_per_px];
     std::fs::File::open(s.fb_dev)
         .ok()?
-        .read_exact_at(&mut bgr, 0)
+        .read_exact_at(&mut raw, 0)
         .ok()?;
     Some(
-        bgr.as_chunks::<3>()
-            .0
-            .iter()
-            .map(|p| [p[2], p[1], p[0]])
+        raw.chunks(bytes_per_px)
+            .take(n)
+            .map(|p| {
+                if bytes_per_px == 4 {
+                    [p[0], p[1], p[2]]
+                } else {
+                    [p[2], p[1], p[0]]
+                }
+            })
             .collect(),
     )
 }
@@ -305,7 +321,7 @@ fn feed_music(
     });
 }
 
-fn led_steps(leds: &LedsHandle, music: &Rc<Cell<bool>>) -> Vec<Step> {
+fn led_steps(leds: &LedsHandle, music: &Rc<Cell<bool>>, model: &Model) -> Vec<Step> {
     let l = leds.clone();
     let st = move |s: UiState| {
         let l = l.clone();
@@ -330,7 +346,7 @@ fn led_steps(leds: &LedsHandle, music: &Rc<Cell<bool>>) -> Vec<Step> {
     }));
     let l = leds.clone();
     steps.push(step("mic unmuted", move || l.set_muted(false)));
-    for &e in pulsar_hw::effect_names() {
+    for &e in pulsar_hw::effect_names(model.led_layout) {
         const WHITE: [&str; 7] = [
             "Rainbow",
             "Color loop",
@@ -505,7 +521,7 @@ async fn leds(model: &'static Model, state_ms: u64) -> bool {
     );
     // Initial state, no indication.
     leds.set_muted(false);
-    let steps = led_steps(&leds, &music);
+    let steps = led_steps(&leds, &music, model);
     let dumps = Dumps {
         ring: true,
         clock: false,
@@ -1030,7 +1046,7 @@ async fn all(model: &'static Model, input_s: u64, state_ms: u64) -> bool {
         Rc::clone(&done),
     );
     leds.set_muted(false);
-    let mut steps = led_steps(&leds, &music);
+    let mut steps = led_steps(&leds, &music, model);
     if clock_open {
         steps.extend(clock_steps(&clock, &music, Some(leds.clone())));
     }
