@@ -28,7 +28,6 @@ use std::time::{Duration, Instant};
 use log::{debug, error, info, warn};
 use pulsar_alsa::{Format, HwRequest, Pcm};
 use pulsar_core::model::Model;
-use pulsar_core::now_ms;
 
 /// The format playsink converts to (capsfilter before the fdsink) and the PCM is opened with.
 pub(crate) const CAPS: &str = "audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels=2";
@@ -59,10 +58,8 @@ const DRAIN_SLACK: Duration = Duration::from_millis(500);
 /// Writer progress of an output item, reported on the GLib thread.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum OutEvent {
-    /// Первые сэмплы переданы устройству; оценка начала воспроизведения по монотонным часам.
-    Started(u64, i64),
-    /// Оценка начала и длительность PCM без тишины, добавленной при голодании.
-    Progress(u64, i64, i64),
+    /// The first samples went to the device.
+    Started(u64),
     /// The last sample has been played.
     PlayedOut(u64),
     /// The PCM could not be opened or failed for good.
@@ -138,7 +135,6 @@ impl Output {
             pcm: None,
             phase: Phase::Priming,
             started: false,
-            speech_frames: 0,
             drain_deadline: None,
             pad_left: 0,
             buffer_frames: 0,
@@ -262,7 +258,6 @@ struct Writer {
     phase: Phase,
     /// Started was reported for the current item.
     started: bool,
-    speech_frames: u64,
     drain_deadline: Option<Instant>,
     /// Frames of the end pad still to write.
     pad_left: usize,
@@ -321,7 +316,6 @@ impl Writer {
         }
         self.phase = Phase::Priming;
         self.started = false;
-        self.speech_frames = 0;
         self.drain_deadline = None;
         self.pad_left = 0;
         if let Some(mut pcm) = self.pcm.take() {
@@ -361,6 +355,10 @@ impl Writer {
                     st = feed.lock();
                 }
                 self.phase = Phase::Playing;
+                if !self.started {
+                    self.started = true;
+                    (self.notify)(OutEvent::Started(item));
+                }
             } else if st.eof {
                 // Nothing left to write: play out what the device holds, if it is open.
                 drop(st);
@@ -379,15 +377,6 @@ impl Writer {
             }
         }
         if self.phase == Phase::Playing {
-            let queued = if self.started {
-                0
-            } else {
-                self.pcm
-                    .as_mut()
-                    .and_then(|p| p.delay().ok())
-                    .unwrap_or(0)
-                    .max(0)
-            };
             let wrote = match self.write(&mut st) {
                 Ok(w) => w,
                 Err(()) => {
@@ -402,27 +391,6 @@ impl Writer {
             );
             drop(st);
             if wrote {
-                if !self.started {
-                    self.started = true;
-                    (self.notify)(OutEvent::Started(
-                        item,
-                        now_ms() + queued * 1000 / i64::from(RATE),
-                    ));
-                }
-                let end_ms = (self.speech_frames * 1000 / u64::from(RATE)) as i64;
-                let delay_ms = self
-                    .pcm
-                    .as_mut()
-                    .and_then(|p| p.delay().ok())
-                    .unwrap_or(0)
-                    .max(0)
-                    * 1000
-                    / i64::from(RATE);
-                (self.notify)(OutEvent::Progress(
-                    item,
-                    now_ms() + delay_ms - end_ms,
-                    end_ms,
-                ));
                 feed.space.notify_all();
             }
             if done {
@@ -506,7 +474,6 @@ impl Writer {
             };
             match res {
                 Ok(w) => {
-                    self.speech_frames += w as u64;
                     st.data.drain(..w * FRAME_BYTES);
                     wrote = true;
                 }

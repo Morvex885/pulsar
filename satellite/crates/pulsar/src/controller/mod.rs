@@ -181,11 +181,7 @@ pub struct Controller {
     voice_run: u64,
     tts_url: String,
     tts_played: bool,
-    speech_marks: Vec<speech_marks::SpeechMark>,
-    speech_started_ms: i64,
-    speech_end_ms: Option<i64>,
-    speech_position_ms: i64,
-    speech_latch: Option<speech_marks::Latch>,
+    speech_display: speech_marks::SpeechDisplay,
     /// A run's TTS_START left HA's assist satellite "responding" until AnnounceFinished, also
     /// when nothing plays here, and that report is still to be sent (`send_tts_report`).
     tts_report_owed: bool,
@@ -591,11 +587,7 @@ impl Controller {
             voice_run: 0,
             tts_url: String::new(),
             tts_played: false,
-            speech_marks: Vec::new(),
-            speech_started_ms: 0,
-            speech_end_ms: None,
-            speech_position_ms: 0,
-            speech_latch: None,
+            speech_display: speech_marks::SpeechDisplay::default(),
             tts_report_owed: false,
             continue_conversation: false,
             announcing: false,
@@ -753,27 +745,6 @@ impl Controller {
 
     fn on_player(&mut self, ev: PlayerEvent) {
         match ev {
-            PlayerEvent::PcmStarted { id, started_ms } => {
-                if self.phase == Phase::Speaking
-                    && matches!(self.pending.get(&id), Some(Pending::Tts { dialog }) if *dialog == self.dialog)
-                {
-                    self.speech_started_ms = started_ms;
-                    self.update_speech_mark();
-                }
-            }
-            PlayerEvent::PcmProgress {
-                id,
-                started_ms,
-                end_ms,
-            } => {
-                if self.phase == Phase::Speaking
-                    && matches!(self.pending.get(&id), Some(Pending::Tts { dialog }) if *dialog == self.dialog)
-                {
-                    self.speech_started_ms = started_ms;
-                    self.speech_end_ms = Some(end_ms);
-                    self.update_speech_mark();
-                }
-            }
             // HA media state follows playback (C++ Player::on_state hook).
             PlayerEvent::State(ch, s) => {
                 if ch == Channel::Music {

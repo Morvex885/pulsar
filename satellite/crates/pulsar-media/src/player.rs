@@ -83,17 +83,6 @@ pub struct PlayId(pub u64);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlayerEvent {
     State(Channel, PlayState),
-    /// Оценка момента первого сэмпла по монотонным часам после начала вывода PCM через ALSA.
-    PcmStarted {
-        id: PlayId,
-        started_ms: i64,
-    },
-    /// Прогресс PCM: начало шкалы с учётом пауз и конец переданных сэмплов, мс.
-    PcmProgress {
-        id: PlayId,
-        started_ms: i64,
-        end_ms: i64,
-    },
     /// Exactly once per `play()`: ok = every url played to its end. A list cut short by `stop()`
     /// or by a later `play()` on the same channel gets ok = false, sent by that call itself (so
     /// it precedes anything the new playback reports). Intended difference from C++: a list that
@@ -654,31 +643,17 @@ impl Machine {
     /// Progress of the ANNOUNCE output; events of an item no longer current are dropped.
     fn on_out(&mut self, ev: OutEvent) {
         let ch = Channel::Announce;
-        let item = match ev {
-            OutEvent::Started(item, _)
-            | OutEvent::Progress(item, _, _)
-            | OutEvent::PlayedOut(item)
-            | OutEvent::Failed(item) => item,
-        };
+        let (OutEvent::Started(item) | OutEvent::PlayedOut(item) | OutEvent::Failed(item)) = ev;
         let c = &mut self.chans[ch.index()];
         if !c.active || item != c.out_gen {
             return;
         }
         match ev {
-            OutEvent::Started(_, started_ms) => {
-                let id = c.item;
+            OutEvent::Started(_) => {
                 c.reached_playing = true;
-                self.shared.send(PlayerEvent::PcmStarted { id, started_ms });
                 if c.want_play {
                     self.set_state(ch, PlayState::Playing);
                 }
-            }
-            OutEvent::Progress(_, started_ms, end_ms) => {
-                self.shared.send(PlayerEvent::PcmProgress {
-                    id: c.item,
-                    started_ms,
-                    end_ms,
-                });
             }
             OutEvent::PlayedOut(_) => {
                 c.out_gen = 0;
@@ -1131,7 +1106,7 @@ mod tests {
 
     use Channel::{Announce, Music};
     use PlayState::{Error as Failed, Idle, Loading, Paused, Playing};
-    use PlayerEvent::{Done, PcmStarted, State};
+    use PlayerEvent::{Done, State};
 
     fn unescape(s: &str) -> String {
         let mut out = String::new();
@@ -1455,28 +1430,6 @@ mod tests {
     }
 
     #[test]
-    fn pcm_progress_belongs_only_to_the_current_item() {
-        let mut r = Rig::new();
-        let id = r.h.play(Announce, urls(&["/a.wav"]));
-        r.pump();
-        r.events();
-        r.out(OutEvent::Progress(1, 1000, 500));
-        assert_eq!(
-            r.events(),
-            [PlayerEvent::PcmProgress {
-                id,
-                started_ms: 1000,
-                end_ms: 500
-            }]
-        );
-        r.h.play(Announce, urls(&["/b.wav"]));
-        r.pump();
-        r.events();
-        r.out(OutEvent::Progress(1, 2000, 1500));
-        assert!(r.events().is_empty());
-    }
-
-    #[test]
     fn plays_to_eos_with_states_before_done() {
         let mut r = Rig::new();
         r.h.set_channel_gain(Music, 0.3);
@@ -1528,17 +1481,13 @@ mod tests {
             ]
         );
         r.state_changed(Announce, GstState::Playing);
-        r.out(OutEvent::Started(1, 0));
+        r.out(OutEvent::Started(1));
         r.msg(Announce, Msg::Eos);
         assert_eq!(r.calls(), ["ch1 Null", "out end"]);
         // The next url starts once the output has played this one out.
         assert_eq!(
             r.events(),
-            [
-                State(Announce, Loading),
-                PcmStarted { id, started_ms: 0 },
-                State(Announce, Playing)
-            ]
+            [State(Announce, Loading), State(Announce, Playing)]
         );
         r.out(OutEvent::PlayedOut(1));
         assert_eq!(
@@ -1587,21 +1536,12 @@ mod tests {
         r.pump();
         assert_eq!(r.events(), [Done { id: a, ok: false }]);
         r.calls();
-        r.out(OutEvent::Started(1, 0));
+        r.out(OutEvent::Started(1));
         r.out(OutEvent::PlayedOut(1));
         assert!(r.calls().is_empty());
         assert!(r.events().is_empty());
-        r.out(OutEvent::Started(2, 0));
-        assert_eq!(
-            r.events(),
-            [
-                PcmStarted {
-                    id: b,
-                    started_ms: 0
-                },
-                State(Announce, Playing)
-            ]
-        );
+        r.out(OutEvent::Started(2));
+        assert_eq!(r.events(), [State(Announce, Playing)]);
         r.out(OutEvent::Failed(2));
         assert_eq!(
             r.events(),

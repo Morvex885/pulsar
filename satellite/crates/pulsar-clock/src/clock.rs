@@ -33,7 +33,7 @@
 //! Приоритет: код сопряжения > громкость > звонок таймера > число из ответа > голосовой
 //! ассистент (LISTENING / THINKING / SPEAKING при включённой индикации) > установка обновления
 //! (темнота) > одноразовая анимация > таймер > временный слой > Text / Face > музыка > время.
-//! При выключенном дисплее остаются код сопряжения и время из ответа; звонок перекрывает ответ.
+//! При выключенном дисплее остаётся только код сопряжения.
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd as _;
@@ -197,7 +197,6 @@ struct Layers {
     overlay_until: i64,
     /// Число из ответа не меняет сохранённое состояние выключателя часов.
     speech_number: Option<Content>,
-    speech_time: bool,
     scroll_ms: i64,
     ui: UiState,
     voice_indication: bool,
@@ -236,7 +235,6 @@ impl Layers {
             overlay: None,
             overlay_until: 0,
             speech_number: None,
-            speech_time: false,
             scroll_ms: 400,
             ui: UiState::Idle,
             voice_indication: true,
@@ -291,19 +289,7 @@ impl Layers {
     }
 
     fn set_speech_number(&mut self, utf8: &str, now: i64) {
-        let time = utf8.split_once(':').and_then(|(h, m)| {
-            if !(1..=2).contains(&h.len())
-                || m.len() != 2
-                || !h.bytes().chain(m.bytes()).all(|b| b.is_ascii_digit())
-            {
-                return None;
-            }
-            let hour = h.parse::<u8>().ok()?;
-            let minute = m.parse::<u8>().ok()?;
-            (hour < 24 && minute < 60).then(|| format!("{hour:02}:{minute:02}"))
-        });
-        self.speech_time = time.is_some();
-        let cells = font::layout_text(time.as_deref().unwrap_or(utf8).as_bytes());
+        let cells = font::layout_text(utf8.as_bytes());
         self.speech_number = if cells.is_empty() {
             None
         } else {
@@ -460,7 +446,7 @@ impl Layers {
             let g = font::number_glyphs(self.flash_value);
             return (glyph_frame(g, false), self.flash_until - now);
         }
-        if !self.enabled && !(self.speech_time && self.speech_number.is_some()) {
+        if !self.enabled {
             return (Frame::default(), 0);
         }
         // Ответ ассистента не должен скрывать звонок таймера.
@@ -977,7 +963,7 @@ impl ClockHandle {
         self.send(Cmd::SetText(utf8));
     }
 
-    /// Число из ответа; время ЧЧ:ММ видно и при выключенных часах. Пустая строка убирает слой.
+    /// Число из ответа при включённом дисплее. Пустая строка убирает слой.
     pub fn set_speech_number(&self, utf8: String) {
         self.send(Cmd::SetSpeechNumber(utf8));
     }
