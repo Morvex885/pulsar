@@ -282,13 +282,26 @@ pub enum BinarySensorId {
     HwMicMute = 1,
 }
 
-/// Clock brightness 0..100 %, clock scroll 100..2000 ms, LED speed 0.25..4 ×.
+/// Верхняя граница «Follow-up duration», с: с запасом меньше 15 с, после которых HA сам
+/// заканчивает ожидание речи.
+// см. docs/voice.md, «Голосовой ассистент HA (ESPHome)»
+pub const FOLLOWUP_DURATION_MAX_S: u32 = 10;
+
+/// «Follow-up duration» из команды HA или `state.conf` — целые секунды 0..=MAX; `None` для NaN и
+/// бесконечности (значение не меняется).
+pub fn followup_duration_s(v: f32) -> Option<u32> {
+    v.is_finite()
+        .then(|| v.round().clamp(0.0, FOLLOWUP_DURATION_MAX_S as f32) as u32)
+}
+
+/// Яркость часов 0..100 %, прокрутка часов 100..2000 мс, скорость LED 0.25..4 ×, follow-up 0..10 с.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NumberId {
     ClockBrightness = 1,
     ClockScroll = 2,
     LedSpeed = 3,
+    FollowupDuration = 4,
 }
 
 #[repr(u32)]

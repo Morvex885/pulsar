@@ -98,7 +98,7 @@ impl Controller {
     /// waiting for an announcement, which that message would end.
     pub(super) fn voice_link_lost(&mut self) {
         self.run.reset();
-        self.continue_conversation = false;
+        self.followup = logic::Followup::default();
         self.tts_report_owed = false;
         if matches!(self.phase, Phase::Listening | Phase::Processing) {
             self.finish_interaction();
@@ -120,6 +120,8 @@ impl Controller {
                 self.arbiter
                     .claim(&self.st.wake_word, level_db, true, false);
             }
+            self.ring_stopped_in_dialog =
+                matches!(self.phase, Phase::Listening | Phase::Processing);
             return self.stop_timer_ring();
         }
         if matches!(self.phase, Phase::Listening | Phase::Processing) || self.arbitrating {
@@ -210,6 +212,7 @@ impl Controller {
     pub(super) fn start_pipeline(&mut self, phrase: &str, earcon: bool, preroll: Vec<i16>) {
         // The button, a continued conversation or HA's start_conversation win.
         self.cancel_arbitration();
+        self.timers.cancel(Tk::FollowupWait);
         if !self.api.voice_subscribed() {
             warn!("wake ignored: Home Assistant voice assistant not subscribed");
             self.show_ui(UiState::Error);
@@ -223,10 +226,12 @@ impl Controller {
         self.run.start();
         self.stop_sent = false;
         self.listen_started_ms = now_ms();
+        self.wake_dialog = !phrase.is_empty();
+        self.ring_stopped_in_dialog = false;
         self.tts_url.clear();
         self.tts_played = false;
         self.clear_speech_display();
-        self.continue_conversation = false;
+        self.followup = logic::Followup::default();
         self.update_duck();
         if earcon {
             let sound = format!("{SOUNDS}{}", self.model.wake_sound);
@@ -248,6 +253,7 @@ impl Controller {
     }
 
     fn stop_streaming(&mut self) {
+        self.timers.cancel(Tk::FollowupWait);
         // A wake word heard meanwhile keeps its audio.
         self.mic.set_streaming(self.arbitrating);
         if self.phase == Phase::Listening {
@@ -275,13 +281,47 @@ impl Controller {
             debug!("voice event {code}: dialog already ended, ignored");
             return;
         }
+        self.followup
+            .on_event(ev, get("continue_conversation") == "1");
         match ev {
             VaEvent::RunStart => {
                 self.tts_url = get("url").to_owned();
                 self.tts_played = false;
-                self.continue_conversation = false;
             }
+            VaEvent::SttStart => {
+                if self.phase == Phase::Listening
+                    && let Some(ms) = self.followup.window_ms(self.st.followup_duration_s)
+                {
+                    self.timers.set(Tk::FollowupWait, ms);
+                }
+            }
+            VaEvent::SttVadStart => self.timers.cancel(Tk::FollowupWait),
             VaEvent::SttVadEnd | VaEvent::SttEnd => {
+                if ev == VaEvent::SttEnd
+                    && matches!(self.phase, Phase::Listening | Phase::Processing)
+                    && logic::stt_stop(get("text"))
+                {
+                    info!("voice command: stop word in STT text");
+                    // Во фразе только стоп-слова: отдавать HA нечего, диалог кончается и при
+                    // звонке таймера. Когда прозвучало слово, по тексту не узнать, поэтому действие
+                    // выбирается по тому, чем открыт диалог: от wake word — как «Алиса, стоп»
+                    // (самого wake word в тексте нет), иначе — как «стоп» посреди диалога.
+                    // Если звонок посреди этого диалога уже выключили «стоп» спотера или wake
+                    // word, а новый не звонит, слово здесь не применяется: иначе оно поставило бы
+                    // музыку на паузу.
+                    // см. docs/voice.md, «Пре-ролл: методика измерения»
+                    if self.wake_dialog {
+                        self.finish_interaction();
+                        if self.timer_ringing || !self.ring_stopped_in_dialog {
+                            self.stop_word(false);
+                        }
+                        return;
+                    }
+                    if self.timer_ringing {
+                        self.stop_timer_ring();
+                    }
+                    return self.cancel_dialog();
+                }
                 self.stop_streaming();
                 self.update_ui();
             }
@@ -296,14 +336,14 @@ impl Controller {
                     self.play_tts();
                 }
             }
-            VaEvent::IntentEnd => {
-                self.continue_conversation = get("continue_conversation") == "1";
-                self.speech_display.text(get("speech"));
-                self.update_speech_mark();
-            }
-            VaEvent::TtsStart => {
-                self.tts_report_owed = true;
-                self.speech_display.text(get("text"));
+            VaEvent::IntentEnd | VaEvent::TtsStart => {
+                let text = if ev == VaEvent::TtsStart {
+                    self.tts_report_owed = true;
+                    get("text")
+                } else {
+                    get("speech")
+                };
+                self.speech_display.text(text);
                 self.update_speech_mark();
             }
             VaEvent::TtsEnd => {
@@ -318,6 +358,9 @@ impl Controller {
                     info!(
                         "pipeline: another satellite answers this wake word (HA duplicate wake-up)"
                     );
+                    self.stop_streaming();
+                } else if self.followup.silent(get("code")) {
+                    info!("follow-up: nothing said, conversation ends");
                     self.stop_streaming();
                 } else {
                     warn!("pipeline error: {} {}", get("code"), get("message"));
@@ -352,8 +395,6 @@ impl Controller {
         let url = self.tts_url.clone();
         let dialog = self.dialog;
         self.play_announce(vec![url], Pending::Tts { dialog });
-        self.speech_display.start();
-        self.update_speech_mark();
     }
 
     fn clear_speech_display(&mut self) {
@@ -380,10 +421,22 @@ impl Controller {
 
     /// A cut-short or failed answer does not reopen the microphone, nor does a ringing timer.
     fn tts_finished(&mut self, ok: bool) {
+        if ok {
+            // Ответ короче периода PCM может завершиться без события начала вывода.
+            self.speech_display.start();
+            self.update_speech_mark();
+        }
         self.send_tts_report(ok);
-        if ok && self.continue_conversation && !self.timer_ringing && !self.mic_muted() {
-            self.continue_conversation = false;
+        let followup = self.followup;
+        if followup.should_continue(
+            ok,
+            self.st.followup_duration_s,
+            self.timer_ringing || self.mic_muted(),
+        ) {
             self.start_pipeline("", false, Vec::new());
+            if self.phase == Phase::Listening {
+                self.followup = followup.next_turn();
+            }
             return;
         }
         self.finish_interaction_inner(ok);
@@ -411,6 +464,7 @@ impl Controller {
     }
 
     fn finish_interaction_inner(&mut self, hold_number: bool) {
+        self.timers.cancel(Tk::FollowupWait);
         // The dialog may end before its run does (answer cut short, cancel, timeout): stop the
         // run so HA does not go on generating; whatever it still sends is dropped while idle.
         if (self.run.run_active || self.run.awaiting_run_start) && !self.stop_sent {
@@ -427,7 +481,7 @@ impl Controller {
         self.dialog += 1;
         self.tts_played = false;
         self.tts_url.clear();
-        self.continue_conversation = false;
+        self.followup = logic::Followup::default();
         self.update_duck();
         self.arm_watchdog();
         if self.error_shown {
@@ -493,8 +547,9 @@ impl Controller {
         self.play_announce(vec![path], Pending::Earcon { seq });
     }
 
-    /// Cancels a LISTENING / PROCESSING dialog: the action button's short press and "стоп" past
-    /// the window after the wake word. An announcement playing over the dialog goes with it.
+    /// Отменяет диалог LISTENING / PROCESSING: короткое нажатие кнопки действия, «стоп» после окна
+    /// wake word и «стоп» из текста STT в диалоге не от wake word. Объявление, играющее поверх
+    /// диалога, обрывается вместе с ним.
     fn cancel_dialog(&mut self) {
         self.interrupt_speech();
         self.play_closing_earcon(format!("{SOUNDS}{}", self.model.cancel_sound));
@@ -768,24 +823,7 @@ impl Controller {
             self.finish_interaction();
         }
         match c {
-            VoiceCommand::Stop => {
-                if self.timer_ringing {
-                    self.stop_timer_ring();
-                } else if in_dialog {
-                    self.cancel_dialog();
-                } else if self.phase == Phase::Speaking {
-                    self.interrupt_speech();
-                    self.finish_interaction();
-                } else if self.announcing {
-                    // A dialog listening meanwhile goes on.
-                    self.interrupt_speech();
-                    self.update_duck();
-                    self.update_ui();
-                } else if self.music_pause() {
-                    // «стоп» = пауза, как в стоке; см. docs/voice.md, «Командный спотер».
-                    self.clock.play(ClockShot::Pause);
-                }
-            }
+            VoiceCommand::Stop => self.stop_word(in_dialog),
             VoiceCommand::Pause => {
                 if self.music_pause() {
                     self.clock.play(ClockShot::Pause);
@@ -808,6 +846,27 @@ impl Controller {
                     info!("'{word}' ignored: no Sendspin queue to skip in");
                 }
             }
+        }
+    }
+
+    /// «стоп» / «хватит» от спотера или из текста STT.
+    fn stop_word(&mut self, in_dialog: bool) {
+        if self.timer_ringing {
+            self.ring_stopped_in_dialog = in_dialog;
+            self.stop_timer_ring();
+        } else if in_dialog {
+            self.cancel_dialog();
+        } else if self.phase == Phase::Speaking {
+            self.interrupt_speech();
+            self.finish_interaction();
+        } else if self.announcing {
+            // A dialog listening meanwhile goes on.
+            self.interrupt_speech();
+            self.update_duck();
+            self.update_ui();
+        } else if self.music_pause() {
+            // «стоп» = пауза, как в стоке; см. docs/voice.md, «Командный спотер».
+            self.clock.play(ClockShot::Pause);
         }
     }
 }

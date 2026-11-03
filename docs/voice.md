@@ -15,6 +15,13 @@ pulsar, протокол арбитража wake word между станция�
 - ESPHome пересылает INTENT_PROGRESS один раз, когда начинается стриминг TTS. Между INTENT_START и
   INTENT_END ничего не приходит, а агент (LLM с вызовами инструментов) может думать минуту и
   дольше.
+- Конец команды, когда её ищет HA, определяет `VoiceCommandSegmenter` (`assist_pipeline/vad.py`):
+  STT_VAD_START приходит не раньше 0,3 с речи, а через 15 с аудио от начала STT HA сам шлёт
+  STT_VAD_END, даже если речь не начиналась; без речи STT обычно кончается ошибкой
+  `stt-no-text-recognized`. Распознаватели со своим определением конца фразы
+  (`requires_external_vad=False`: HA Cloud STT v2 из Labs, Wyoming ASR — по флагу сервиса)
+  STT_VAD_START не шлют вовсе, STT_VAD_END — только после результата. STT_START приходит на
+  ESPHome без данных, поэтому по нему не узнать, чей VAD работает в run.
 - Assist satellite в HA остаётся в состоянии «responding» от TTS_START run до
   VoiceAssistantAnnounceFinished, даже если на станции ничего не играло. HA применяет
   AnnounceFinished принудительным переходом в idle, поэтому отчёт, пришедший уже после следующего

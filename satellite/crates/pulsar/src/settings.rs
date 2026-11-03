@@ -64,6 +64,8 @@ pub struct Settings {
     pub voice_indication: bool,
     /// Audio between the end of the wake word and its confirmation goes ahead of the request.
     pub wake_preroll: bool,
+    /// Сколько ждать начала речи в follow-up-реплике, с; 0 — не продолжать разговор.
+    pub followup_duration_s: u32,
     /// Stem of `pulsar_hw::case_colors()`, "" = none.
     pub led_case_color: String,
     /// Release being installed. Still set after a restart into another version: that release
@@ -98,6 +100,7 @@ impl Default for Settings {
             led_speed: 1.0,
             voice_indication: true,
             wake_preroll: true,
+            followup_duration_s: 10,
             led_case_color: String::new(),
             update_attempt: String::new(),
             zigbee_role: Mode::Off,
@@ -171,6 +174,11 @@ impl Settings {
                 }
                 b"voice_indication" => self.voice_indication = on,
                 b"wake_preroll" => self.wake_preroll = on,
+                b"followup_duration_s" => {
+                    if let Some(s) = pulsar_esphome::followup_duration_s(fv) {
+                        self.followup_duration_s = s;
+                    }
+                }
                 b"led_case_color" => self.led_case_color = v,
                 _ => {}
             }
@@ -183,8 +191,8 @@ impl Settings {
         }
     }
 
-    /// The file as C++ `Settings::save` writes it: every key, in its order.
-    /// `wake_preroll` and `clock_auto_brightness` were added after the C++ reference fixtures.
+    /// Файл в том виде, как его пишет C++ `Settings::save`: все ключи, в его порядке; ключи,
+    /// добавленные после фикстур эталона, перечислены в шапке `settings/tests.rs`.
     pub fn serialize(&self) -> String {
         let f = |v: f32| g6(f64::from(v));
         let b = |v: bool| u8::from(v);
@@ -194,7 +202,7 @@ impl Settings {
              light_b={}\nlight_effect={}\nwake_word={}\ntz={}\nauto_update={}\nupdate_attempt={}\n\
              zigbee_role={}\nzigbee_flash_failed={:x}\nnearest_answers={}\nmusic_viz={}\n\
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
-             wake_preroll={}\nclock_auto_brightness={}\n",
+             wake_preroll={}\nclock_auto_brightness={}\nfollowup_duration_s={}\n",
             f(self.volume),
             f(self.volume_legacy),
             b(self.muted),
@@ -222,6 +230,7 @@ impl Settings {
             self.clock_music,
             b(self.wake_preroll),
             b(self.clock_auto_brightness),
+            self.followup_duration_s,
         )
     }
 

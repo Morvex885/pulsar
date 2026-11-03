@@ -80,6 +80,10 @@ impl Controller {
         api.publish_text(TextId::ClockText, &self.clock_text);
         api.publish_select(SelectId::ClockFace, &self.clock_face);
         api.publish_number(NumberId::LedSpeed, self.st.led_speed);
+        api.publish_number(
+            NumberId::FollowupDuration,
+            self.st.followup_duration_s as f32,
+        );
         api.publish_select(SelectId::MusicViz, &self.st.music_viz);
         api.publish_select(SelectId::ClockMusic, &self.st.clock_music);
         api.publish_select(SelectId::CaseColor, self.case_color_option());
@@ -202,6 +206,21 @@ impl Controller {
                 self.st.clock_scroll_ms = steps.wrapping_mul(50).clamp(100, 2000);
                 self.clock.set_scroll_ms(self.st.clock_scroll_ms);
                 self.api.publish_number(id, self.st.clock_scroll_ms as f32);
+            }
+            NumberId::FollowupDuration => {
+                let Some(s) = pulsar_esphome::followup_duration_s(value) else {
+                    return;
+                };
+                self.st.followup_duration_s = s;
+                self.api.publish_number(id, s as f32);
+                // Ожидание открыто и до STT_START, и без таймера: проверяется по флагу, не по Tk.
+                if s == 0
+                    && self.phase == logic::Phase::Listening
+                    && self.followup.awaiting_speech()
+                {
+                    info!("follow-up: turned off, conversation ends");
+                    self.finish_interaction();
+                }
             }
             NumberId::LedSpeed => {
                 self.st.led_speed = cxx_clamp(value, 0.25, 4.0);

@@ -186,6 +186,53 @@ fn command_words() {
 }
 
 #[test]
+fn stt_stop_words() {
+    for text in [
+        "стоп",
+        " Хватит! ",
+        "СТОП.",
+        "«стоп»",
+        "‹стоп›",
+        "“Хватит!”",
+        "стоп, стоп",
+        "стоп-стоп",
+        "Хватит, стоп!",
+        "Алиса\u{2010}стоп",
+        "стоп\u{2027}стоп",
+        "Алиса, стоп!",
+        "Яндекс хватит…",
+        "Алиса—стоп",
+        "Яндекс – «стоп».",
+        "Алиса, стоп, стоп",
+    ] {
+        assert!(stt_stop(text), "{text:?}");
+    }
+    for text in [
+        "",
+        "…",
+        "Алиса",
+        "Алиса, Алиса, стоп",
+        "Стоп, Алиса",
+        "алисастоп",
+        "хватит ли времени",
+        "не стоп",
+        "стопка",
+        "сколько стоит стоп кран",
+        "стоп-кран",
+        "погода",
+        "стоп музыку",
+        "«стоп музыку»",
+        "Алиса—стоп—музыку",
+        "«хватит ли времени»",
+        "пауза",
+        "Алиса, громче",
+        "стоп, пауза",
+    ] {
+        assert!(!stt_stop(text), "{text:?}");
+    }
+}
+
+#[test]
 fn command_gating() {
     // The window after the wake word: 2.5 s of LISTENING / PROCESSING.
     assert!(after_wake(Phase::Listening, 12_499, 10_000));
@@ -584,4 +631,81 @@ fn microphones_mutes() {
     assert!(!sw_mute_after_button(true, false));
     // The button never sets the software mute.
     assert!(!sw_mute_after_button(false, true));
+}
+
+#[test]
+fn followup_needs_ha_request_success_and_nonzero_duration() {
+    let mut f = Followup::default();
+    assert!(!f.should_continue(true, 10, false));
+    f.on_event(VaEvent::IntentEnd, true);
+    assert!(f.should_continue(true, 10, false));
+    assert!(!f.should_continue(true, 0, false));
+    assert!(!f.should_continue(false, 10, false));
+    assert!(!f.should_continue(true, 10, true)); // звонит таймер или микрофон выключен
+    f.on_event(VaEvent::IntentEnd, false);
+    assert!(!f.should_continue(true, 10, false));
+}
+
+#[test]
+fn followup_error_after_true_cannot_reopen_after_successful_tts() {
+    let mut f = Followup::default();
+    f.on_event(VaEvent::IntentEnd, true);
+    f.on_event(VaEvent::Error, false);
+    assert!(!f.should_continue(true, 10, false));
+    f.on_event(VaEvent::IntentEnd, true); // поздний INTENT_END ошибку не отменяет
+    assert!(!f.should_continue(true, 10, false));
+    f.on_event(VaEvent::RunStart, false);
+    f.on_event(VaEvent::IntentEnd, true);
+    assert!(f.should_continue(true, 10, false));
+}
+
+fn run(f: &mut Followup, events: &[VaEvent]) {
+    for &ev in events {
+        f.on_event(ev, true);
+    }
+}
+
+#[test]
+fn followup_window_needs_ha_speech_events() {
+    assert_eq!(Followup::default().window_ms(7), None);
+
+    let mut f = Followup::default();
+    run(
+        &mut f,
+        &[
+            VaEvent::RunStart,
+            VaEvent::SttStart,
+            VaEvent::SttVadStart,
+            VaEvent::IntentEnd,
+        ],
+    );
+    let mut f = f.next_turn();
+    run(&mut f, &[VaEvent::RunStart, VaEvent::SttStart]);
+    assert_eq!(f.window_ms(7), Some(8_000));
+    assert_eq!(f.window_ms(0), None);
+    f.on_event(VaEvent::SttVadStart, false);
+    assert_eq!(f.window_ms(7), None);
+    assert!(!f.awaiting_speech());
+
+    // Распознаватель со своим VAD: STT_VAD_START не было, окно не ограничивается.
+    let mut f = Followup::default();
+    run(
+        &mut f,
+        &[VaEvent::RunStart, VaEvent::SttStart, VaEvent::IntentEnd],
+    );
+    let mut f = f.next_turn();
+    f.on_event(VaEvent::RunStart, false);
+    assert_eq!(f.window_ms(7), None);
+    assert!(f.awaiting_speech());
+}
+
+#[test]
+fn followup_silence_is_quiet_only_before_speech() {
+    assert!(!Followup::default().silent("stt-no-text-recognized"));
+    let mut f = Followup::default().next_turn();
+    f.on_event(VaEvent::RunStart, false);
+    assert!(f.silent("stt-no-text-recognized"));
+    assert!(!f.silent("stt-stream-failed"));
+    f.on_event(VaEvent::SttVadStart, false);
+    assert!(!f.silent("stt-no-text-recognized"));
 }
