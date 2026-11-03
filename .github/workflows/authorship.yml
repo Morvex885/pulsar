@@ -1,0 +1,59 @@
+name: authorship
+
+# Авторство всего, что попадает в main при squash-мерже: коммиты PR, его заголовок и описание
+# (AGENTS.md, «Git»). Отдельный workflow — чтобы правка заголовка или описания (`edited`)
+# перезапускала только эту проверку, а не сборки.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  commits:
+    # Имя job — обязательная проверка ruleset'а main: не переименовывать.
+    # Скрипт берётся с вершины базовой ветки, а не из PR: правка скрипта в PR не ослабит проверку
+    # этого же PR. Правку самого workflow (pull_request берёт его из merge-коммита PR) этим не
+    # закрыть — её ловит ревью. Вершина, а не base.sha: base.sha не обновляется при мерже main в
+    # ветку PR, и диапазон захватил бы чужие коммиты main; PR со старой базой проверяется текущими
+    # правилами. Копия из PR — только если в базовой ветке скрипта нет вовсе, и тогда без `--text`.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: script from base branch
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if git cat-file -e "origin/$BASE_REF:tools/check-authorship.sh" 2>/dev/null; then
+            git show "origin/$BASE_REF:tools/check-authorship.sh" > "$RUNNER_TEMP/base.sh"
+          else
+            cp tools/check-authorship.sh "$RUNNER_TEMP/base.sh"
+            echo "PR_COPY=1" >> "$GITHUB_ENV"
+          fi
+      - name: commits
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: sh "$RUNNER_TEMP/base.sh" "origin/$BASE_REF..$HEAD_SHA"
+      - name: PR title and body
+        # Текст PR — только через env: подстановка `${{ }}` прямо в скрипт дала бы инъекцию команд.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr.txt"
+          # Без `--text` в скрипте базовой ветки (до мержа PR, который этот режим добавил) или без
+          # скрипта в ней вовсе текст не проверяем: копию из PR для текста не запускаем.
+          if [ -z "${PR_COPY:-}" ] && grep -q -e '--text' "$RUNNER_TEMP/base.sh"; then
+            sh "$RUNNER_TEMP/base.sh" --text "$RUNNER_TEMP/pr.txt"
+          else
+            echo "::warning::заголовок и описание PR не проверены: в базовой ветке нет check-authorship.sh с --text"
+          fi

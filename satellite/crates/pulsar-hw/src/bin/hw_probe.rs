@@ -131,10 +131,10 @@ fn ring_dump(model: &Model) -> String {
     s
 }
 
-/// sysfs brightness of a framebuffer byte per channel. The Lite 2's led_ring_fb scales each
-/// channel on its way to the LEDs (AGENTS.md, "Lite 2 LEDs") and the brightness tops out at 63
-/// (measured with the daemon stopped: fb 26/100/150/204/255 -> red 9/37/55/63/63, green
-/// 6/24/36/49/62, blue 4/19/29/39/49); the Midi's reads back as written.
+/// Яркость в sysfs для байта фреймбуфера по каналу. led_ring_fb Лайт 2 масштабирует каждый канал
+/// по пути к светодиодам (см. docs/lite2.md, «Светодиоды и часы»), яркость упирается в 63
+/// (измерено при остановленном демоне: fb 26/100/150/204/255 -> красный 9/37/55/63/63, зелёный
+/// 6/24/36/49/62, синий 4/19/29/39/49); у Миди читается как записано.
 fn sysfs_expected(model: &Model, fb: [u8; 3]) -> [i32; 3] {
     if model.codename == "plum" {
         let k = [0.36, 0.23, 0.2];

@@ -18,6 +18,9 @@ ring = "=0.17.14"
 log = { version = "=0.4.34", features = ["std"] }
 libc = "=0.2.191"
 libloading = "=0.9.0"
+# snow: нужны только примитивы Noise_NNpsk0_25519_ChaChaPoly_SHA256; фичи по умолчанию (`std`,
+# `default-resolver-crypto`) тянут ещё ring, BLAKE2 и AES-GCM — они не нужны (ring в сборке и так
+# есть для rustls).
 snow = { version = "=0.10.0", default-features = false, features = ["use-chacha20poly1305", "use-sha2", "use-curve25519", "use-getrandom"] }
 socket2 = { version = "=0.6.5", features = ["all"] }
 cc = "=1.10.0"

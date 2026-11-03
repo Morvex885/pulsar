@@ -3,6 +3,9 @@
  * Midi radio: a Telink B91 on the station's /dev/ttyS2, driven by pulsar over zbhci. Based on the
  * Telink Zigbee SDK sample gateway (apps/zigbee/sampleGW).
  *
+ * Быстрого сброса к заводским настройкам циклами питания (как в примерах SDK) здесь нет: pulsar
+ * сбрасывает радио при каждом старте.
+ *
  * Copyright (c) 2021, Telink Semiconductor (Shanghai) Co., Ltd. ("TELINK"); pulsar changes are
  * under the same license.
  *
