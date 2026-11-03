@@ -120,6 +120,8 @@ impl Controller {
                 self.arbiter
                     .claim(&self.st.wake_word, level_db, true, false);
             }
+            self.ring_stopped_in_dialog =
+                matches!(self.phase, Phase::Listening | Phase::Processing);
             return self.stop_timer_ring();
         }
         if matches!(self.phase, Phase::Listening | Phase::Processing) || self.arbitrating {

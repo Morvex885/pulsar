@@ -159,7 +159,7 @@ pub struct Controller {
     listen_started_ms: i64,
     /// Текущий диалог открыт wake word (не кнопкой, не продолжением разговора и не HA).
     wake_dialog: bool,
-    /// «стоп» спотера выключил звонок посреди этого диалога, а диалог пошёл дальше.
+    /// Звонок выключили посреди этого диалога «стоп» спотера или wake word, а диалог пошёл дальше.
     ring_stopped_in_dialog: bool,
     hw_mic_muted: bool,
     error_shown: bool,
