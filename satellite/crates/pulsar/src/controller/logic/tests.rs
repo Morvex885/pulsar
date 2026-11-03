@@ -195,6 +195,8 @@ fn stt_stop_words() {
         ("‹стоп›", SttStop::Bare),
         ("“Хватит!”", SttStop::Bare),
         ("стоп, стоп", SttStop::Bare),
+        ("стоп-стоп", SttStop::Bare),
+        ("Алиса\u{2010}стоп", SttStop::AfterWake),
         ("Хватит, стоп!", SttStop::Bare),
         ("Алиса, стоп!", SttStop::AfterWake),
         ("Яндекс хватит…", SttStop::AfterWake),
