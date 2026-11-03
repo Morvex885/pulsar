@@ -42,6 +42,20 @@ Scenarios against the daemon (a test instance: PULSAR_PORT_OFFSET, service stopp
                      waited for up to --install-s (default 300); the daemon exits after it.
                      Refused on the live API port 6053 (it would replace the installed daemon)
                      unless --allow-live-port is given; use a test instance (16053).
+  scenario-followup  continued conversation (follow-up duration --followup-s, default 3, set first
+                     and restored at the end). Announcement (--media-url) with start_conversation,
+                     a fake run with STT_VAD_START (not in --case no-vad) answering with
+                     continue_conversation=1 and TTS_END (--tts-url), then the follow-up run
+                     (RUN_START, STT_START at t0) per --case:
+                       speech    STT_VAD_START at t0+N-0.5: no stop until t0+N+3, the run ends
+                                 normally, no third start;
+                       silence   the daemon must stop the run within [t0+N+0.5, t0+N+2];
+                       no-text   ERROR stt-no-text-recognized at t0+1.5: no stop;
+                       no-vad    first run without STT_VAD_START: no stop until t0+N+3, then
+                                 ERROR stt-no-text-recognized;
+                       off       duration 0: no follow-up start at all;
+                       set-zero  duration set to 0 at t0+1: stop within 1.5 s.
+                     Whether the close was quiet is read in the daemon log ("follow-up: ...").
 The LED ring and clock states (LISTENING, THINKING, SPEAKING, TIMER_RING, the timer) are read on
 the station meanwhile (sysfs); the --*-s pauses leave time for that.
 
@@ -475,11 +489,13 @@ async def cmd_scenario_entities(client, args):
         ("clock_text_speed", 333, 350.0),
         ("led_speed", 9.0, 4.0),
         ("led_speed", 1.5, 1.5),
+        ("followup_duration", 50.0, 10.0),
+        ("followup_duration", 7.6, 8.0),
     ]:
         if oid not in k:
             continue
         await expect(w, f"number {oid} {value} -> {want}", k[oid], lambda o=oid, v=value: client.number_command(k[o], v), lambda s, x=want: abs(s.state - x) < 1e-3)
-    for oid in ["clock_brightness", "clock_text_speed", "led_speed"]:
+    for oid in ["clock_brightness", "clock_text_speed", "led_speed", "followup_duration"]:
         if st(oid) is not None:
             v = st(oid)
             restore.append((f"number {oid} -> {v}", k[oid], lambda o=oid, x=v: client.number_command(k[o], x), lambda s, x=v: abs(s.state - x) < 1e-3))
@@ -532,6 +548,163 @@ async def cmd_scenario_entities(client, args):
 
     for name, key, send, pred in restore:
         await expect(w, name, key, send, pred)
+
+
+async def cmd_scenario_followup(client, args):
+    w = Watch(client)
+    ents, _ = await entities_of(client)
+    await asyncio.sleep(0.8)
+    if "followup_duration" not in ents:
+        FAILURES.append("followup: no followup_duration entity")
+        return
+    key = ents["followup_duration"].key
+    orig = w.latest.get(key)
+    n = 0 if args.case == "off" else args.followup_s
+    await expect(w, f"number followup_duration -> {n}", key, lambda: client.number_command(key, n), lambda s: abs(s.state - n) < 1e-3)
+    try:
+        await followup_case(client, w, key, args, n)
+    finally:
+        if orig is not None:
+            v = orig.state
+            await expect(w, f"number followup_duration -> {v} (restored)", key, lambda: client.number_command(key, v), lambda s: abs(s.state - v) < 1e-3)
+
+
+async def followup_case(client, w, key, args, n):
+    loop = asyncio.get_running_loop()
+    E = VoiceAssistantEventType
+    starts = []
+    stops = []
+    t0 = None
+
+    def rel(t):
+        return f"{t - t0:+.2f} s" if t0 is not None else "before t0"
+
+    def send(ev, data=None):
+        client.send_voice_assistant_event(ev, data)
+
+    async def until(pred, timeout):
+        deadline = loop.time() + timeout
+        while not pred():
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+        return True
+
+    async def sleep_until(t):
+        await asyncio.sleep(max(0.0, t - loop.time()))
+
+    async def start(conversation_id, flags, settings, wake_word_phrase):
+        starts.append(loop.time())
+        print(f"start #{len(starts)}: phrase={wake_word_phrase!r} ({rel(starts[-1])})")
+        if len(starts) == 2 and wake_word_phrase:
+            FAILURES.append(f"followup: follow-up started with phrase {wake_word_phrase!r}")
+        return 0
+
+    async def stop(abort):
+        stops.append(loop.time())
+        print(f"stop: abort={abort} ({rel(stops[-1])})")
+
+    async def handle_audio(data, *_):
+        pass
+
+    client.subscribe_voice_assistant(handle_start=start, handle_stop=stop, handle_audio=handle_audio)
+    await asyncio.sleep(0.5)
+    print(f"announce {args.media_url} with start_conversation")
+    resp = await client.send_voice_assistant_announcement_await_response(
+        args.media_url, args.seconds, text="scenario-followup", start_conversation=True
+    )
+    print("announce finished: " + line(resp))
+    if not await until(lambda: len(starts) >= 1, 5.0):
+        FAILURES.append("followup: no pipeline start after the announcement")
+        return
+
+    # Первый run: HA просит продолжить разговор.
+    await asyncio.sleep(0.3)
+    send(E.VOICE_ASSISTANT_RUN_START)
+    send(E.VOICE_ASSISTANT_STT_START)
+    await asyncio.sleep(0.5)
+    if args.case != "no-vad":
+        send(E.VOICE_ASSISTANT_STT_VAD_START)
+    await asyncio.sleep(0.5)
+    send(E.VOICE_ASSISTANT_STT_VAD_END)
+    send(E.VOICE_ASSISTANT_STT_END, {"text": "test"})
+    send(E.VOICE_ASSISTANT_INTENT_START)
+    await asyncio.sleep(0.3)
+    send(E.VOICE_ASSISTANT_INTENT_END, {"conversation_id": "c1", "continue_conversation": "1"})
+    send(E.VOICE_ASSISTANT_TTS_START, {"text": "ok"})
+    send(E.VOICE_ASSISTANT_TTS_END, {"url": args.tts_url})
+    send(E.VOICE_ASSISTANT_RUN_END)
+    print("run 1: INTENT_END continue_conversation=1, TTS_END, RUN_END")
+
+    if args.case == "off":
+        await asyncio.sleep(5.0)
+        if len(starts) != 1:
+            FAILURES.append(f"followup off: {len(starts)} pipeline starts, expected 1")
+        return
+    if not await until(lambda: len(starts) >= 2, 10.0):
+        FAILURES.append("followup: no follow-up start after the answer")
+        return
+
+    # Follow-up-реплика: окно отсчитывается от STT_START.
+    await asyncio.sleep(0.3)
+    send(E.VOICE_ASSISTANT_RUN_START)
+    send(E.VOICE_ASSISTANT_STT_START)
+    t0 = loop.time()
+    print("run 2: RUN_START, STT_START at t0")
+    no_text = {"code": "stt-no-text-recognized", "message": "No text recognized"}
+
+    if args.case == "speech":
+        await sleep_until(t0 + n - 0.5)
+        send(E.VOICE_ASSISTANT_STT_VAD_START)
+        print(f"run 2: STT_VAD_START ({rel(loop.time())})")
+        await sleep_until(t0 + n + 3)
+        if stops:
+            FAILURES.append(f"followup speech: stopped at {rel(stops[0])} after speech started")
+        send(E.VOICE_ASSISTANT_STT_VAD_END)
+        send(E.VOICE_ASSISTANT_STT_END, {"text": "test"})
+        send(E.VOICE_ASSISTANT_INTENT_START)
+        send(E.VOICE_ASSISTANT_INTENT_END, {"conversation_id": "c1", "continue_conversation": "0"})
+        send(E.VOICE_ASSISTANT_TTS_START, {"text": "ok"})
+        send(E.VOICE_ASSISTANT_TTS_END, {"url": args.tts_url})
+        send(E.VOICE_ASSISTANT_RUN_END)
+        await asyncio.sleep(5.0)
+        if len(starts) != 2:
+            FAILURES.append(f"followup speech: {len(starts)} pipeline starts, expected 2")
+    elif args.case == "silence":
+        await until(lambda: stops, n + 4)
+        if not stops:
+            FAILURES.append("followup silence: no stop")
+        elif not n + 0.5 <= stops[0] - t0 <= n + 2:
+            FAILURES.append(f"followup silence: stop at {rel(stops[0])}, expected {n + 0.5}..{n + 2} s")
+        send(E.VOICE_ASSISTANT_ERROR, no_text)
+        send(E.VOICE_ASSISTANT_RUN_END)
+    elif args.case == "no-text":
+        await sleep_until(t0 + 1.5)
+        send(E.VOICE_ASSISTANT_STT_VAD_END)
+        send(E.VOICE_ASSISTANT_ERROR, no_text)
+        send(E.VOICE_ASSISTANT_RUN_END)
+        await asyncio.sleep(n + 2)
+        if stops:
+            FAILURES.append(f"followup no-text: stop at {rel(stops[0])}")
+    elif args.case == "no-vad":
+        await sleep_until(t0 + n + 3)
+        if stops:
+            FAILURES.append(f"followup no-vad: stop at {rel(stops[0])}, the window must not be timed")
+        send(E.VOICE_ASSISTANT_STT_VAD_END)
+        send(E.VOICE_ASSISTANT_ERROR, no_text)
+        send(E.VOICE_ASSISTANT_RUN_END)
+        await asyncio.sleep(1.0)
+    elif args.case == "set-zero":
+        await sleep_until(t0 + 1)
+        t_set = loop.time()
+        await expect(w, "number followup_duration -> 0 (while waiting)", key, lambda: client.number_command(key, 0), lambda s: s.state == 0)
+        await until(lambda: stops, 3.0)
+        if not stops:
+            FAILURES.append("followup set-zero: no stop")
+        elif stops[0] - t_set > 1.5:
+            FAILURES.append(f"followup set-zero: stop {stops[0] - t_set:.2f} s after the change")
+        send(E.VOICE_ASSISTANT_RUN_END)
+    print(f"starts={len(starts)} stops={[rel(t) for t in stops]}")
 
 
 # Values the daemon keeps as sent (inside its clamp, clock_text_speed in steps of 50).
@@ -603,6 +776,7 @@ COMMANDS = {
     "scenario-media": cmd_scenario_media,
     "scenario-entities": cmd_scenario_entities,
     "scenario-persist": cmd_scenario_persist,
+    "scenario-followup": cmd_scenario_followup,
 }
 
 
@@ -639,6 +813,9 @@ async def main():
     p.add_argument("--install", action="store_true", help="scenario-persist: then check and install an update")
     p.add_argument("--install-s", type=float, default=300.0)
     p.add_argument("--allow-live-port", action="store_true", help="scenario-persist --install against port 6053")
+    p.add_argument("--case", default="silence", choices=["speech", "silence", "no-text", "no-vad", "off", "set-zero"],
+                   help="scenario-followup case")
+    p.add_argument("--followup-s", type=int, default=3, help="scenario-followup duration, 1..10")
     args = p.parse_args()
     if not 0.0 <= args.media_volume <= 0.2:
         p.error("--media-volume must be between 0 and 0.2")
