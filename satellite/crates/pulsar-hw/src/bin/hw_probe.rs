@@ -21,7 +21,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use pulsar_clock::ClockHandle;
-use pulsar_core::model::{LedStrip, Model};
+use pulsar_core::model::{LedLayout, LedStrip, Model};
 use pulsar_core::{AmbientDimmer, ClockShot, MusicFrame, UiState, actors};
 use pulsar_hw::{Button, InputEvent, InputHandle, LedsHandle, Press, Rgb};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -119,6 +119,10 @@ fn ring_dump(model: &Model) -> String {
     if !model.ring.i2c_dev.is_empty() {
         return "i2c (no read-back)".to_owned();
     }
+    if model.led_prefix.is_empty() {
+        // Нет поканальных sysfs-светодиодов (Станция 2): отсутствующие файлы читались бы как 0.
+        return "no sysfs LEDs".to_owned();
+    }
     let hex = |v: [i32; 3]| format!("{:02x}{:02x}{:02x}", v[0], v[1], v[2]);
     let step = if model.ring.count > 6 { 3 } else { 1 };
     let mut s = String::new();
@@ -146,40 +150,62 @@ fn sysfs_expected(model: &Model, fb: [u8; 3], fb_output: bool) -> [i32; 3] {
     }
 }
 
-/// Whether the daemon would drive `s` through its framebuffer: the same test as pulsar-hw
-/// (trigger active on the first red LED, fb named as expected).
+/// Выводит ли демон ленту `s` через framebuffer: та же проверка, что в pulsar-hw (`fb_dev`
+/// задан, имя fb совпадает с моделью, LED-триггер, если он у ленты есть, активен на первом
+/// красном светодиоде).
 fn fb_mode(model: &Model, s: &LedStrip) -> bool {
+    if s.fb_dev.is_empty() {
+        return false;
+    }
+    let dev = s.fb_dev.rsplit('/').next().unwrap_or(s.fb_dev);
+    let name = pulsar_core::sysfs::read_file(&format!("/sys/class/graphics/{dev}/name"))
+        .unwrap_or_default();
+    let ok = pulsar_core::sysfs::trim(&name) == s.fb_name;
+    if s.trigger.is_empty() {
+        return ok;
+    }
     let trigger = pulsar_core::sysfs::read_file(&format!(
         "/sys/class/leds/{}:red:{}{}/trigger",
         model.led_prefix, s.sysfs_kind, s.first_index
     ))
     .unwrap_or_default();
-    let dev = s.fb_dev.rsplit('/').next().unwrap_or(s.fb_dev);
-    let name = pulsar_core::sysfs::read_file(&format!("/sys/class/graphics/{dev}/name"))
-        .unwrap_or_default();
-    trigger.contains(&format!("[{}]", s.trigger)) && pulsar_core::sysfs::trim(&name) == s.fb_name
+    ok && trigger.contains(&format!("[{}]", s.trigger))
 }
 
-/// The strip's framebuffer as RGB per LED; None when it cannot be read.
+/// Фреймбуфер ленты как RGB по светодиодам; None, если его не прочитать. Пиксель 24 bpp —
+/// B, G, R; 32 bpp (панель Станции 2) — R, G, B, W, белый байт не читается.
 fn strip_fb(s: &LedStrip) -> Option<Vec<[u8; 3]>> {
     let n = usize::try_from(s.count).ok()?;
-    let mut bgr = vec![0u8; n * 3];
+    let dev = s.fb_dev.rsplit('/').next().unwrap_or(s.fb_dev);
+    let bpp = std::fs::read_to_string(format!("/sys/class/graphics/{dev}/bits_per_pixel"))
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(24);
+    let bytes_per_px = if bpp == 32 { 4 } else { 3 };
+    let mut raw = vec![0u8; n * bytes_per_px];
     std::fs::File::open(s.fb_dev)
         .ok()?
-        .read_exact_at(&mut bgr, 0)
+        .read_exact_at(&mut raw, 0)
         .ok()?;
     Some(
-        bgr.as_chunks::<3>()
-            .0
-            .iter()
-            .map(|p| [p[2], p[1], p[0]])
+        raw.chunks(bytes_per_px)
+            .take(n)
+            .map(|p| {
+                if bytes_per_px == 4 {
+                    [p[0], p[1], p[2]]
+                } else {
+                    [p[2], p[1], p[0]]
+                }
+            })
             .collect(),
     )
 }
 
-/// Checks that every pixel of the strip's framebuffer is `fb` (in framebuffer mode) and that
-/// every LED's sysfs brightness matches it as the model reads it back (within ±3). An I²C ring
-/// (the Mini's) has neither: the check is skipped.
+/// Проверяет, что каждый пиксель фреймбуфера ленты равен `fb` (если демон выводит через
+/// framebuffer) и что яркость каждого sysfs-светодиода читается как `fb` с поправкой модели
+/// (±3). У I²C-кольца (Мини) нет ни того, ни другого — проверка пропускается. У модели без
+/// поканальных sysfs-светодиодов (`led_prefix` пуст, Станция 2) проверяется только framebuffer:
+/// отсутствующие файлы яркости читались бы как 0; если и framebuffer не годится — FAIL.
 fn check_strip(model: &Model, s: &LedStrip, what: &str, fb: [u8; 3]) -> bool {
     if !s.i2c_dev.is_empty() {
         say(&format!("   check {what}: I²C ring has no read-back, SKIP"));
@@ -189,15 +215,28 @@ fn check_strip(model: &Model, s: &LedStrip, what: &str, fb: [u8; 3]) -> bool {
     let fb_output =
         fb_mode(model, &model.ring) && (model.logo.count == 0 || fb_mode(model, &model.logo));
     let want = sysfs_expected(model, fb, fb_output);
+    // Та же проверка, что в open_sysfs pulsar-hw.
+    let sysfs = !model.led_prefix.is_empty();
     let mut ok = true;
     let mut got = String::new();
-    for i in 0..s.count {
-        let v = rgb_values(model, s, i);
-        ok &= v.iter().zip(want).all(|(g, w)| (g - w).abs() <= 3);
-        got += &format!(" {},{},{}", v[0], v[1], v[2]);
+    if sysfs {
+        for i in 0..s.count {
+            let v = rgb_values(model, s, i);
+            ok &= v.iter().zip(want).all(|(g, w)| (g - w).abs() <= 3);
+            got += &format!(" {},{},{}", v[0], v[1], v[2]);
+        }
+    } else {
+        got = " (no sysfs LEDs)".to_owned();
     }
     let fb_state = if !fb_output {
-        "fb not checked (sysfs output)".to_owned()
+        if sysfs {
+            "fb not checked (sysfs output)".to_owned()
+        } else {
+            // У панели без sysfs-светодиодов framebuffer — единственный проверяемый вывод:
+            // если и он недоступен, панель не проверена и это ошибка, а не PASS.
+            ok = false;
+            "fb not checked (no sysfs LEDs)".to_owned()
+        }
     } else {
         match strip_fb(s) {
             Some(px) if px.iter().all(|p| *p == fb) => "fb ok".to_owned(),
@@ -307,7 +346,7 @@ fn feed_music(
     });
 }
 
-fn led_steps(leds: &LedsHandle, music: &Rc<Cell<bool>>) -> Vec<Step> {
+fn led_steps(leds: &LedsHandle, music: &Rc<Cell<bool>>, model: &Model) -> Vec<Step> {
     let l = leds.clone();
     let st = move |s: UiState| {
         let l = l.clone();
@@ -332,7 +371,7 @@ fn led_steps(leds: &LedsHandle, music: &Rc<Cell<bool>>) -> Vec<Step> {
     }));
     let l = leds.clone();
     steps.push(step("mic unmuted", move || l.set_muted(false)));
-    for &e in pulsar_hw::effect_names() {
+    for &e in pulsar_hw::effect_names(model.led_layout) {
         const WHITE: [&str; 7] = [
             "Rainbow",
             "Color loop",
@@ -368,8 +407,13 @@ fn led_steps(leds: &LedsHandle, music: &Rc<Cell<bool>>) -> Vec<Step> {
     red.check = Some([FULL_FB, 0, 0]);
     steps.push(red);
     let l = leds.clone();
-    steps.push(step("led_show Comet green 3 s", move || {
-        l.show_temporary("Comet".into(), Rgb { r: 0, g: 255, b: 0 }, 3);
+    // Эффект, который HA пропустит в led_show для этой раскладки (`effect_names`).
+    let show = match model.led_layout {
+        LedLayout::Ring => "Comet",
+        LedLayout::Station2Panel => "Radar",
+    };
+    steps.push(step(format!("led_show {show} green 3 s"), move || {
+        l.show_temporary(show.into(), Rgb { r: 0, g: 255, b: 0 }, 3);
     }));
     let l = leds.clone();
     steps.push(step("show_volume 0.2 (user light off)", move || {
@@ -507,7 +551,7 @@ async fn leds(model: &'static Model, state_ms: u64) -> bool {
     );
     // Initial state, no indication.
     leds.set_muted(false);
-    let steps = led_steps(&leds, &music);
+    let steps = led_steps(&leds, &music, model);
     let dumps = Dumps {
         ring: true,
         clock: false,
@@ -1032,7 +1076,7 @@ async fn all(model: &'static Model, input_s: u64, state_ms: u64) -> bool {
         Rc::clone(&done),
     );
     leds.set_muted(false);
-    let mut steps = led_steps(&leds, &music);
+    let mut steps = led_steps(&leds, &music, model);
     if clock_open {
         steps.extend(clock_steps(&clock, &music, Some(leds.clone())));
     }

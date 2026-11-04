@@ -131,7 +131,11 @@ fn mini3_curve_landmarks() {
 fn percent_curve_has_no_lowest_step() {
     // Linear in percent, no jump to a lowest step: low HA volumes stay low (the C++ curve made
     // any volume of a two-point map full volume).
-    for c in [&b"yandex,station-mini2\0"[..], b"yandex,pickle\0"] {
+    for c in [
+        &b"yandex,station-mini2\0"[..],
+        b"yandex,pickle\0",
+        b"yandex,station-midi\0",
+    ] {
         let m = model_from_compatible(c).unwrap();
         assert_eq!(volume::to_raw(m, 0.01), 3);
         assert_eq!(volume::to_raw(m, 0.05), 13);

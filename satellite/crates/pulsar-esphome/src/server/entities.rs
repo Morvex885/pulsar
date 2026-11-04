@@ -3,6 +3,7 @@
 
 use std::net::Ipv4Addr;
 
+use pulsar_core::model::LedLayout;
 use tokio::time::Instant;
 
 use super::{ESPHOME_VERSION, PROJECT_NAME, Server, msg};
@@ -482,7 +483,11 @@ impl Server {
             ));
         }
         let mut w = Writer::new();
-        entity_head(&mut w, "ring", key::LIGHT_RING, "Ring");
+        let (light_oid, light_name) = match self.cfg.led_layout {
+            LedLayout::Ring => ("ring", "Ring"),
+            LedLayout::Station2Panel => ("panel", "Panel"),
+        };
+        entity_head(&mut w, light_oid, key::LIGHT_RING, light_name);
         w.str(11, "None", true);
         for e in &self.cfg.light_effects {
             w.str(11, e, true);

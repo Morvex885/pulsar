@@ -1,7 +1,8 @@
 # Кросс-сборка для Яндекс Станций через cargo-zigbuild: по бинарнику на ABI userland.
 #   ARCH=aarch64  64-битный userspace (Станция Миди и Мини 3 Про, glibc 2.36)
-#   ARCH=armhf    32-битный userspace (Станция Лайт 2, Мини 2, Мини 3 и Мини; а также образы Миди
-#                  с armhf userland), сборка под glibc 2.23 (как у Мини; у остальных 2.30)
+#   ARCH=armhf    32-битный userspace (Станция Лайт 2, Станция 2, Мини 2, Мини 3 и Мини; а также
+#                  образы Миди с armhf userland), сборка под glibc 2.23 (как у Мини; у остальных
+#                  2.30)
 # `make` собирает оба демона, `make ARCH=armhf` — один. Выход: build/<arch>/pulsar (без символов,
 # его и ставят) и build/<arch>/pulsar.debug (таблицы строк для `addr2line -f -e` по crash-отчёту;
 # не PIE, поэтому адреса в нём абсолютные). `make ARCH=armhf tools` собирает все утилиты

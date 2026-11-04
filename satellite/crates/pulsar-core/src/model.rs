@@ -4,10 +4,18 @@
 
 use std::sync::LazyLock;
 
+/// Раскладка светодиодов модели: задаёт эффекты лампы, их геометрию и имя сущности в HA.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LedLayout {
+    #[default]
+    Ring,
+    Station2Panel,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
     /// Кодовое имя из devicetree: "cucumber", "plum", "prune", "station-mini2", "bergamot",
-    /// "pickle", "yandexmini".
+    /// "pickle", "yandexmini", "station-midi".
     pub codename: &'static str,
     /// ESPHome node name prefix; the MAC suffix is appended.
     pub host_prefix: &'static str,
@@ -24,8 +32,11 @@ pub struct Model {
     pub mic_channels: &'static [u32],
     pub spk_channels: &'static [u32],
     pub vqe_preset: &'static str,
+    /// Физическая раскладка светодиодов; определяет тип эффектов и геометрию панели.
+    pub led_layout: LedLayout,
 
-    /// Prefix of the per-channel sysfs LEDs "<led_prefix>:<color>:<ring|logo><index>".
+    /// Префикс поканальных sysfs-светодиодов "<led_prefix>:<color>:<ring|logo><index>"; пусто — их
+    /// нет (Мини, Станция 2).
     pub led_prefix: &'static str,
     pub ring: LedStrip,
     /// `logo.count == 0`: no logo.
@@ -72,9 +83,13 @@ pub struct Model {
     /// muted sources "other" (app / remote) and "smart_tts" (smart volume); keys and voice words
     /// click.
     pub volume_sound: &'static str,
-    /// ALSA playback PCM (dmix + the softvol "Master Playback Volume"): GStreamer's alsasink,
-    /// the Sendspin sink, and the PCM the mixer opens to create the control.
+    /// PCM воспроизведения ALSA (dmix, обычно за softvol «Master Playback Volume» — см.
+    /// `master_pcm`): alsasink GStreamer, вывод объявлений и Sendspin.
     pub playback_pcm: &'static str,
+    /// PCM со softvol «Master Playback Volume» (на hw:0): однократное открытие создаёт регулятор,
+    /// если его ещё нет (softvol — пользовательский контрол alsa-lib). Обычно совпадает с
+    /// `playback_pcm`; пусто — у моделей с программной громкостью, где регулятора нет.
+    pub master_pcm: &'static str,
     /// ALSA config selected through ALSA_CONFIG_PATH before any thread starts (the Mini's dmix);
     /// empty: the firmware's /etc/asound.conf.
     pub alsa_config: &'static str,
@@ -86,13 +101,13 @@ pub struct Model {
     /// (`pulsar_alsa::enable_output`). Пусто: затвора нет.
     pub amp_enable_paths: &'static [&'static str],
 
-    /// Stock volume curve: platform level -> raw value (0..255) of the softvol "Master Playback
-    /// Volume" on `playback_pcm`, piecewise linear between the points; the first point is
-    /// level 0 (raw 0), the last one the top level. quasar.cfg volume_capability
-    /// .volume_manager_settings.platformToAlsaMap. One platform level is 5 % on the 20-level maps;
-    /// maind's Alice volume (0..10, "громче" / "тише") is platform level / 2 rounded half up.
-    /// quasar.cfg changeStepPercent is the step of maind's gradual volume change
-    /// (start_volume_change), not of the keys or the voice words.
+    /// Штатная кривая громкости: уровень платформы -> сырое значение (0..255) softvol «Master
+    /// Playback Volume» (`master_pcm`), кусочно-линейная между точками; первая точка — уровень 0
+    /// (raw 0), последняя — верхний уровень. В quasar.cfg — volume_capability
+    /// .volume_manager_settings.platformToAlsaMap. На 20-уровневых картах один уровень платформы —
+    /// 5 %; громкость Алисы в maind (0..10, «громче» / «тише») — уровень платформы / 2 с
+    /// округлением половины вверх. changeStepPercent в quasar.cfg — шаг плавного изменения
+    /// громкости в maind (start_volume_change), а не кнопок и голосовых команд.
     pub volume_map: &'static [VolumePoint],
     /// true: any audible volume is at least the map's second point (the stock firmware never
     /// sets the raw values below it).
@@ -129,8 +144,9 @@ impl CaptureFormat {
     }
 }
 
-/// An Nx1 BGR framebuffer behind an ledfb trigger, with per-channel sysfs LEDs as fallback, or an
-/// IS31FL323x I2C controller (18 channels = 6 RGB pixels).
+/// Лента светодиодов: фреймбуфер (24 bpp B, G, R за ledfb-триггером; 32 bpp R, G, B, W панели
+/// Станции 2 без триггера) с поканальными sysfs-светодиодами как фолбэком, если они есть, либо
+/// I²C-контроллер IS31FL323x (18 каналов = 6 RGB-пикселей).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LedStrip {
     pub count: i32,
@@ -140,7 +156,7 @@ pub struct LedStrip {
     pub fb_dev: &'static str,
     /// Expected /sys/class/graphics/fbN/name.
     pub fb_name: &'static str,
-    /// LED trigger that routes the framebuffer to the LEDs.
+    /// LED-триггер, направляющий фреймбуфер на светодиоды; "" — триггера нет (панель Станции 2).
     pub trigger: &'static str,
     /// "ring" / "logo"
     pub sysfs_kind: &'static str,
@@ -190,6 +206,7 @@ static MIDI: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5, 6, 7],
     vqe_preset: "cucumber",
+    led_layout: LedLayout::Ring,
     led_prefix: "cucumber",
     ring: LedStrip {
         count: 24,
@@ -233,6 +250,7 @@ static MIDI: Model = Model {
     timer_sound: "common/timer.wav",
     volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
+    master_pcm: "speakers",
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
@@ -261,6 +279,7 @@ static LITE2: Model = Model {
     mic_channels: &[0, 2],
     spk_channels: &[6],
     vqe_preset: "plum",
+    led_layout: LedLayout::Ring,
     led_prefix: "plum",
     ring: LedStrip {
         count: 3,
@@ -293,6 +312,7 @@ static LITE2: Model = Model {
     timer_sound: "common/timer.wav",
     volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
+    master_pcm: "speakers",
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
@@ -315,8 +335,8 @@ static PRUNE: Model = Model {
     ..LITE2
 };
 
-// set_volume.sh у Мини 2 и (по вики) у Мини 3 Про — `amixer set 'Master' <percent>%`: raw —
-// процент от 255, без сдвига в дБ и без нижней ступени.
+// set_volume.sh у Мини 2 и (по вики) у Мини 3 Про и Станции 2 — `amixer set 'Master' <percent>%`:
+// raw — процент от 255, без сдвига в дБ и без нижней ступени.
 const PERCENT_VOLUME: &[VolumePoint] = &[
     VolumePoint { level: 0, raw: 0 },
     VolumePoint {
@@ -338,6 +358,7 @@ static MINI2: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5],
     vqe_preset: "yandexmini_2",
+    led_layout: LedLayout::Ring,
     led_prefix: "mini2",
     ring: LedStrip {
         count: 6,
@@ -371,6 +392,7 @@ static MINI2: Model = Model {
     timer_sound: "common/timer.opus",
     volume_sound: "common/volume_sound.opus",
     playback_pcm: "default",
+    master_pcm: "default",
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
@@ -398,6 +420,7 @@ static MINI: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[6, 7],
     vqe_preset: "yandexmini",
+    led_layout: LedLayout::Ring,
     led_prefix: "",
     ring: LedStrip {
         count: 6,
@@ -431,6 +454,7 @@ static MINI: Model = Model {
     volume_sound: "common/volume_sound.mp3",
     // dmix over hw:0,0; defined in /data/pulsar/asound.conf and selected via ALSA_CONFIG_PATH.
     playback_pcm: "mini",
+    master_pcm: "",
     alsa_config: "/data/pulsar/asound.conf",
     alsa_lib: "/system/vendor/quasar/libs/libasound.so.2",
     // No softvol "speakers" PCM and the hardware "Master" control does not attenuate the output;
@@ -469,6 +493,7 @@ static MINI3: Model = Model {
     mic_channels: &[0, 1, 2],
     spk_channels: &[6],
     vqe_preset: "bergamot",
+    led_layout: LedLayout::Ring,
     led_prefix: "bergamot",
     // The driver calls the 6-zone ring "logo" (/dev/fb0 6×1, AW21018); there is no separate logo.
     ring: LedStrip {
@@ -502,6 +527,7 @@ static MINI3: Model = Model {
     timer_sound: "common/timer.wav",
     volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
+    master_pcm: "speakers",
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
@@ -528,6 +554,7 @@ static MINI3PRO: Model = Model {
     mic_channels: &[0, 1, 2],
     spk_channels: &[3],
     vqe_preset: "pickle",
+    led_layout: LedLayout::Ring,
     led_prefix: "pickle",
     ring: LedStrip {
         count: 16,
@@ -569,10 +596,75 @@ static MINI3PRO: Model = Model {
     timer_sound: "common/timer.wav",
     volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
+    master_pcm: "speakers",
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
     amp_enable_paths: &[],
+    volume_map: PERCENT_VOLUME,
+    volume_min_step: false,
+    has_lux: true,
+    zigbee_tty: "",
+    zigbee_reset: "",
+    zigbee_boot: "",
+};
+
+/// Станция 2: см. docs/station2.md.
+static STATION2: Model = Model {
+    codename: "station-midi",
+    host_prefix: "yandex-station2-",
+    friendly_name: "Яндекс Станция 2",
+    model_name: "Yandex Station 2",
+    capture_pcm: "hw:0,2",
+    capture_rate: 48000,
+    capture_channels: 16,
+    capture_format: CaptureFormat::S16,
+    mic_channels: &[0, 2, 4, 7],
+    spk_channels: &[8, 9],
+    vqe_preset: "yandexmidi",
+    led_layout: LedLayout::Station2Panel,
+    led_prefix: "",
+    // Панель Gowin: 88 светодиодов на /dev/fb0, 89-й пиксель не горит —
+    // https://hackalice.me/devices/station-2/#led.
+    ring: LedStrip {
+        count: 88,
+        first_index: 0,
+        fb_dev: "/dev/fb0",
+        fb_name: "YNDX LED screen",
+        trigger: "",
+        sysfs_kind: "ring",
+        i2c_dev: "",
+        i2c_addr: 0,
+    },
+    logo: NO_STRIP,
+    clock_dir: "",
+    clock_seg_base: 'a',
+    clock_pos_base: 0,
+    clock_colon: &[],
+    clock_aux: &[],
+    clock_center: "",
+    clock_chip_current: false,
+    has_clock: false,
+    keys_input: "midi_touch",
+    mute_input: "gpio-keys",
+    mute_gpio: 0,
+    action_key: 582,
+    mute_key: 0,
+    error_sound: "ru-RU/playback_error.mp3",
+    wake_sound: "common/spotter_start.mp3",
+    cancel_sound: "common/spotter_cancel.mp3",
+    timer_sound: "common/timer.wav",
+    volume_sound: "common/volume_sound.mp3",
+    // Штатный маршрут без дополнительного softvol: см. docs/station2.md, «Звук».
+    playback_pcm: "default",
+    // Master создаёт softvol soft_volume, а не default:
+    // https://hackalice.me/devices/station-2/#audio.
+    master_pcm: "soft_volume",
+    alsa_config: "",
+    alsa_lib: "",
+    software_volume: false,
+    amp_enable_paths: &[],
+    // Линейная кривая, как у Мини 2: см. docs/station2.md, «Звук».
     volume_map: PERCENT_VOLUME,
     volume_min_step: false,
     has_lux: true,
@@ -661,6 +753,7 @@ pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
         b"yandex,station-mini2" => Some(&MINI2),
         b"yandex,bergamot" => Some(&MINI3),
         b"yandex,pickle" => Some(&MINI3PRO),
+        b"yandex,station-midi" => Some(&STATION2),
         _ => None,
     })
 }
@@ -783,6 +876,31 @@ mod tests {
         assert_eq!(m.ring.fb_name, "logo");
         assert_eq!(m.logo.count, 0);
         assert!(!m.has_clock && m.has_lux);
+    }
+
+    #[test]
+    fn station_midi_is_station2() {
+        let m = model_from_compatible(b"yandex,station-midi\0amlogic, axg\0").unwrap();
+        assert_eq!(m.codename, "station-midi");
+        assert_eq!(m.ring.count, 88);
+        assert_eq!(m.capture_rate, 48_000);
+        assert_eq!(m.playback_pcm, "default");
+        assert_eq!(m.master_pcm, "soft_volume");
+        assert_eq!(m.led_layout, LedLayout::Station2Panel);
+        assert!(!m.has_clock);
+        assert!(m.has_lux);
+        assert_eq!(m.capture_channels, 16);
+        assert_eq!(m.vqe_preset, "yandexmidi");
+    }
+
+    #[test]
+    fn master_pcm_exactly_where_volume_is_hardware() {
+        // Без master_pcm у модели с аппаратной громкостью Mixer не создаст регулятор Master.
+        for m in [
+            &MIDI, &LITE2, &PRUNE, &MINI2, &MINI, &MINI3, &MINI3PRO, &STATION2,
+        ] {
+            assert_eq!(m.master_pcm.is_empty(), m.software_volume, "{}", m.codename);
+        }
     }
 
     #[test]

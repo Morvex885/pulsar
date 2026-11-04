@@ -209,8 +209,10 @@ async def cmd_commands(client, args):
         await echo("text", "clock_text", lambda k: client.text_command(k, "Привет"))
     await echo("media", "media_player", lambda k: client.media_player_command(k, volume=0.2))
     await echo("media", "media_player", lambda k: client.media_player_command(k, command=MediaPlayerCommand.PAUSE))
-    await echo("light", "ring", lambda k: client.light_command(k, state=True, brightness=0.5, rgb=(1.0, 0.5, 0.0)))
-    await echo("light", "ring", lambda k: client.light_command(k, effect=ents["ring"].effects[-1]))
+    # Станция 2 публикует лампу как «panel», остальные модели — как «ring».
+    light = "ring" if "ring" in ents else "panel"
+    await echo("light", light, lambda k: client.light_command(k, state=True, brightness=0.5, rgb=(1.0, 0.5, 0.0)))
+    await echo("light", light, lambda k: client.light_command(k, effect=ents[light].effects[-1]))
     # Joins whatever Zigbee network permits joining when the daemon runs the router role.
     if "zigbee_join" in ents and args.zigbee_join:
         await echo("button", "zigbee", lambda k: client.button_command(ents["zigbee_join"].key))
@@ -563,14 +565,16 @@ async def cmd_scenario_entities(client, args):
         await expect(w, "text clock_text -> Тест", k["clock_text"], lambda: client.text_command(k["clock_text"], "Тест"), lambda s: s.state == "Тест")
         restore.append((f"text clock_text -> {text!r}", k["clock_text"], lambda: client.text_command(k["clock_text"], text), lambda s: s.state == text))
 
-    ring = orig.get("ring")
-    await expect(w, "light ring on", k["ring"], lambda: client.light_command(k["ring"], state=True, brightness=0.4, rgb=(0.0, 0.5, 1.0)), lambda s: s.state and abs(s.brightness - 0.4) < 0.01)
-    await expect(w, "light ring effect", k["ring"], lambda: client.light_command(k["ring"], effect=ents["ring"].effects[-1]), lambda s: s.effect == ents["ring"].effects[-1])
+    # Станция 2 публикует лампу как «panel», остальные модели — как «ring».
+    light = "ring" if "ring" in k else "panel"
+    ring = orig.get(light)
+    await expect(w, f"light {light} on", k[light], lambda: client.light_command(k[light], state=True, brightness=0.4, rgb=(0.0, 0.5, 1.0)), lambda s: s.state and abs(s.brightness - 0.4) < 0.01)
+    await expect(w, f"light {light} effect", k[light], lambda: client.light_command(k[light], effect=ents[light].effects[-1]), lambda s: s.effect == ents[light].effects[-1])
     if ring is not None:
         restore.append((
-            "light ring restored",
-            k["ring"],
-            lambda: client.light_command(k["ring"], state=ring.state, brightness=ring.brightness, rgb=(ring.red, ring.green, ring.blue), effect=ring.effect or "None"),
+            f"light {light} restored",
+            k[light],
+            lambda: client.light_command(k[light], state=ring.state, brightness=ring.brightness, rgb=(ring.red, ring.green, ring.blue), effect=ring.effect or "None"),
             lambda s: s.state == ring.state,
         ))
 

@@ -12,6 +12,7 @@
 |---|---|---|---|---|
 | Миди | `cucumber` | станция мейнтейнера | [station-midi](https://hackalice.me/devices/station-midi/) | [midi.md](midi.md) |
 | Лайт 2 | `plum`, `prune` | `plum` — станция мейнтейнера; `prune` — контрибьютор: [#57](https://github.com/Morvex885/pulsar/issues/57) | [station-lite2](https://hackalice.me/devices/station-lite2/) | [lite2.md](lite2.md) |
+| Станция 2 | `station-midi` | контрибьютор: [#58](https://github.com/Morvex885/pulsar/pull/58) | [station-2](https://hackalice.me/devices/station-2/) | [station2.md](station2.md) |
 | Мини 2 | `station-mini2` | контрибьюторы: [#9](https://github.com/Morvex885/pulsar/pull/9), станция из [#38](https://github.com/Morvex885/pulsar/issues/38) | [station-mini2](https://hackalice.me/devices/station-mini2/) | [mini2.md](mini2.md) |
 | Мини 3 | `bergamot` | контрибьютор: [#30](https://github.com/Morvex885/pulsar/pull/30) | [station-mini3](https://hackalice.me/devices/station-mini3/) | [mini3.md](mini3.md) |
 | Мини 3 Про | `pickle` | контрибьютор: [#52](https://github.com/Morvex885/pulsar/pull/52) | [station-mini3-pro](https://hackalice.me/devices/station-mini3-pro/) | [mini3pro.md](mini3pro.md) |
@@ -79,7 +80,7 @@ Wake word, командный спотер и эхоподавление раб�
   `spotter_get_current_phrase`, до следующего `spotter_get_next_event` или подачи: без результата
   хита библиотека делает `abort()` (`Y_VERIFY("resultIdx != -1")`). Так же устроен внутренний
   `FeedData` библиотеки. Символ есть в сборках Миди (aarch64), Лайт 2 и kiosk-alisa (armhf); Мини,
-  Мини 2, Мини 3 и Мини 3 Про не смотрелись.
+  Мини 2, Мини 3, Мини 3 Про и Станция 2 не смотрелись.
 - `libquasar_gstreamer.so` — GStreamer 1.14.5 из прошивки, тоже загружается через `dlopen`. При
   переходе PLAYING → PAUSED его alsasink делает `snd_pcm_drop`: на Миди каждая пауза съедала около
   200 мс ответа. С `sync=true` опоздавшие сэмплы отбрасываются. В сборке Миди нет экспорта ни
@@ -103,6 +104,7 @@ alsa-lib на armhf-образах Миди версионированная (AL
 | Миди | ~974 МиБ | вики (MemTotal 997788 kB) |
 | Лайт 2, плата `plum` | ~237 МиБ | мейнтейнер |
 | Лайт 2, плата `prune` | ~238 МиБ, tmpfs ~119 МиБ | #57 (MemTotal 243512 kB) |
+| Станция 2 | ~490 МиБ | вики (MemTotal 501664 kB) |
 | Мини 2 | ~238 МиБ | вики (MemTotal 243996 kB) |
 | Мини 3 | ~238 МиБ | вики (MemTotal 243908 kB) |
 | Мини 3 Про | ~473 МиБ | вики (MemTotal 484784 kB) |
@@ -120,8 +122,8 @@ alsa-lib на armhf-образах Миди версионированная (AL
 
 Ключи IPC:
 
-- `speakers` прошивки (Миди, Лайт 2, Мини 3 Про) и `dmix_speakers` Мини 3 (`ipc_key 1024`):
-  shm 0x400, 0x401 (буфер микширования), семафор 0x400;
+- `speakers` прошивки (Миди, Лайт 2, Мини 3 Про), `dmix_speakers` Мини 3 и `dmix_spk` Станции 2
+  (`ipc_key 1024`): shm 0x400, 0x401 (буфер микширования), семафор 0x400;
 - `minidmix` у Мини (`ipc_key 2277` в [`../satellite/deploy/asound.conf`](../satellite/deploy/asound.conf)):
   shm 0x8e5, 0x8e6, семафор 0x8e5;
 - `dmix_spk_plug` у Мини 2: ключ не сверен.

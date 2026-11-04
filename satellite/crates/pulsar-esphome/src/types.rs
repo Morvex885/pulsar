@@ -2,6 +2,7 @@
 //! values exchanged with Home Assistant. Numeric values are the protocol's (api.proto /
 //! aioesphomeapi), as in the C++ `api_server.h`.
 
+use pulsar_core::model::LedLayout;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -42,7 +43,7 @@ pub struct ApiConfig {
     pub wake_words: Vec<WakeWordInfo>,
     /// Initially active ids.
     pub active_wake_words: Vec<String>,
-    /// Ring light effects, besides "None".
+    /// Эффекты лампы («Ring» или «Panel» — по `led_layout`), кроме "None".
     pub light_effects: Vec<String>,
     /// Select «Clock face» options, "None" first.
     pub clock_faces: Vec<String>,
@@ -69,6 +70,9 @@ pub struct ApiConfig {
     pub has_hw_mic_mute: bool,
     /// The model has the action button and volume keys (the Event «Button» entity).
     pub has_buttons: bool,
+    /// Раскладка модели (`Model::led_layout`): object_id и имя лампы — «ring»/«Ring» или
+    /// «panel»/«Panel».
+    pub led_layout: LedLayout,
     /// File holding the Noise encryption key (base64 of 32 bytes, as ESPHome's `api: encryption:
     /// key`). Missing or empty file: plaintext (and provisioning with the all-zeros key). HA may
     /// set or rotate it with NoiseEncryptionSetKeyRequest. None: encryption unsupported.
@@ -93,6 +97,7 @@ impl Default for ApiConfig {
             has_hw_mic_mute: true,
             has_buttons: true,
             has_auto_brightness: true,
+            led_layout: LedLayout::default(),
             key_path: None,
         }
     }

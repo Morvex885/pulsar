@@ -4,6 +4,7 @@
 use super::*;
 use crate::server::entities::key;
 use crate::types::*;
+use pulsar_core::model::LedLayout;
 
 const RAW: &str = include_str!("../../../tests/golden/selftest_raw.txt");
 
@@ -36,6 +37,7 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         clock_music_styles: s(&["Off", "Levels"]),
         clock_formats: s(&["24h", "12h"]),
         zigbee_modes: s(&["Coordinator", "Router"]),
+        led_layout: Default::default(),
         has_clock: true,
         has_lux: true,
         has_hw_mic_mute: true,
@@ -777,6 +779,36 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
             assert_eq!(got.len(), 1, "{got:?}");
             assert_eq!(got[0].0, msg::NUMBER_STATE);
             assert_eq!(state_key(&got[0].1), Some(key::NUMBER_LED_SPEED));
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn panel_layout_names_the_light_panel() {
+    local()
+        .run_until(async {
+            let (id, mut cfg) = selftest("now");
+            cfg.led_layout = LedLayout::Station2Panel;
+            let (_h, mut rx, port) = start_with(id, cfg);
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            event(&mut rx).await;
+            p.send(msg::LIST_ENTITIES_REQ, &Writer::new()).await;
+            let mut light = None;
+            loop {
+                let (t, m) = p.recv().await.unwrap();
+                if t == msg::LIST_DONE {
+                    break;
+                }
+                if t == msg::LIST_LIGHT {
+                    light = Some(m);
+                }
+            }
+            let m = light.expect("no light entity");
+            // Ключ тот же, меняются только object_id и имя.
+            assert_eq!(field(&m, 2).unwrap().u32(), key::LIGHT_RING);
+            assert_eq!(field(&m, 1).unwrap().str(), "panel");
+            assert_eq!(field(&m, 3).unwrap().str(), "Panel");
         })
         .await;
 }

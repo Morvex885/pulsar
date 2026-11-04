@@ -152,3 +152,150 @@ fn hsv_wraps_hue_in_turns() {
     assert_eq!(hsv(1.0, 1.0, 1.0), red);
     assert_eq!(hsv(-0.5, 1.0, 1.0), hsv(0.5, 1.0, 1.0));
 }
+
+#[test]
+fn panel_effect_returns_false_for_non_panel_names() {
+    let mut out = vec![Col::default(); 88];
+    assert!(!panel_effect(
+        "Rainbow",
+        rgb(255, 0, 255),
+        1.0,
+        0.0,
+        &mut out
+    ));
+    assert!(!panel_effect("", rgb(255, 0, 255), 1.0, 0.0, &mut out));
+    assert!(!panel_effect(
+        "Twinkle",
+        rgb(255, 0, 255),
+        1.0,
+        0.0,
+        &mut out
+    ));
+}
+
+#[test]
+fn panel_names_are_ring_noops_on_a_ring_layout() {
+    // Панельные имена на кольце не включают сетку Станции 2: раскладку задаёт модель, а не имя
+    // эффекта.
+    let st = EffectState::default();
+    let mut out = vec![Col::default(); 24];
+    assert!(!effect(
+        "Radar",
+        rgb(255, 0, 255),
+        1.0,
+        0.0,
+        0.0,
+        &mut st.with_layout(LedLayout::Ring),
+        &mut out,
+    ));
+    let mut st = EffectState::default().with_layout(LedLayout::Station2Panel);
+    let mut out = vec![Col::default(); 88];
+    assert!(effect(
+        "Radar",
+        rgb(255, 0, 255),
+        1.0,
+        0.0,
+        0.0,
+        &mut st,
+        &mut out,
+    ));
+}
+
+#[test]
+fn panel_effect_returns_true_for_every_panel_name() {
+    let mut out = vec![Col::default(); 88];
+    for &name in crate::effect_names(LedLayout::Station2Panel) {
+        assert!(
+            panel_effect(name, rgb(255, 0, 255), 1.0, 0.0, &mut out),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn panel_effects_keep_moving_after_long_uptime() {
+    // t растёт всё время работы демона; при 1e7 с (~116 суток) у f32 шаг 1 с.
+    let t = 10_000_000.0;
+    for &name in crate::effect_names(LedLayout::Station2Panel) {
+        let mut a = vec![Col::default(); 88];
+        let mut b = vec![Col::default(); 88];
+        assert!(
+            panel_effect(name, rgb(255, 0, 255), 1.0, t, &mut a),
+            "{name}"
+        );
+        assert!(
+            panel_effect(name, rgb(255, 0, 255), 1.0, t + 0.1, &mut b),
+            "{name}"
+        );
+        assert_ne!(a, b, "{name}: кадр не сдвинулся за 0,1 с");
+    }
+}
+
+#[test]
+fn panel_rainbow_hue_keeps_moving_after_long_uptime() {
+    // Белый цвет лампы по умолчанию идёт в радужные ветки: их оттенок тоже зависит от t.
+    let t = 10_000_000.0;
+    let hue = |o: &Col| {
+        let m = o.r.max(o.g).max(o.b);
+        (m > 0.05).then(|| (o.r / m, o.g / m, o.b / m))
+    };
+    for name in ["Radar", "Ripple", "Spiral"] {
+        let mut a = vec![Col::default(); 88];
+        let mut b = vec![Col::default(); 88];
+        assert!(panel_effect(name, rgb(255, 255, 255), 1.0, t, &mut a));
+        assert!(panel_effect(name, rgb(255, 255, 255), 1.0, t + 0.1, &mut b));
+        // Яркость светодиода сокращается при нормировке, остаётся только оттенок; допуск — на
+        // округление f32 разной яркости в двух кадрах.
+        let moved = a
+            .iter()
+            .zip(&b)
+            .filter_map(|(x, y)| Some((hue(x)?, hue(y)?)))
+            .any(|(x, y)| {
+                (x.0 - y.0)
+                    .abs()
+                    .max((x.1 - y.1).abs())
+                    .max((x.2 - y.2).abs())
+                    > 1e-3
+            });
+        assert!(moved, "{name}: оттенок не сдвинулся за 0,1 с");
+    }
+}
+
+#[test]
+fn panel_effect_writes_exactly_88_leds_and_no_more() {
+    let white = Col {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+    };
+    let mut out = vec![white; 100];
+    assert!(panel_effect("Radar", rgb(255, 0, 255), 0.5, 0.0, &mut out));
+    // Первые 88 светодиодов перезаписаны (не белые).
+    assert_ne!(out[0], white);
+    assert_ne!(out[87], white);
+    // Светодиоды за пределами 88 обнуляются циклом skip.
+    for o in &out[88..] {
+        assert_eq!(*o, Col::default(), "LEDs beyond the panel must be dark");
+    }
+}
+
+#[test]
+fn panel_effect_plain_color_uses_rainbow() {
+    // Ахроматический цвет пользователя: Radar рисует луч радугой, а не серым.
+    let mut out = vec![Col::default(); 88];
+    assert!(panel_effect(
+        "Radar",
+        rgb(128, 128, 128),
+        1.0,
+        0.0,
+        &mut out
+    ));
+    assert!(
+        out.iter().any(|o| o.r.max(o.g).max(o.b) > 0.0),
+        "луч не горит"
+    );
+    assert!(
+        out.iter().any(|o| o.r != o.g || o.g != o.b),
+        "луч серый, а не радужный"
+    );
+}

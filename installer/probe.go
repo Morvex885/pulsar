@@ -22,6 +22,8 @@ func modelName(code string) string {
 		return "Yandex Station Mini 3 Pro"
 	case "yandexmini":
 		return "Yandex Station Mini"
+	case "station-midi":
+		return "Yandex Station 2"
 	}
 	return ""
 }
@@ -30,18 +32,18 @@ func modelName(code string) string {
 // поддерживается. Ставится build/<arch>/pulsar для первой ABI, чей динамический загрузчик есть на
 // станции. Вторая ABI — только для userspace, действительно встреченного на этой модели: часть
 // образов Миди работает с 32-битным userspace на 64-битном ядре (#13), им нужна armhf-сборка
-// (ABI alsa-lib этих образов — #14). Лайт 2, Мини 2, Мини 3 и Мини — только armhf: 64-битного
-// userspace на них не встречали, а aarch64-бинарнику нужна glibc 2.34 — при промахе он ушёл бы в
-// crash-цикл и вернул стек Яндекса (при первой установке .prev нет). armhf-сборка собрана под
-// glibc 2.23 (как у Мини), userland 2.30 у Лайт 2, Мини 2 и Мини 3 её тоже запускает. Мини 3 Про —
-// только aarch64: на ней встречали лишь 64-битный userland (glibc 2.36).
+// (ABI alsa-lib этих образов — #14). Лайт 2, Мини 2, Мини 3, Мини и Станция 2 — только armhf:
+// 64-битного userspace на них не встречали, а aarch64-бинарнику нужна glibc 2.34 — при промахе он
+// ушёл бы в crash-цикл и вернул стек Яндекса (при первой установке .prev нет). armhf-сборка
+// собрана под glibc 2.23 (как у Мини), userland 2.30 у Лайт 2, Мини 2, Мини 3 и Станции 2 её тоже
+// запускает. Мини 3 Про — только aarch64: на ней встречали лишь 64-битный userland (glibc 2.36).
 func abis(code string) []string {
 	switch code {
 	case "cucumber":
 		return []string{"aarch64", "armhf"}
 	case "pickle":
 		return []string{"aarch64"}
-	case "plum", "prune", "station-mini2", "bergamot", "yandexmini":
+	case "plum", "prune", "station-mini2", "bergamot", "yandexmini", "station-midi":
 		return []string{"armhf"}
 	}
 	return nil
