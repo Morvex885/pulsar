@@ -112,11 +112,11 @@ userspace, действительно встреченного на этой м�
 контрибьюторов), `S99onboot.sh` (Мини, по данным контрибьюторов) → `onboot.sh` (adbd через
 `activate_adb.sh check`, quasar в фоне; возвращается) → `S99zpulsar` → `boot.sh` в фоне →
 ожидание quasar, `/system/vendor/quasar/q stop` (`q` есть на Лайт 2; Мини 2 — по данным
-контрибьюторов) → `supervise.sh`. Мини 3 (`bergamot`) поддерживают `boot.sh` и
-установщик, но скрипт прошивки Мини 3 не записан. Условия, при которых `boot.sh` не трогает стек
-Яндекса, — в его заголовке и комментариях. Root через AliceBridge добавляет в `/etc/init.d`
-`S99zalicebridge-ssh` и `S99zzalicebridge-agent` (файлы метода root): `S99zpulsar` идёт между
-ними. По [AGENT.md](https://github.com/Yandex-Station-Universal-Repo/AliceBridge_APP/blob/main/AGENT.md)
+контрибьюторов) → `supervise.sh`. Мини 3 (`bergamot`) и Мини 3 Про (`pickle`) поддерживают
+`boot.sh` и установщик, но их скрипты прошивки не записаны. Условия, при которых `boot.sh` не
+трогает стек Яндекса, — в его заголовке и комментариях. Root через AliceBridge добавляет в
+`/etc/init.d` `S99zalicebridge-ssh` и `S99zzalicebridge-agent` (файлы метода root): `S99zpulsar`
+идёт между ними. По [AGENT.md](https://github.com/Yandex-Station-Universal-Repo/AliceBridge_APP/blob/main/AGENT.md)
 агент восстанавливает сеть, ADB/SSH и защиту от OTA и обновляет себя; стека Яндекса в его задачах
 нет.
 

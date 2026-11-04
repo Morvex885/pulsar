@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
     /// Кодовое имя из devicetree: "cucumber", "plum", "prune", "station-mini2", "bergamot",
-    /// "yandexmini".
+    /// "pickle", "yandexmini".
     pub codename: &'static str,
     /// ESPHome node name prefix; the MAC suffix is appended.
     pub host_prefix: &'static str,
@@ -134,7 +134,7 @@ impl CaptureFormat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LedStrip {
     pub count: i32,
-    /// sysfs numbering starts at 0 (Midi, Mini 3) or 1 (Lite 2, Mini 2).
+    /// Нумерация sysfs начинается с 0 (Миди, Мини 3, Мини 3 Про) или с 1 (Лайт 2, Мини 2).
     pub first_index: i32,
     /// "/dev/fb0"; "" = none: sysfs LEDs only.
     pub fb_dev: &'static str,
@@ -315,9 +315,9 @@ static PRUNE: Model = Model {
     ..LITE2
 };
 
-// set_volume.sh on the Mini 2 is `amixer set 'Master' <percent>%`: raw = percent of 255, no dB
-// offset and no lowest step.
-const MINI2_VOLUME: &[VolumePoint] = &[
+// set_volume.sh у Мини 2 и (по вики) у Мини 3 Про — `amixer set 'Master' <percent>%`: raw —
+// процент от 255, без сдвига в дБ и без нижней ступени.
+const PERCENT_VOLUME: &[VolumePoint] = &[
     VolumePoint { level: 0, raw: 0 },
     VolumePoint {
         level: 20,
@@ -375,7 +375,7 @@ static MINI2: Model = Model {
     alsa_lib: "",
     software_volume: false,
     amp_enable_paths: &[],
-    volume_map: MINI2_VOLUME,
+    volume_map: PERCENT_VOLUME,
     volume_min_step: false,
     // Датчик есть не на всех станциях: см. docs/mini2.md, «Светодиоды и часы».
     has_lux: false,
@@ -514,12 +514,7 @@ static MINI3: Model = Model {
     zigbee_boot: "",
 };
 
-/// Station Mini 3 Pro: aarch64 userland (glibc 2.36), unlike the armhf Mini 3. maind captures from
-/// `default` = pcm.loopback = hw:0,2 (quasar.cfg `audiod`: 3 mics + 1 spk, S16 @ 48 kHz, preset
-/// "pickle"): 4 channels there are mics 0–2 and the amplifier reference on ch 3. hw:0,1
-/// ("PDM-dummy-mics") has the same mics without the reference (its ch 3 duplicates ch 2).
-/// 16-zone RGB ring (/dev/fb1) + 6-zone logo (/dev/fb0), both ledfb; LED clock and Zigbee left
-/// off for now.
+/// Станция Мини 3 Про: см. docs/mini3pro.md.
 static MINI3PRO: Model = Model {
     codename: "pickle",
     host_prefix: "yandex-mini3pro-",
@@ -529,6 +524,7 @@ static MINI3PRO: Model = Model {
     capture_rate: 48000,
     capture_channels: 4,
     capture_format: CaptureFormat::S16,
+    // Раскладка со слов контрибьютора: см. docs/mini3pro.md, «Не проверено».
     mic_channels: &[0, 1, 2],
     spk_channels: &[3],
     vqe_preset: "pickle",
@@ -553,14 +549,15 @@ static MINI3PRO: Model = Model {
         i2c_dev: "",
         i2c_addr: 0,
     },
+    // Раскладка часов Лайт 2 на плате plum: см. docs/mini3pro.md, «Светодиоды и часы».
     clock_dir: "/sys/class/leds/pickle:white:clock",
     clock_seg_base: 'A',
     clock_pos_base: 0,
     clock_colon: &["DH", "DL"],
-    clock_aux: &["DEGREE"],
+    clock_aux: &["H0", "H1", "H2", "H3", "DEGREE"],
     clock_center: "DM",
     clock_chip_current: false,
-    has_clock: false,
+    has_clock: true,
     keys_input: "aw933xx",
     mute_input: "mute",
     mute_gpio: 0,
@@ -576,8 +573,8 @@ static MINI3PRO: Model = Model {
     alsa_lib: "",
     software_volume: false,
     amp_enable_paths: &[],
-    volume_map: MINI3_VOLUME,
-    volume_min_step: true,
+    volume_map: PERCENT_VOLUME,
+    volume_min_step: false,
     has_lux: true,
     zigbee_tty: "",
     zigbee_reset: "",
@@ -797,6 +794,21 @@ mod tests {
         ] {
             assert!(model_from_compatible(raw).is_none(), "{raw:?}");
         }
+    }
+
+    #[test]
+    fn pickle_is_mini3pro() {
+        // compatible по вики: вариант платы, затем модель.
+        let m = model_from_compatible(b"yandex,pickle-evt\0yandex,pickle\0amlogic, a4\0").unwrap();
+        assert_eq!(m.codename, "pickle");
+        assert_eq!((m.capture_pcm, m.capture_channels), ("hw:0,2", 4));
+        assert_eq!(m.mic_channels, &[0, 1, 2]);
+        assert_eq!(m.spk_channels, &[3]);
+        assert_eq!((m.ring.count, m.logo.count), (16, 6));
+        assert!(m.has_clock && m.has_lux && !m.volume_min_step);
+        assert_eq!(m.zigbee_tty, "");
+        // Один вариант платы — не модель.
+        assert!(model_from_compatible(b"yandex,pickle-evt\0amlogic, a4\0").is_none());
     }
 
     #[test]
