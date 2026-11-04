@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 
+use tract_core::internal::RunnableModel;
 use tract_onnx::prelude::*;
 
 /// openWakeWord's frame: 80 ms of 16 kHz audio.
@@ -28,7 +29,7 @@ const EMB_WINDOW: usize = 76;
 const EMB_DIM: usize = 96;
 const FEATURES: usize = 16;
 
-type Plan = SimplePlan<TypedFact, Box<dyn TypedOp>, TypedModel>;
+type Plan = std::sync::Arc<tract_core::plan::SimplePlan<TypedFact, Box<dyn TypedOp>>>;
 
 /// The model's own name, from the classifier file name: `hey_jarvis_v0.1.onnx` -> "hey jarvis".
 pub fn phrase_of(file: &Path) -> String {
@@ -131,7 +132,7 @@ impl Oww {
             return None;
         }
         let window: Vec<f32> = self.feats.iter().copied().collect();
-        self.score(&window).ok()
+        self.score(&window).ok().flatten()
     }
 
     fn melspectrogram(&mut self, chunk: &[f32]) -> TractResult<Vec<f32>> {
@@ -141,23 +142,40 @@ impl Oww {
         let tail = chunk.len() - MEL_LOOKBACK;
         self.lookback.copy_from_slice(&chunk[tail..]);
 
-        let tensor = tract_ndarray::Array2::from_shape_vec((1, MEL_INPUT), input)?;
+        let tensor = Tensor::from_shape(&[1, MEL_INPUT], &input)?;
         let out = self.mel.run(tvec!(tensor.into()))?;
-        let view = out[0].to_array_view::<f32>()?;
+        let plain = out[0]
+            .clone()
+            .into_tensor()
+            .cast_to::<f32>()?
+            .into_owned()
+            .into_plain_array::<f32>()?;
         // same normalisation as openWakeWord: /10 + 2
-        Ok(view.iter().map(|v| v / 10.0 + 2.0).collect())
+        Ok(plain.iter().map(|v| v / 10.0 + 2.0).collect())
     }
 
     fn embedding(&mut self, mels: &[f32]) -> TractResult<Vec<f32>> {
-        let tensor = tract_ndarray::Array4::from_shape_vec((1, EMB_WINDOW, 32, 1), mels.to_vec())?;
+        let tensor = Tensor::from_shape(&[1, EMB_WINDOW, 32, 1], mels)?;
         let out = self.emb.run(tvec!(tensor.into()))?;
-        Ok(out[0].to_array_view::<f32>()?.iter().copied().collect())
+        let plain = out[0]
+            .clone()
+            .into_tensor()
+            .cast_to::<f32>()?
+            .into_owned()
+            .into_plain_array::<f32>()?;
+        Ok(plain.iter().copied().collect())
     }
 
     fn score(&mut self, window: &[f32]) -> TractResult<Option<f32>> {
-        let tensor = tract_ndarray::Array3::from_shape_vec((1, FEATURES, EMB_DIM), window.to_vec())?;
+        let tensor = Tensor::from_shape(&[1, FEATURES, EMB_DIM], window)?;
         let out = self.clf.run(tvec!(tensor.into()))?;
-        let score = out[0].to_array_view::<f32>()?.iter().copied().next().unwrap_or(0.0);
+        let plain = out[0]
+            .clone()
+            .into_tensor()
+            .cast_to::<f32>()?
+            .into_owned()
+            .into_plain_array::<f32>()?;
+        let score = plain.iter().copied().next().unwrap_or(0.0);
         Ok((score >= self.threshold).then_some(score))
     }
 }
