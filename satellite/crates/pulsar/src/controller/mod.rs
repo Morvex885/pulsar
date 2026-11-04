@@ -288,10 +288,12 @@ fn wake_word_names() -> Vec<String> {
 
 /// The phrase Home Assistant shows for a model directory (English, as the rest of the API).
 fn wake_word_phrase(id: &str) -> String {
+    // Both scripts: the word is the same in either language, and Home Assistant shows this one
+    // line as the option label, so a Russian and an English user both recognise it.
     match id {
-        "alisa" => "Alisa".into(),
-        "yandex" => "Yandex".into(),
-        "yasmina" => "Yasmina".into(),
+        "alisa" => "Алиса / Alisa".into(),
+        "yandex" => "Яндекс / Yandex".into(),
+        "yasmina" => "Ясмина / Yasmina".into(),
         other => other.to_string(),
     }
 }
@@ -364,7 +366,9 @@ impl Controller {
                 .map(|id| WakeWordInfo {
                     phrase: wake_word_phrase(&id),
                     id,
-                    languages: vec!["ru".into()],
+                    // Every shipped model is language-independent; declaring both keeps a
+                    // Russian-only client from hiding an English user's options and vice versa.
+                    languages: vec!["ru".into(), "en".into()],
                 })
                 .collect(),
             active_wake_words: vec![st.wake_word.clone()],
