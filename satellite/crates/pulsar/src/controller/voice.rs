@@ -912,7 +912,7 @@ impl Controller {
 impl Controller {
     /// Прошлого говорящего сбрасываем сразу, чтобы ответ не достался ему.
     fn speaker_begin(&mut self, preroll: &[i16]) {
-        let Some(speaker) = &mut self.speaker else {
+        let Some(speaker) = &self.speaker else {
             return;
         };
         self.speaker_seq = speaker.begin();
@@ -971,7 +971,8 @@ impl Controller {
         self.on_speaker_action(action, self.voice_name.clone());
     }
 
-    /// Как при звонке таймера, станция занимает очередь, чтобы соседние не начали диалог.
+    /// Фраза идёт в образец, а не в конвейер HA: агент не выполняет сказанное. Как при звонке
+    /// таймера, станция занимает очередь, чтобы соседние не начали диалог.
     fn enroll_wake(&mut self, level_db: f32, preroll: Vec<i16>) {
         if self.enroll_phrase.is_some() {
             return;
@@ -981,10 +982,14 @@ impl Controller {
             self.arbiter
                 .claim(&self.st.wake_word, level_db, true, false);
         }
-        if self.phase == Phase::Speaking || self.announcing {
+        if self.phase == Phase::Speaking {
+            // Иначе поздний Done ответа завершит диалог и выключит микрофон посреди фразы.
+            self.interrupt_speech();
+            self.finish_interaction();
+        } else if self.announcing {
             self.interrupt_speech();
         }
-        let Some(speaker) = &mut self.speaker else {
+        let Some(speaker) = &self.speaker else {
             return;
         };
         self.speaker_seq = speaker.begin_sample();
@@ -994,7 +999,6 @@ impl Controller {
         self.enroll_phrase = Some(endpointer);
         self.mic.set_streaming(true);
         self.timers.set(Tk::EnrollPhrase, PHRASE_MAX_MS);
-        self.timers.set(Tk::EnrollExpire, ENROLL_EXPIRE_MS);
         let sound = format!("{SOUNDS}{}", self.model.wake_sound);
         self.player.play(Channel::Announce, vec![sound]);
         self.update_duck();
@@ -1033,10 +1037,22 @@ impl Controller {
         self.update_ui();
     }
 
+    /// Сбрасываем и здесь: рабочий поток мог уже завершиться, и ответа от него не будет.
     pub(super) fn enroll_expired(&mut self) {
         if let Some(speaker) = &self.speaker {
             speaker.cancel(true);
         }
+        self.enroll_active = false;
+        self.enroll_phrase_abort();
+    }
+
+    /// Рабочий поток завершился: записи больше нет, активационное слово снова идёт в диалог.
+    pub(super) fn speaker_lost(&mut self) {
+        self.rx.speaker = None;
+        self.speaker = None;
+        self.enroll_active = false;
+        self.timers.cancel(Tk::EnrollExpire);
+        self.enroll_phrase_abort();
     }
 
     fn enroll_publish(&mut self, view: EnrollView) {
@@ -1092,7 +1108,9 @@ impl Controller {
             SpeakerEvent::Enroll(view) => {
                 self.enroll_active = view.active.is_some();
                 if self.enroll_active {
-                    if view.sound.is_some() {
+                    // Сам wake word и слишком короткая фраза срок не продлевают: иначе телевизор
+                    // держал бы запись открытой, и станция не отвечала бы на фразы.
+                    if view.sound.is_some() && view.note != EnrollNote::TooShort {
                         self.timers.set(Tk::EnrollExpire, ENROLL_EXPIRE_MS);
                     }
                 } else {
