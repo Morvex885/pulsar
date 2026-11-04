@@ -85,6 +85,7 @@ const VIZ_CYCLE_MS: i64 = 30_000;
 const VIZ_TIME_MS: i64 = 3000;
 
 const MUSIC_STYLES: [&str; 2] = ["Off", "Levels"];
+const TIME_FORMATS: [&str; 2] = ["24h", "12h"];
 
 /// Names of `set_face` indices: the 17 static faces, then "Blink", "All faces".
 pub fn face_names() -> &'static [&'static str] {
@@ -94,6 +95,11 @@ pub fn face_names() -> &'static [&'static str] {
 /// Clock music styles ("Clock music" select).
 pub fn music_styles() -> &'static [&'static str] {
     &MUSIC_STYLES
+}
+
+/// Форматы времени (Select «Clock format»).
+pub fn time_formats() -> &'static [&'static str] {
+    &TIME_FORMATS
 }
 
 fn shot_anim(s: ClockShot) -> Anim {
@@ -208,6 +214,8 @@ struct Layers {
     levels_on: bool,
     media: bool,
     viz: bool,
+    /// Select «Clock format» = "12h": часы 1..12.
+    hour12: bool,
     /// Per digit, 0..1 within its range.
     mus_in: [f32; DIGITS],
     mus_shown: [f32; DIGITS],
@@ -243,6 +251,7 @@ impl Layers {
             levels_on: false,
             media: false,
             viz: false,
+            hour12: false,
             mus_in: [0.0; DIGITS],
             mus_shown: [0.0; DIGITS],
             ranges: [Range::default(); 2],
@@ -497,7 +506,7 @@ impl Layers {
             let w = wall();
             // Colon on for the first half of every second.
             (
-                glyph_frame(font::time_glyphs(w.hour, w.min), w.first_half),
+                glyph_frame(font::time_glyphs(w.hour, w.min, self.hour12), w.first_half),
                 0,
             )
         }
@@ -701,6 +710,7 @@ enum Cmd {
     Play(ClockShot),
     SetUpdating(bool),
     SetMusicStyle(String),
+    SetTimeFormat(String),
     SetMediaPlaying(bool),
     MusicFrame(MusicFrame, bool),
 }
@@ -784,6 +794,7 @@ impl Clock {
             Cmd::Play(s) => l.play(s, now),
             Cmd::SetUpdating(on) => l.updating = on,
             Cmd::SetMusicStyle(style) => l.levels_on = style == "Levels",
+            Cmd::SetTimeFormat(f) => l.hour12 = f == "12h",
             Cmd::SetMediaPlaying(on) => l.media = on,
             Cmd::MusicFrame(f, from_sendspin) => {
                 // Frames only feed the meters; the frame timer draws them.
@@ -973,6 +984,11 @@ impl ClockHandle {
     /// One of `music_styles()`.
     pub fn set_music_style(&self, style: String) {
         self.send(Cmd::SetMusicStyle(style));
+    }
+
+    /// Одно из `time_formats()`.
+    pub fn set_time_format(&self, format: String) {
+        self.send(Cmd::SetTimeFormat(format));
     }
 
     pub fn set_media_playing(&self, playing: bool) {

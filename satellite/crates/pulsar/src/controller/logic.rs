@@ -237,6 +237,21 @@ pub fn command_of(word: &str) -> Option<VoiceCommand> {
     })
 }
 
+/// Стоп-команда в готовом тексте STT — запасной путь, когда командный спотер пропустил слово.
+/// Фраза сверяется целиком: «хватит ли времени» остаётся запросом к HA. Повтор («стоп, стоп») —
+/// тоже команда; «Алиса» / «Яндекс» впереди допускается на случай, если wake word попал в звук.
+pub fn stt_stop(text: &str) -> bool {
+    let text = text.to_lowercase();
+    let sep = |c: char| {
+        c.is_whitespace()
+            || c.is_ascii_punctuation()
+            || matches!(c, '«' | '»' | '\u{2010}'..='\u{2027}' | '‹' | '›')
+    };
+    let mut words = text.split(sep).filter(|w| !w.is_empty()).peekable();
+    words.next_if(|w| matches!(*w, "алиса" | "яндекс"));
+    words.peek().is_some() && words.all(|w| command_of(w) == Some(VoiceCommand::Stop))
+}
+
 /// Within the window after the wake word that opened this dialog: HA may end the speech of a
 /// short "Алиса, громче" (PROCESSING) before the command spotter confirms the word.
 pub fn after_wake(phase: Phase, now: i64, listen_started_ms: i64) -> bool {
@@ -412,6 +427,81 @@ pub fn strip_deleted(exe: &OsStr) -> &OsStr {
         OsStr::from_bytes(&b[..b.len() - DELETED.len()])
     } else {
         exe
+    }
+}
+
+/// Запас к окну follow-up на задержку STT_VAD_START: VAD HA шлёт его не раньше 0,3 с речи.
+// см. docs/voice.md, «Голосовой ассистент HA (ESPHome)»
+pub const FOLLOWUP_VAD_GRACE_MS: u64 = 1000;
+
+/// Продолжение разговора: следующую реплику должен попросить HA, а ошибку run поздний
+/// INTENT_END не отменяет.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Followup {
+    /// INTENT_END этого run попросил ещё реплику, ошибок в run не было.
+    requested: bool,
+    /// В run была ошибка.
+    failed: bool,
+    /// В этом run пришёл STT_VAD_START.
+    vad_seen: bool,
+    /// Идёт follow-up-реплика, речь ещё не началась.
+    awaiting_speech: bool,
+    /// Окно этой реплики ограничено таймером. Только если в прошлом run пришёл STT_VAD_START:
+    /// без него таймер нечем снять и он оборвал бы реплику, а тип VAD по STT_START на ESPHome
+    /// не узнать.
+    // см. docs/voice.md, «Голосовой ассистент HA (ESPHome)»
+    timed: bool,
+}
+
+impl Followup {
+    pub fn on_event(&mut self, event: VaEvent, continue_conversation: bool) {
+        match event {
+            // RUN_START follow-up-реплики приходит уже после `next_turn`: её флаги не трогаем.
+            VaEvent::RunStart => {
+                self.requested = false;
+                self.failed = false;
+                self.vad_seen = false;
+            }
+            VaEvent::IntentEnd => self.requested = continue_conversation && !self.failed,
+            VaEvent::Error => {
+                self.failed = true;
+                self.requested = false;
+            }
+            VaEvent::SttVadStart => {
+                self.vad_seen = true;
+                self.awaiting_speech = false;
+            }
+            _ => {}
+        }
+    }
+
+    /// Слушать ли следующую реплику после ответа.
+    pub fn should_continue(&self, ok: bool, seconds: u32, blocked: bool) -> bool {
+        ok && self.requested && !blocked && seconds > 0
+    }
+
+    /// Состояние для follow-up-реплики, начатой после этого run.
+    pub fn next_turn(self) -> Self {
+        Self {
+            awaiting_speech: true,
+            timed: self.vad_seen,
+            ..Self::default()
+        }
+    }
+
+    /// Таймер ожидания речи от STT_START follow-up-реплики, мс.
+    pub fn window_ms(&self, seconds: u32) -> Option<u64> {
+        (self.awaiting_speech && self.timed && seconds > 0)
+            .then(|| u64::from(seconds) * 1000 + FOLLOWUP_VAD_GRACE_MS)
+    }
+
+    /// Ошибка — это молчание в follow-up-реплике: диалог закрывается тихо.
+    pub fn silent(&self, code: &str) -> bool {
+        self.awaiting_speech && code == "stt-no-text-recognized"
+    }
+
+    pub fn awaiting_speech(&self) -> bool {
+        self.awaiting_speech
     }
 }
 

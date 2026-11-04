@@ -133,10 +133,12 @@ fn ring_dump(model: &Model) -> String {
 
 /// Яркость в sysfs для байта фреймбуфера по каналу. led_ring_fb Лайт 2 масштабирует каждый канал
 /// по пути к светодиодам (см. docs/lite2.md, «Светодиоды и часы»), яркость упирается в 63
-/// (измерено при остановленном демоне: fb 26/100/150/204/255 -> красный 9/37/55/63/63, зелёный
-/// 6/24/36/49/62, синий 4/19/29/39/49); у Миди читается как записано.
-fn sysfs_expected(model: &Model, fb: [u8; 3]) -> [i32; 3] {
-    if model.codename == "plum" {
+/// (измерено на плате plum при остановленном демоне: fb 26/100/150/204/255 -> красный
+/// 9/37/55/63/63, зелёный 6/24/36/49/62, синий 4/19/29/39/49); у Миди читается как записано.
+/// Без framebuffer (`fb_output` false) pulsar-hw пишет яркость в sysfs сам, мимо trigger, и она
+/// читается как записана. Плата prune: см. docs/lite2.md, «Не проверено».
+fn sysfs_expected(model: &Model, fb: [u8; 3], fb_output: bool) -> [i32; 3] {
+    if fb_output && model.ring.trigger == "led_ring_fb" {
         let k = [0.36, 0.23, 0.2];
         [0, 1, 2].map(|c| ((f32::from(fb[c]) * k[c]).round() as i32).min(63))
     } else {
@@ -144,10 +146,13 @@ fn sysfs_expected(model: &Model, fb: [u8; 3]) -> [i32; 3] {
     }
 }
 
-/// Whether the daemon would drive `s` through its framebuffer: the same test as pulsar-hw
-/// (trigger active on the first red LED, fb named as expected). Models without LED trigger
-/// (Station 2's Gowin panel) just check the framebuffer name.
+/// Выводит ли демон ленту `s` через framebuffer: та же проверка, что в pulsar-hw (`fb_dev`
+/// задан, имя fb совпадает с моделью, LED-триггер, если он у ленты есть, активен на первом
+/// красном светодиоде).
 fn fb_mode(model: &Model, s: &LedStrip) -> bool {
+    if s.fb_dev.is_empty() {
+        return false;
+    }
     let dev = s.fb_dev.rsplit('/').next().unwrap_or(s.fb_dev);
     let name = pulsar_core::sysfs::read_file(&format!("/sys/class/graphics/{dev}/name"))
         .unwrap_or_default();
@@ -163,11 +168,12 @@ fn fb_mode(model: &Model, s: &LedStrip) -> bool {
     ok && trigger.contains(&format!("[{}]", s.trigger))
 }
 
-/// The strip's framebuffer as RGB per LED; None when it cannot be read. 32-bpp panels
-/// (Station 2) read 4 bytes per pixel and discard the fourth.
+/// Фреймбуфер ленты как RGB по светодиодам; None, если его не прочитать. Пиксель 24 bpp —
+/// B, G, R; 32 bpp (панель Станции 2) — R, G, B, W, белый байт не читается.
 fn strip_fb(s: &LedStrip) -> Option<Vec<[u8; 3]>> {
     let n = usize::try_from(s.count).ok()?;
-    let bpp = std::fs::read_to_string("/sys/class/graphics/fb0/bits_per_pixel")
+    let dev = s.fb_dev.rsplit('/').next().unwrap_or(s.fb_dev);
+    let bpp = std::fs::read_to_string(format!("/sys/class/graphics/{dev}/bits_per_pixel"))
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(24);
@@ -191,18 +197,22 @@ fn strip_fb(s: &LedStrip) -> Option<Vec<[u8; 3]>> {
     )
 }
 
-/// Checks that every pixel of the strip's framebuffer is `fb` (in framebuffer mode) and that
-/// every LED's sysfs brightness matches it as the model reads it back (within ±3). An I²C ring
-/// (the Mini's) has neither: the check is skipped. A model with no LED trigger (Station 2's Gowin
-/// panel) has no sysfs LEDs at all, so only the framebuffer is checked — otherwise every missing
-/// brightness file would read as 0 and the check would report FAIL on a correct frame.
+/// Проверяет, что каждый пиксель фреймбуфера ленты равен `fb` (если демон выводит через
+/// framebuffer) и что яркость каждого sysfs-светодиода читается как `fb` с поправкой модели
+/// (±3). У I²C-кольца (Мини) нет ни того, ни другого — проверка пропускается. У модели без
+/// поканальных sysfs-светодиодов (`led_prefix` пуст, Станция 2) проверяется только framebuffer:
+/// отсутствующие файлы яркости читались бы как 0; если и framebuffer не годится — FAIL.
 fn check_strip(model: &Model, s: &LedStrip, what: &str, fb: [u8; 3]) -> bool {
     if !s.i2c_dev.is_empty() {
         say(&format!("   check {what}: I²C ring has no read-back, SKIP"));
         return true;
     }
-    let sysfs = !s.trigger.is_empty();
-    let want = sysfs_expected(model, fb);
+    // pulsar-hw uses the framebuffers only if the ring's and the logo's both qualify.
+    let fb_output =
+        fb_mode(model, &model.ring) && (model.logo.count == 0 || fb_mode(model, &model.logo));
+    let want = sysfs_expected(model, fb, fb_output);
+    // Та же проверка, что в open_sysfs pulsar-hw.
+    let sysfs = !model.led_prefix.is_empty();
     let mut ok = true;
     let mut got = String::new();
     if sysfs {
@@ -214,9 +224,6 @@ fn check_strip(model: &Model, s: &LedStrip, what: &str, fb: [u8; 3]) -> bool {
     } else {
         got = " (no sysfs LEDs)".to_owned();
     }
-    // pulsar-hw uses the framebuffers only if the ring's and the logo's both qualify.
-    let fb_output =
-        fb_mode(model, &model.ring) && (model.logo.count == 0 || fb_mode(model, &model.logo));
     let fb_state = if !fb_output {
         if sysfs {
             "fb not checked (sysfs output)".to_owned()

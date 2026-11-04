@@ -1,8 +1,10 @@
-// Fixtures in tests/golden/settings/ come from the C++ reference (rust-port-base): Settings::load
-// and Settings::save of controller.cpp, copied verbatim into a throwaway host harness built with
-// `zig c++ -std=c++20 -O2`. save_*.conf: `save` of the values below; load_*.out: `load` of
-// load_*.in, then `save`. Edited by hand since: `wake_preroll` (after `clock_music`; 0 in
-// load_odd.in); `clock_auto_brightness` (after `wake_preroll`).
+// Фикстуры в tests/golden/settings/ сняты с эталона на C++ (rust-port-base): Settings::load и
+// Settings::save из controller.cpp, перенесённые без изменений во временный хост-харнесс, собранный
+// `zig c++ -std=c++20 -O2`. save_*.conf — `save` значений ниже; load_*.out — `load` из load_*.in,
+// затем `save`. С тех пор правились руками: `clock_auto_brightness` (после `clock_music`);
+// `followup_duration_s` (10); `clock_format` (12h в load_odd.in, bogus → 24h в load_edge.in);
+// `command_start_offset_ms` (0, последним). `wake_preroll` (бывший переключатель) больше не
+// пишется и не читается; в load_odd.in остался как неизвестный ключ.
 
 use super::*;
 
@@ -329,10 +331,64 @@ fn strtoul_hex_matches_libc() {
 fn clock_auto_brightness_is_always_written() {
     let mut s = Settings::default();
     assert!(s.clock_auto_brightness);
-    assert!(s.serialize().ends_with("clock_auto_brightness=1\n"));
+    assert!(
+        s.serialize()
+            .lines()
+            .any(|line| line == "clock_auto_brightness=1")
+    );
     s.parse(b"clock_auto_brightness=0\n");
     assert!(!s.clock_auto_brightness);
-    assert!(s.serialize().ends_with("clock_auto_brightness=0\n"));
+    assert!(
+        s.serialize()
+            .lines()
+            .any(|line| line == "clock_auto_brightness=0")
+    );
     s.parse(b"clock_auto_brightness=1\n");
     assert!(s.clock_auto_brightness);
+}
+
+#[test]
+fn followup_duration_defaults_roundtrips_and_clamps() {
+    let mut st = Settings::default();
+    st.parse(b"unknown_old_setting=1\n");
+    assert_eq!(st.followup_duration_s, 10);
+    for seconds in [0, 7, 10] {
+        st.followup_duration_s = seconds;
+        let mut loaded = Settings::default();
+        loaded.parse(st.serialize().as_bytes());
+        assert_eq!(loaded.followup_duration_s, seconds);
+    }
+    st.followup_duration_s = 7;
+    for value in ["NaN", "inf", "-inf"] {
+        st.parse(format!("followup_duration_s={value}\n").as_bytes());
+        assert_eq!(st.followup_duration_s, 7, "{value}");
+    }
+    // Разбор как у остальных чисел — strtof: мусор даёт 0, число в начале строки читается.
+    for (value, expected) in [
+        ("garbage", 0),
+        ("", 0),
+        ("7junk", 7),
+        ("-1", 0),
+        ("7.6", 8),
+        ("999999", 10),
+    ] {
+        st.parse(format!("followup_duration_s={value}\n").as_bytes());
+        assert_eq!(st.followup_duration_s, expected, "{value}");
+    }
+}
+
+#[test]
+fn command_start_offset_roundtrips_negative_and_clamps() {
+    let mut st = Settings::default();
+    assert_eq!(st.command_start_offset_ms, 0);
+    for ms in [-100, -30, 0, 40, 200] {
+        st.command_start_offset_ms = ms;
+        let mut loaded = Settings::default();
+        loaded.parse(st.serialize().as_bytes());
+        assert_eq!(loaded.command_start_offset_ms, ms);
+    }
+    for (value, expected) in [("-500", -100), ("999", 200), ("12.6", 13), ("NaN", 13)] {
+        st.parse(format!("command_start_offset_ms={value}\n").as_bytes());
+        assert_eq!(st.command_start_offset_ms, expected, "{value}");
+    }
 }

@@ -235,7 +235,6 @@ impl Server {
             key::SW_AUTO_UPDATE => SwitchId::AutoUpdate,
             key::SW_NEAREST_ANSWERS => SwitchId::NearestAnswers,
             key::SW_VOICE_INDICATION => SwitchId::VoiceIndication,
-            key::SW_WAKE_PREROLL => SwitchId::WakePreroll,
             _ => return,
         };
         self.emit(ApiEvent::Switch(id, state));
@@ -257,6 +256,18 @@ impl Server {
             key::NUMBER_CLOCK_BRI => (NumberId::ClockBrightness, v.clamp(0.0, 100.0)),
             key::NUMBER_CLOCK_SCROLL => (NumberId::ClockScroll, v.clamp(100.0, 2000.0)),
             key::NUMBER_LED_SPEED => (NumberId::LedSpeed, v.clamp(LED_SPEED_MIN, LED_SPEED_MAX)),
+            key::NUMBER_FOLLOWUP_DURATION => {
+                let Some(s) = crate::followup_duration_s(v) else {
+                    return;
+                };
+                (NumberId::FollowupDuration, s as f32)
+            }
+            key::NUMBER_COMMAND_OFFSET => {
+                let Some(ms) = crate::command_offset_ms(v) else {
+                    return;
+                };
+                (NumberId::CommandOffset, ms as f32)
+            }
             _ => return,
         };
         self.emit(ApiEvent::Number(id, v));
@@ -300,6 +311,11 @@ impl Server {
                 SelectId::ClockMusic,
                 &self.cfg.clock_music_styles,
                 "clock music",
+            ),
+            key::SELECT_CLOCK_FORMAT => (
+                SelectId::ClockFormat,
+                &self.cfg.clock_formats,
+                "clock format",
             ),
             key::SELECT_MUSIC_VIZ => (
                 SelectId::MusicViz,
