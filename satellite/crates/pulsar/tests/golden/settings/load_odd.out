@@ -26,3 +26,4 @@ clock_music=Levels
 wake_preroll=0
 clock_auto_brightness=1
 followup_duration_s=10
+wake_sound=1

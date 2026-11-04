@@ -48,6 +48,7 @@ pub(super) mod key {
     pub const SW_WAKE_PREROLL: u32 = 32;
     pub const SW_CLOCK_AUTO_BRI: u32 = 33;
     pub const NUMBER_FOLLOWUP_DURATION: u32 = 34;
+    pub const SW_WAKE_SOUND: u32 = 35;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -124,6 +125,7 @@ pub(super) struct Cache {
     sw_auto_update: BoolState,
     sw_nearest_answers: BoolState,
     sw_voice_indication: BoolState,
+    sw_wake_sound: BoolState,
     sw_wake_preroll: BoolState,
     bs_hw_mute: BoolState,
     update: UpdateState,
@@ -158,6 +160,7 @@ impl Cache {
             sw_auto_update: BoolState::default(),
             sw_nearest_answers: BoolState::default(),
             sw_voice_indication: BoolState::default(),
+            sw_wake_sound: BoolState::default(),
             sw_wake_preroll: BoolState::default(),
             bs_hw_mute: BoolState::default(),
             update: UpdateState::default(),
@@ -259,7 +262,8 @@ impl Server {
             SwitchId::Microphones
             | SwitchId::AutoUpdate
             | SwitchId::NearestAnswers
-            | SwitchId::VoiceIndication => true,
+            | SwitchId::VoiceIndication
+            | SwitchId::WakeSound => true,
         }
     }
 
@@ -338,6 +342,13 @@ impl Server {
             key::SW_VOICE_INDICATION,
             "Voice indication",
             "mdi:led-on",
+            cfg,
+        ));
+        out.push(switch(
+            "wake_sound",
+            key::SW_WAKE_SOUND,
+            "Wake sound",
+            "mdi:volume-high",
             cfg,
         ));
         if self.cfg.has_wake_preroll {
@@ -732,13 +743,14 @@ impl Server {
         let to = Some(id);
         let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
         let c = &self.cache;
-        let (mic, clock, auto_bri, auto, nearest, voice, preroll, hw) = (
+        let (mic, clock, auto_bri, auto, nearest, voice, wake_sound, preroll, hw) = (
             c.sw_microphones,
             c.sw_clock,
             c.sw_clock_auto_bri,
             c.sw_auto_update,
             c.sw_nearest_answers,
             c.sw_voice_indication,
+            c.sw_wake_sound,
             c.sw_wake_preroll,
             c.bs_hw_mute,
         );
@@ -754,6 +766,7 @@ impl Server {
         self.send_bool(msg::SWITCH_STATE, key::SW_AUTO_UPDATE, auto, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_NEAREST_ANSWERS, nearest, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_VOICE_INDICATION, voice, to);
+        self.send_bool(msg::SWITCH_STATE, key::SW_WAKE_SOUND, wake_sound, to);
         if self.cfg.has_wake_preroll {
             self.send_bool(msg::SWITCH_STATE, key::SW_WAKE_PREROLL, preroll, to);
         }
@@ -904,6 +917,7 @@ impl Server {
                     SwitchId::VoiceIndication => {
                         (&mut c.sw_voice_indication, key::SW_VOICE_INDICATION)
                     }
+                    SwitchId::WakeSound => (&mut c.sw_wake_sound, key::SW_WAKE_SOUND),
                     SwitchId::WakePreroll => (&mut c.sw_wake_preroll, key::SW_WAKE_PREROLL),
                 };
                 *s = BoolState { has: true, v };

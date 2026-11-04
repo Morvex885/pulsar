@@ -62,6 +62,8 @@ pub struct Settings {
     pub led_speed: f32,
     /// Listening / thinking / speaking shown on the ring and the clock.
     pub voice_indication: bool,
+    /// Звук подтверждения начала прослушивания.
+    pub wake_sound: bool,
     /// Audio between the end of the wake word and its confirmation goes ahead of the request.
     pub wake_preroll: bool,
     /// Сколько ждать начала речи в follow-up-реплике, с; 0 — не продолжать разговор.
@@ -99,6 +101,7 @@ impl Default for Settings {
             clock_music: "Off".into(),
             led_speed: 1.0,
             voice_indication: true,
+            wake_sound: true,
             wake_preroll: true,
             followup_duration_s: 10,
             led_case_color: String::new(),
@@ -173,6 +176,7 @@ impl Settings {
                     };
                 }
                 b"voice_indication" => self.voice_indication = on,
+                b"wake_sound" => self.wake_sound = on,
                 b"wake_preroll" => self.wake_preroll = on,
                 b"followup_duration_s" => {
                     if let Some(s) = pulsar_esphome::followup_duration_s(fv) {
@@ -202,7 +206,7 @@ impl Settings {
              light_b={}\nlight_effect={}\nwake_word={}\ntz={}\nauto_update={}\nupdate_attempt={}\n\
              zigbee_role={}\nzigbee_flash_failed={:x}\nnearest_answers={}\nmusic_viz={}\n\
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
-             wake_preroll={}\nclock_auto_brightness={}\nfollowup_duration_s={}\n",
+             wake_preroll={}\nclock_auto_brightness={}\nfollowup_duration_s={}\nwake_sound={}\n",
             f(self.volume),
             f(self.volume_legacy),
             b(self.muted),
@@ -231,6 +235,7 @@ impl Settings {
             b(self.wake_preroll),
             b(self.clock_auto_brightness),
             self.followup_duration_s,
+            b(self.wake_sound),
         )
     }
 

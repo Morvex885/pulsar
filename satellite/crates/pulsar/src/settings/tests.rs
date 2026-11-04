@@ -2,7 +2,7 @@
 // Settings::save из controller.cpp, перенесённые без изменений во временный хост-харнесс, собранный
 // `zig c++ -std=c++20 -O2`. save_*.conf — `save` значений ниже; load_*.out — `load` из load_*.in,
 // затем `save`. С тех пор правились руками: `wake_preroll` (после `clock_music`; 0 в load_odd.in);
-// `clock_auto_brightness` (после `wake_preroll`); `followup_duration_s` (10, последним).
+// `clock_auto_brightness` (после `wake_preroll`); `followup_duration_s` (10); `wake_sound` (1, последним).
 
 use super::*;
 
@@ -373,4 +373,18 @@ fn followup_duration_defaults_roundtrips_and_clamps() {
         st.parse(format!("followup_duration_s={value}\n").as_bytes());
         assert_eq!(st.followup_duration_s, expected, "{value}");
     }
+}
+
+#[test]
+fn wake_sound_defaults_on_and_persists_disabled() {
+    let mut s = Settings::default();
+    s.parse(b"volume2=0.2\n");
+    assert!(s.wake_sound, "старые файлы сохраняют звук включённым");
+    s.parse(b"wake_sound=0\n");
+    assert!(!s.wake_sound);
+    let mut restored = Settings::default();
+    restored.parse(s.serialize().as_bytes());
+    assert!(!restored.wake_sound);
+    restored.parse(b"wake_sound=1\n");
+    assert!(restored.wake_sound);
 }

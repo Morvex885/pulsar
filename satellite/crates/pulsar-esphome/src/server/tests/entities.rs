@@ -708,9 +708,9 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
                 }
                 keys.push(field(&m, 2).unwrap().u32());
             }
-            // 15 сущностей и сервис led_show; нет часов, Lux, пре-ролла wake word, аппаратного
+            // 16 сущностей и сервис led_show; нет часов, Lux, пре-ролла wake word, аппаратного
             // MUTE, цвета корпуса и Button.
-            assert_eq!(keys.len(), 16, "keys: {keys:?}");
+            assert_eq!(keys.len(), 17, "keys: {keys:?}");
             assert!(keys.contains(&key::NUMBER_FOLLOWUP_DURATION));
             assert!(keys.contains(&key::ACTION_LED_SHOW));
             let absent = [
@@ -989,6 +989,64 @@ async fn followup_duration_is_universal_config_and_replays_its_state() {
                         .find(|(_, m)| state_key(m) == Some(key::NUMBER_FOLLOWUP_DURATION))
                         .unwrap();
                     assert_eq!(field(m, 2).map_or(0.0, |f| f.flt()), value);
+                }
+            })
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn wake_sound_switch_is_universal_and_replays_both_states() {
+    for has_clock in [true, false] {
+        local()
+            .run_until(async {
+                let (id, mut cfg) = selftest("now");
+                cfg.has_clock = has_clock;
+                cfg.has_wake_preroll = false;
+                let (h, mut rx, port) = start_with(id, cfg);
+                let mut p = Peer::connect(port).await;
+                p.hello("HA").await;
+                event(&mut rx).await;
+                p.send(msg::LIST_ENTITIES_REQ, &Writer::new()).await;
+                let mut found = false;
+                loop {
+                    let (t, m) = p.recv().await.unwrap();
+                    if t == msg::LIST_DONE {
+                        break;
+                    }
+                    if t == msg::LIST_SWITCH && field(&m, 2).unwrap().u32() == key::SW_WAKE_SOUND {
+                        found = true;
+                        assert_eq!(field(&m, 1).unwrap().str(), "wake_sound");
+                        assert_eq!(field(&m, 3).unwrap().str(), "Wake sound");
+                        assert_eq!(field(&m, 8).unwrap().u32(), 1);
+                    }
+                }
+                assert!(found);
+                p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+                p.sync().await;
+                for on in [false, true] {
+                    p.send(
+                        msg::SWITCH_CMD,
+                        &kv(key::SW_WAKE_SOUND, |w| w.boolean(2, on, true)),
+                    )
+                    .await;
+                    assert_eq!(
+                        drain(&mut p, &mut rx).await,
+                        [ApiEvent::Switch(SwitchId::WakeSound, on)]
+                    );
+                    h.publish_switch(SwitchId::WakeSound, on);
+                    let pushed = p.sync().await;
+                    p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+                    let replayed = p.sync().await;
+                    for states in [pushed, replayed] {
+                        let (_, m) = states
+                            .iter()
+                            .find(|(t, m)| {
+                                *t == msg::SWITCH_STATE && state_key(m) == Some(key::SW_WAKE_SOUND)
+                            })
+                            .unwrap();
+                        assert_eq!(field(m, 2).is_some_and(|f| f.u32() != 0), on);
+                    }
                 }
             })
             .await;
