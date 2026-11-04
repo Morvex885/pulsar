@@ -6,7 +6,8 @@ use std::sync::LazyLock;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
-    /// Devicetree codename: "cucumber", "plum", "prune", "station-mini2", "bergamot", "yandexmini".
+    /// Кодовое имя из devicetree: "cucumber", "plum", "prune", "station-mini2", "bergamot",
+    /// "yandexmini".
     pub codename: &'static str,
     /// ESPHome node name prefix; the MAC suffix is appended.
     pub host_prefix: &'static str,
@@ -238,7 +239,7 @@ const NO_STRIP: LedStrip = LedStrip {
 };
 
 // { "0": 0, "1": 49, "20": 255 }: softvol min_dB -60, значит 2,6 дБ на уровень, уровень 1 — на
-// -48,5 дБ. Та же карта в quasar.cfg Лайт 2 на плате plum; quasar.cfg платы prune не прочитан.
+// -48,5 дБ. Та же карта в quasar.cfg Лайт 2 на плате plum; prune: см. docs/lite2.md, «Не проверено».
 const STOCK_VOLUME: &[VolumePoint] = &[
     VolumePoint { level: 0, raw: 0 },
     VolumePoint { level: 1, raw: 49 },
