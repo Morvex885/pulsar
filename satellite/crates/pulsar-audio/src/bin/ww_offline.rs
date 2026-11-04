@@ -1,13 +1,14 @@
-//! Offline evaluation of a stock spotter model on a recording made on the device: raw capture
-//! WAV (S16, layout of the detected model, e.g. `arecord -D hw:0,1 -c 8 -r 48000` on the Lite 2,
-//! or `frontend_probe --record`) -> Yandex VQE -> spotter. The spotter channel layout is derived
-//! from the model like the daemon does.
-//! usage: ww_offline <wav> [model_dir]   (default: .../spotter_models/activation/alisa)
-//! Prints every spotter event with its time; "HIT" lines are confirmations (events 2 and 5), and
-//! per second the RMS of the speaker reference and of the VQE output (echo cancellation check).
-//! Experiments: VT=<type> feeds every spotter channel from that VQE output; SPK=<ch>[,<ch>...]
-//! overrides the speaker reference capture channels; unlike the C++ tool, it must name as many
-//! channels as the model's VQE preset takes (the library is never given other counts).
+//! Офлайн-прогон стоковой модели спотера по записи, сделанной на станции: сырой WAV захвата
+//! (S16, раскладка определённой модели, например `arecord -D hw:0,1 -c 8 -r 48000` на Лайт 2
+//! или `frontend_probe --record`) -> VQE Яндекса -> спотер. Раскладка каналов спотера берётся
+//! из модели, как в демоне.
+//! usage: ww_offline <wav> [model_dir]   (по умолчанию .../spotter_models/activation/alisa)
+//! Печатает каждое событие спотера со временем; строки "HIT" — подтверждения (события 2 и 5);
+//! раз в секунду — RMS референса динамика и выхода VQE (проверка эхоподавления).
+//! Эксперименты: VT=<type> подаёт на все каналы спотера этот выход VQE; LEGACY=1 — прежнюю
+//! раскладку wake-спотера pulsar (`LEGACY_SPOTTER_TO_VQE`); SPK=<ch>[,<ch>...] заменяет каналы
+//! захвата референса динамика; в отличие от C++-утилиты, их должно быть столько, сколько берёт
+//! пресет VQE модели (библиотека не получает других количеств).
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -17,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use pulsar_audio::engine::{
-    Lib, LoadError, SPOTTER_RATE, SPOTTER_TO_VQE, SPOTTER_TYPES, Spotter, SpotterConf, VQE_MODELS,
-    Vqe, VqeStep, preload_deps, spotter_layout,
+    LEGACY_SPOTTER_TO_VQE, Lib, LoadError, SPOTTER_RATE, SPOTTER_TO_VQE, SPOTTER_TYPES, Spotter,
+    SpotterConf, VQE_MODELS, Vqe, VqeStep, preload_deps, spotter_layout, to_s16,
 };
 
 const DEFAULT_MODEL: &str = "/system/vendor/quasar/spotter_models/activation/alisa";
@@ -140,11 +141,17 @@ fn run() -> u8 {
     for (t, n) in counts.iter_mut().enumerate() {
         *n = conf.channel_count(t as i64).unwrap_or(0);
     }
-    let mut layout = spotter_layout(&counts, SPOTTER_TO_VQE[0]);
+    let table = if std::env::var_os("LEGACY").is_some() {
+        &LEGACY_SPOTTER_TO_VQE
+    } else {
+        &SPOTTER_TO_VQE
+    };
+    let mut layout = spotter_layout(&counts, table);
     // VT=<type>: every channel from that VQE output (experiments).
     if let Some(vt) = std::env::var_os("VT") {
         layout.vqe.fill(atoi(&vt.to_string_lossy()));
     }
+    out!("channels [{layout}]");
     let mut sp = match Spotter::create(&conf, SPOTTER_RATE, &layout.types) {
         (Some(sp), _) => sp,
         (None, e) => {
@@ -201,16 +208,13 @@ fn run() -> u8 {
                     return 1;
                 }
             };
+            // Утилита для замеров не подменяет каналы молча.
+            if d.is_empty() {
+                out!("out {ty}: none in the preset");
+                return 1;
+            }
             for (i, &x) in d.iter().take(frame).enumerate() {
-                let v = x * 32768.0;
-                // Truncated, unlike the daemon's lrint: the C++ tool's conversion.
-                sbuf[i * nch + k] = if v > 32767.0 {
-                    32767
-                } else if v < -32768.0 {
-                    -32768
-                } else {
-                    v as i16
-                };
+                sbuf[i * nch + k] = to_s16(x);
                 if k == 0 {
                     out_e = f64::from(x).mul_add(f64::from(x), out_e);
                     out_n += 1;

@@ -819,9 +819,9 @@ fn processing(
             continue;
         }
 
-        // VQE_OMNI is cleaned of the station's own playback but has no AGC, so it keeps the
-        // distance to the talker; VQE_OMNI_WITH_GAIN, which the spotter hears, normalizes it
-        // away.
+        // Уровень для арбитража — с VQE_OMNI: он очищен от собственного воспроизведения станции
+        // и, в отличие от VQE_OMNI_WITH_GAIN, не проходит усиление пресета, так что не зависит от
+        // настройки усиления модели; см. docs/hardware.md, «Библиотеки Яндекса (C API)».
         if let Some(d) = eng.output(VQE_OMNI)
             && !d.is_empty()
         {
