@@ -25,6 +25,7 @@ use pulsar_core::model::{CaptureFormat, Model};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::engine::{Engine, SPOTTER_RATE, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
+use crate::oww;
 use crate::spectrum::SpectrumAnalyzer;
 
 /// Wake word level window: 1.5 s in 32 ms blocks at 16 kHz, independent of VQE chunk size.
@@ -41,6 +42,8 @@ const SAMPLES_PER_MS: usize = SPOTTER_RATE as usize / 1000;
 /// Конец речи для строки лога "wake anchor": самый новый блок окна уровня в пределах 20 дБ
 /// (по мощности) от самого громкого.
 const SPEECH_END_RATIO: f32 = 0.01;
+/// Where the OpenWakeWord models live when that engine is installed.
+const OWW_DIR: &str = "/data/pulsar/oww";
 
 /// ALSA buffer in VQE chunks: 256 ms with 32 ms chunks, 128 ms on the Mini 3 and Mini (16 ms);
 /// the device may grant less (Lite 2: 2048 frames).
@@ -112,11 +115,25 @@ pub fn spawn(
         _events: tx.clone(),
     };
     let command_dir = command_model_dir.filter(|d| !d.as_os_str().is_empty());
+    // OpenWakeWord takes over detection when its models are installed; the VQE (echo
+    // cancellation) and the command spotter stay Yandex. The Yandex wake spotter is still
+    // started — an empty model path crashes its C wrapper — but it is never fed while
+    // OpenWakeWord runs.
+    let oww = match oww::Oww::load(std::path::Path::new(OWW_DIR)) {
+        Ok(o) => {
+            info!("wake engine: openWakeWord '{}' (yandex spotter off)", o.name);
+            Some(o)
+        }
+        Err(e) => {
+            info!("wake engine: yandex spotter ({e})");
+            None
+        }
+    };
     let started = match Engine::start(model, &wake_model_dir, command_dir.as_deref()) {
         Some(eng) => {
             inner.frame = eng.frame();
             inner
-                .start_threads(model, eng, tx)
+                .start_threads(model, eng, oww, tx)
                 .inspect_err(|e| error!("audio threads: {e}"))
                 .is_ok()
         }
@@ -289,6 +306,7 @@ impl Inner {
         &mut self,
         model: &'static Model,
         eng: Engine,
+        oww: Option<oww::Oww>,
         tx: UnboundedSender<FrontendEvent>,
     ) -> std::io::Result<()> {
         let nch = model.capture_channels as usize;
@@ -311,7 +329,7 @@ impl Inner {
             std::thread::Builder::new()
                 .name("audio-process".into())
                 .stack_size(PROCESSING_STACK)
-                .spawn(move || processing(model, eng, &shared, &pipe, &tx))?,
+                .spawn(move || processing(model, eng, oww, &shared, &pipe, &tx))?,
         );
         Ok(())
     }
@@ -771,6 +789,7 @@ impl<T: std::fmt::Display> std::fmt::Display for Opt<T> {
 fn processing(
     model: &'static Model,
     mut eng: Engine,
+    mut oww: Option<oww::Oww>,
     shared: &Shared,
     pipe: &Pipe,
     tx: &UnboundedSender<FrontendEvent>,
@@ -789,6 +808,8 @@ fn processing(
     }
     let mut music_was_on = false;
     let frame = eng.frame();
+    // The chunk the Yandex spotter would hear, kept for OpenWakeWord.
+    let mut oww_audio: Vec<f32> = Vec::new();
     let mut ring = PrerollRing::new(PREROLL_SAMPLES / frame.max(1), frame);
 
     while shared.running() {
@@ -842,6 +863,10 @@ fn processing(
         // first: its Acquire pairs with `wake_handled`, after the owner's `set_streaming(true)`.
         match eng.output(VQE_OMNI_WITH_GAIN) {
             Some(d) => {
+                if oww.is_some() {
+                    oww_audio.clear();
+                    oww_audio.extend_from_slice(d);
+                }
                 if let Some(slot) = ring.push(d)
                     && (shared.wake_pending.load(Acquire) > 0 || shared.stream.load(Relaxed))
                 {
@@ -851,7 +876,31 @@ fn processing(
             None => ring.clear(),
         }
 
-        if shared.detect.load(Relaxed) {
+        if shared.detect.load(Relaxed) && oww.is_some() {
+            if let Some(o) = oww.as_mut()
+                && let Some(score) = o.push(&oww_audio)
+            {
+                let phrase = o.name.clone();
+                let level_db = wake_level_db(&level_hist.values);
+                let speech_end = level_hist.speech_end_ms();
+                let offset_ms = shared.command_offset_ms.load(Relaxed);
+                // No spotter anchor exists for an external engine, so the pre-roll starts at the
+                // end of the ring — OpenWakeWord reports after its 80 ms window is complete.
+                let n = preroll_samples(None, offset_ms, ring.stored());
+                let preroll = ring.tail(n);
+                info!(
+                    "oww: '{phrase}' fired score={score:.2} preroll={} ms speech_end={} ms",
+                    n / SAMPLES_PER_MS,
+                    Opt(speech_end)
+                );
+                shared.wake_pending.fetch_add(1, Relaxed);
+                let _ = tx.send(FrontendEvent::Wake {
+                    phrase,
+                    level_db,
+                    preroll,
+                });
+            }
+        } else if shared.detect.load(Relaxed) {
             let hits = eng.feed_wake();
             if !hits.is_empty() {
                 let level_db = wake_level_db(&level_hist.values);
