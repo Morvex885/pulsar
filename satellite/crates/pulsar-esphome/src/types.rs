@@ -52,19 +52,19 @@ pub struct ApiConfig {
     pub case_colors: Vec<String>,
     /// Select «Clock music» options.
     pub clock_music_styles: Vec<String>,
+    /// Варианты Select «Clock format».
+    pub clock_formats: Vec<String>,
     /// Select «Zigbee role» options; empty: no Zigbee entities (no radio).
     pub zigbee_modes: Vec<String>,
-    /// false: no Clock display / Clock brightness / Clock auto brightness / Clock text speed /
-    /// Clock text / Clock face / Clock music entities, no clock_show_text / clock_show_face
-    /// actions, none of their states sent.
+    /// false: нет сущностей Clock display / Clock brightness / Clock auto brightness / Clock text
+    /// speed / Clock text / Clock face / Clock music / Clock format, нет действий clock_show_text /
+    /// clock_show_face, их состояния не отправляются.
     pub has_clock: bool,
     /// false: no Illuminance sensor or lux states.
     pub has_lux: bool,
     /// false: no Clock auto brightness switch or its states (listed only with `has_clock` as
     /// well).
     pub has_auto_brightness: bool,
-    /// The model has wake-word pre-roll rules: the switch "Command right after wake word".
-    pub has_wake_preroll: bool,
     /// The model has a readable hardware microphone mute switch/key.
     pub has_hw_mic_mute: bool,
     /// The model has the action button and volume keys (the Event «Button» entity).
@@ -86,10 +86,10 @@ impl Default for ApiConfig {
             music_styles: Vec::new(),
             case_colors: Vec::new(),
             clock_music_styles: Vec::new(),
+            clock_formats: Vec::new(),
             zigbee_modes: Vec::new(),
             has_clock: true,
             has_lux: true,
-            has_wake_preroll: true,
             has_hw_mic_mute: true,
             has_buttons: true,
             has_auto_brightness: true,
@@ -266,7 +266,6 @@ pub enum SwitchId {
     AutoUpdate = 3,
     NearestAnswers = 4,
     VoiceIndication = 5,
-    WakePreroll = 6,
     ClockAutoBrightness = 7,
 }
 
@@ -294,7 +293,22 @@ pub fn followup_duration_s(v: f32) -> Option<u32> {
         .then(|| v.round().clamp(0.0, FOLLOWUP_DURATION_MAX_S as f32) as u32)
 }
 
-/// Яркость часов 0..100 %, прокрутка часов 100..2000 мс, скорость LED 0.25..4 ×, follow-up 0..10 с.
+/// Пределы «Command start offset», мс: сдвиг начала звука запроса от точки, где спотер распознал
+/// wake word; минус — раньше (ближе к слову), плюс — позже (ближе к команде).
+pub const COMMAND_OFFSET_MIN_MS: i32 = -100;
+pub const COMMAND_OFFSET_MAX_MS: i32 = 200;
+
+/// «Command start offset» из команды HA или `state.conf` — целые мс в пределах; `None` для NaN и
+/// бесконечности (значение не меняется).
+pub fn command_offset_ms(v: f32) -> Option<i32> {
+    v.is_finite().then(|| {
+        v.round()
+            .clamp(COMMAND_OFFSET_MIN_MS as f32, COMMAND_OFFSET_MAX_MS as f32) as i32
+    })
+}
+
+/// Яркость часов 0..100 %, прокрутка часов 100..2000 мс, скорость LED 0.25..4 ×, follow-up 0..10 с,
+/// сдвиг начала команды −100..200 мс.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NumberId {
@@ -302,6 +316,7 @@ pub enum NumberId {
     ClockScroll = 2,
     LedSpeed = 3,
     FollowupDuration = 4,
+    CommandOffset = 5,
 }
 
 #[repr(u32)]
@@ -318,6 +333,7 @@ pub enum SelectId {
     MusicViz = 3,
     CaseColor = 4,
     ClockMusic = 5,
+    ClockFormat = 6,
 }
 
 #[repr(u32)]

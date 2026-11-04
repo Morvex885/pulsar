@@ -466,8 +466,7 @@ async def cmd_scenario_entities(client, args):
     def st(oid):
         return orig[oid].state if orig.get(oid) is not None else None
 
-    switches = ["microphones", "clock_display", "nearest_station_answers", "voice_indication",
-                "command_right_after_wake_word"]
+    switches = ["microphones", "clock_display", "nearest_station_answers", "voice_indication"]
     if "hardware_mic_mute" in k and st("hardware_mic_mute"):
         # Under the mute button's mute "on" is refused: the switch comes back off.
         await expect(w, "switch microphones -> True (refused: mute button)", k["microphones"], lambda: client.switch_command(k["microphones"], True), lambda s: not s.state)
@@ -491,16 +490,18 @@ async def cmd_scenario_entities(client, args):
         ("led_speed", 1.5, 1.5),
         ("followup_duration", 50.0, 10.0),
         ("followup_duration", 7.6, 8.0),
+        ("command_start_offset", 500.0, 200.0),
+        ("command_start_offset", -30.0, -30.0),
     ]:
         if oid not in k:
             continue
         await expect(w, f"number {oid} {value} -> {want}", k[oid], lambda o=oid, v=value: client.number_command(k[o], v), lambda s, x=want: abs(s.state - x) < 1e-3)
-    for oid in ["clock_brightness", "clock_text_speed", "led_speed", "followup_duration"]:
+    for oid in ["clock_brightness", "clock_text_speed", "led_speed", "followup_duration", "command_start_offset"]:
         if st(oid) is not None:
             v = st(oid)
             restore.append((f"number {oid} -> {v}", k[oid], lambda o=oid, x=v: client.number_command(k[o], x), lambda s, x=v: abs(s.state - x) < 1e-3))
 
-    for oid in ["clock_face", "music_visualization", "case_color", "clock_music"]:
+    for oid in ["clock_face", "music_visualization", "case_color", "clock_music", "clock_format"]:
         if oid not in k:
             continue
         opts = ents[oid].options

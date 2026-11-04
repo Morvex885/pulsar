@@ -235,7 +235,6 @@ impl Server {
             key::SW_AUTO_UPDATE => SwitchId::AutoUpdate,
             key::SW_NEAREST_ANSWERS => SwitchId::NearestAnswers,
             key::SW_VOICE_INDICATION => SwitchId::VoiceIndication,
-            key::SW_WAKE_PREROLL => SwitchId::WakePreroll,
             _ => return,
         };
         self.emit(ApiEvent::Switch(id, state));
@@ -262,6 +261,12 @@ impl Server {
                     return;
                 };
                 (NumberId::FollowupDuration, s as f32)
+            }
+            key::NUMBER_COMMAND_OFFSET => {
+                let Some(ms) = crate::command_offset_ms(v) else {
+                    return;
+                };
+                (NumberId::CommandOffset, ms as f32)
             }
             _ => return,
         };
@@ -306,6 +311,11 @@ impl Server {
                 SelectId::ClockMusic,
                 &self.cfg.clock_music_styles,
                 "clock music",
+            ),
+            key::SELECT_CLOCK_FORMAT => (
+                SelectId::ClockFormat,
+                &self.cfg.clock_formats,
+                "clock format",
             ),
             key::SELECT_MUSIC_VIZ => (
                 SelectId::MusicViz,

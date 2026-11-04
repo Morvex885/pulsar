@@ -6,7 +6,8 @@ use std::sync::LazyLock;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
-    /// Devicetree codename: "cucumber", "plum", "station-mini2", "bergamot", "yandexmini".
+    /// Кодовое имя из devicetree: "cucumber", "plum", "prune", "station-mini2", "bergamot",
+    /// "yandexmini".
     pub codename: &'static str,
     /// ESPHome node name prefix; the MAC suffix is appended.
     pub host_prefix: &'static str,
@@ -23,9 +24,6 @@ pub struct Model {
     pub mic_channels: &'static [u32],
     pub spk_channels: &'static [u32],
     pub vqe_preset: &'static str,
-    /// Pre-roll per wake word model: audio between the end of the wake word and its
-    /// confirmation, sent ahead of the request. Ids not listed get none.
-    pub wake_preroll: &'static [WakePreroll],
 
     /// Prefix of the per-channel sysfs LEDs "<led_prefix>:<color>:<ring|logo><index>".
     pub led_prefix: &'static str,
@@ -160,72 +158,6 @@ pub struct VolumePoint {
     pub raw: i32,
 }
 
-/// Pre-roll of one wake word model (`spotter_models/activation/<id>`), in VQE chunks (32 ms;
-/// 16 ms on the Mini 3 and Mini) ending with the confirming chunk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WakePreroll {
-    pub id: &'static str,
-    pub rule: PrerollRule,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PrerollRule {
-    /// (chunks since the 1st-stage hit) + `offset`, at least 0; `fallback` chunks when no
-    /// 1st-stage hit preceded the confirmation.
-    FirstStage { offset: i32, fallback: u32 },
-    /// Always this many chunks.
-    Fixed(u32),
-}
-
-// Midi, frontend_probe 2026-10-28, one talker at 1-2 m: "alisa" confirms with event 5 and the
-// 1st-stage hit (event 3) always comes in the same chunk, so it anchors nothing; "yandex"
-// confirms with event 2 and never reports event 3. Both get a fixed length. Words reach
-// VQE_OMNI at -54..-63 dB, near the noise floor, so the end of an isolated word is often not
-// found: confirmation 0..5 chunks after it, mostly 2..3 ("alisa", 10 words), 0..3 ("yandex",
-// 11 words). Readings this close to the noise floor are unreliable, so the typical reading is
-// used instead of the shortest; checked through HA (see the PR).
-const CUCUMBER_PREROLL: &[WakePreroll] = &[
-    WakePreroll {
-        id: "alisa",
-        rule: PrerollRule::Fixed(2),
-    },
-    WakePreroll {
-        id: "yandex",
-        rule: PrerollRule::Fixed(2),
-    },
-];
-// Lite 2, frontend_probe 2026-10-28, one talker at 1-2 m: both models confirm with event 2
-// (1st stage) and never report a 1st-stage hit (event 3), so the length is fixed. Chunks from
-// the end of an isolated word (VQE_OMNI 20 dB below its peak) to the confirmation, over words
-// louder than -55 dB (quieter ones have their noise floor within 20 dB): "alisa" 3..8,
-// "yandex" 4..9. The shortest one is used, so the word does not reach STT. Through HA,
-// "yandex" with no pre-roll lost the start of the command ("который час" -> "час").
-// The Mini 2 ships the Lite 2's spotter models and uses these too (not measured on it).
-const PLUM_PREROLL: &[WakePreroll] = &[
-    WakePreroll {
-        id: "alisa",
-        rule: PrerollRule::Fixed(3),
-    },
-    WakePreroll {
-        id: "yandex",
-        rule: PrerollRule::Fixed(4),
-    },
-];
-// Мини 3: «alisa» — замер из #30 у шумового пола, поэтому берётся типичное значение, а не самое
-// короткое (см. docs/mini3.md, «Звук», и docs/voice.md, «Пре-ролл: методика измерения»); приёмка
-// через HA не проводилась. «yandex» не замерялся: длина Лайт 2 во времени (128 мс при чанке VQE
-// 16 мс).
-const BERGAMOT_PREROLL: &[WakePreroll] = &[
-    WakePreroll {
-        id: "alisa",
-        rule: PrerollRule::Fixed(3),
-    },
-    WakePreroll {
-        id: "yandex",
-        rule: PrerollRule::Fixed(8),
-    },
-];
-
 const NO_STRIP: LedStrip = LedStrip {
     count: 0,
     first_index: 0,
@@ -237,8 +169,8 @@ const NO_STRIP: LedStrip = LedStrip {
     i2c_addr: 0,
 };
 
-// { "0": 0, "1": 49, "20": 255 }: softvol min_dB -60, so 2.6 dB per level, level 1 at -48.5 dB.
-// The Lite 2's quasar.cfg has the same map.
+// { "0": 0, "1": 49, "20": 255 }: softvol min_dB -60, значит 2,6 дБ на уровень, уровень 1 — на
+// -48,5 дБ. Та же карта в quasar.cfg Лайт 2 на плате plum; prune: см. docs/lite2.md, «Не проверено».
 const STOCK_VOLUME: &[VolumePoint] = &[
     VolumePoint { level: 0, raw: 0 },
     VolumePoint { level: 1, raw: 49 },
@@ -261,7 +193,6 @@ static MIDI: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5, 6, 7],
     vqe_preset: "cucumber",
-    wake_preroll: CUCUMBER_PREROLL,
     led_prefix: "cucumber",
     ring: LedStrip {
         count: 24,
@@ -334,7 +265,6 @@ static LITE2: Model = Model {
     mic_channels: &[0, 2],
     spk_channels: &[6],
     vqe_preset: "plum",
-    wake_preroll: PLUM_PREROLL,
     led_prefix: "plum",
     ring: LedStrip {
         count: 3,
@@ -380,6 +310,16 @@ static LITE2: Model = Model {
     zigbee_boot: "",
 };
 
+/// Станция Лайт 2 на плате prune: см. docs/lite2.md.
+static PRUNE: Model = Model {
+    codename: "prune",
+    clock_dir: "",
+    has_clock: false,
+    keys_input: "aw933xx",
+    has_lux: false,
+    ..LITE2
+};
+
 // set_volume.sh on the Mini 2 is `amixer set 'Master' <percent>%`: raw = percent of 255, no dB
 // offset and no lowest step.
 const MINI2_VOLUME: &[VolumePoint] = &[
@@ -403,7 +343,6 @@ static MINI2: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5],
     vqe_preset: "yandexmini_2",
-    wake_preroll: PLUM_PREROLL,
     led_prefix: "mini2",
     ring: LedStrip {
         count: 6,
@@ -465,8 +404,6 @@ static MINI: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[6, 7],
     vqe_preset: "yandexmini",
-    // No pre-roll measurements on the Mini: an id without a rule gives an empty pre-roll.
-    wake_preroll: &[],
     led_prefix: "",
     ring: LedStrip {
         count: 6,
@@ -545,7 +482,6 @@ static MINI3: Model = Model {
     mic_channels: &[0, 1, 2],
     spk_channels: &[6],
     vqe_preset: "bergamot",
-    wake_preroll: BERGAMOT_PREROLL,
     led_prefix: "bergamot",
     // The driver calls the 6-zone ring "logo" (/dev/fb0 6×1, AW21018); there is no separate logo.
     ring: LedStrip {
@@ -668,6 +604,7 @@ pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
     raw.split(|&b| b == 0).find_map(|entry| match entry {
         b"yandex,cucumber" => Some(&MIDI),
         b"yandex,plum" => Some(&LITE2),
+        b"yandex,prune" => Some(&PRUNE),
         b"yandex,station-mini2" => Some(&MINI2),
         b"yandex,bergamot" => Some(&MINI3),
         _ => None,
@@ -709,6 +646,24 @@ mod tests {
                 .codename,
             "plum"
         );
+    }
+
+    #[test]
+    fn prune_is_lite2_without_clock() {
+        // devicetree станции из #57.
+        let m = model_from_compatible(b"yandex,prune-evt2\0yandex,prune\0amlogic, axg\0").unwrap();
+        assert_eq!(m.codename, "prune");
+        assert_eq!(m.keys_input, "aw933xx");
+        assert!(!m.has_clock && !m.has_lux);
+        assert_eq!(m.clock_dir, "");
+        // Звуковой тракт и светодиоды — как у plum.
+        assert_eq!(m.vqe_preset, "plum");
+        assert_eq!(m.mic_channels, &[0, 2]);
+        assert_eq!(m.spk_channels, &[6]);
+        assert_eq!(m.led_prefix, "plum");
+        assert_eq!(m.ring.trigger, "led_ring_fb");
+        assert_eq!(m.host_prefix, "yandex-lite2-");
+        assert!(model_from_compatible(b"yandex,prune-evt2\0amlogic, axg\0").is_none());
     }
 
     #[test]

@@ -56,8 +56,13 @@ pub struct Lib {
     sp_phrase: unsafe extern "C" fn(P, *mut P) -> *const c_char,
     sp_errmsg: unsafe extern "C" fn(P) -> *const c_char,
     sp_errfree: unsafe extern "C" fn(P),
-    // Only ww_offline prints event names; the daemon does not need the symbol.
+    // ww_offline печатает имена событий; демон сверяет по ним номера 2/5 перед чтением якоря,
+    // без символа пре-ролла нет.
     event_name: Option<unsafe extern "C" fn(c_int) -> *const c_char>,
+    // Байты входа после точки хита; необязателен (без него нет пре-ролла после wake word). Читать
+    // только сразу после подтверждения, иначе библиотека делает abort.
+    // см. docs/hardware.md, «Библиотеки Яндекса (C API)»
+    sp_unhandled: Option<unsafe extern "C" fn(P, *mut P) -> c_int>,
 }
 
 /// Why [`Lib::load`] failed.
@@ -169,6 +174,7 @@ impl Lib {
                 sp_errmsg: sym(lib, "spotter_error_get_message")?,
                 sp_errfree: sym(lib, "spotter_error_free")?,
                 event_name: sym(lib, "event_id_to_str").ok(),
+                sp_unhandled: sym(lib, "spotter_get_unhandled_nbytes").ok(),
             })
         }
     }
@@ -180,6 +186,11 @@ impl Lib {
         let s = unsafe { f(ev) };
         // SAFETY: null or a static NUL-terminated string.
         Some(unsafe { text(s) })
+    }
+
+    /// Есть ли `spotter_get_unhandled_nbytes` в этой сборке библиотеки.
+    pub fn has_unhandled_bytes(&self) -> bool {
+        self.sp_unhandled.is_some()
     }
 
     /// Message of a VQE error (freed here); Ok for null.
@@ -515,6 +526,17 @@ impl Spotter {
             Some(unsafe { text(p) })
         };
         (phrase, self.lib.sp_error(err))
+    }
+
+    /// spotter_get_unhandled_nbytes; None без символа. Только сразу после события 2/5 и phrase:
+    /// без результата хита библиотека делает abort.
+    pub fn unhandled_bytes(&mut self) -> Option<Result<i32, String>> {
+        let f = self.lib.sp_unhandled?;
+        let mut err = ptr::null_mut();
+        // SAFETY: валидный спотер, out-указатель на локальную переменную; вызывающий читает сразу
+        // после подтверждения, когда у спотера есть результат хита.
+        let n = unsafe { f(self.sp.as_ptr(), &mut err) };
+        Some(self.lib.sp_error(err).map_or(Ok(n), Err))
     }
 }
 

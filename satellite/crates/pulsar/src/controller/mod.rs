@@ -339,6 +339,7 @@ impl Controller {
             music_styles: strings(pulsar_hw::music_styles()),
             case_colors: with_none(case_colors.clone()),
             clock_music_styles: strings(pulsar_clock::music_styles()),
+            clock_formats: strings(pulsar_clock::time_formats()),
             zigbee_modes: if model.zigbee_tty.is_empty() {
                 Vec::new()
             } else {
@@ -349,7 +350,6 @@ impl Controller {
             },
             has_clock: model.has_clock || pulsar_clock::panel_present(model),
             has_lux: model.has_lux || lux_rx.is_some(),
-            has_wake_preroll: !model.wake_preroll.is_empty(),
             has_hw_mic_mute: !model.mute_input.is_empty() || model.mute_gpio != 0,
             has_buttons: model.has_button_events(),
             key_path: Some(logic::in_dir(&dir, "api_key")),
@@ -374,6 +374,7 @@ impl Controller {
         clock.set_scroll_ms(st.clock_scroll_ms);
         clock.set_voice_indication(st.voice_indication);
         clock.set_music_style(st.clock_music.clone());
+        clock.set_time_format(st.clock_format.clone());
         leds.set_speed(st.led_speed);
         leds.set_voice_indication(st.voice_indication);
         leds.set_music_style(st.music_viz.clone());
@@ -452,7 +453,7 @@ impl Controller {
             model_dir(&st.wake_word),
             Some(PathBuf::from(COMMAND_MODEL)),
         );
-        mic.set_preroll(st.wake_preroll);
+        mic.set_command_offset(st.command_start_offset_ms);
 
         let ss_cfg = SendspinConfig {
             name: id.friendly_name.clone(),

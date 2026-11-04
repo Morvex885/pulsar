@@ -11,3 +11,4 @@ light_b=inf
 led_case_color=sky blue
 light_on=1
 clock_music=Off
+clock_format=bogus

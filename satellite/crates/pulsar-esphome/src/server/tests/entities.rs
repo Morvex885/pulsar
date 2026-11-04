@@ -34,10 +34,10 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         music_styles: s(&["Off", "All styles", "Spectrum"]),
         case_colors: s(&["None", "blue"]),
         clock_music_styles: s(&["Off", "Levels"]),
+        clock_formats: s(&["24h", "12h"]),
         zigbee_modes: s(&["Coordinator", "Router"]),
         has_clock: true,
         has_lux: true,
-        has_wake_preroll: true,
         has_hw_mic_mute: true,
         has_buttons: true,
         has_auto_brightness: true,
@@ -55,6 +55,7 @@ fn publish_selftest_states(h: &ApiHandle) {
     h.publish_select(SelectId::MusicViz, "All styles");
     h.publish_select(SelectId::CaseColor, "None");
     h.publish_select(SelectId::ClockMusic, "Off");
+    h.publish_select(SelectId::ClockFormat, "24h");
     h.publish_binary_sensor(BinarySensorId::HwMicMute, false);
     h.publish_number(NumberId::ClockBrightness, 50.0);
     h.publish_light(&LightState {
@@ -270,6 +271,10 @@ async fn commands_are_validated_like_cxx() {
                 .await;
             c.send(msg::SELECT_CMD, select(key::SELECT_CLOCK_MUSIC, "Levels"))
                 .await;
+            c.send(msg::SELECT_CMD, select(key::SELECT_CLOCK_FORMAT, "12h"))
+                .await;
+            c.send(msg::SELECT_CMD, select(key::SELECT_CLOCK_FORMAT, "13h"))
+                .await;
             c.send(
                 msg::SWITCH_CMD,
                 kv(key::SW_NEAREST_ANSWERS, |w| w.boolean(2, true, true)),
@@ -277,11 +282,10 @@ async fn commands_are_validated_like_cxx() {
             .await;
             c.send(msg::SWITCH_CMD, kv(key::SW_VOICE_INDICATION, |_| {}))
                 .await;
-            c.send(
-                msg::SWITCH_CMD,
-                kv(key::SW_WAKE_PREROLL, |w| w.boolean(2, true, true)),
-            )
-            .await;
+            // Ключ бывшего «Command right after wake word»: команда от старой сущности HA
+            // отбрасывается.
+            c.send(msg::SWITCH_CMD, kv(32, |w| w.boolean(2, true, true)))
+                .await;
             c.send(
                 msg::SWITCH_CMD,
                 kv(key::SW_CLOCK_AUTO_BRI, |w| w.boolean(2, true, true)),
@@ -299,9 +303,9 @@ async fn commands_are_validated_like_cxx() {
                     ApiEvent::Select(SelectId::MusicViz, "Spectrum".into()),
                     ApiEvent::Select(SelectId::ZigbeeMode, "Router".into()),
                     ApiEvent::Select(SelectId::ClockMusic, "Levels".into()),
+                    ApiEvent::Select(SelectId::ClockFormat, "12h".into()),
                     ApiEvent::Switch(SwitchId::NearestAnswers, true),
                     ApiEvent::Switch(SwitchId::VoiceIndication, false),
-                    ApiEvent::Switch(SwitchId::WakePreroll, true),
                     ApiEvent::Switch(SwitchId::ClockAutoBrightness, true),
                 ]
             );
@@ -688,7 +692,6 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
             cfg.has_clock = false;
             cfg.has_lux = false;
             cfg.has_auto_brightness = false;
-            cfg.has_wake_preroll = false;
             cfg.has_hw_mic_mute = false;
             // Only a mute button: no «Button» event entity (Model::has_button_events).
             cfg.has_buttons = false;
@@ -708,20 +711,21 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
                 }
                 keys.push(field(&m, 2).unwrap().u32());
             }
-            // 15 сущностей и сервис led_show; нет часов, Lux, пре-ролла wake word, аппаратного
-            // MUTE, цвета корпуса и Button.
-            assert_eq!(keys.len(), 16, "keys: {keys:?}");
+            // 16 сущностей и сервис led_show; нет часов, Lux, аппаратного MUTE, цвета корпуса и
+            // Button.
+            assert_eq!(keys.len(), 17, "keys: {keys:?}");
             assert!(keys.contains(&key::NUMBER_FOLLOWUP_DURATION));
+            assert!(keys.contains(&key::NUMBER_COMMAND_OFFSET));
             assert!(keys.contains(&key::ACTION_LED_SHOW));
             let absent = [
                 key::SW_CLOCK,
                 key::SW_CLOCK_AUTO_BRI,
-                key::SW_WAKE_PREROLL,
                 key::NUMBER_CLOCK_BRI,
                 key::NUMBER_CLOCK_SCROLL,
                 key::TEXT_CLOCK,
                 key::SELECT_CLOCK_FACE,
                 key::SELECT_CLOCK_MUSIC,
+                key::SELECT_CLOCK_FORMAT,
                 key::ACTION_CLOCK_TEXT,
                 key::ACTION_CLOCK_FACE,
                 key::BS_HW_MIC_MUTE,
@@ -748,12 +752,12 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
             // The controller may still publish these cache values; the server must drop them.
             h.publish_switch(SwitchId::Clock, true);
             h.publish_switch(SwitchId::ClockAutoBrightness, true);
-            h.publish_switch(SwitchId::WakePreroll, true);
             h.publish_number(NumberId::ClockBrightness, 50.0);
             h.publish_number(NumberId::ClockScroll, 400.0);
             h.publish_text(TextId::ClockText, "x");
             h.publish_select(SelectId::ClockFace, "None");
             h.publish_select(SelectId::ClockMusic, "Off");
+            h.publish_select(SelectId::ClockFormat, "24h");
             h.publish_select(SelectId::CaseColor, "None");
             h.publish_binary_sensor(BinarySensorId::HwMicMute, false);
             h.publish_sensor(SensorId::Illuminance, 12.5);
@@ -990,6 +994,61 @@ async fn followup_duration_is_universal_config_and_replays_its_state() {
                         .unwrap();
                     assert_eq!(field(m, 2).map_or(0.0, |f| f.flt()), value);
                 }
+            })
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn command_offset_is_universal_config_clamped_and_replayed() {
+    for has_clock in [true, false] {
+        local()
+            .run_until(async {
+                let (id, mut cfg) = selftest("now");
+                cfg.has_clock = has_clock;
+                let (h, mut rx, port) = start_with(id, cfg);
+                let mut p = Peer::connect(port).await;
+                p.hello("HA").await;
+                event(&mut rx).await;
+                p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+                p.sync().await;
+                for (input, expected) in [
+                    (-150.0, Some(-100.0)),
+                    (-30.0, Some(-30.0)),
+                    (12.6, Some(13.0)),
+                    (999.0, Some(200.0)),
+                    (f32::NAN, None),
+                    (f32::NEG_INFINITY, None),
+                ] {
+                    p.send(
+                        msg::NUMBER_CMD,
+                        &kv(key::NUMBER_COMMAND_OFFSET, |w| w.flt(2, input, true)),
+                    )
+                    .await;
+                    assert_eq!(
+                        drain(&mut p, &mut rx).await,
+                        expected
+                            .map(|v| ApiEvent::Number(NumberId::CommandOffset, v))
+                            .into_iter()
+                            .collect::<Vec<_>>(),
+                        "{input}"
+                    );
+                }
+                // Состояние уходит и на моделях без часов, и повторяется новому подписчику.
+                h.publish_number(NumberId::CommandOffset, -30.0);
+                let pushed = p.sync().await;
+                let (_, m) = pushed
+                    .iter()
+                    .find(|(_, m)| state_key(m) == Some(key::NUMBER_COMMAND_OFFSET))
+                    .unwrap();
+                assert_eq!(field(m, 2).unwrap().flt(), -30.0);
+                p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+                let replayed = p.sync().await;
+                let (_, m) = replayed
+                    .iter()
+                    .find(|(_, m)| state_key(m) == Some(key::NUMBER_COMMAND_OFFSET))
+                    .unwrap();
+                assert_eq!(field(m, 2).unwrap().flt(), -30.0);
             })
             .await;
     }
