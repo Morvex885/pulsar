@@ -3,23 +3,32 @@
 //! или `frontend_probe --record`) -> VQE Яндекса -> спотер. Раскладка каналов спотера берётся
 //! из модели, как в демоне.
 //! usage: ww_offline <wav> [model_dir]   (по умолчанию .../spotter_models/activation/alisa)
-//! Печатает каждое событие спотера со временем; строки "HIT" — подтверждения (события 2 и 5);
-//! раз в секунду — RMS референса динамика и выхода VQE (проверка эхоподавления).
+//! Печатает каждое событие спотера со временем; раз в секунду — RMS референса динамика и выхода
+//! VQE (проверка эхоподавления). Строки "HIT" — подтверждения (события 2 и 5) с полями `end` —
+//! сэмплов на канал, поданных спотеру, включая эту подачу; `unhandled` —
+//! spotter_get_unhandled_nbytes сразу после подтверждения (`-` без символа или при ошибке);
+//! `at` = `end − unhandled/(2·каналов)` — точка хита в сэмплах от начала записи (`-`, если
+//! значения нет, оно отрицательно или не кратно кадру всех каналов).
 //! Эксперименты: VT=<type> подаёт на все каналы спотера этот выход VQE; LEGACY=1 — прежнюю
 //! раскладку wake-спотера pulsar (`LEGACY_SPOTTER_TO_VQE`); SPK=<ch>[,<ch>...] заменяет каналы
 //! захвата референса динамика; в отличие от C++-утилиты, их должно быть столько, сколько берёт
 //! пресет VQE модели (библиотека не получает других количеств).
+//! OUT=<wav>: выход VQE_OMNI_WITH_GAIN (его же демон кладёт в кольцо пре-ролла, с тем же
+//! преобразованием в s16) пишется WAV 16 кГц моно, по кадру на чанк; сэмпл `at` в нём — точка хита.
+//! SUBMIT=<n>: подавать спотеру куски по `n` сэмплов на канал (по умолчанию — кадр VQE), события
+//! читаются после каждой подачи; остаток в конце файла не подаётся.
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::fs::File;
-use std::io::{BufReader, Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{BufReader, BufWriter, Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use pulsar_audio::engine::{
     LEGACY_SPOTTER_TO_VQE, Lib, LoadError, SPOTTER_RATE, SPOTTER_TO_VQE, SPOTTER_TYPES, Spotter,
-    SpotterConf, VQE_MODELS, Vqe, VqeStep, preload_deps, spotter_layout, to_s16,
+    SpotterConf, VQE_MODELS, VQE_OMNI_WITH_GAIN, Vqe, VqeStep, preload_deps, spotter_layout,
+    to_s16,
 };
 
 const DEFAULT_MODEL: &str = "/system/vendor/quasar/spotter_models/activation/alisa";
@@ -168,8 +177,32 @@ fn run() -> u8 {
         out!("missing event_id_to_str");
         return 1;
     }
+    let submit = std::env::var("SUBMIT")
+        .ok()
+        .map(|s| atoi(&s))
+        .filter(|&n| n > 0)
+        .map_or(frame, |n| n as usize);
+    let mut wav_out = match std::env::var_os("OUT") {
+        Some(p) => match File::create(&p).and_then(|f| {
+            let mut w = BufWriter::new(f);
+            w.write_all(&wav_header(0))?;
+            Ok(w)
+        }) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                let _ = writeln!(std::io::stderr(), "OUT: {}", strerror(&e));
+                return 1;
+            }
+        },
+        None => None,
+    };
 
     let nch = layout.types.len();
+    // Без каналов цикл подачи по SUBMIT не продвигался бы.
+    if nch == 0 {
+        out!("spotter: no channels in the model");
+        return 1;
+    }
     let (mic_ch, spk_ch) = (m.mic_channels, spk_channels.as_slice());
     let (nmic, nspk) = (mic_ch.len(), spk_ch.len());
     let mut raw = vec![0u8; frames * cap * 2];
@@ -180,6 +213,9 @@ fn run() -> u8 {
     let (mut t, mut spk_e, mut out_e, mut next_report) = (0f64, 0f64, 0f64, 1f64);
     let (mut spk_n, mut out_n) = (0usize, 0usize);
     let mut hits = 0;
+    // Поданные спотеру сэмплы на канал и ещё не поданные (чередованные).
+    let (mut end, mut out_samples) = (0u64, 0u64);
+    let mut pending: Vec<i16> = Vec::with_capacity((frame + submit) * nch);
     while f.read_exact(&mut raw).is_ok() {
         for (s, b) in input.iter_mut().zip(raw.as_chunks::<2>().0) {
             *s = i16::from_le_bytes(*b);
@@ -221,24 +257,71 @@ fn run() -> u8 {
                 }
             }
         }
-        if let Err(e) = sp.submit(&sbuf) {
-            out!("submit: {e}");
-            return 1;
-        }
-        for _ in 0..16 {
-            let ev = match sp.next_event() {
-                Ok(ev) if !matches!(ev, 0 | 4 | 7 | 9) => ev,
-                _ => break,
+        if let Some(w) = wav_out.as_mut() {
+            // Тот же выход и то же преобразование, что у кольца пре-ролла демона.
+            let d = match vqe.output(VQE_OMNI_WITH_GAIN) {
+                Ok(d) if d.len() >= frame => d,
+                Ok(d) => {
+                    out!("out {VQE_OMNI_WITH_GAIN}: {} of {frame} samples", d.len());
+                    return 1;
+                }
+                Err(e) => {
+                    out!("out {VQE_OMNI_WITH_GAIN}: {e}");
+                    return 1;
+                }
             };
-            let (phrase, _) = sp.phrase();
-            let hit = ev == 2 || ev == 5;
-            hits += i32::from(hit);
-            out!(
-                "t={t:6.2}s event {ev} {} phrase={}{}",
-                lib.event_name(ev).unwrap_or_default(),
-                phrase.unwrap_or_default(),
-                if hit { "  HIT" } else { "" }
-            );
+            let bytes: Vec<u8> = d[..frame]
+                .iter()
+                .flat_map(|&v| to_s16(v).to_le_bytes())
+                .collect();
+            if let Err(e) = w.write_all(&bytes) {
+                out!("OUT: {}", strerror(&e));
+                return 1;
+            }
+            out_samples += (bytes.len() / 2) as u64;
+        }
+        pending.extend_from_slice(&sbuf);
+        while pending.len() >= submit * nch {
+            if let Err(e) = sp.submit(&pending[..submit * nch]) {
+                out!("submit: {e}");
+                return 1;
+            }
+            pending.drain(..submit * nch);
+            end += submit as u64;
+            for _ in 0..16 {
+                let ev = match sp.next_event() {
+                    Ok(ev) if !matches!(ev, 0 | 4 | 7 | 9) => ev,
+                    _ => break,
+                };
+                let (phrase, _) = sp.phrase();
+                let hit = ev == 2 || ev == 5;
+                hits += i32::from(hit);
+                let name = lib.event_name(ev).unwrap_or_default();
+                let phrase = phrase.unwrap_or_default();
+                if !hit {
+                    out!("t={t:6.2}s event {ev} {name} phrase={phrase}");
+                    continue;
+                }
+                // Сразу после phrase, до следующего события: в другой момент библиотека делает
+                // abort.
+                let u = match sp.unhandled_bytes() {
+                    Some(Ok(v)) => Some(v),
+                    Some(Err(e)) => {
+                        out!("unhandled: {e}");
+                        None
+                    }
+                    None => None,
+                };
+                let at = u
+                    .and_then(|v| u64::try_from(v).ok())
+                    .filter(|v| v % (2 * nch as u64) == 0)
+                    .and_then(|v| end.checked_sub(v / (2 * nch as u64)));
+                out!(
+                    "t={t:6.2}s event {ev} {name} phrase={phrase}  HIT end={end} unhandled={} at={}",
+                    dash(u),
+                    dash(at)
+                );
+            }
         }
         t += frames as f64 / f64::from(m.capture_rate);
         if t >= next_report {
@@ -252,7 +335,42 @@ fn run() -> u8 {
         }
     }
     out!("done: {t:.1}s, hits={hits}");
+    if let Some(mut w) = wav_out {
+        let data = u32::try_from(out_samples * 2).unwrap_or(u32::MAX);
+        if let Err(e) = w
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| w.write_all(&wav_header(data)))
+            .and_then(|()| w.flush())
+        {
+            out!("OUT: {}", strerror(&e));
+            return 1;
+        }
+    }
     0
+}
+
+/// Значение или "-".
+fn dash<T: std::fmt::Display>(v: Option<T>) -> String {
+    v.map_or_else(|| "-".to_owned(), |v| v.to_string())
+}
+
+/// 44-байтный заголовок WAV PCM S16LE, 16 кГц моно.
+fn wav_header(data_bytes: u32) -> [u8; 44] {
+    let rate = SPOTTER_RATE as u32;
+    let mut h = [0u8; 44];
+    h[0..4].copy_from_slice(b"RIFF");
+    h[4..8].copy_from_slice(&data_bytes.saturating_add(36).to_le_bytes());
+    h[8..16].copy_from_slice(b"WAVEfmt ");
+    h[16..20].copy_from_slice(&16u32.to_le_bytes());
+    h[20..22].copy_from_slice(&1u16.to_le_bytes());
+    h[22..24].copy_from_slice(&1u16.to_le_bytes());
+    h[24..28].copy_from_slice(&rate.to_le_bytes());
+    h[28..32].copy_from_slice(&(rate * 2).to_le_bytes());
+    h[32..34].copy_from_slice(&2u16.to_le_bytes());
+    h[34..36].copy_from_slice(&16u16.to_le_bytes());
+    h[36..40].copy_from_slice(b"data");
+    h[40..44].copy_from_slice(&data_bytes.to_le_bytes());
+    h
 }
 
 /// perror's text: the C library message without Rust's " (os error N)".

@@ -1,9 +1,10 @@
 // Фикстуры в tests/golden/settings/ сняты с эталона на C++ (rust-port-base): Settings::load и
 // Settings::save из controller.cpp, перенесённые без изменений во временный хост-харнесс, собранный
 // `zig c++ -std=c++20 -O2`. save_*.conf — `save` значений ниже; load_*.out — `load` из load_*.in,
-// затем `save`. С тех пор правились руками: `wake_preroll` (после `clock_music`; 0 в load_odd.in);
-// `clock_auto_brightness` (после `wake_preroll`); `followup_duration_s` (10); `clock_format`
-// (последним; 12h в load_odd.in, bogus → 24h в load_edge.in).
+// затем `save`. С тех пор правились руками: `clock_auto_brightness` (после `clock_music`);
+// `followup_duration_s` (10); `clock_format` (12h в load_odd.in, bogus → 24h в load_edge.in);
+// `command_start_offset_ms` (0, последним). `wake_preroll` (бывший переключатель) больше не
+// пишется и не читается; в load_odd.in остался как неизвестный ключ.
 
 use super::*;
 
@@ -373,5 +374,21 @@ fn followup_duration_defaults_roundtrips_and_clamps() {
     ] {
         st.parse(format!("followup_duration_s={value}\n").as_bytes());
         assert_eq!(st.followup_duration_s, expected, "{value}");
+    }
+}
+
+#[test]
+fn command_start_offset_roundtrips_negative_and_clamps() {
+    let mut st = Settings::default();
+    assert_eq!(st.command_start_offset_ms, 0);
+    for ms in [-100, -30, 0, 40, 200] {
+        st.command_start_offset_ms = ms;
+        let mut loaded = Settings::default();
+        loaded.parse(st.serialize().as_bytes());
+        assert_eq!(loaded.command_start_offset_ms, ms);
+    }
+    for (value, expected) in [("-500", -100), ("999", 200), ("12.6", 13), ("NaN", 13)] {
+        st.parse(format!("command_start_offset_ms={value}\n").as_bytes());
+        assert_eq!(st.command_start_offset_ms, expected, "{value}");
     }
 }

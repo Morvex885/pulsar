@@ -308,7 +308,7 @@ impl Controller {
                     // Если звонок посреди этого диалога уже выключили «стоп» спотера или wake
                     // word, а новый не звонит, слово здесь не применяется: иначе оно поставило бы
                     // музыку на паузу.
-                    // см. docs/voice.md, «Пре-ролл: методика измерения»
+                    // см. docs/voice.md, «Голосовой ассистент HA (ESPHome)»
                     if self.wake_dialog {
                         self.finish_interaction();
                         if self.timer_ringing || !self.ring_stopped_in_dialog {
