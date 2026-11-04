@@ -210,10 +210,21 @@ fn two(g: &mut [u8], v: i64, blank_lead: bool) {
     g[1] = FONT[(v % 10) as usize];
 }
 
-/// hh:mm of the local time (colon handled by the caller).
-pub fn time_glyphs(hour: i32, min: i32) -> Glyphs {
+/// чч:мм местного времени (двоеточие — у вызывающего). `hour12`: часы 1..12 без ведущего нуля.
+/// Отметки AM/PM нет ни на одной модели: двоеточие занято (мигает у времени, горит у таймера),
+/// средняя точка `DM` есть только у Лайт 2 и Мини 3, знак градуса читается как температура, а
+/// положение остальных вспомогательных светодиодов не известно.
+pub fn time_glyphs(hour: i32, min: i32, hour12: bool) -> Glyphs {
     let mut g = [0; DIGITS];
-    two(&mut g[..2], i64::from(hour), false);
+    if hour12 {
+        let h = match hour.rem_euclid(12) {
+            0 => 12,
+            h => h,
+        };
+        two(&mut g[..2], i64::from(h), true);
+    } else {
+        two(&mut g[..2], i64::from(hour), false);
+    }
     two(&mut g[2..], i64::from(min), false);
     g
 }
@@ -413,8 +424,13 @@ mod tests {
         assert_eq!(number_glyphs(9999), [f(9), f(9), f(9), f(9)]);
         assert_eq!(number_glyphs(-5), [0, 0, MINUS, f(5)]);
         assert_eq!(number_glyphs(-999), [MINUS, f(9), f(9), f(9)]);
-        assert_eq!(time_glyphs(7, 5), [f(0), f(7), f(0), f(5)]);
-        assert_eq!(time_glyphs(23, 59), [f(2), f(3), f(5), f(9)]);
+        assert_eq!(time_glyphs(7, 5, false), [f(0), f(7), f(0), f(5)]);
+        assert_eq!(time_glyphs(23, 59, false), [f(2), f(3), f(5), f(9)]);
+        assert_eq!(time_glyphs(0, 5, true), [f(1), f(2), f(0), f(5)]);
+        assert_eq!(time_glyphs(12, 0, true), [f(1), f(2), f(0), f(0)]);
+        assert_eq!(time_glyphs(13, 7, true), [0, f(1), f(0), f(7)]);
+        assert_eq!(time_glyphs(9, 30, true), [0, f(9), f(3), f(0)]);
+        assert_eq!(time_glyphs(23, 59, true), [f(1), f(1), f(5), f(9)]);
     }
 
     #[test]

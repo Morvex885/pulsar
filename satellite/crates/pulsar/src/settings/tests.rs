@@ -1,9 +1,10 @@
-// Фикстуры в tests/golden/settings/ сняты с эталона на C++ (rust-port-base): Settings::load и
-// Settings::save из controller.cpp, перенесённые без изменений во временный хост-харнесс, собранный
-// `zig c++ -std=c++20 -O2`. save_*.conf — `save` значений ниже; load_*.out — `load` из load_*.in,
-// затем `save`. С тех пор правились руками: `wake_preroll` (после `clock_music`; 0 в load_odd.in);
-// `clock_auto_brightness` (после `wake_preroll`); `followup_duration_s` (10); `wake_sound` (1);
-// `clock_colon_blink` (1, последним).
+// Fixtures in tests/golden/settings/ were captured from the C++ reference (rust-port-base):
+// Settings::load and Settings::save from controller.cpp, copied unchanged into a temporary
+// host harness built with `zig c++ -std=c++20 -O2`. save_*.conf contains the values below;
+// load_*.out contains load_*.in loaded and saved again. Later additions were edited by hand:
+// wake_preroll (after clock_music, 0 in load_odd.in), clock_auto_brightness, followup_duration_s
+// (10), clock_format (12h in load_odd.in, bogus -> 24h in load_edge.in), wake_sound (1),
+// and clock_colon_blink (1, last).
 
 use super::*;
 
@@ -380,7 +381,7 @@ fn followup_duration_defaults_roundtrips_and_clamps() {
 fn wake_sound_defaults_on_and_persists_disabled() {
     let mut s = Settings::default();
     s.parse(b"volume2=0.2\n");
-    assert!(s.wake_sound, "старые файлы сохраняют звук включённым");
+    assert!(s.wake_sound, "old files keep the wake sound enabled");
     s.parse(b"wake_sound=0\n");
     assert!(!s.wake_sound);
     let mut restored = Settings::default();
@@ -394,10 +395,7 @@ fn wake_sound_defaults_on_and_persists_disabled() {
 fn clock_colon_blink_defaults_on_and_persists_disabled() {
     let mut s = Settings::default();
     s.parse(b"volume2=0.2\n");
-    assert!(
-        s.clock_colon_blink,
-        "старые файлы сохраняют мигание включённым"
-    );
+    assert!(s.clock_colon_blink, "old files keep colon blinking enabled");
     s.parse(b"clock_colon_blink=0\n");
     assert!(!s.clock_colon_blink);
     let mut restored = Settings::default();

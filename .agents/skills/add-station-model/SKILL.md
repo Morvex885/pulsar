@@ -84,6 +84,11 @@ description: >-
 
 - `frontend_probe --record` — микрофонный тракт, сырая запись;
 - `ww_offline` — спотер на записи;
+- раскладка спотеров — по строке `channels [...]` у `ww_offline`: каждому флагу каналов из
+  `flags.txt` модели (`bnr-channel`, `raw-mic-channels`, `freq-filter-audio-channel raw-mic`)
+  соответствует выход из таблицы `docs/hardware.md`, «Библиотеки Яндекса (C API)»;
+  `out N: none in the preset` — в пресете VQE модели нет выхода из таблицы (демон тогда пишет
+  `legacy channels`);
 - `hw_probe` — светодиоды, часы, ввод, датчик.
 
 Результаты вносят в `Model` и в документацию (п. 4).

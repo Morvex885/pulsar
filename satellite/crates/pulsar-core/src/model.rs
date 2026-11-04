@@ -6,7 +6,8 @@ use std::sync::LazyLock;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
-    /// Devicetree codename: "cucumber", "plum", "station-mini2", "bergamot", "yandexmini".
+    /// Кодовое имя из devicetree: "cucumber", "plum", "prune", "station-mini2", "bergamot",
+    /// "yandexmini".
     pub codename: &'static str,
     /// ESPHome node name prefix; the MAC suffix is appended.
     pub host_prefix: &'static str,
@@ -237,8 +238,8 @@ const NO_STRIP: LedStrip = LedStrip {
     i2c_addr: 0,
 };
 
-// { "0": 0, "1": 49, "20": 255 }: softvol min_dB -60, so 2.6 dB per level, level 1 at -48.5 dB.
-// The Lite 2's quasar.cfg has the same map.
+// { "0": 0, "1": 49, "20": 255 }: softvol min_dB -60, значит 2,6 дБ на уровень, уровень 1 — на
+// -48,5 дБ. Та же карта в quasar.cfg Лайт 2 на плате plum; prune: см. docs/lite2.md, «Не проверено».
 const STOCK_VOLUME: &[VolumePoint] = &[
     VolumePoint { level: 0, raw: 0 },
     VolumePoint { level: 1, raw: 49 },
@@ -378,6 +379,16 @@ static LITE2: Model = Model {
     zigbee_tty: "",
     zigbee_reset: "",
     zigbee_boot: "",
+};
+
+/// Станция Лайт 2 на плате prune: см. docs/lite2.md.
+static PRUNE: Model = Model {
+    codename: "prune",
+    clock_dir: "",
+    has_clock: false,
+    keys_input: "aw933xx",
+    has_lux: false,
+    ..LITE2
 };
 
 // set_volume.sh on the Mini 2 is `amixer set 'Master' <percent>%`: raw = percent of 255, no dB
@@ -668,6 +679,7 @@ pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
     raw.split(|&b| b == 0).find_map(|entry| match entry {
         b"yandex,cucumber" => Some(&MIDI),
         b"yandex,plum" => Some(&LITE2),
+        b"yandex,prune" => Some(&PRUNE),
         b"yandex,station-mini2" => Some(&MINI2),
         b"yandex,bergamot" => Some(&MINI3),
         _ => None,
@@ -709,6 +721,24 @@ mod tests {
                 .codename,
             "plum"
         );
+    }
+
+    #[test]
+    fn prune_is_lite2_without_clock() {
+        // devicetree станции из #57.
+        let m = model_from_compatible(b"yandex,prune-evt2\0yandex,prune\0amlogic, axg\0").unwrap();
+        assert_eq!(m.codename, "prune");
+        assert_eq!(m.keys_input, "aw933xx");
+        assert!(!m.has_clock && !m.has_lux);
+        assert_eq!(m.clock_dir, "");
+        // Звуковой тракт и светодиоды — как у plum.
+        assert_eq!(m.vqe_preset, "plum");
+        assert_eq!(m.mic_channels, &[0, 2]);
+        assert_eq!(m.spk_channels, &[6]);
+        assert_eq!(m.led_prefix, "plum");
+        assert_eq!(m.ring.trigger, "led_ring_fb");
+        assert_eq!(m.host_prefix, "yandex-lite2-");
+        assert!(model_from_compatible(b"yandex,prune-evt2\0amlogic, axg\0").is_none());
     }
 
     #[test]

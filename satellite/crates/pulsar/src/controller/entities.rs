@@ -88,6 +88,7 @@ impl Controller {
         );
         api.publish_select(SelectId::MusicViz, &self.st.music_viz);
         api.publish_select(SelectId::ClockMusic, &self.st.clock_music);
+        api.publish_select(SelectId::ClockFormat, &self.st.clock_format);
         api.publish_select(SelectId::CaseColor, self.case_color_option());
         if let Some(z) = &self.zigbee {
             api.publish_select(
@@ -291,6 +292,12 @@ impl Controller {
                 self.st.clock_music = option;
                 self.persist();
                 self.update_music();
+            }
+            SelectId::ClockFormat => {
+                self.clock.set_time_format(option.clone());
+                self.api.publish_select(id, &option);
+                self.st.clock_format = option;
+                self.persist();
             }
             SelectId::CaseColor => {
                 let stem = if option == "None" { "" } else { &option };

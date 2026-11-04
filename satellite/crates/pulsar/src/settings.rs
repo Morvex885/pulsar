@@ -59,11 +59,13 @@ pub struct Settings {
     pub music_viz: String,
     /// One of `pulsar_clock::music_styles()`.
     pub clock_music: String,
+    /// Одно из `pulsar_clock::time_formats()`.
+    pub clock_format: String,
     /// 0.25..4
     pub led_speed: f32,
     /// Listening / thinking / speaking shown on the ring and the clock.
     pub voice_indication: bool,
-    /// Звук подтверждения начала прослушивания.
+    /// Confirmation sound when listening starts.
     pub wake_sound: bool,
     /// Audio between the end of the wake word and its confirmation goes ahead of the request.
     pub wake_preroll: bool,
@@ -101,6 +103,7 @@ impl Default for Settings {
             nearest_answers: true,
             music_viz: "All styles".into(),
             clock_music: "Off".into(),
+            clock_format: "24h".into(),
             led_speed: 1.0,
             voice_indication: true,
             wake_sound: true,
@@ -171,6 +174,7 @@ impl Settings {
                 b"zigbee_flash_failed" => self.zigbee_flash_failed = strtoul_hex(&v) as u32,
                 b"music_viz" => self.music_viz = v,
                 b"clock_music" => self.clock_music = v,
+                b"clock_format" => self.clock_format = v,
                 b"led_speed" => {
                     self.led_speed = if fv.is_finite() {
                         fv.clamp(0.25, 4.0)
@@ -196,6 +200,9 @@ impl Settings {
         if !pulsar_clock::music_styles().contains(&self.clock_music.as_str()) {
             self.clock_music = "Off".into();
         }
+        if !pulsar_clock::time_formats().contains(&self.clock_format.as_str()) {
+            self.clock_format = "24h".into();
+        }
     }
 
     /// Файл в том виде, как его пишет C++ `Settings::save`: все ключи, в его порядке; ключи,
@@ -209,7 +216,7 @@ impl Settings {
              light_b={}\nlight_effect={}\nwake_word={}\ntz={}\nauto_update={}\nupdate_attempt={}\n\
              zigbee_role={}\nzigbee_flash_failed={:x}\nnearest_answers={}\nmusic_viz={}\n\
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
-             wake_preroll={}\nclock_auto_brightness={}\nfollowup_duration_s={}\nwake_sound={}\nclock_colon_blink={}\n",
+             wake_preroll={}\nclock_auto_brightness={}\nfollowup_duration_s={}\nclock_format={}\nwake_sound={}\nclock_colon_blink={}\n",
             f(self.volume),
             f(self.volume_legacy),
             b(self.muted),
@@ -238,6 +245,7 @@ impl Settings {
             b(self.wake_preroll),
             b(self.clock_auto_brightness),
             self.followup_duration_s,
+            self.clock_format,
             b(self.wake_sound),
             b(self.clock_colon_blink),
         )

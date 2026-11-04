@@ -52,11 +52,13 @@ pub struct ApiConfig {
     pub case_colors: Vec<String>,
     /// Select «Clock music» options.
     pub clock_music_styles: Vec<String>,
+    /// Варианты Select «Clock format».
+    pub clock_formats: Vec<String>,
     /// Select «Zigbee role» options; empty: no Zigbee entities (no radio).
     pub zigbee_modes: Vec<String>,
-    /// false: no Clock display / Clock brightness / Clock auto brightness / Clock text speed /
-    /// Clock text / Clock face / Clock music entities, no clock_show_text / clock_show_face
-    /// actions, none of their states sent.
+    /// false: нет сущностей Clock display / Clock brightness / Clock auto brightness / Clock text
+    /// speed / Clock text / Clock face / Clock music / Clock format, нет действий clock_show_text /
+    /// clock_show_face, их состояния не отправляются.
     pub has_clock: bool,
     /// false: no Illuminance sensor or lux states.
     pub has_lux: bool,
@@ -86,6 +88,7 @@ impl Default for ApiConfig {
             music_styles: Vec::new(),
             case_colors: Vec::new(),
             clock_music_styles: Vec::new(),
+            clock_formats: Vec::new(),
             zigbee_modes: Vec::new(),
             has_clock: true,
             has_lux: true,
@@ -320,6 +323,7 @@ pub enum SelectId {
     MusicViz = 3,
     CaseColor = 4,
     ClockMusic = 5,
+    ClockFormat = 6,
 }
 
 #[repr(u32)]

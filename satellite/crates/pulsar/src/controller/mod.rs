@@ -336,6 +336,7 @@ impl Controller {
             music_styles: strings(pulsar_hw::music_styles()),
             case_colors: with_none(case_colors.clone()),
             clock_music_styles: strings(pulsar_clock::music_styles()),
+            clock_formats: strings(pulsar_clock::time_formats()),
             zigbee_modes: if model.zigbee_tty.is_empty() {
                 Vec::new()
             } else {
@@ -372,6 +373,7 @@ impl Controller {
         clock.set_scroll_ms(st.clock_scroll_ms);
         clock.set_voice_indication(st.voice_indication);
         clock.set_music_style(st.clock_music.clone());
+        clock.set_time_format(st.clock_format.clone());
         leds.set_speed(st.led_speed);
         leds.set_voice_indication(st.voice_indication);
         leds.set_music_style(st.music_viz.clone());

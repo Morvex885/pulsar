@@ -48,7 +48,8 @@ pub(super) mod key {
     pub const SW_WAKE_PREROLL: u32 = 32;
     pub const SW_CLOCK_AUTO_BRI: u32 = 33;
     pub const NUMBER_FOLLOWUP_DURATION: u32 = 34;
-    pub const SW_WAKE_SOUND: u32 = 35;
+    pub const SELECT_CLOCK_FORMAT: u32 = 35;
+    pub const SW_WAKE_SOUND: u32 = 37;
     pub const SW_CLOCK_COLON_BLINK: u32 = 36;
 }
 
@@ -144,6 +145,7 @@ pub(super) struct Cache {
     music_viz: StrState,
     case_color: StrState,
     clock_music: StrState,
+    clock_format: StrState,
     pub(super) light: LightState,
     rssi: FloatState,
     ip: Option<Ipv4Addr>,
@@ -180,6 +182,7 @@ impl Cache {
             music_viz: StrState::default(),
             case_color: StrState::default(),
             clock_music: StrState::default(),
+            clock_format: StrState::default(),
             light: LightState::default(),
             rssi: FloatState::default(),
             ip: None,
@@ -437,6 +440,14 @@ impl Server {
                 "Clock music",
                 "mdi:equalizer-outline",
                 &self.cfg.clock_music_styles,
+                cfg,
+            ));
+            out.push(select(
+                "clock_format",
+                key::SELECT_CLOCK_FORMAT,
+                "Clock format",
+                "mdi:hours-24",
+                &self.cfg.clock_formats,
                 cfg,
             ));
         }
@@ -852,6 +863,12 @@ impl Server {
                 |c| &c.clock_music,
                 to,
             );
+            self.send_cached_str(
+                msg::SELECT_STATE,
+                key::SELECT_CLOCK_FORMAT,
+                |c| &c.clock_format,
+                to,
+            );
         }
         if !self.cfg.zigbee_modes.is_empty() {
             self.send_cached_str(
@@ -999,7 +1016,11 @@ impl Server {
                 self.cache.clock_text = StrState { has: true, v };
             }
             Publish::Select(id, v) => {
-                if matches!(id, SelectId::ClockFace | SelectId::ClockMusic) && !self.cfg.has_clock {
+                if matches!(
+                    id,
+                    SelectId::ClockFace | SelectId::ClockMusic | SelectId::ClockFormat
+                ) && !self.cfg.has_clock
+                {
                     return;
                 }
                 if id == SelectId::CaseColor && self.cfg.case_colors.len() <= 1 {
@@ -1014,8 +1035,15 @@ impl Server {
                     SelectId::MusicViz => key::SELECT_MUSIC_VIZ,
                     SelectId::CaseColor => key::SELECT_CASE_COLOR,
                     SelectId::ClockMusic => key::SELECT_CLOCK_MUSIC,
+                    SelectId::ClockFormat => key::SELECT_CLOCK_FORMAT,
                 };
-                if on && (has_clock || !matches!(id, SelectId::ClockFace | SelectId::ClockMusic)) {
+                if on
+                    && (has_clock
+                        || !matches!(
+                            id,
+                            SelectId::ClockFace | SelectId::ClockMusic | SelectId::ClockFormat
+                        ))
+                {
                     self.send_str(msg::SELECT_STATE, key, &v, true, None);
                 }
                 let c = &mut self.cache;
@@ -1025,6 +1053,7 @@ impl Server {
                     SelectId::MusicViz => &mut c.music_viz,
                     SelectId::CaseColor => &mut c.case_color,
                     SelectId::ClockMusic => &mut c.clock_music,
+                    SelectId::ClockFormat => &mut c.clock_format,
                 };
                 *s = StrState { has: true, v };
             }
