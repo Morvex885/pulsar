@@ -8,7 +8,9 @@ mod enroll;
 mod ffi;
 mod gallery;
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use log::{error, info, warn};
@@ -288,7 +290,8 @@ pub enum SpeakerEvent {
         found: Option<Match>,
         detail: String,
     },
-    /// Оценка по началу реплики изменилась; `None` снимает имя.
+    /// Оценка по началу реплики изменилась; `None` снимает имя. Итог по всей реплике придёт позже
+    /// и может заменить имя.
     Early {
         seq: u64,
         found: Option<Match>,
@@ -349,24 +352,25 @@ enum Cmd {
 #[derive(Clone)]
 pub struct SpeakerHandle {
     tx: Option<Sender<Cmd>>,
-    seq: u64,
+    seq: Rc<Cell<u64>>,
 }
 
 impl SpeakerHandle {
     /// Начало реплики. Возвращает номер, с которым придёт её результат.
-    pub fn begin(&mut self) -> u64 {
+    pub fn begin(&self) -> u64 {
         self.start(false)
     }
 
     /// Начало фразы для записи голоса: её результат — образец, а не узнавание.
-    pub fn begin_sample(&mut self) -> u64 {
+    pub fn begin_sample(&self) -> u64 {
         self.start(true)
     }
 
-    fn start(&mut self, sample: bool) -> u64 {
-        self.seq += 1;
-        self.send(Cmd::Begin(self.seq, sample));
-        self.seq
+    fn start(&self, sample: bool) -> u64 {
+        let seq = self.seq.get() + 1;
+        self.seq.set(seq);
+        self.send(Cmd::Begin(seq, sample));
+        seq
     }
 
     pub fn audio(&self, pcm: Vec<i16>) {
@@ -375,7 +379,7 @@ impl SpeakerHandle {
 
     /// Повторный вызов ничего не делает: приходят и VAD_END, и STT_END.
     pub fn end(&self) {
-        self.send(Cmd::End(self.seq));
+        self.send(Cmd::End(self.seq.get()));
     }
 
     /// Следующие [`ENROLL_UTTERANCES`] принятых фраз становятся голосом `name`; прежний голос
@@ -399,8 +403,8 @@ impl SpeakerHandle {
     }
 }
 
-/// Модели грузятся в потоке; если не загрузились, команды игнорируются. Поток не ждём: он завершится
-/// сам, когда пропадут все handle.
+/// Модели грузятся в потоке; если не загрузились, команды игнорируются. Поток не ждём: он
+/// завершится сам, когда пропадут все handle.
 pub fn spawn(store: PathBuf) -> (SpeakerHandle, UnboundedReceiver<SpeakerEvent>) {
     let (tx, rx) = channel();
     let (ev_tx, ev_rx) = unbounded_channel();
@@ -414,7 +418,13 @@ pub fn spawn(store: PathBuf) -> (SpeakerHandle, UnboundedReceiver<SpeakerEvent>)
             None
         }
     };
-    (SpeakerHandle { tx, seq: 0 }, ev_rx)
+    (
+        SpeakerHandle {
+            tx,
+            seq: Rc::default(),
+        },
+        ev_rx,
+    )
 }
 
 /// Текст сущности «Speaker status»: ход обучения, записанные голоса, оценки последней реплики
@@ -465,6 +475,8 @@ fn enroll_sample(
     let (found, detail) = gallery.identify(&emb);
     match e.offer(emb) {
         Offer::Accepted => {
+            // Только предупреждаем: голоса родственников бывают похожи, и отказ не дал бы их
+            // записать.
             let note = match found {
                 Some(m) if m.name != e.name => EnrollNote::SoundsLike(m.name),
                 _ => EnrollNote::None,
@@ -483,11 +495,20 @@ fn enroll_sample(
         ),
         Offer::Done => {
             let name = e.name.clone();
+            let before = gallery.clone();
             gallery.add(&name, &e.samples);
-            if let Err(err) = gallery.save(store) {
-                error!("speaker: {err}");
-            }
+            let saved = gallery.save(store);
             *enrolling = None;
+            if let Err(err) = saved {
+                // Иначе голос пропал бы при перезапуске, хотя запись объявлена удачной.
+                error!("speaker: {err}");
+                *gallery = before;
+                return (
+                    EnrollNote::SaveFailed,
+                    EnrollSound::Rejected,
+                    "save failed".to_owned(),
+                );
+            }
             (
                 EnrollNote::Saved(name),
                 EnrollSound::Saved,
@@ -495,6 +516,20 @@ fn enroll_sample(
             )
         }
     }
+}
+
+/// false — файл не перезаписан: голос остаётся и в памяти, иначе он выглядел бы удалённым, но
+/// вернулся бы при перезапуске.
+fn forget_voice(store: &Path, gallery: &mut Gallery, name: &str) -> bool {
+    let before = gallery.clone();
+    if gallery.remove(name)
+        && let Err(err) = gallery.save(store)
+    {
+        error!("speaker: {err}");
+        *gallery = before;
+        return false;
+    }
+    true
 }
 
 fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) {
@@ -509,6 +544,7 @@ fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) 
             return;
         }
     };
+    // Только в памяти: перезапуск демона отменяет запись, прежний голос остаётся.
     let mut enrolling: Option<Enrollment> = None;
     // Номер идущей реплики и образец ли она.
     let mut active: Option<(u64, bool)> = None;
@@ -607,10 +643,8 @@ fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) 
                     enrolling = None;
                     let _ = tx.send(view(None, EnrollNote::Cancelled, None));
                 }
-                if gallery.remove(&name)
-                    && let Err(err) = gallery.save(store)
-                {
-                    error!("speaker: {err}");
+                if !forget_voice(store, &mut gallery, &name) {
+                    let _ = tx.send(view(enrolling.as_ref(), EnrollNote::ForgetFailed, None));
                 }
                 let _ = tx.send(SpeakerEvent::Status(status_text(
                     &gallery,
@@ -636,6 +670,57 @@ mod tests {
 
     fn name(update: Option<Option<Match>>) -> Option<Option<String>> {
         update.map(|found| found.map(|m| m.name))
+    }
+
+    const NO_STORE: &str = "/nonexistent/speakers.conf";
+
+    fn unit_voice() -> Vec<f32> {
+        let mut v = vec![0.0; EMBEDDING_DIM];
+        v[0] = 1.0;
+        v
+    }
+
+    #[test]
+    fn failed_save_ends_the_recording_and_keeps_the_old_gallery() {
+        let mut gallery = Gallery::default();
+        gallery.add("old", &[unit_voice()]);
+        let mut e = Enrollment::new("new".to_owned());
+        for _ in 1..ENROLL_UTTERANCES {
+            e.offer(unit_voice());
+        }
+        let mut enrolling = Some(e);
+        let (note, sound, _) = enroll_sample(
+            Path::new(NO_STORE),
+            &mut gallery,
+            &mut enrolling,
+            Some(unit_voice()),
+        );
+        assert_eq!(note, EnrollNote::SaveFailed);
+        assert_eq!(sound, EnrollSound::Rejected);
+        assert!(enrolling.is_none());
+        assert_eq!(gallery.names(), ["old"]);
+    }
+
+    #[test]
+    fn failed_forget_keeps_the_voice() {
+        let mut gallery = Gallery::default();
+        gallery.add("a", &[unit_voice()]);
+        assert!(!forget_voice(Path::new(NO_STORE), &mut gallery, "a"));
+        assert_eq!(gallery.names(), ["a"]);
+        // Такого голоса нет: файл не трогаем, и это не сбой.
+        assert!(forget_voice(Path::new(NO_STORE), &mut gallery, "b"));
+    }
+
+    #[test]
+    fn handle_clones_share_the_sequence() {
+        let a = SpeakerHandle {
+            tx: None,
+            seq: Rc::default(),
+        };
+        let b = a.clone();
+        assert_eq!(a.begin(), 1);
+        assert_eq!(b.begin_sample(), 2);
+        assert_eq!(a.begin(), 3);
     }
 
     #[test]
