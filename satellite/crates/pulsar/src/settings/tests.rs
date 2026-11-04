@@ -2,7 +2,8 @@
 // Settings::save из controller.cpp, перенесённые без изменений во временный хост-харнесс, собранный
 // `zig c++ -std=c++20 -O2`. save_*.conf — `save` значений ниже; load_*.out — `load` из load_*.in,
 // затем `save`. С тех пор правились руками: `wake_preroll` (после `clock_music`; 0 в load_odd.in);
-// `clock_auto_brightness` (после `wake_preroll`); `followup_duration_s` (10); `wake_sound` (1, последним).
+// `clock_auto_brightness` (после `wake_preroll`); `followup_duration_s` (10); `wake_sound` (1);
+// `clock_colon_blink` (1, последним).
 
 use super::*;
 
@@ -387,4 +388,21 @@ fn wake_sound_defaults_on_and_persists_disabled() {
     assert!(!restored.wake_sound);
     restored.parse(b"wake_sound=1\n");
     assert!(restored.wake_sound);
+}
+
+#[test]
+fn clock_colon_blink_defaults_on_and_persists_disabled() {
+    let mut s = Settings::default();
+    s.parse(b"volume2=0.2\n");
+    assert!(
+        s.clock_colon_blink,
+        "старые файлы сохраняют мигание включённым"
+    );
+    s.parse(b"clock_colon_blink=0\n");
+    assert!(!s.clock_colon_blink);
+    let mut restored = Settings::default();
+    restored.parse(s.serialize().as_bytes());
+    assert!(!restored.clock_colon_blink);
+    restored.parse(b"clock_colon_blink=1\n");
+    assert!(restored.clock_colon_blink);
 }

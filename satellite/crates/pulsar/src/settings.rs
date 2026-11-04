@@ -43,6 +43,7 @@ pub struct Settings {
     pub clock_brightness: f32,
     /// Clock level follows the light sensor, with `clock_brightness` as the ceiling.
     pub clock_auto_brightness: bool,
+    pub clock_colon_blink: bool,
     /// Clock text scroll step.
     pub clock_scroll_ms: i32,
     /// User ring light.
@@ -91,6 +92,7 @@ impl Default for Settings {
             clock_on: true,
             clock_brightness: 1.0,
             clock_auto_brightness: true,
+            clock_colon_blink: true,
             clock_scroll_ms: 400,
             light: LightState::default(),
             wake_word: "alisa".into(),
@@ -151,6 +153,7 @@ impl Settings {
                 b"clock_on" => self.clock_on = on,
                 b"clock_brightness" => self.clock_brightness = fv,
                 b"clock_auto_brightness" => self.clock_auto_brightness = on,
+                b"clock_colon_blink" => self.clock_colon_blink = on,
                 // C++ int(float): truncation (Rust saturates where C++ is undefined).
                 b"clock_scroll_ms" => self.clock_scroll_ms = (fv as i32).clamp(100, 2000),
                 b"light_on" => self.light.on = on,
@@ -206,7 +209,7 @@ impl Settings {
              light_b={}\nlight_effect={}\nwake_word={}\ntz={}\nauto_update={}\nupdate_attempt={}\n\
              zigbee_role={}\nzigbee_flash_failed={:x}\nnearest_answers={}\nmusic_viz={}\n\
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
-             wake_preroll={}\nclock_auto_brightness={}\nfollowup_duration_s={}\nwake_sound={}\n",
+             wake_preroll={}\nclock_auto_brightness={}\nfollowup_duration_s={}\nwake_sound={}\nclock_colon_blink={}\n",
             f(self.volume),
             f(self.volume_legacy),
             b(self.muted),
@@ -236,6 +239,7 @@ impl Settings {
             b(self.clock_auto_brightness),
             self.followup_duration_s,
             b(self.wake_sound),
+            b(self.clock_colon_blink),
         )
     }
 

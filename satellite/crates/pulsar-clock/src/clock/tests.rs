@@ -642,3 +642,32 @@ fn names() {
     assert_eq!(music_styles(), ["Off", "Levels"]);
     assert_eq!(face_names().len(), 19);
 }
+
+#[test]
+fn colon_blink_only_affects_wall_clock_time() {
+    let mut l = Layers::new();
+    let second_half = || Wall {
+        first_half: false,
+        ..wall()
+    };
+    assert_eq!(l.compose(NOW, wall).0.colon, 255);
+    assert_eq!(l.compose(NOW + 500, second_half).0.colon, 0);
+    l.colon_blink = false;
+    assert_eq!(l.compose(NOW, wall).0, time_frame());
+    assert_eq!(l.compose(NOW + 500, second_half).0, time_frame());
+    l.set_text("12:34", NOW);
+    assert_eq!(l.compose(NOW + 500, second_half).0, text_frame("12:34"));
+    l.set_text("1234", NOW);
+    assert_eq!(l.compose(NOW + 500, second_half).0.colon, 0);
+    l.set_timer(1000, true, NOW);
+    assert_eq!(
+        l.compose(NOW + 1000, wall).0,
+        glyph_frame(font::timer_glyphs(0), true)
+    );
+    assert_eq!(l.compose(NOW + 1500, second_half).0, Frame::default());
+    l.set_timer(0, false, NOW);
+    l.set_text("", NOW);
+    l.colon_blink = true;
+    assert_eq!(l.compose(NOW + 2000, wall).0, time_frame());
+    assert_eq!(l.compose(NOW + 2500, second_half).0.colon, 0);
+}

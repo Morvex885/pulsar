@@ -269,6 +269,7 @@ pub enum SwitchId {
     WakePreroll = 6,
     ClockAutoBrightness = 7,
     WakeSound = 8,
+    ClockColonBlink = 9,
 }
 
 #[repr(u32)]

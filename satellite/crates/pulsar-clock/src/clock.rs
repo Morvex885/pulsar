@@ -198,6 +198,7 @@ struct Layers {
     scroll_ms: i64,
     ui: UiState,
     voice_indication: bool,
+    colon_blink: bool,
     /// Voice state / ringing.
     voice: Option<Anim>,
     voice_t0: i64,
@@ -235,6 +236,7 @@ impl Layers {
             scroll_ms: 400,
             ui: UiState::Idle,
             voice_indication: true,
+            colon_blink: true,
             voice: None,
             voice_t0: 0,
             shot: None,
@@ -495,9 +497,12 @@ impl Layers {
             (clock_fx::levels(&self.mus_shown), MUSIC_FRAME_MS)
         } else {
             let w = wall();
-            // Colon on for the first half of every second.
+            // При отключённом мигании двоеточие времени горит постоянно.
             (
-                glyph_frame(font::time_glyphs(w.hour, w.min), w.first_half),
+                glyph_frame(
+                    font::time_glyphs(w.hour, w.min),
+                    !self.colon_blink || w.first_half,
+                ),
                 0,
             )
         }
@@ -698,6 +703,7 @@ enum Cmd {
     ShowTemporaryFace(i32, i32),
     SetUiState(UiState),
     SetVoiceIndication(bool),
+    SetColonBlink(bool),
     Play(ClockShot),
     SetUpdating(bool),
     SetMusicStyle(String),
@@ -781,6 +787,7 @@ impl Clock {
             Cmd::ShowTemporaryFace(i, secs) => l.show_temporary_face(i, secs, now),
             Cmd::SetUiState(s) => l.set_ui_state(s, now),
             Cmd::SetVoiceIndication(on) => l.set_voice_indication(on, now),
+            Cmd::SetColonBlink(on) => l.colon_blink = on,
             Cmd::Play(s) => l.play(s, now),
             Cmd::SetUpdating(on) => l.updating = on,
             Cmd::SetMusicStyle(style) => l.levels_on = style == "Levels",
@@ -954,6 +961,11 @@ impl ClockHandle {
 
     pub fn set_ui_state(&self, s: UiState) {
         self.send(Cmd::SetUiState(s));
+    }
+
+    /// Мигание двоеточия при показе времени; выключено — горит постоянно.
+    pub fn set_colon_blink(&self, on: bool) {
+        self.send(Cmd::SetColonBlink(on));
     }
 
     pub fn set_voice_indication(&self, on: bool) {

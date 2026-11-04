@@ -368,6 +368,7 @@ impl Controller {
         clock.set_enabled(st.clock_on);
         clock.set_brightness(st.clock_brightness);
         clock.set_auto_brightness(st.clock_auto_brightness);
+        clock.set_colon_blink(st.clock_colon_blink);
         clock.set_scroll_ms(st.clock_scroll_ms);
         clock.set_voice_indication(st.voice_indication);
         clock.set_music_style(st.clock_music.clone());

@@ -49,6 +49,7 @@ pub(super) mod key {
     pub const SW_CLOCK_AUTO_BRI: u32 = 33;
     pub const NUMBER_FOLLOWUP_DURATION: u32 = 34;
     pub const SW_WAKE_SOUND: u32 = 35;
+    pub const SW_CLOCK_COLON_BLINK: u32 = 36;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -121,6 +122,7 @@ pub(super) struct Cache {
     media_muted: bool,
     sw_microphones: BoolState,
     sw_clock: BoolState,
+    sw_clock_colon_blink: BoolState,
     sw_clock_auto_bri: BoolState,
     sw_auto_update: BoolState,
     sw_nearest_answers: BoolState,
@@ -156,6 +158,7 @@ impl Cache {
             media_muted: false,
             sw_microphones: BoolState::default(),
             sw_clock: BoolState::default(),
+            sw_clock_colon_blink: BoolState::default(),
             sw_clock_auto_bri: BoolState::default(),
             sw_auto_update: BoolState::default(),
             sw_nearest_answers: BoolState::default(),
@@ -256,7 +259,7 @@ impl Server {
 
     fn switch_listed(&self, id: SwitchId) -> bool {
         match id {
-            SwitchId::Clock => self.cfg.has_clock,
+            SwitchId::Clock | SwitchId::ClockColonBlink => self.cfg.has_clock,
             SwitchId::ClockAutoBrightness => self.cfg.has_clock && self.cfg.has_auto_brightness,
             SwitchId::WakePreroll => self.cfg.has_wake_preroll,
             SwitchId::Microphones
@@ -314,6 +317,15 @@ impl Server {
             ));
         }
         let cfg = Some(ENTITY_CATEGORY_CONFIG);
+        if self.switch_listed(SwitchId::ClockColonBlink) {
+            out.push(switch(
+                "clock_colon_blink",
+                key::SW_CLOCK_COLON_BLINK,
+                "Clock colon blink",
+                "mdi:clock-digital",
+                cfg,
+            ));
+        }
         if self.switch_listed(SwitchId::ClockAutoBrightness) {
             out.push(switch(
                 "clock_auto_brightness",
@@ -754,11 +766,20 @@ impl Server {
             c.sw_wake_preroll,
             c.bs_hw_mute,
         );
+        let colon_blink = c.sw_clock_colon_blink;
         let (lux, bri, scroll, speed) = (c.lux, c.clock_bri, c.clock_scroll, c.led_speed);
         self.send_media(to);
         self.send_bool(msg::SWITCH_STATE, key::SW_MICROPHONES, mic, to);
         if self.switch_listed(SwitchId::Clock) {
             self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK, clock, to);
+        }
+        if self.switch_listed(SwitchId::ClockColonBlink) {
+            self.send_bool(
+                msg::SWITCH_STATE,
+                key::SW_CLOCK_COLON_BLINK,
+                colon_blink,
+                to,
+            );
         }
         if self.switch_listed(SwitchId::ClockAutoBrightness) {
             self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK_AUTO_BRI, auto_bri, to);
@@ -907,6 +928,9 @@ impl Server {
                 let (s, key) = match id {
                     SwitchId::Microphones => (&mut c.sw_microphones, key::SW_MICROPHONES),
                     SwitchId::Clock => (&mut c.sw_clock, key::SW_CLOCK),
+                    SwitchId::ClockColonBlink => {
+                        (&mut c.sw_clock_colon_blink, key::SW_CLOCK_COLON_BLINK)
+                    }
                     SwitchId::ClockAutoBrightness => {
                         (&mut c.sw_clock_auto_bri, key::SW_CLOCK_AUTO_BRI)
                     }

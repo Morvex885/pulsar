@@ -7,6 +7,7 @@ DeviceInfo api_encryption_provisionable=False api_encryption_supported=True api_
 MediaPlayerInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE feature_flags=1070605 icon='' key=1 name='Media Player' object_id='media_player' supported_formats=[{bitrate=0, format='flac', num_channels=2, purpose=MediaPlayerFormatPurpose.DEFAULT, sample_bytes=2, sample_rate=48000}, {bitrate=0, format='flac', num_channels=1, purpose=MediaPlayerFormatPurpose.ANNOUNCEMENT, sample_bytes=2, sample_rate=48000}] supports_pause=True
 SwitchInfo assumed_state=False device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE icon='mdi:microphone' key=2 name='Microphones' object_id='microphones'
 SwitchInfo assumed_state=False device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE icon='mdi:clock-digital' key=3 name='Clock display' object_id='clock_display'
+SwitchInfo assumed_state=False device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:clock-digital' key=36 name='Clock colon blink' object_id='clock_colon_blink'
 SwitchInfo assumed_state=False device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:brightness-auto' key=33 name='Clock auto brightness' object_id='clock_auto_brightness'
 SwitchInfo assumed_state=False device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:update' key=20 name='Auto update' object_id='auto_update'
 SwitchInfo assumed_state=False device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:speaker-multiple' key=25 name='Nearest station answers' object_id='nearest_station_answers'
@@ -42,6 +43,7 @@ UserService args=[{default_value='', description='', example='', name='effect', 
 media_player: MediaPlayerEntityState device_id=0 key=1 muted=False state=MediaPlayerState.IDLE volume=0.5
 microphones: SwitchState device_id=0 key=2 missing_state=False state=True
 clock_display: SwitchState device_id=0 key=3 missing_state=False state=True
+clock_colon_blink: SwitchState device_id=0 key=36 missing_state=True state=False
 clock_auto_brightness: SwitchState device_id=0 key=33 missing_state=True state=False
 auto_update: SwitchState device_id=0 key=20 missing_state=True state=False
 nearest_station_answers: SwitchState device_id=0 key=25 missing_state=True state=False
