@@ -295,6 +295,11 @@ async fn commands_are_validated_like_cxx() {
             .await;
             c.send(
                 msg::SWITCH_CMD,
+                kv(key::SW_CLOCK_SPOKEN_NUMBERS, |w| w.boolean(2, true, true)),
+            )
+            .await;
+            c.send(
+                msg::SWITCH_CMD,
                 kv(key::MEDIA, |w| w.boolean(2, true, true)),
             )
             .await;
@@ -309,6 +314,7 @@ async fn commands_are_validated_like_cxx() {
                     ApiEvent::Switch(SwitchId::NearestAnswers, true),
                     ApiEvent::Switch(SwitchId::VoiceIndication, false),
                     ApiEvent::Switch(SwitchId::ClockAutoBrightness, true),
+                    ApiEvent::Switch(SwitchId::ClockSpokenNumbers, true),
                 ]
             );
 
@@ -722,6 +728,7 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
             let absent = [
                 key::SW_CLOCK,
                 key::SW_CLOCK_AUTO_BRI,
+                key::SW_CLOCK_SPOKEN_NUMBERS,
                 key::NUMBER_CLOCK_BRI,
                 key::NUMBER_CLOCK_SCROLL,
                 key::TEXT_CLOCK,
@@ -754,6 +761,7 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
             // The controller may still publish these cache values; the server must drop them.
             h.publish_switch(SwitchId::Clock, true);
             h.publish_switch(SwitchId::ClockAutoBrightness, true);
+            h.publish_switch(SwitchId::ClockSpokenNumbers, true);
             h.publish_number(NumberId::ClockBrightness, 50.0);
             h.publish_number(NumberId::ClockScroll, 400.0);
             h.publish_text(TextId::ClockText, "x");

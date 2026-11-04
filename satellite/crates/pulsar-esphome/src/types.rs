@@ -57,9 +57,9 @@ pub struct ApiConfig {
     pub clock_formats: Vec<String>,
     /// Select «Zigbee role» options; empty: no Zigbee entities (no radio).
     pub zigbee_modes: Vec<String>,
-    /// false: нет сущностей Clock display / Clock brightness / Clock auto brightness / Clock text
-    /// speed / Clock text / Clock face / Clock music / Clock format, нет действий clock_show_text /
-    /// clock_show_face, их состояния не отправляются.
+    /// false: нет сущностей Clock display / Clock brightness / Clock auto brightness / Clock spoken
+    /// numbers / Clock text speed / Clock text / Clock face / Clock music / Clock format, нет
+    /// действий clock_show_text / clock_show_face, их состояния не отправляются.
     pub has_clock: bool,
     /// false: no Illuminance sensor or lux states.
     pub has_lux: bool,
@@ -272,6 +272,7 @@ pub enum SwitchId {
     NearestAnswers = 4,
     VoiceIndication = 5,
     ClockAutoBrightness = 7,
+    ClockSpokenNumbers = 8,
 }
 
 #[repr(u32)]

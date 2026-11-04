@@ -84,6 +84,10 @@ pub struct PlayId(pub u64);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlayerEvent {
     State(Channel, PlayState),
+    /// Начало вывода ANNOUNCE; id позволяет отбрасывать события заменённого ответа.
+    Started {
+        id: PlayId,
+    },
     /// Exactly once per `play()`: ok = every url played to its end. A list cut short by `stop()`
     /// or by a later `play()` on the same channel gets ok = false, sent by that call itself (so
     /// it precedes anything the new playback reports). Intended difference from C++: a list that
@@ -651,9 +655,14 @@ impl Machine {
         }
         match ev {
             OutEvent::Started(_) => {
+                if c.reached_playing {
+                    return;
+                }
                 c.reached_playing = true;
                 if c.want_play {
+                    let id = c.item;
                     self.set_state(ch, PlayState::Playing);
+                    self.shared.send(PlayerEvent::Started { id });
                 }
             }
             OutEvent::PlayedOut(_) => {
@@ -1107,7 +1116,7 @@ mod tests {
 
     use Channel::{Announce, Music};
     use PlayState::{Error as Failed, Idle, Loading, Paused, Playing};
-    use PlayerEvent::{Done, State};
+    use PlayerEvent::{Done, Started, State};
 
     fn unescape(s: &str) -> String {
         let mut out = String::new();
@@ -1488,7 +1497,11 @@ mod tests {
         // The next url starts once the output has played this one out.
         assert_eq!(
             r.events(),
-            [State(Announce, Loading), State(Announce, Playing)]
+            [
+                State(Announce, Loading),
+                State(Announce, Playing),
+                Started { id }
+            ]
         );
         r.out(OutEvent::PlayedOut(1));
         assert_eq!(
@@ -1542,7 +1555,9 @@ mod tests {
         assert!(r.calls().is_empty());
         assert!(r.events().is_empty());
         r.out(OutEvent::Started(2));
-        assert_eq!(r.events(), [State(Announce, Playing)]);
+        assert_eq!(r.events(), [State(Announce, Playing), Started { id: b }]);
+        r.out(OutEvent::Started(2));
+        assert!(r.events().is_empty());
         r.out(OutEvent::Failed(2));
         assert_eq!(
             r.events(),

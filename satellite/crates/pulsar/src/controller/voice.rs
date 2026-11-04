@@ -11,6 +11,7 @@ use pulsar_media::{Channel, PlayState};
 use pulsar_sendspin::Transport;
 
 use super::logic::{self, COMMAND_AFTER_WAKE_MS, HaTimer, Phase, VoiceCommand};
+use super::speech_numbers;
 use super::{
     Controller, LISTEN_TIMEOUT_MS, PROCESS_TIMEOUT_MS, Pending, SOUNDS, TIMER_RING_MAX_MS, Tk,
 };
@@ -230,6 +231,7 @@ impl Controller {
         self.ring_stopped_in_dialog = false;
         self.tts_url.clear();
         self.tts_played = false;
+        self.clear_speech_display();
         self.followup = logic::Followup::default();
         self.update_duck();
         if earcon {
@@ -335,7 +337,19 @@ impl Controller {
                     self.play_tts();
                 }
             }
-            VaEvent::TtsStart => self.tts_report_owed = true,
+            VaEvent::IntentEnd | VaEvent::TtsStart => {
+                let text = if ev == VaEvent::TtsStart {
+                    self.tts_report_owed = true;
+                    get("text")
+                } else {
+                    get("speech")
+                };
+                // Выключенный «Clock spoken numbers»: текст не разбирается, часы не трогаются.
+                if self.st.clock_spoken_numbers {
+                    self.speech_display.text(text);
+                    self.update_speech_number();
+                }
+            }
             VaEvent::TtsEnd => {
                 if !get("url").is_empty() {
                     self.tts_url = get("url").to_owned();
@@ -366,7 +380,13 @@ impl Controller {
             VaEvent::RunEnd => {
                 self.stop_streaming();
                 if !self.tts_played {
-                    self.finish_interaction();
+                    // Follow-up-реплика без речи (stt-no-text-recognized) кончается тихо; с
+                    // ошибкой на кольце — как обычный сбой.
+                    if self.followup.awaiting_speech() && !self.error_shown {
+                        self.end_silent_followup();
+                    } else {
+                        self.finish_interaction();
+                    }
                 }
             }
             // Any other type, including one newer than this build, only re-arms the watchdog.
@@ -387,6 +407,31 @@ impl Controller {
         self.play_announce(vec![url], Pending::Tts { dialog });
     }
 
+    pub(super) fn clear_speech_display(&mut self) {
+        self.timers.cancel(Tk::SpeechNumber);
+        if let Some(text) = self.speech_display.clear() {
+            self.clock.set_speech_number(text);
+        }
+    }
+
+    pub(super) fn update_speech_number(&mut self) {
+        let now = now_ms();
+        if let Some(text) = self
+            .speech_display
+            .tick(now, i64::from(self.st.clock_scroll_ms))
+        {
+            let hour12 = self.st.clock_format == "12h";
+            self.clock
+                .set_speech_number(speech_numbers::clock_text(text, hour12));
+        }
+        if let Some(until) = self.speech_display.wake() {
+            self.timers
+                .set(Tk::SpeechNumber, (until - now).max(1) as u64);
+        } else {
+            self.timers.cancel(Tk::SpeechNumber);
+        }
+    }
+
     /// A cut-short or failed answer does not reopen the microphone, nor does a ringing timer.
     fn tts_finished(&mut self, ok: bool) {
         self.send_tts_report(ok);
@@ -396,13 +441,18 @@ impl Controller {
             self.st.followup_duration_s,
             self.timer_ringing || self.mic_muted(),
         ) {
+            // Продолжение слушает, пока часы дочитывают предыдущий ответ.
+            let display = std::mem::take(&mut self.speech_display);
             self.start_pipeline("", false, Vec::new());
+            self.speech_display = display;
+            self.speech_display.followup();
+            self.update_speech_number();
             if self.phase == Phase::Listening {
                 self.followup = followup.next_turn();
             }
             return;
         }
-        self.finish_interaction();
+        self.end_interaction(ok);
     }
 
     /// Sends the AnnounceFinished owed since the run's TTS_START, at most once. Dropped while an
@@ -423,6 +473,19 @@ impl Controller {
     }
 
     pub(super) fn finish_interaction(&mut self) {
+        self.end_interaction(false);
+    }
+
+    /// Follow-up-реплика кончилась без речи: числа прошлого ответа дочитываются, как после
+    /// обычного конца ответа. Отмена (кнопка, стоп-слово, мьют) гасит их через finish_interaction.
+    pub(super) fn end_silent_followup(&mut self) {
+        // Текст нового ответа без воспроизведения уже сбросил очередь (распознаватель со своим
+        // VAD не шлёт STT_VAD_START): старое число без таймера на часах не оставлять.
+        let keep = self.speech_display.started();
+        self.end_interaction(keep);
+    }
+
+    fn end_interaction(&mut self, keep_numbers: bool) {
         self.timers.cancel(Tk::FollowupWait);
         // The dialog may end before its run does (answer cut short, cancel, timeout): stop the
         // run so HA does not go on generating; whatever it still sends is dropped while idle.
@@ -431,6 +494,9 @@ impl Controller {
             self.stop_sent = true;
         }
         self.run.awaiting_run_start = false;
+        if !keep_numbers {
+            self.clear_speech_display();
+        }
         self.send_tts_report(false);
         self.mic.set_streaming(self.arbitrating);
         self.phase = Phase::Idle;

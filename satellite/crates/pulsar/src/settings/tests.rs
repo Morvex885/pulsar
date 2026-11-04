@@ -3,8 +3,8 @@
 // `zig c++ -std=c++20 -O2`. save_*.conf — `save` значений ниже; load_*.out — `load` из load_*.in,
 // затем `save`. С тех пор правились руками: `clock_auto_brightness` (после `clock_music`);
 // `followup_duration_s` (10); `clock_format` (12h в load_odd.in, bogus → 24h в load_edge.in);
-// `command_start_offset_ms` (0, последним). `wake_preroll` (бывший переключатель) больше не
-// пишется и не читается; в load_odd.in остался как неизвестный ключ.
+// `command_start_offset_ms` (0); `clock_spoken_numbers` (0, последним). `wake_preroll` (бывший
+// переключатель) больше не пишется и не читается; в load_odd.in остался как неизвестный ключ.
 
 use super::*;
 
@@ -345,6 +345,26 @@ fn clock_auto_brightness_is_always_written() {
     );
     s.parse(b"clock_auto_brightness=1\n");
     assert!(s.clock_auto_brightness);
+}
+
+#[test]
+fn clock_spoken_numbers_defaults_off() {
+    let mut s = Settings::default();
+    assert!(!s.clock_spoken_numbers);
+    assert!(
+        s.serialize()
+            .lines()
+            .any(|line| line == "clock_spoken_numbers=0")
+    );
+    s.parse(b"clock_spoken_numbers=1\n");
+    assert!(s.clock_spoken_numbers);
+    assert!(
+        s.serialize()
+            .lines()
+            .any(|line| line == "clock_spoken_numbers=1")
+    );
+    s.parse(b"clock_spoken_numbers=0\n");
+    assert!(!s.clock_spoken_numbers);
 }
 
 #[test]
