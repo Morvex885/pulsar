@@ -14,6 +14,7 @@ use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering::AcqRel, Ordering::Acquire,
     Ordering::Relaxed,
 };
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -815,11 +816,46 @@ fn processing(
     }
     let mut music_was_on = false;
     let frame = eng.frame();
-    // The chunk the Yandex spotter would hear, kept for OpenWakeWord.
-    let mut oww_audio: Vec<f32> = Vec::new();
     let mut ring = PrerollRing::new(PREROLL_SAMPLES / frame.max(1), frame);
     let mut gain_db = shared.mic_gain_db.load(Relaxed);
     let mut gain = db_to_gain(gain_db);
+
+    // OpenWakeWord runs on its own thread: this loop only copies chunks into a bounded channel, so
+    // a slow detector can never starve capture (which showed up as "processing behind, dropping
+    // frames"). A hit arrives as a phrase in `oww_hit` and is turned into a Wake here, where the
+    // pre-roll ring lives.
+    let mut oww_hit: Option<Arc<Mutex<Option<String>>>> = None;
+    let mut oww_tx: Option<SyncSender<Vec<f32>>> = None;
+    let mut oww_dropped: u64 = 0;
+    if let Some(owwm) = oww.take() {
+        let name = owwm.name.clone();
+        let hit = Arc::new(Mutex::new(None::<String>));
+        let (txq, rxq) = sync_channel::<Vec<f32>>(8);
+        let slot = hit.clone();
+        match std::thread::Builder::new()
+            .name("oww".into())
+            .spawn(move || {
+                let mut o = owwm;
+                while let Ok(chunk) = rxq.recv() {
+                    if o.push(&chunk).is_some() {
+                        let mut g = lock(&slot);
+                        if g.is_none() {
+                            *g = Some(o.name.clone());
+                        }
+                    }
+                    if let Some(e) = o.error.take() {
+                        error!("oww: graph error: {e}");
+                    }
+                }
+            }) {
+            Ok(_) => {
+                info!("wake engine: openWakeWord '{name}' on its own thread (yandex spotter still fed)");
+                oww_hit = Some(hit);
+                oww_tx = Some(txq);
+            }
+            Err(e) => error!("oww: thread failed to start ({e}); wake word stays Yandex only"),
+        }
+    }
 
     while shared.running() {
         let pending = lock(&shared.pending_model).take();
@@ -882,9 +918,14 @@ fn processing(
         // first: its Acquire pairs with `wake_handled`, after the owner's `set_streaming(true)`.
         match omni {
             Some(d) => {
-                if oww.is_some() {
-                    oww_audio.clear();
-                    oww_audio.extend_from_slice(d);
+                if let Some(q) = oww_tx.as_ref() {
+                    // try_send, never block: a full queue means the detector is behind, and the
+                    // audio path matters more than the discarded 80 ms.
+                    match q.try_send(d.to_vec()) {
+                        Ok(()) => {}
+                        Err(std::sync::mpsc::TrySendError::Full(_)) => oww_dropped += 1,
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
+                    }
                 }
                 if let Some(slot) = ring.push(d, gain)
                     && (shared.wake_pending.load(Acquire) > 0 || shared.stream.load(Relaxed))
@@ -895,36 +936,34 @@ fn processing(
             None => ring.clear(),
         }
 
-        if shared.detect.load(Relaxed) && oww.is_some() {
-            if let Some(o) = oww.as_mut() {
-                let fired = o.push(&oww_audio);
-                // A graph failure used to look exactly like "nothing was said": surface it once.
-                if let Some(e) = o.error.take() {
-                    error!("oww: graph error: {e}");
-                }
-                if let Some(score) = fired {
-                let phrase = o.name.clone();
-                let level_db = wake_level_db(&level_hist.values);
-                let speech_end = level_hist.speech_end_ms();
-                let offset_ms = shared.command_offset_ms.load(Relaxed);
-                // No spotter anchor exists for an external engine, so the pre-roll starts at the
-                // end of the ring — OpenWakeWord reports after its 80 ms window is complete.
-                let n = preroll_samples(None, offset_ms, ring.stored());
-                let preroll = ring.tail(n);
-                info!(
-                    "oww: '{phrase}' fired score={score:.2} preroll={} ms speech_end={} ms",
-                    n / SAMPLES_PER_MS,
-                    Opt(speech_end)
-                );
-                shared.wake_pending.fetch_add(1, Relaxed);
-                    let _ = tx.send(FrontendEvent::Wake {
-                        phrase,
-                        level_db,
-                        preroll,
-                    });
-                }
-            }
-        } else if shared.detect.load(Relaxed) {
+        // OpenWakeWord's hit is reported by its thread; build the Wake here so the pre-roll comes
+        // from the ring this loop owns.
+        if let Some(slot) = oww_hit.as_ref()
+            && shared.detect.load(Relaxed)
+            && let Some(phrase) = lock(slot).take()
+        {
+            let level_db = wake_level_db(&level_hist.values);
+            let speech_end = level_hist.speech_end_ms();
+            let offset_ms = shared.command_offset_ms.load(Relaxed);
+            // No spotter anchor exists for an external engine: the hit arrives after its 80 ms
+            // window, so the useful pre-roll is everything the ring holds.
+            let n = preroll_samples(Some(ring.stored()), offset_ms, ring.stored());
+            let preroll = ring.tail(n);
+            info!(
+                "oww: '{phrase}' fired preroll={} ms speech_end={} ms dropped={oww_dropped}",
+                n / SAMPLES_PER_MS,
+                Opt(speech_end)
+            );
+            shared.wake_pending.fetch_add(1, Relaxed);
+            let _ = tx.send(FrontendEvent::Wake {
+                phrase,
+                level_db,
+                preroll,
+            });
+        }
+
+        // The Yandex spotter keeps running, so «Алиса» / «Ясмина» and «hey jarvis» all work.
+        if shared.detect.load(Relaxed) {
             let hits = eng.feed_wake();
             if !hits.is_empty() {
                 let level_db = wake_level_db(&level_hist.values);
