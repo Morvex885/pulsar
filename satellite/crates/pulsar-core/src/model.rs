@@ -384,6 +384,7 @@ static LITE2: Model = Model {
 /// Станция Лайт 2 на плате prune: см. docs/lite2.md.
 static PRUNE: Model = Model {
     codename: "prune",
+    clock_dir: "",
     has_clock: false,
     keys_input: "aw933xx",
     has_lux: false,
@@ -729,6 +730,7 @@ mod tests {
         assert_eq!(m.codename, "prune");
         assert_eq!(m.keys_input, "aw933xx");
         assert!(!m.has_clock && !m.has_lux);
+        assert_eq!(m.clock_dir, "");
         // Звуковой тракт и светодиоды — как у plum.
         assert_eq!(m.vqe_preset, "plum");
         assert_eq!(m.mic_channels, &[0, 2]);
