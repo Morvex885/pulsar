@@ -719,7 +719,7 @@ impl Controller {
                 },
                 ev = recv(&mut self.rx.speaker) => match ev {
                     Some(ev) => self.on_speaker(ev),
-                    None => self.rx.speaker = None,
+                    None => self.speaker_lost(),
                 },
                 ev = recv(&mut self.rx.arbiter) => match ev {
                     Some(ArbiterEvent::Decided { claim_id, won, best, peers }) => {

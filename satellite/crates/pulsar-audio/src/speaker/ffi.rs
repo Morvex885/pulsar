@@ -10,8 +10,8 @@ use std::sync::LazyLock;
 use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW, Symbol};
 
 const TFLITE: &str = "/system/vendor/quasar/libs/libtflite.so";
-// "custom-opresolver-tag" в конфиге модели. В этой сборке библиотеки у TfLiteInterpreterCreate нулевой
-// резолвер (падает на создании), операторы даёт только резолвер из её реестра по тегу.
+// "custom-opresolver-tag" в конфиге модели. В этой сборке библиотеки у TfLiteInterpreterCreate
+// нулевой резолвер (падает на создании), операторы даёт только резолвер из её реестра по тегу.
 const RESOLVER_TAG: &std::ffi::CStr = c"next";
 
 type P = *mut c_void;

@@ -8,7 +8,7 @@ pub const ENROLL_EXPIRE_MS: u64 = 5 * 60 * 1000;
 /// Таймер нужен на случай, если звук с микрофона перестанет приходить.
 pub const PHRASE_MAX_MS: u64 = 8000;
 
-// Посередине между замерами: один говорящий от 0,70, разные до 0,47.
+// Посередине между замерами на Миди: один говорящий от 0,70, разные до 0,47.
 const MIN_SAMPLE_COS: f32 = 0.55;
 // После стольких отказов подряд, видимо, плох первый образец: начинаем заново.
 const MAX_REJECTS: u32 = 3;
@@ -114,6 +114,8 @@ pub enum EnrollNote {
     Restarted,
     SoundsLike(String),
     Saved(String),
+    SaveFailed,
+    ForgetFailed,
     Cancelled,
     Expired,
     BadName,
@@ -142,6 +144,10 @@ pub fn prompt(view: &EnrollView, wake: &str) -> String {
             EnrollNote::Saved(name) => {
                 format!("Голос сохранён: {name}. Проверьте: «{wake}, как меня зовут?»")
             }
+            EnrollNote::SaveFailed => {
+                "Не удалось сохранить голос: запись отменена, прежний голос остался.".to_owned()
+            }
+            EnrollNote::ForgetFailed => "Не удалось удалить голос: он остался.".to_owned(),
             EnrollNote::Cancelled => "Запись отменена.".to_owned(),
             EnrollNote::Expired => "Запись отменена: 5 минут не было фраз.".to_owned(),
             EnrollNote::BadName => {
@@ -157,6 +163,7 @@ pub fn prompt(view: &EnrollView, wake: &str) -> String {
         }
         EnrollNote::Restarted => "Фразы слишком разные, запись начата заново. ".to_owned(),
         EnrollNote::SoundsLike(name) => format!("Похоже на голос: {name}. "),
+        EnrollNote::ForgetFailed => "Не удалось удалить голос: он остался. ".to_owned(),
         _ => String::new(),
     };
     let index = (*done as usize).min(PHRASES.len() - 1);
