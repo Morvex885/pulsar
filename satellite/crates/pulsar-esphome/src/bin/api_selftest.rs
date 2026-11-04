@@ -301,6 +301,7 @@ async fn run(port: u16, name: String, run_s: i64, key_path: Option<PathBuf>) -> 
         music_styles: strings(&["Off", "All styles", "Spectrum"]),
         case_colors: strings(&["None", "blue"]),
         clock_music_styles: strings(&["Off", "Levels"]),
+        clock_formats: strings(&["24h", "12h"]),
         zigbee_modes: strings(&["Coordinator", "Router"]),
         has_clock: true,
         has_lux: true,
@@ -321,6 +322,7 @@ async fn run(port: u16, name: String, run_s: i64, key_path: Option<PathBuf>) -> 
     api.publish_select(SelectId::MusicViz, "All styles");
     api.publish_select(SelectId::CaseColor, "None");
     api.publish_select(SelectId::ClockMusic, "Off");
+    api.publish_select(SelectId::ClockFormat, "24h");
     api.publish_binary_sensor(BinarySensorId::HwMicMute, false);
     api.publish_number(NumberId::ClockBrightness, 50.0);
     api.publish_light(&LightState {

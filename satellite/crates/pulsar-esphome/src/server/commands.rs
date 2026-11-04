@@ -307,6 +307,11 @@ impl Server {
                 &self.cfg.clock_music_styles,
                 "clock music",
             ),
+            key::SELECT_CLOCK_FORMAT => (
+                SelectId::ClockFormat,
+                &self.cfg.clock_formats,
+                "clock format",
+            ),
             key::SELECT_MUSIC_VIZ => (
                 SelectId::MusicViz,
                 &self.cfg.music_styles,

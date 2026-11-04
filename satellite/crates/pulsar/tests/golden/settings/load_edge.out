@@ -26,3 +26,4 @@ clock_music=Off
 wake_preroll=1
 clock_auto_brightness=1
 followup_duration_s=10
+clock_format=24h

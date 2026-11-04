@@ -15,7 +15,7 @@ fn wall() -> Wall {
 }
 
 fn time_frame() -> Frame {
-    glyph_frame(font::time_glyphs(12, 34), true)
+    glyph_frame(font::time_glyphs(12, 34, false), true)
 }
 
 fn text_frame(s: &str) -> Frame {
@@ -130,6 +130,18 @@ fn layer_priority() {
     assert_eq!(l.compose(NOW, wall).0, clock_fx::levels(&l.mus_in));
     l.media = false;
     assert_eq!(l.compose(NOW, wall).0, time_frame());
+}
+
+#[test]
+fn time_follows_the_format() {
+    let mut l = Layers::new();
+    // 15 ч: у 12:34 из wall() оба формата совпадают.
+    let pm = || Wall { hour: 15, ..wall() };
+    let shown = |h12| glyph_frame(font::time_glyphs(15, 34, h12), true);
+    assert_eq!(l.compose(NOW, pm), (shown(false), 0));
+    l.hour12 = true;
+    assert_eq!(l.compose(NOW, pm), (shown(true), 0));
+    assert_ne!(shown(true), shown(false));
 }
 
 #[test]
@@ -640,5 +652,6 @@ async fn unavailable_clock_is_a_no_op() {
 #[test]
 fn names() {
     assert_eq!(music_styles(), ["Off", "Levels"]);
+    assert_eq!(time_formats(), ["24h", "12h"]);
     assert_eq!(face_names().len(), 19);
 }

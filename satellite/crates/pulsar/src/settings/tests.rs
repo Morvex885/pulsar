@@ -2,7 +2,8 @@
 // Settings::save из controller.cpp, перенесённые без изменений во временный хост-харнесс, собранный
 // `zig c++ -std=c++20 -O2`. save_*.conf — `save` значений ниже; load_*.out — `load` из load_*.in,
 // затем `save`. С тех пор правились руками: `wake_preroll` (после `clock_music`; 0 в load_odd.in);
-// `clock_auto_brightness` (после `wake_preroll`); `followup_duration_s` (10, последним).
+// `clock_auto_brightness` (после `wake_preroll`); `followup_duration_s` (10); `clock_format`
+// (последним; 12h в load_odd.in, bogus → 24h в load_edge.in).
 
 use super::*;
 
