@@ -877,9 +877,13 @@ fn processing(
         }
 
         if shared.detect.load(Relaxed) && oww.is_some() {
-            if let Some(o) = oww.as_mut()
-                && let Some(score) = o.push(&oww_audio)
-            {
+            if let Some(o) = oww.as_mut() {
+                let fired = o.push(&oww_audio);
+                // A graph failure used to look exactly like "nothing was said": surface it once.
+                if let Some(e) = o.error.take() {
+                    error!("oww: graph error: {e}");
+                }
+                if let Some(score) = fired {
                 let phrase = o.name.clone();
                 let level_db = wake_level_db(&level_hist.values);
                 let speech_end = level_hist.speech_end_ms();
@@ -894,11 +898,12 @@ fn processing(
                     Opt(speech_end)
                 );
                 shared.wake_pending.fetch_add(1, Relaxed);
-                let _ = tx.send(FrontendEvent::Wake {
-                    phrase,
-                    level_db,
-                    preroll,
-                });
+                    let _ = tx.send(FrontendEvent::Wake {
+                        phrase,
+                        level_db,
+                        preroll,
+                    });
+                }
             }
         } else if shared.detect.load(Relaxed) {
             let hits = eng.feed_wake();
