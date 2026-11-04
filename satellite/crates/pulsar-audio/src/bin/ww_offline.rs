@@ -216,7 +216,16 @@ fn run() -> u8 {
     // Поданные спотеру сэмплы на канал и ещё не поданные (чередованные).
     let (mut end, mut out_samples) = (0u64, 0u64);
     let mut pending: Vec<i16> = Vec::with_capacity((frame + submit) * nch);
-    while f.read_exact(&mut raw).is_ok() {
+    loop {
+        match f.read_exact(&mut raw) {
+            Ok(()) => {}
+            // Конец записи, в том числе неполный последний чанк.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => {
+                out!("wav: {}", strerror(&e));
+                return 1;
+            }
+        }
         for (s, b) in input.iter_mut().zip(raw.as_chunks::<2>().0) {
             *s = i16::from_le_bytes(*b);
         }
