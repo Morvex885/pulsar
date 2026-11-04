@@ -135,9 +135,10 @@ fn ring_dump(model: &Model) -> String {
 /// по пути к светодиодам (см. docs/lite2.md, «Светодиоды и часы»), яркость упирается в 63
 /// (измерено на плате plum при остановленном демоне: fb 26/100/150/204/255 -> красный
 /// 9/37/55/63/63, зелёный 6/24/36/49/62, синий 4/19/29/39/49); у Миди читается как записано.
-/// Плата prune: см. docs/lite2.md, «Не проверено».
-fn sysfs_expected(model: &Model, fb: [u8; 3]) -> [i32; 3] {
-    if model.ring.trigger == "led_ring_fb" {
+/// Без framebuffer (`fb_output` false) pulsar-hw пишет яркость в sysfs сам, мимо trigger, и она
+/// читается как записана. Плата prune: см. docs/lite2.md, «Не проверено».
+fn sysfs_expected(model: &Model, fb: [u8; 3], fb_output: bool) -> [i32; 3] {
+    if fb_output && model.ring.trigger == "led_ring_fb" {
         let k = [0.36, 0.23, 0.2];
         [0, 1, 2].map(|c| ((f32::from(fb[c]) * k[c]).round() as i32).min(63))
     } else {
@@ -184,7 +185,10 @@ fn check_strip(model: &Model, s: &LedStrip, what: &str, fb: [u8; 3]) -> bool {
         say(&format!("   check {what}: I²C ring has no read-back, SKIP"));
         return true;
     }
-    let want = sysfs_expected(model, fb);
+    // pulsar-hw uses the framebuffers only if the ring's and the logo's both qualify.
+    let fb_output =
+        fb_mode(model, &model.ring) && (model.logo.count == 0 || fb_mode(model, &model.logo));
+    let want = sysfs_expected(model, fb, fb_output);
     let mut ok = true;
     let mut got = String::new();
     for i in 0..s.count {
@@ -192,9 +196,6 @@ fn check_strip(model: &Model, s: &LedStrip, what: &str, fb: [u8; 3]) -> bool {
         ok &= v.iter().zip(want).all(|(g, w)| (g - w).abs() <= 3);
         got += &format!(" {},{},{}", v[0], v[1], v[2]);
     }
-    // pulsar-hw uses the framebuffers only if the ring's and the logo's both qualify.
-    let fb_output =
-        fb_mode(model, &model.ring) && (model.logo.count == 0 || fb_mode(model, &model.logo));
     let fb_state = if !fb_output {
         "fb not checked (sysfs output)".to_owned()
     } else {
