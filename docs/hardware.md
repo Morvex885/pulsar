@@ -123,8 +123,7 @@ alsa-lib на armhf-образах Миди версионированная (AL
 Ключи IPC:
 
 - `speakers` прошивки (Миди, Лайт 2, Мини 3 Про), `dmix_speakers` Мини 3 и `dmix_spk` Станции 2
-  (`ipc_key 1024`):
-  shm 0x400, 0x401 (буфер микширования), семафор 0x400;
+  (`ipc_key 1024`): shm 0x400, 0x401 (буфер микширования), семафор 0x400;
 - `minidmix` у Мини (`ipc_key 2277` в [`../satellite/deploy/asound.conf`](../satellite/deploy/asound.conf)):
   shm 0x8e5, 0x8e6, семафор 0x8e5;
 - `dmix_spk_plug` у Мини 2: ключ не сверен.

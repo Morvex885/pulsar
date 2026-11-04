@@ -335,8 +335,8 @@ static PRUNE: Model = Model {
     ..LITE2
 };
 
-// set_volume.sh у Мини 2 и (по вики) у Мини 3 Про — `amixer set 'Master' <percent>%`: raw —
-// процент от 255, без сдвига в дБ и без нижней ступени.
+// set_volume.sh у Мини 2 и (по вики) у Мини 3 Про и Станции 2 — `amixer set 'Master' <percent>%`:
+// raw — процент от 255, без сдвига в дБ и без нижней ступени.
 const PERCENT_VOLUME: &[VolumePoint] = &[
     VolumePoint { level: 0, raw: 0 },
     VolumePoint {
