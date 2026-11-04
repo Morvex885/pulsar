@@ -258,6 +258,44 @@ fn model_dir(id: &str) -> PathBuf {
     PathBuf::from(format!("{MODELS}{id}"))
 }
 
+/// Activation models are directories under MODELS — the firmware decides which words it carries.
+fn wake_word_available(id: &str) -> bool {
+    !id.is_empty() && model_dir(id).join("acoustic_model.nnet").is_file()
+}
+
+/// Every activation model on this firmware, alisa first when present.
+fn wake_word_names() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(MODELS) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if wake_word_available(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out.sort_by(|a, b| match (a.as_str(), b.as_str()) {
+        ("alisa", "alisa") => std::cmp::Ordering::Equal,
+        ("alisa", _) => std::cmp::Ordering::Less,
+        (_, "alisa") => std::cmp::Ordering::Greater,
+        _ => a.cmp(b),
+    });
+    if out.is_empty() {
+        out.push("alisa".into());
+    }
+    out
+}
+
+/// The phrase Home Assistant shows for a model directory (English, as the rest of the API).
+fn wake_word_phrase(id: &str) -> String {
+    match id {
+        "alisa" => "Alisa".into(),
+        "yandex" => "Yandex".into(),
+        "yasmina" => "Yasmina".into(),
+        other => other.to_string(),
+    }
+}
+
 /// C++ `uint8_t(x * 255)`.
 fn light_rgb(l: &pulsar_esphome::LightState) -> Rgb {
     Rgb {
@@ -298,7 +336,7 @@ impl Controller {
             VERSION,
             BUILD_TIME,
         );
-        if st.wake_word != "alisa" && st.wake_word != "yandex" {
+        if !wake_word_available(&st.wake_word) {
             st.wake_word = "alisa".into();
         }
         let case_colors = pulsar_hw::case_colors();
@@ -321,18 +359,14 @@ impl Controller {
         };
         let cfg = ApiConfig {
             port: ports.api,
-            wake_words: vec![
-                WakeWordInfo {
-                    id: "alisa".into(),
-                    phrase: "Алиса".into(),
+            wake_words: wake_word_names()
+                .into_iter()
+                .map(|id| WakeWordInfo {
+                    phrase: wake_word_phrase(&id),
+                    id,
                     languages: vec!["ru".into()],
-                },
-                WakeWordInfo {
-                    id: "yandex".into(),
-                    phrase: "Яндекс".into(),
-                    languages: vec!["ru".into()],
-                },
-            ],
+                })
+                .collect(),
             active_wake_words: vec![st.wake_word.clone()],
             light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
             clock_faces: with_none(strings(pulsar_clock::face_names())),
