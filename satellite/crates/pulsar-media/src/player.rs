@@ -1,5 +1,6 @@
-//! Audio playback through the GStreamer build bundled with the Yandex firmware into the model's
-//! ALSA playback PCM (`Model::playback_pcm`: dmix + softvol). Two independent channels:
+//! Воспроизведение через GStreamer из прошивки Яндекса в PCM воспроизведения модели
+//! (`Model::playback_pcm`: dmix, обычно за softvol — см. `Model::master_pcm`). Два независимых
+//! канала:
 //!   Music    - media_player content, can be paused / ducked.
 //!   Announce - TTS, announcements, earcons; plays over (ducked) music. Decoded by its playbin,
 //!              played by the writer of [`crate::pcm_out`] instead of an alsasink.

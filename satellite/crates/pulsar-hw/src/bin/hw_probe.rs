@@ -119,6 +119,10 @@ fn ring_dump(model: &Model) -> String {
     if !model.ring.i2c_dev.is_empty() {
         return "i2c (no read-back)".to_owned();
     }
+    if model.led_prefix.is_empty() {
+        // Нет поканальных sysfs-светодиодов (Станция 2): отсутствующие файлы читались бы как 0.
+        return "no sysfs LEDs".to_owned();
+    }
     let hex = |v: [i32; 3]| format!("{:02x}{:02x}{:02x}", v[0], v[1], v[2]);
     let step = if model.ring.count > 6 { 3 } else { 1 };
     let mut s = String::new();

@@ -154,7 +154,7 @@ pub struct LedStrip {
     pub fb_dev: &'static str,
     /// Expected /sys/class/graphics/fbN/name.
     pub fb_name: &'static str,
-    /// LED trigger that routes the framebuffer to the LEDs.
+    /// LED-триггер, направляющий фреймбуфер на светодиоды; "" — триггера нет (панель Станции 2).
     pub trigger: &'static str,
     /// "ring" / "logo"
     pub sysfs_kind: &'static str,
@@ -538,7 +538,7 @@ static MINI3: Model = Model {
     zigbee_boot: "",
 };
 
-/// Станция 2 (флагман 2-го поколения): см. docs/station2.md.
+/// Станция 2: см. docs/station2.md.
 static STATION2: Model = Model {
     codename: "station-midi",
     host_prefix: "yandex-station2-",
@@ -592,8 +592,7 @@ static STATION2: Model = Model {
     alsa_lib: "",
     software_volume: false,
     amp_enable_paths: &[],
-    // set_volume.sh Яндекса = `amixer set 'Master' <процент>%`: raw = процент от 255, без нижней
-    // ступени — линейная кривая, как у Мини 2 (у неё тот же сценарий без platformToAlsaMap).
+    // Линейная кривая, как у Мини 2: см. docs/station2.md, «Звук».
     volume_map: MINI2_VOLUME,
     volume_min_step: false,
     has_lux: true,

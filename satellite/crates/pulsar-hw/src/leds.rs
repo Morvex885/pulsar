@@ -714,7 +714,8 @@ fn trigger_is(led: &str, trig: &str) -> bool {
         .is_some_and(|t| t.contains(&format!("[{trig}]")))
 }
 
-/// Opens one strip's framebuffer if its trigger is active and the fb has the expected name.
+/// Открывает фреймбуфер ленты, если имя fb совпадает с моделью и LED-триггер ленты (если он у неё
+/// есть) активен.
 fn open_strip_fb(model: &Model, s: &LedStrip) -> Option<Framebuffer> {
     if s.fb_dev.is_empty() {
         return None; // sysfs-only ring (Mini 2)

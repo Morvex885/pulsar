@@ -175,8 +175,8 @@ fn panel_effect_returns_false_for_non_panel_names() {
 
 #[test]
 fn panel_names_are_ring_noops_on_a_ring_layout() {
-    // На кольце панельные имена не должны включать сетку Station 2: старое поведение
-    // (проверка только по имени) давало другой модели чужую геометрию.
+    // Панельные имена на кольце не включают сетку Станции 2: раскладку задаёт модель, а не имя
+    // эффекта.
     let st = EffectState::default();
     let mut out = vec![Col::default(); 24];
     assert!(!effect(
@@ -228,6 +228,29 @@ fn panel_effects_keep_moving_after_long_uptime() {
             "{name}"
         );
         assert_ne!(a, b, "{name}: кадр не сдвинулся за 0,1 с");
+    }
+}
+
+#[test]
+fn panel_rainbow_hue_keeps_moving_after_long_uptime() {
+    // Белый цвет лампы по умолчанию идёт в радужные ветки: их оттенок тоже зависит от t.
+    let t = 10_000_000.0;
+    let hue = |o: &Col| {
+        let m = o.r.max(o.g).max(o.b);
+        (m > 0.05).then(|| (o.r / m, o.g / m, o.b / m))
+    };
+    for name in ["Radar", "Ripple", "Spiral"] {
+        let mut a = vec![Col::default(); 88];
+        let mut b = vec![Col::default(); 88];
+        assert!(panel_effect(name, rgb(255, 255, 255), 1.0, t, &mut a));
+        assert!(panel_effect(name, rgb(255, 255, 255), 1.0, t + 0.1, &mut b));
+        // Яркость светодиода сокращается при нормировке, остаётся только оттенок.
+        let moved = a
+            .iter()
+            .zip(&b)
+            .filter_map(|(x, y)| Some((hue(x)?, hue(y)?)))
+            .any(|(x, y)| x != y);
+        assert!(moved, "{name}: оттенок не сдвинулся за 0,1 с");
     }
 }
 

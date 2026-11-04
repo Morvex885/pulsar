@@ -23,17 +23,15 @@ Init-скрипты, `hardvold.config` и earcons мейнтейнер свер�
   микрофоны — каналы 0, 2, 4, 7, референсы — 8, 9 (сигнал TLV320ADC3101, см. вики).
 - VQE: пресет `yandexmidi`, 4 микрофона, 2 референса, выход 16 кГц (`quasar.cfg`,
   `audiod.audioDevice.vqe`).
-- Воспроизведение: штатный музыкальный плеер играет в PCM `default` (`quasar.cfg`). Ветка
-  `default` в `/etc/asound.conf` — `dmix_spk_plug` → `playback_metrics_tap` → `dmix_spk`
-  (`hw:0,0`, `ipc_key 1024`), без softvol. Регулятор `Master Playback Volume` создаёт отдельный
-  PCM `soft_volume` (softvol перед тем же маршрутом).
+- Воспроизведение: штатный плеер играет в `default` (`quasar.cfg`); ветка `default` —
+  `dmix_spk_plug` → `playback_metrics_tap` → `dmix_spk`, без softvol; регулятор `Master` создаёт
+  `soft_volume` (вики, «Звук»).
 - Громкость: штатный `/usr/bin/hardvold` работает и при остановленном `maind`. По
-  `/etc/hardvold.config` он переводит `Master Playback Volume` (0…255) в
-  `SY6045S Master Playback Volume` по кривой −51…0 дБ; регуляторы `SY6045S Ch1/Ch2` не трогает.
-  Запись `SY6045S Master` в обход `hardvold` с ним конфликтовала: при одинаковом raw 77
-  аппаратный Master был 183–185 либо 255.
-- Карты `platformToAlsaMap` в `quasar.cfg` нет, `set_volume.sh` — `amixer set 'Master' <процент>%`:
-  кривая линейная, raw — процент от 255.
+  `/etc/hardvold.config` он переводит `Master Playback Volume` в `SY6045S Master Playback Volume`
+  по кривой −51…0 дБ; регуляторы `SY6045S Ch1/Ch2` не трогает. Запись `SY6045S Master` в обход
+  `hardvold` с ним конфликтовала: при одинаковом raw 77 аппаратный Master был 183–185 либо 255.
+- Карты `platformToAlsaMap` в `quasar.cfg` нет: по `set_volume.sh` (вики) кривая линейная, raw —
+  процент от 255.
 - Earcons модели (`common/spotter_start.mp3`, `common/spotter_cancel.mp3`,
   `common/volume_sound.mp3`, `common/timer.wav`, `ru-RU/playback_error.mp3`) в дампе есть. В
   `libquasar_gstreamer.so` собран gst-libav; что он декодирует MP3 — вывод по строкам библиотеки.
@@ -41,7 +39,6 @@ Init-скрипты, `hardvold.config` и earcons мейнтейнер свер�
 ## Светодиоды и часы
 
 - Часов нет.
-- Порядок байтов пикселя панели — по вики R, G, B, W; белый канал pulsar не использует.
 - `/system/vendor/quasar/ledconfigs` пуст: матриц цвета корпуса нет.
 - Датчик освещённости — IIO-устройство `ltr308als01`.
 
@@ -59,7 +56,7 @@ Init-скрипты, `hardvold.config` и earcons мейнтейнер свер�
 - Установка через `pulsar-install`: станция определяется как «Yandex Station 2 (station-midi)»,
   ставится armhf-сборка; демон запускается.
 - По описанию #58: панель, кнопки, датчик освещённости, громкость (ползунок HA, кнопки, голос), в
-  том числе на низких уровнях после перехода на `default`, ESPHome и Sendspin.
+  том числе на низких уровнях (воспроизведение через `default`), ESPHome и Sendspin.
 
 ## Не проверено
 
@@ -71,7 +68,7 @@ Init-скрипты, `hardvold.config` и earcons мейнтейнер свер�
 - Вид 2D-эффектов, анимаций состояния и индикации mute на панели; подстройка яркости панели по
   датчику.
 - Аппаратный переключатель микрофонов в pulsar.
-- ALSA-переключатель `SPK mute` на hw:0 (в вики и docs не записан).
+- ALSA-переключатель `SPK mute` на hw:0: глушит ли он выход и в каком состоянии он после загрузки.
 - Earcons `.mp3` в pulsar.
 - Якорь пре-ролла (`spotter_get_unhandled_nbytes`) при этой сборке библиотеки.
 - Zigbee: радио на `/dev/ttyS3`, линии GPIO 474/475, прошивка радио в формате GBL (по данным #58);

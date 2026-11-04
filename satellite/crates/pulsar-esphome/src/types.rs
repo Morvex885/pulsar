@@ -43,7 +43,7 @@ pub struct ApiConfig {
     pub wake_words: Vec<WakeWordInfo>,
     /// Initially active ids.
     pub active_wake_words: Vec<String>,
-    /// Ring light effects, besides "None".
+    /// Эффекты лампы («Ring» или «Panel» — по `led_layout`), кроме "None".
     pub light_effects: Vec<String>,
     /// Select «Clock face» options, "None" first.
     pub clock_faces: Vec<String>,
