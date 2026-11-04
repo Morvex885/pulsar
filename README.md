@@ -475,10 +475,10 @@ pulsar отдаёт модуль по протоколу deCONZ (ConBee/RaspBee)
 ### Лайт 2 на плате prune
 
 Данные контрибьютора ([#57](https://github.com/Morvex885/pulsar/issues/57)); pulsar на этой плате
-ещё не запускался. Прошивка, звуковой тракт и кольцо те же, что у Лайт 2 на плате `plum`; часов и
-датчика освещённости нет, поэтому нет и сущностей часов и «Illuminance». Установщик определяет
-колонку как `Yandex Station Lite 2 (prune)`, в HA она называется `yandex-lite2-xxxxxx`. Что
-проверено, а что нет — в
+ещё не запускался. Прошивка (`deviceType` `plum`), звуковой тракт и кольцо те же, что у Лайт 2 на
+плате `plum`; часов и датчика освещённости нет, поэтому нет и сущностей часов и «Illuminance».
+Установщик определяет колонку как `Yandex Station Lite 2 (prune)`, в HA она называется
+`yandex-lite2-xxxxxx`. Что проверено, а что нет — в
 [docs/lite2.md](https://github.com/Morvex885/pulsar/blob/main/docs/lite2.md).
 
 ### Мини 2

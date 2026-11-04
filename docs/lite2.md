@@ -5,13 +5,14 @@
 — [вики](https://hackalice.me/devices/station-lite2/), плата `prune` там не описана; здесь только
 то, чего на вики нет ([AGENTS.md, «Документация»](../AGENTS.md#документация)).
 
-Прошивка у плат общая: `deviceType` в `quasar.cfg` — `plum` на обеих. Плату различают `pcba_id -m`
-(26 — `plum`, 28 — `prune`; так `/etc/init.d/S38touch-settings` выбирает конфиг сенсорных кнопок)
-и devicetree: `yandex,prune-evt2` / `yandex,prune`, `amlogic-dt-id` `axg_prune_evt2`. Сравнение
-`plum` на `0.369.1.46.4778258659.20261013.133` и `prune` на `0.369.1.50.4794654278.20261021.133`:
-SHA256 `/etc/asound.conf`, `/etc/init.d/S45amplifier-settings` и всех файлов `vqe_models/` и
-`spotter_models/` совпадают, `quasar.cfg` различается (прошивки разные). Список ALSA PCM и
-контролов микшера на обеих платах одинаковый.
+Линейка прошивки у плат общая: `deviceType` в `quasar.cfg` — `plum` на обеих. Плату различают
+`pcba_id -m` (26 — `plum`, 28 — `prune`; так `/etc/init.d/S38touch-settings` выбирает конфиг
+сенсорных кнопок) и devicetree: `yandex,prune-evt2` / `yandex,prune`, `amlogic-dt-id`
+`axg_prune_evt2`. Сравнение `plum` на `0.369.1.46.4778258659.20261013.133` и `prune` на
+`0.369.1.50.4794654278.20261021.133`: SHA256 `/etc/asound.conf`,
+`/etc/init.d/S45amplifier-settings` и всех файлов `vqe_models/` и `spotter_models/` совпадают,
+`quasar.cfg` различается (версии прошивки разные). Список ALSA PCM и контролов микшера на обеих
+платах одинаковый.
 
 ## Userland и хранилище
 
