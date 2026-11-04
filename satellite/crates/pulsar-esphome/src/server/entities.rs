@@ -49,6 +49,8 @@ pub(super) mod key {
     pub const SW_CLOCK_AUTO_BRI: u32 = 33;
     pub const NUMBER_FOLLOWUP_DURATION: u32 = 34;
     pub const SELECT_CLOCK_FORMAT: u32 = 35;
+    pub const SW_WAKE_SOUND: u32 = 37;
+    pub const SW_CLOCK_COLON_BLINK: u32 = 36;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -121,10 +123,12 @@ pub(super) struct Cache {
     media_muted: bool,
     sw_microphones: BoolState,
     sw_clock: BoolState,
+    sw_clock_colon_blink: BoolState,
     sw_clock_auto_bri: BoolState,
     sw_auto_update: BoolState,
     sw_nearest_answers: BoolState,
     sw_voice_indication: BoolState,
+    sw_wake_sound: BoolState,
     sw_wake_preroll: BoolState,
     bs_hw_mute: BoolState,
     update: UpdateState,
@@ -156,10 +160,12 @@ impl Cache {
             media_muted: false,
             sw_microphones: BoolState::default(),
             sw_clock: BoolState::default(),
+            sw_clock_colon_blink: BoolState::default(),
             sw_clock_auto_bri: BoolState::default(),
             sw_auto_update: BoolState::default(),
             sw_nearest_answers: BoolState::default(),
             sw_voice_indication: BoolState::default(),
+            sw_wake_sound: BoolState::default(),
             sw_wake_preroll: BoolState::default(),
             bs_hw_mute: BoolState::default(),
             update: UpdateState::default(),
@@ -256,13 +262,14 @@ impl Server {
 
     fn switch_listed(&self, id: SwitchId) -> bool {
         match id {
-            SwitchId::Clock => self.cfg.has_clock,
+            SwitchId::Clock | SwitchId::ClockColonBlink => self.cfg.has_clock,
             SwitchId::ClockAutoBrightness => self.cfg.has_clock && self.cfg.has_auto_brightness,
             SwitchId::WakePreroll => self.cfg.has_wake_preroll,
             SwitchId::Microphones
             | SwitchId::AutoUpdate
             | SwitchId::NearestAnswers
-            | SwitchId::VoiceIndication => true,
+            | SwitchId::VoiceIndication
+            | SwitchId::WakeSound => true,
         }
     }
 
@@ -313,6 +320,15 @@ impl Server {
             ));
         }
         let cfg = Some(ENTITY_CATEGORY_CONFIG);
+        if self.switch_listed(SwitchId::ClockColonBlink) {
+            out.push(switch(
+                "clock_colon_blink",
+                key::SW_CLOCK_COLON_BLINK,
+                "Clock colon blink",
+                "mdi:clock-digital",
+                cfg,
+            ));
+        }
         if self.switch_listed(SwitchId::ClockAutoBrightness) {
             out.push(switch(
                 "clock_auto_brightness",
@@ -341,6 +357,13 @@ impl Server {
             key::SW_VOICE_INDICATION,
             "Voice indication",
             "mdi:led-on",
+            cfg,
+        ));
+        out.push(switch(
+            "wake_sound",
+            key::SW_WAKE_SOUND,
+            "Wake sound",
+            "mdi:volume-high",
             cfg,
         ));
         if self.cfg.has_wake_preroll {
@@ -743,21 +766,31 @@ impl Server {
         let to = Some(id);
         let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
         let c = &self.cache;
-        let (mic, clock, auto_bri, auto, nearest, voice, preroll, hw) = (
+        let (mic, clock, auto_bri, auto, nearest, voice, wake_sound, preroll, hw) = (
             c.sw_microphones,
             c.sw_clock,
             c.sw_clock_auto_bri,
             c.sw_auto_update,
             c.sw_nearest_answers,
             c.sw_voice_indication,
+            c.sw_wake_sound,
             c.sw_wake_preroll,
             c.bs_hw_mute,
         );
+        let colon_blink = c.sw_clock_colon_blink;
         let (lux, bri, scroll, speed) = (c.lux, c.clock_bri, c.clock_scroll, c.led_speed);
         self.send_media(to);
         self.send_bool(msg::SWITCH_STATE, key::SW_MICROPHONES, mic, to);
         if self.switch_listed(SwitchId::Clock) {
             self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK, clock, to);
+        }
+        if self.switch_listed(SwitchId::ClockColonBlink) {
+            self.send_bool(
+                msg::SWITCH_STATE,
+                key::SW_CLOCK_COLON_BLINK,
+                colon_blink,
+                to,
+            );
         }
         if self.switch_listed(SwitchId::ClockAutoBrightness) {
             self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK_AUTO_BRI, auto_bri, to);
@@ -765,6 +798,7 @@ impl Server {
         self.send_bool(msg::SWITCH_STATE, key::SW_AUTO_UPDATE, auto, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_NEAREST_ANSWERS, nearest, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_VOICE_INDICATION, voice, to);
+        self.send_bool(msg::SWITCH_STATE, key::SW_WAKE_SOUND, wake_sound, to);
         if self.cfg.has_wake_preroll {
             self.send_bool(msg::SWITCH_STATE, key::SW_WAKE_PREROLL, preroll, to);
         }
@@ -911,6 +945,9 @@ impl Server {
                 let (s, key) = match id {
                     SwitchId::Microphones => (&mut c.sw_microphones, key::SW_MICROPHONES),
                     SwitchId::Clock => (&mut c.sw_clock, key::SW_CLOCK),
+                    SwitchId::ClockColonBlink => {
+                        (&mut c.sw_clock_colon_blink, key::SW_CLOCK_COLON_BLINK)
+                    }
                     SwitchId::ClockAutoBrightness => {
                         (&mut c.sw_clock_auto_bri, key::SW_CLOCK_AUTO_BRI)
                     }
@@ -921,6 +958,7 @@ impl Server {
                     SwitchId::VoiceIndication => {
                         (&mut c.sw_voice_indication, key::SW_VOICE_INDICATION)
                     }
+                    SwitchId::WakeSound => (&mut c.sw_wake_sound, key::SW_WAKE_SOUND),
                     SwitchId::WakePreroll => (&mut c.sw_wake_preroll, key::SW_WAKE_PREROLL),
                 };
                 *s = BoolState { has: true, v };

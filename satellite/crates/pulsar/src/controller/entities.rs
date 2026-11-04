@@ -68,9 +68,11 @@ impl Controller {
         let api = &self.api;
         api.publish_switch(SwitchId::Clock, self.st.clock_on);
         api.publish_switch(SwitchId::ClockAutoBrightness, self.st.clock_auto_brightness);
+        api.publish_switch(SwitchId::ClockColonBlink, self.st.clock_colon_blink);
         api.publish_switch(SwitchId::AutoUpdate, self.st.auto_update);
         api.publish_switch(SwitchId::NearestAnswers, self.st.nearest_answers);
         api.publish_switch(SwitchId::VoiceIndication, self.st.voice_indication);
+        api.publish_switch(SwitchId::WakeSound, self.st.wake_sound);
         api.publish_switch(SwitchId::WakePreroll, self.st.wake_preroll);
         self.publish_update();
         let api = &self.api;
@@ -167,6 +169,11 @@ impl Controller {
                 self.st.clock_auto_brightness = state;
                 self.clock.set_auto_brightness(state);
             }
+            SwitchId::ClockColonBlink => {
+                self.st.clock_colon_blink = state;
+                self.clock.set_colon_blink(state);
+            }
+            SwitchId::WakeSound => self.st.wake_sound = state,
             SwitchId::AutoUpdate => self.st.auto_update = state,
             SwitchId::NearestAnswers => self.st.nearest_answers = state,
             SwitchId::VoiceIndication => {

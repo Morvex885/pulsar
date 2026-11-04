@@ -232,7 +232,7 @@ impl Controller {
         self.tts_played = false;
         self.followup = logic::Followup::default();
         self.update_duck();
-        if earcon {
+        if earcon && self.st.wake_sound {
             let sound = format!("{SOUNDS}{}", self.model.wake_sound);
             self.player.play(Channel::Announce, vec![sound]);
         }

@@ -235,6 +235,8 @@ impl Server {
             key::SW_AUTO_UPDATE => SwitchId::AutoUpdate,
             key::SW_NEAREST_ANSWERS => SwitchId::NearestAnswers,
             key::SW_VOICE_INDICATION => SwitchId::VoiceIndication,
+            key::SW_WAKE_SOUND => SwitchId::WakeSound,
+            key::SW_CLOCK_COLON_BLINK => SwitchId::ClockColonBlink,
             key::SW_WAKE_PREROLL => SwitchId::WakePreroll,
             _ => return,
         };
