@@ -41,8 +41,32 @@ Wake word, командный спотер и эхоподавление раб�
   `Config_Get*` возвращают значение напрямую.
 - Спотер: `spotter_create_multichannel(conf, rate, n, types, false, &err)` и
   `spotter_submit_raw_data(sp, s16_interleaved, bytes, &err)`. Сколько каналов нужно каждому
-  типу, задаёт конфиг модели спотера (`spotter_conf_get_required_channel_count`). Спотер типа 0
-  получает основной канал VQE.
+  типу, задаёт конфиг модели спотера (`spotter_conf_get_required_channel_count`). Какой выход VQE
+  питает каждый тип канала — ниже.
+- Каналы спотера → выходы VQE (`voicetech.AudioInputChannelType`, имена
+  `AUDIO_INPUT_CHANNEL_TYPE_*` в `libyandex_evil.so`) — контракт библиотеки, общий для всех
+  моделей. Таблица восстановлена реверсом конвертеров `maind` (`toSpotterChannelType`,
+  [#60](https://github.com/Morvex885/pulsar/pull/60)); названия флагов каналов спотера в
+  библиотеке совпадают с ней по смыслу. Номера 2, 6, 9 проверены, 3, 5, 7, 8 — по порядку
+  имён enum (вывод).
+
+  | Тип | Флаг в `flags.txt` модели | Выход VQE |
+  |---|---|---|
+  | 0 | основной (`omni-channel`) | 6 `VQE_OMNI` |
+  | 1 | `beamforming-channels` | 7 `VQE_BEAMFORMING` |
+  | 2 | `feedback-channel` | 5 `RAW_FEEDBACK_SYNC` |
+  | 3 | `bnr-channel` | 8 `VQE_BACKGROUND_NOISE_REDUCER` |
+  | 4 | `raw-mic-channels`, `freq-filter-audio-channel raw-mic` | 2 `RAW_MAIN_MIC_SYNC` |
+  | 5 | — | 3 `RAW_AUXILIARY_MIC_SYNC` |
+
+  Типы 3 и 4 подтверждены парами «флаг — запрошенный тип» у `alisa` Миди и Лайт 2, остальные
+  флаги — по именам. Сток подаёт спотеру `vqe_0` (выход 6), а не `vqe_gain` (`quasar.cfg`:
+  `audiosender.spotterChannelName`; что без своего усиления — вывод: перевод float → s16 в
+  `maind` не декомпилирован); `vqe_gain` (выход 9 = выход 6 ×
+  `omniChannelGainCoefficient` пресета, у `cucumber` 50; AGC пресета выключен) — только SIP
+  (`audio_source.channel`). Проверено: Миди, модель `alisa` ([midi.md, «Входы спотера:
+  замеры»](midi.md#входы-спотера-замеры)); Лайт 2, модель `alisa` — только наличие выходов
+  (ww_offline на шуме); `yandex`, командная модель и остальные станции — нет.
 - События спотера (`event_id_to_str`): 2 и 5 — срабатывания (`CONFIRMATION_1ST_STAGE` и
   `_2ND_STAGE`), 3 — `1ST_STAGE_HIT` (верификатор ждёт ещё данных), 6 — отказ второй стадии.
   Спотер подтверждает слово через несколько чанков после того, как оно закончилось. По замеру

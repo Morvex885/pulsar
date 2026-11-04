@@ -1,6 +1,6 @@
 //! VQE и спотеры из libyandex_evil.so прошивки. Безопасные обёртки [`Lib`], [`Vqe`],
-//! [`SpotterConf`], [`Spotter`] и общий профиль [`wake_input`]/[`SpotterInput`] доступны
-//! утилите ww_offline; `Engine` обслуживает фронтенд демона.
+//! [`SpotterConf`], [`Spotter`], таблицы каналов спотера и [`spotter_layout`] открыты утилите
+//! ww_offline; `Engine` обслуживает фронтенд демона.
 
 #[allow(unsafe_code)]
 mod ffi;
@@ -14,13 +14,33 @@ pub use ffi::{Lib, LoadError, Spotter, SpotterConf, Vqe, VqeStep, preload_deps};
 
 pub const VQE_MODELS: &str = "/system/vendor/quasar/vqe_models";
 
-// voicetech.AudioInputChannelType (VQE output channel types).
+// voicetech.AudioInputChannelType (VQE output channel types);
+// см. docs/hardware.md, «Библиотеки Яндекса (C API)».
 pub const RAW_MAIN_MIC_SYNC: i32 = 2;
+pub const RAW_AUX_MIC_SYNC: i32 = 3;
+pub const RAW_FEEDBACK_SYNC: i32 = 5;
 pub const VQE_OMNI: i32 = 6;
+pub const VQE_BEAMFORMING: i32 = 7;
+pub const VQE_BNR: i32 = 8;
 pub const VQE_OMNI_WITH_GAIN: i32 = 9;
 
-/// Прежняя раскладка: сохранена для профилей, не прошедших замер с новой таблицей.
+/// Тип канала спотера (0..5) -> выход VQE: контракт библиотеки, общий для всех моделей.
+/// Командная модель на VQE_OMNI_WITH_GAIN не срабатывала (ww_offline: 0/14 против 10/14 на
+/// VQE_OMNI). См. docs/hardware.md, «Библиотеки Яндекса (C API)».
 pub const SPOTTER_TO_VQE: [i32; 6] = [
+    VQE_OMNI,
+    VQE_BEAMFORMING,
+    RAW_FEEDBACK_SYNC,
+    VQE_BNR,
+    RAW_MAIN_MIC_SYNC,
+    RAW_AUX_MIC_SYNC,
+];
+
+/// Раскладка wake-спотера pulsar до таблицы библиотеки (с ней wake word работал на всех
+/// моделях): запасная, когда в пресете VQE нет выхода из [`SPOTTER_TO_VQE`]. Командный спотер
+/// получал на тип 0 VQE_OMNI (на VQE_OMNI_WITH_GAIN он не срабатывает): его тип 0 в запасной
+/// раскладке задаёт `Slot::init`.
+pub const LEGACY_SPOTTER_TO_VQE: [i32; 6] = [
     VQE_OMNI_WITH_GAIN,
     RAW_MAIN_MIC_SYNC,
     VQE_OMNI_WITH_GAIN,
@@ -58,14 +78,9 @@ pub struct SpotterLayout {
     pub vqe: Vec<i32>,
 }
 
-/// Прежняя раскладка по счётчикам типов; `main_vqe` питает тип 0.
-pub fn spotter_layout(counts: &[i64; SPOTTER_TYPES], main_vqe: i32) -> SpotterLayout {
-    let mut mapping = SPOTTER_TO_VQE;
-    mapping[0] = main_vqe;
-    layout_for_mapping(counts, &mapping)
-}
-
-fn layout_for_mapping(
+/// Раскладка каналов по числу каналов каждого типа в конфиге спотера
+/// (spotter_conf_get_required_channel_count) и таблице тип -> выход VQE.
+pub fn spotter_layout(
     counts: &[i64; SPOTTER_TYPES],
     mapping: &[i32; SPOTTER_TYPES],
 ) -> SpotterLayout {
@@ -82,67 +97,35 @@ fn layout_for_mapping(
     l
 }
 
-/// Маршрутизация и общий уровень входов одного спотера.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SpotterInput {
-    mapping: [i32; SPOTTER_TYPES],
-    gain: f32,
-}
-
-impl SpotterInput {
-    /// Сохраняет прежние уровни и маршрутизацию непроверенных профилей.
-    pub fn legacy(main_vqe: i32) -> Self {
-        let mut mapping = SPOTTER_TO_VQE;
-        mapping[0] = main_vqe;
-        Self { mapping, gain: 1.0 }
-    }
-
-    pub fn layout(self, counts: &[i64; SPOTTER_TYPES]) -> SpotterLayout {
-        layout_for_mapping(counts, &self.mapping)
-    }
-
-    pub fn gain(self) -> f32 {
-        self.gain
-    }
-
-    /// Усиление до квантования, одинаковое для всех входов спотера.
-    pub fn sample(self, value: f32) -> i16 {
-        scaled_s16(value, self.gain)
-    }
-}
-
-/// См. docs/midi.md, «Входы спотера и проверка усиления».
-pub fn wake_input(codename: &str, wake_id: &str) -> SpotterInput {
-    if codename == "cucumber" && wake_id == "alisa" {
-        SpotterInput {
-            mapping: [6, 7, 5, 8, 2, 3],
-            gain: 10.0,
-        }
-    } else {
-        SpotterInput::legacy(VQE_OMNI_WITH_GAIN)
+fn vqe_name(ty: i32) -> &'static str {
+    match ty {
+        RAW_MAIN_MIC_SYNC => "main_mic_sync",
+        RAW_AUX_MIC_SYNC => "aux_mic_sync",
+        RAW_FEEDBACK_SYNC => "feedback_sync",
+        VQE_OMNI => "omni",
+        VQE_BEAMFORMING => "beamforming",
+        VQE_BNR => "bnr",
+        VQE_OMNI_WITH_GAIN => "omni_with_gain",
+        _ => "?",
     }
 }
 
 impl std::fmt::Display for SpotterLayout {
-    /// "0<-vqe9,3<-vqe2,4<-vqe6"
+    /// "0<-omni(6),3<-bnr(8),4<-main_mic_sync(2)"
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (i, (t, v)) in self.types.iter().zip(&self.vqe).enumerate() {
             if i > 0 {
                 f.write_char(',')?;
             }
-            write!(f, "{t}<-vqe{v}")?;
+            write!(f, "{t}<-{}({v})", vqe_name(*v))?;
         }
         Ok(())
     }
 }
 
 /// VQE sample in [-1, 1] -> s16 as the C++ daemon converts it (clamped, lrint: ties to even).
-pub(crate) fn to_s16(v: f32) -> i16 {
-    scaled_s16(v, 1.0)
-}
-
-fn scaled_s16(v: f32, gain: f32) -> i16 {
-    let v = v * 32768.0 * gain;
+pub fn to_s16(v: f32) -> i16 {
+    let v = v * 32768.0;
     if v > 32767.0 {
         32767
     } else if v < -32768.0 {
@@ -234,11 +217,12 @@ impl EventSource for Logged<'_> {
 pub(crate) struct Slot {
     what: &'static str,
     sp: Option<Spotter>,
-    /// Per spotter input channel: VQE output type.
-    vqe: Vec<i32>,
+    layout: SpotterLayout,
+    legacy: SpotterLayout,
+    /// Выходы раскладки проверены на первом чанке ([`Slot::resolve`]).
+    checked: bool,
     buf: Vec<i16>,
     last_hit_ms: i64,
-    input: SpotterInput,
 }
 
 impl Slot {
@@ -246,15 +230,17 @@ impl Slot {
         Slot {
             what,
             sp: None,
-            vqe: Vec::new(),
+            layout: SpotterLayout::default(),
+            legacy: SpotterLayout::default(),
+            checked: false,
             buf: Vec::new(),
             last_hit_ms: 0,
-            input: SpotterInput::legacy(VQE_OMNI_WITH_GAIN),
         }
     }
 
     /// (Re)creates the spotter from the model in `dir`; the previous one is destroyed first.
-    fn init(&mut self, lib: &Lib, dir: &Path, input: SpotterInput) -> bool {
+    /// `legacy_main` — выход VQE для типа 0 в запасной раскладке.
+    fn init(&mut self, lib: &Lib, dir: &Path, legacy_main: i32) -> bool {
         self.sp = None;
         let conf = match SpotterConf::read(lib, dir) {
             Ok(conf) => conf,
@@ -272,14 +258,13 @@ impl Slot {
                 0
             });
         }
-        self.input = input;
-        let layout = input.layout(&counts);
-        self.vqe.clone_from(&layout.vqe);
+        self.set_layouts(&counts, legacy_main);
         let (rate, err) = conf.native_rate();
         if let Some(e) = err {
             error!("spotter_conf_native_sample_rate: {e}");
         }
-        let (sp, err) = Spotter::create(&conf, SPOTTER_RATE, &layout.types);
+        // Типы каналов обеих раскладок одинаковы: они зависят только от counts.
+        let (sp, err) = Spotter::create(&conf, SPOTTER_RATE, &self.layout.types);
         let ok = err.is_none() && sp.is_some();
         if let Some(e) = err {
             error!("spotter_create_multichannel: {e}");
@@ -289,13 +274,47 @@ impl Slot {
         drop(conf);
         if ok {
             info!(
-                "{} spotter {}: native rate {rate}, channels [{layout}], gain {}",
+                "{} spotter {}: native rate {rate}, channels [{}]",
                 self.what,
                 dir.display(),
-                input.gain()
+                self.layout
             );
         }
         ok
+    }
+
+    /// Раскладка по таблице и запасная, `legacy_main` — выход VQE для типа 0 в запасной.
+    fn set_layouts(&mut self, counts: &[i64; SPOTTER_TYPES], legacy_main: i32) {
+        self.layout = spotter_layout(counts, &SPOTTER_TO_VQE);
+        let mut legacy = LEGACY_SPOTTER_TO_VQE;
+        legacy[0] = legacy_main;
+        self.legacy = spotter_layout(counts, &legacy);
+        self.checked = false;
+    }
+
+    /// Выходы раскладки проверяются на первом чанке: без выхода в пресете спотер молча получал бы
+    /// пустые буферы (GetOutputChannelData отдаёт n == 0).
+    fn resolve(&mut self, present: impl Fn(i32) -> bool) -> bool {
+        let Some(&ty) = self.layout.vqe.iter().find(|&&ty| !present(ty)) else {
+            return true;
+        };
+        if self.legacy.vqe.iter().all(|&ty| present(ty)) {
+            warn!(
+                "{} spotter: VQE has no output {}({ty}); legacy channels [{}]",
+                self.what,
+                vqe_name(ty),
+                self.legacy
+            );
+            self.layout = std::mem::take(&mut self.legacy);
+            true
+        } else {
+            error!(
+                "{} spotter: VQE has no output {}({ty}), nor the legacy channels; spotter off",
+                self.what,
+                vqe_name(ty)
+            );
+            false
+        }
     }
 }
 
@@ -313,7 +332,6 @@ pub(crate) struct Engine {
     frame: usize,
     /// Id of the wake word model (its directory name, e.g. "alisa").
     wake_id: String,
-    codename: &'static str,
     /// Events 3 / 6 carry the names the stage tracking expects.
     stages: bool,
 }
@@ -391,17 +409,13 @@ impl Engine {
             chunk: chunk_n,
             frame: frame_n,
             wake_id: model_id(wake_dir),
-            codename: model.codename,
             stages,
         };
-        if !eng
-            .wake
-            .init(&lib, wake_dir, wake_input(model.codename, &eng.wake_id))
-        {
+        if !eng.wake.init(&lib, wake_dir, VQE_OMNI_WITH_GAIN) {
             return None;
         }
         if let Some(dir) = command_dir
-            && !eng.cmd.init(&lib, dir, SpotterInput::legacy(VQE_OMNI))
+            && !eng.cmd.init(&lib, dir, VQE_OMNI)
         {
             warn!("command spotter unavailable; voice commands without the wake word are disabled");
         }
@@ -411,8 +425,7 @@ impl Engine {
     /// Switches the wake word model.
     pub fn set_wake_model(&mut self, dir: &Path) -> bool {
         self.wake_id = model_id(dir);
-        self.wake
-            .init(&self.lib, dir, wake_input(self.codename, &self.wake_id))
+        self.wake.init(&self.lib, dir, VQE_OMNI_WITH_GAIN)
     }
 
     /// Id of the current wake word model (`Model::wake_preroll` key).
@@ -458,7 +471,24 @@ impl Engine {
 }
 
 fn feed(vqe: &Vqe, frame: usize, s: &mut Slot) -> Spotted {
-    let nch = s.vqe.len();
+    if s.sp.is_some() && !s.checked {
+        // Ошибка библиотеки — не отсутствие выхода: проверка повторяется на следующем чанке.
+        if let Some(e) = s
+            .layout
+            .vqe
+            .iter()
+            .chain(&s.legacy.vqe)
+            .find_map(|&ty| vqe.output(ty).err())
+        {
+            error!("VQE output: {e}");
+            return Spotted::default();
+        }
+        s.checked = true;
+        if !s.resolve(|ty| vqe.output(ty).is_ok_and(|d| !d.is_empty())) {
+            s.sp = None;
+        }
+    }
+    let nch = s.layout.vqe.len();
     let Some(sp) = s.sp.as_mut() else {
         return Spotted::default();
     };
@@ -467,7 +497,7 @@ fn feed(vqe: &Vqe, frame: usize, s: &mut Slot) -> Spotted {
     }
     let mut src: [&[f32]; MAX_SPOTTER_CHANNELS] = [&[]; MAX_SPOTTER_CHANNELS];
     let mut n = frame;
-    for (k, &ty) in s.vqe.iter().enumerate() {
+    for (k, &ty) in s.layout.vqe.iter().enumerate() {
         match vqe.output(ty) {
             Ok(d) => {
                 n = n.min(d.len());
@@ -482,7 +512,7 @@ fn feed(vqe: &Vqe, frame: usize, s: &mut Slot) -> Spotted {
     s.buf.resize(n * nch, 0);
     for (i, out) in s.buf.chunks_exact_mut(nch).enumerate() {
         for (o, d) in out.iter_mut().zip(&src[..nch]) {
-            *o = s.input.sample(d[i]);
+            *o = to_s16(d[i]);
         }
     }
     if let Err(e) = sp.submit(&s.buf) {
@@ -502,75 +532,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn midi_alisa_routes_bnr_and_raw_with_common_gain() {
-        let profile = wake_input("cucumber", "alisa");
-        let layout = profile.layout(&[1, 0, 0, 1, 1, 0]);
-        assert_eq!(layout.types, [0, 3, 4]);
-        assert_eq!(layout.vqe, [6, 8, 2]);
-        let samples = [0.0001, -0.0002, 0.0003].map(|v| profile.sample(v));
-        assert_eq!(samples, [33, -66, 98]);
-        assert_eq!(profile.sample(0.2), 32767);
-        assert_eq!(profile.sample(-0.2), -32768);
-        assert_eq!(profile.sample(f32::NAN), 0);
-        assert_eq!(profile.sample(2.5 / 327680.0), 2);
-    }
-
-    #[test]
-    fn unmeasured_profiles_and_commands_keep_legacy_inputs() {
-        for (codename, id) in [
-            ("plum", "alisa"),
-            ("bergamot", "alisa"),
-            ("station-mini2", "alisa"),
-            ("yandexmini", "alisa"),
-            ("cucumber", "yandex"),
-        ] {
-            assert_eq!(
-                wake_input(codename, id),
-                SpotterInput::legacy(VQE_OMNI_WITH_GAIN)
-            );
-        }
-        let cmd = SpotterInput::legacy(VQE_OMNI);
-        assert_eq!(cmd.layout(&[1, 0, 0, 0, 0, 0]).vqe, [6]);
-        assert_eq!(cmd.sample(0.01), to_s16(0.01));
-        let alisa = wake_input("cucumber", "alisa");
-        assert_ne!(alisa, wake_input("cucumber", "yandex"));
-        assert_eq!(alisa, wake_input("cucumber", "alisa"));
-    }
-
-    #[test]
     fn layout_from_channel_counts() {
-        // Прежняя раскладка остаётся доступной для сравнения.
-        let l = spotter_layout(&[1, 0, 0, 1, 1, 0], VQE_OMNI_WITH_GAIN);
+        // Миди alisa: bnr-channel и freq-filter-audio-channel raw-mic (типы 3 и 4).
+        let l = spotter_layout(&[1, 0, 0, 1, 1, 0], &SPOTTER_TO_VQE);
         assert_eq!(l.types, [0, 3, 4]);
+        assert_eq!(l.vqe, [6, 8, 2]);
+        assert_eq!(l.to_string(), "0<-omni(6),3<-bnr(8),4<-main_mic_sync(2)");
+        // Запасная раскладка — та, с которой wake word работал раньше.
+        let l = spotter_layout(&[1, 0, 0, 1, 1, 0], &LEGACY_SPOTTER_TO_VQE);
         assert_eq!(l.vqe, [9, 2, 6]);
-        assert_eq!(l.to_string(), "0<-vqe9,3<-vqe2,4<-vqe6");
         // Lite 2 alisa / yandex: types 0 and 4.
-        let l = spotter_layout(&[1, 0, 0, 0, 1, 0], VQE_OMNI_WITH_GAIN);
+        let l = spotter_layout(&[1, 0, 0, 0, 1, 0], &SPOTTER_TO_VQE);
         assert_eq!(
             (l.types.as_slice(), l.vqe.as_slice()),
-            (&[0, 4][..], &[9, 6][..])
+            (&[0, 4][..], &[6, 2][..])
         );
-        // Command model: type 0 only, fed from VQE_OMNI.
-        let l = spotter_layout(&[1, 0, 0, 0, 0, 0], VQE_OMNI);
-        assert_eq!(l.to_string(), "0<-vqe6");
+        // Командная модель: только тип 0.
+        let l = spotter_layout(&[1, 0, 0, 0, 0, 0], &SPOTTER_TO_VQE);
+        assert_eq!(l.to_string(), "0<-omni(6)");
         // Several channels of a type, every type mapped.
-        let l = spotter_layout(&[2, 1, 1, 1, 1, 2], VQE_OMNI_WITH_GAIN);
+        let l = spotter_layout(&[2, 1, 1, 1, 1, 2], &SPOTTER_TO_VQE);
         assert_eq!(l.types, [0, 0, 1, 2, 3, 4, 5, 5]);
-        assert_eq!(l.vqe, [9, 9, 2, 9, 2, 6, 6, 6]);
+        assert_eq!(l.vqe, [6, 6, 7, 5, 8, 2, 3, 3]);
     }
 
     #[test]
     fn layout_skips_bad_counts() {
         // 8 or more channels of a type, or a negative count (error value): none of that type.
-        let l = spotter_layout(&[8, -1, 0, 7, 100, 1], VQE_OMNI);
+        let l = spotter_layout(&[8, -1, 0, 7, 100, 1], &SPOTTER_TO_VQE);
         assert_eq!(l.types, [3, 3, 3, 3, 3, 3, 3, 5]);
-        assert_eq!(l.vqe, [2, 2, 2, 2, 2, 2, 2, 6]);
-        assert!(spotter_layout(&[0; 6], VQE_OMNI).types.is_empty());
+        assert_eq!(l.vqe, [8, 8, 8, 8, 8, 8, 8, 3]);
+        assert!(spotter_layout(&[0; 6], &SPOTTER_TO_VQE).types.is_empty());
         // The largest possible layout fits the per-chunk channel table.
         assert_eq!(
-            spotter_layout(&[7; 6], VQE_OMNI).types.len(),
+            spotter_layout(&[7; 6], &SPOTTER_TO_VQE).types.len(),
             MAX_SPOTTER_CHANNELS
         );
+    }
+
+    #[test]
+    fn missing_vqe_output_switches_to_legacy_channels() {
+        let slot = |counts: &[i64; SPOTTER_TYPES], legacy_main| {
+            let mut s = Slot::new("test");
+            s.set_layouts(counts, legacy_main);
+            s
+        };
+        let wake = [1, 0, 0, 1, 1, 0];
+        let mut s = slot(&wake, VQE_OMNI_WITH_GAIN);
+        assert!(s.resolve(|_| true));
+        assert_eq!(s.layout.vqe, [6, 8, 2]);
+        // Запасная раскладка не нужна, когда есть все выходы таблицы.
+        let mut s = slot(&wake, VQE_OMNI_WITH_GAIN);
+        assert!(s.resolve(|ty| ty != VQE_OMNI_WITH_GAIN));
+        assert_eq!(s.layout.vqe, [6, 8, 2]);
+        let mut s = slot(&wake, VQE_OMNI_WITH_GAIN);
+        assert!(s.resolve(|ty| ty != VQE_BNR));
+        assert_eq!(s.layout.vqe, [9, 2, 6]);
+        let mut s = slot(&wake, VQE_OMNI_WITH_GAIN);
+        assert!(!s.resolve(|ty| ty != VQE_BNR && ty != VQE_OMNI_WITH_GAIN));
+        // Командный спотер в запасной раскладке остаётся на VQE_OMNI.
+        let mut s = slot(&[1, 0, 0, 1, 0, 0], VQE_OMNI);
+        assert!(s.resolve(|ty| ty != VQE_BNR));
+        assert_eq!(s.layout.vqe, [6, 2]);
     }
 
     #[test]
