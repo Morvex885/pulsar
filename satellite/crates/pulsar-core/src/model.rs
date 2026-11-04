@@ -82,11 +82,8 @@ pub struct Model {
     /// empty: the usual "libasound.so.2" lookup.
     pub alsa_lib: &'static str,
     pub software_volume: bool,
-    /// ALSA playback switch (on hw:0) that must be 1 (on) for the amplifier to pass audio; empty:
-    /// no such control.
-    pub spk_mute_ctl: &'static str,
-    /// Sysfs switches that gate the speaker amplifier; written to "1" before a playback PCM is
-    /// opened. Empty: no gate.
+    /// Sysfs-затворы усилителя: в каждый пишется "1" до и после открытия PCM воспроизведения
+    /// (`pulsar_alsa::enable_output`). Пусто: затвора нет.
     pub amp_enable_paths: &'static [&'static str],
 
     /// Stock volume curve: platform level -> raw value (0..255) of the softvol "Master Playback
@@ -239,7 +236,6 @@ static MIDI: Model = Model {
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
-    spk_mute_ctl: "",
     amp_enable_paths: &[],
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
@@ -300,7 +296,6 @@ static LITE2: Model = Model {
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
-    spk_mute_ctl: "",
     amp_enable_paths: &[],
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
@@ -379,7 +374,6 @@ static MINI2: Model = Model {
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
-    spk_mute_ctl: "",
     amp_enable_paths: &[],
     volume_map: MINI2_VOLUME,
     volume_min_step: false,
@@ -442,13 +436,7 @@ static MINI: Model = Model {
     // No softvol "speakers" PCM and the hardware "Master" control does not attenuate the output;
     // Controller applies the volume to the GStreamer player channels instead.
     software_volume: true,
-    // "SPK mute" means what it says on the Mini: writing 1 logs "spk_mute_set: mute flag = 1" and
-    // pulls the spk_mute GPIO low (amplifier muted, amp_table back to 0). Leave it alone.
-    spk_mute_ctl: "",
-    // amp_table = 1 alone opens the amplifier (spk_mute GPIO high, "SPK mute" reads on): the stock
-    // state after boot, which the Yandex stack never changes while it plays. aux_amp is not a gate
-    // here: 1 raises aux_amp_mute and resets amp_table, so it stays at its boot value 0. The driver
-    // clears amp_table when the playback PCM closes, so every start sets it again.
+    // см. docs/mini.md, «Звук»
     amp_enable_paths: &["/sys/class/tdm_state/amp_table"],
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
@@ -517,7 +505,6 @@ static MINI3: Model = Model {
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
-    spk_mute_ctl: "",
     amp_enable_paths: &[],
     volume_map: MINI3_VOLUME,
     volume_min_step: true,

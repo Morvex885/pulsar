@@ -269,30 +269,14 @@ impl Pcm {
     }
 }
 
-/// Writes an integer mixer element on card 0, e.g. the Mini's "SPK mute" switch (1 = on).
-/// Opens the control for every call, as the stock firmware does before each playback start.
-pub fn set_mixer_integer(name: &str, values: &[i64]) -> Result<(), i32> {
-    let ctl = Ctl::open("hw:0")?;
-    ctl.write_integers(name, values)
-}
-
-/// Switches the model's output on: the sysfs amplifier gates and the ALSA "SPK mute" mixer.
-/// Opening a PCM or dmix dropping its last client may switch the gates off again, so this runs
-/// both before and after a device is opened.
+/// Открывает выход модели: пишет "1" в её sysfs-затворы усилителя. Открытие PCM или уход
+/// последнего клиента dmix может снова закрыть затвор, поэтому вызывается и до, и после открытия
+/// устройства.
 pub fn enable_output(model: &Model) {
     for path in model.amp_enable_paths {
         if !pulsar_core::sysfs::write_file(path, "1\n") {
             log::warn!("amp: cannot write '{path}'");
         }
-    }
-    if !model.spk_mute_ctl.is_empty()
-        && let Err(e) = set_mixer_integer(model.spk_mute_ctl, &[1])
-    {
-        log::warn!(
-            "spk: cannot unmute '{}': {}",
-            model.spk_mute_ctl,
-            strerror(e)
-        );
     }
 }
 
