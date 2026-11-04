@@ -195,7 +195,7 @@ struct Layers {
     /// Temporary layer (actions).
     overlay: Option<Content>,
     overlay_until: i64,
-    /// Число из ответа не меняет сохранённое состояние выключателя часов.
+    /// Временный слой числа из ответа.
     speech_number: Option<Content>,
     scroll_ms: i64,
     ui: UiState,

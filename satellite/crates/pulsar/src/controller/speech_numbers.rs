@@ -6,6 +6,7 @@ const HOLD_MS: i64 = 3_000;
 pub(super) struct SpeechDisplay {
     numbers: Vec<String>,
     started: bool,
+    next_answer: bool,
     next: usize,
     until: Option<i64>,
     displayed: String,
@@ -13,12 +14,29 @@ pub(super) struct SpeechDisplay {
 
 impl SpeechDisplay {
     pub fn text(&mut self, text: &str) {
+        if self.next_answer {
+            self.reset_answer();
+        }
         if self.numbers.is_empty() {
             self.numbers = from_text(text);
         }
     }
 
+    pub fn followup(&mut self) {
+        self.next_answer = true;
+    }
+
+    fn reset_answer(&mut self) {
+        // Старое число остаётся до первого кадра нового ответа, чтобы tick отправил замену.
+        let displayed = std::mem::take(&mut self.displayed);
+        *self = Self::default();
+        self.displayed = displayed;
+    }
+
     pub fn start(&mut self) {
+        if self.next_answer {
+            self.reset_answer();
+        }
         self.started = true;
     }
 
@@ -125,7 +143,13 @@ fn tens(token: &str) -> Option<i32> {
 }
 
 fn literal(token: &str) -> Option<String> {
-    let token = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '-');
+    let normalized = token.replace('−', "-");
+    let token = normalized.trim_matches(|c: char| !c.is_alphanumeric() && c != '-');
+    let token = token
+        .strip_suffix("°C")
+        .or_else(|| token.strip_suffix("°С"))
+        .or_else(|| token.strip_suffix("°F"))
+        .unwrap_or(token);
     // Буквенный префикс — часть имени (COVID-19), а не отрицательное число.
     if !token.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
         return None;
@@ -200,13 +224,111 @@ fn number(tokens: &[&str], i: usize) -> Option<(String, usize)> {
     }
 }
 
+fn unsupported_number(token: &str) -> bool {
+    let w = word(token);
+    let hundred = [
+        "двухс",
+        "двумс",
+        "двумяс",
+        "трехс",
+        "тремс",
+        "тремяс",
+        "четырехс",
+        "четыремс",
+        "четырьмяс",
+        "пятис",
+        "пятьюс",
+        "шестис",
+        "шестьюс",
+        "семис",
+        "семьюс",
+        "восьмис",
+        "восемьюс",
+        "восьмьюс",
+        "девятис",
+        "девятьюс",
+    ]
+    .iter()
+    .any(|prefix| w.starts_with(prefix));
+    hundred
+        || matches!(
+            w.as_str(),
+            "сто"
+                | "ста"
+                | "двести"
+                | "двухсот"
+                | "триста"
+                | "трехсот"
+                | "четыреста"
+                | "четырехсот"
+                | "пятьсот"
+                | "шестьсот"
+                | "семьсот"
+                | "восемьсот"
+                | "девятьсот"
+                | "целая"
+                | "целую"
+                | "целой"
+                | "целых"
+                | "целые"
+        )
+        || [
+            "тысяч",
+            "миллион",
+            "миллиард",
+            "десят",
+            "сотых",
+            "сотая",
+            "тысячных",
+        ]
+        .iter()
+        .any(|prefix| w.starts_with(prefix))
+            && unit(token).is_none()
+            && tens(token).is_none()
+}
+
+fn numeric_component(token: &str) -> bool {
+    unsupported_number(token)
+        || unit(token).is_some()
+        || tens(token).is_some()
+        || literal(token).is_some()
+        || matches!(word(token).as_str(), "минус" | "плюс")
+}
+
 /// Текст HA не содержит выравнивания слов со звуком; порядок чисел сохраняется.
 pub(super) fn from_text(input: &str) -> Vec<String> {
-    let mut marks = Vec::new();
+    let mut numbers = Vec::new();
     let tokens: Vec<_> = input.split_whitespace().collect();
     let mut i = 0;
+    let mut rejected = vec![false; tokens.len()];
+    let mut begin = 0;
+    while begin < tokens.len() {
+        if !numeric_component(tokens[begin]) {
+            begin += 1;
+            continue;
+        }
+        let mut end = begin + 1;
+        while end < tokens.len() && !boundary(tokens[end - 1]) && numeric_component(tokens[end]) {
+            end += 1;
+        }
+        let unsupported = tokens[begin..end].iter().any(|t| unsupported_number(t));
+        let grouped = tokens[begin..end].windows(2).any(|pair| {
+            literal(pair[0]).is_some()
+                && literal(pair[1])
+                    .is_some_and(|n| n.len() == 3 && n.bytes().all(|b| b.is_ascii_digit()))
+        });
+        if unsupported || grouped {
+            rejected[begin..end].fill(true);
+        }
+        begin = end;
+    }
     let mut negative = false;
-    while i < tokens.len() && marks.len() < 100 {
+    while i < tokens.len() && numbers.len() < 100 {
+        if rejected[i] {
+            negative = false;
+            i += 1;
+            continue;
+        }
         match word(tokens[i]).as_str() {
             "минус" => {
                 negative = true;
@@ -238,7 +360,15 @@ pub(super) fn from_text(input: &str) -> Vec<String> {
             continue;
         }
         // Часы и минуты показываются вместе, включая произнесённый ведущий ноль.
-        if !negative && let Ok(hour @ 0..=23) = value.parse::<u8>() {
+        let time_context = tokens[..i]
+            .iter()
+            .rev()
+            .take(2)
+            .any(|t| matches!(word(t).as_str(), "сейчас" | "время"));
+        if time_context
+            && !negative
+            && let Ok(hour @ 0..=23) = value.parse::<u8>()
+        {
             let unit_index = i + consumed;
             if !boundary(tokens[unit_index - 1])
                 && tokens
@@ -261,11 +391,11 @@ pub(super) fn from_text(input: &str) -> Vec<String> {
         } else {
             value
         };
-        marks.push(display);
+        numbers.push(display);
         negative = false;
         i += consumed;
     }
-    marks
+    numbers
 }
 
 fn minutes(tokens: &[&str], i: usize) -> Option<(String, usize)> {
@@ -286,11 +416,20 @@ mod tests {
     #[test]
     fn recognition_regressions() {
         for (text, expected) in [
+            ("сто двадцать пять", vec![]),
+            ("от пятисот двадцати пяти рублей", vec![]),
+            ("1 час 30 минут осталось", vec!["1", "30"]),
+            ("10 000 рублей", vec![]),
+            ("ноль целых пять десятых", vec![]),
+            ("−5 градусов", vec!["-5"]),
+            ("Сейчас -5°C, ветер 3 м/с", vec!["-5", "3"]),
+            ("Сейчас 5°C", vec!["5"]),
+            ("Таймер на 1 час 30 минут", vec!["1", "30"]),
             ("21-го ноября", vec!["21"]),
             ("COVID-19", vec![]),
             ("один момент, ни одного", vec![]),
             ("двадцать одну минуту", vec!["21"]),
-            ("двадцать один час ноль пять минут", vec!["21:05"]),
+            ("Сейчас двадцать один час ноль пять минут", vec!["21:05"]),
             ("Сейчас 21 час 5 минут.", vec!["21:05"]),
             ("Время 9:05.", vec!["09:05"]),
             ("Температура -12,5, потом 7.5.", vec!["-12.5", "7.5"]),
@@ -339,8 +478,30 @@ mod tests {
     }
 
     #[test]
+    fn followup_keeps_queue_until_new_answer() {
+        for text_first in [true, false] {
+            let mut display = SpeechDisplay::default();
+            display.text("12 34");
+            display.start();
+            assert_eq!(display.tick(0, 400).as_deref(), Some("12  "));
+            display.followup();
+            assert_eq!(display.tick(3000, 400).as_deref(), Some("  34"));
+            if text_first {
+                display.text("7");
+                assert_eq!(display.tick(4000, 400), None);
+                display.start();
+            } else {
+                display.start();
+                display.text("7");
+            }
+            assert_eq!(display.tick(4000, 400).as_deref(), Some("7"));
+            assert_eq!(display.wake(), Some(7000));
+        }
+    }
+
+    #[test]
     fn long_numbers_finish_scrolling_and_sides_ignore_other_numbers() {
-        let numbers = from_text("5 12 123 34 7,5 56");
+        let numbers = from_text("5, 12, 123, 34, 7,5, 56");
         assert_eq!(
             (0..numbers.len())
                 .map(|i| positioned(&numbers, i))

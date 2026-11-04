@@ -344,7 +344,7 @@ impl Controller {
                     get("speech")
                 };
                 self.speech_display.text(text);
-                self.update_speech_mark();
+                self.update_speech_number();
             }
             VaEvent::TtsEnd => {
                 if !get("url").is_empty() {
@@ -398,13 +398,13 @@ impl Controller {
     }
 
     fn clear_speech_display(&mut self) {
-        self.timers.cancel(Tk::SpeechMark);
+        self.timers.cancel(Tk::SpeechNumber);
         if let Some(text) = self.speech_display.clear() {
             self.clock.set_speech_number(text);
         }
     }
 
-    pub(super) fn update_speech_mark(&mut self) {
+    pub(super) fn update_speech_number(&mut self) {
         let now = now_ms();
         if let Some(text) = self
             .speech_display
@@ -413,19 +413,15 @@ impl Controller {
             self.clock.set_speech_number(text);
         }
         if let Some(until) = self.speech_display.wake() {
-            self.timers.set(Tk::SpeechMark, (until - now).max(1) as u64);
+            self.timers
+                .set(Tk::SpeechNumber, (until - now).max(1) as u64);
         } else {
-            self.timers.cancel(Tk::SpeechMark);
+            self.timers.cancel(Tk::SpeechNumber);
         }
     }
 
     /// A cut-short or failed answer does not reopen the microphone, nor does a ringing timer.
     fn tts_finished(&mut self, ok: bool) {
-        if ok {
-            // Ответ короче периода PCM может завершиться без события начала вывода.
-            self.speech_display.start();
-            self.update_speech_mark();
-        }
         self.send_tts_report(ok);
         let followup = self.followup;
         if followup.should_continue(
@@ -433,7 +429,12 @@ impl Controller {
             self.st.followup_duration_s,
             self.timer_ringing || self.mic_muted(),
         ) {
+            // Продолжение слушает, пока часы дочитывают предыдущий ответ.
+            let display = std::mem::take(&mut self.speech_display);
             self.start_pipeline("", false, Vec::new());
+            self.speech_display = display;
+            self.speech_display.followup();
+            self.update_speech_number();
             if self.phase == Phase::Listening {
                 self.followup = followup.next_turn();
             }
