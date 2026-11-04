@@ -1,26 +1,27 @@
-//! Buttons via evdev (devices matched by name in /proc/bus/input/devices, names per Model).
-//! Station Midi: touch keys "awinic_sar", mute switch "mute"; Station Lite 2: touch keys
-//! "aw9610x", mute switch "gpio-keys"; Station Mini 3: touch keys "aw933xx", mute switch
-//! "gpio-keys"; Station Mini 2: touch keys "sar0_pad0", no mute switch device: the latched mute
-//! line is a GPIO (`Model::mute_gpio`, low = muted), sampled every 100 ms; Station Mini: keypad
-//! "adc_keypad" with only the momentary mute button. The others use the same key codes and
-//! switch:
+//! Кнопки через evdev: устройства ищутся по имени в /proc/bus/input/devices, имена — из Model.
+//! Миди: сенсорные кнопки "awinic_sar", переключатель микрофонов "mute". Лайт 2: сенсорные кнопки
+//! "aw9610x" на плате plum и "aw933xx" на плате prune (драйвер у обеих один, aw933xx_aw9610x),
+//! переключатель "gpio-keys". Мини 3: сенсорные кнопки "aw933xx", переключатель "gpio-keys".
+//! Мини 2: сенсорные кнопки "sar0_pad0", устройства-переключателя нет: фиксируемая линия
+//! отключения микрофонов — GPIO (`Model::mute_gpio`, низкий уровень = микрофоны выключены),
+//! опрос каждые 100 мс. Мини: клавиатура "adc_keypad" только с кнопкой отключения микрофонов без
+//! фиксации. У остальных коды кнопок и переключателя общие:
 //!
-//! touch keys (capacitive, EV_KEY only; Midi KEY bitmap "40 0 0 0 0 0 0 0 c000000000000 0"):
+//! сенсорные кнопки (ёмкостные, только EV_KEY; KEY bitmap Миди "40 0 0 0 0 0 0 0 c000000000000 0"):
 //!   Model::action_key (KEY_VOICECOMMAND 582) -> Action
 //!   KEY_VOLUMEUP     (115) -> VolumeUp
 //!   KEY_VOLUMEDOWN   (114) -> VolumeDown
-//!   Model::mute_key  (the Mini's KEY_MUTE 113 on adc_keypad) -> MuteToggle (the mic mute is
-//!   software there)
-//! mute switch (gpio-keys, KEY bitmap bit 113 KEY_MUTE, SW bitmap 0x4000 = SW_MUTE_DEVICE (14)):
-//!   the hardware microphone mute slider/toggle; SW_MUTE_DEVICE=1 means muted. Its KEY_MUTE
-//!   press/release events are ignored, the switch state is authoritative (initial value via
-//!   EVIOCGSW).
-//! Action: Short on release before 800 ms, Long as soon as it has been held for 800 ms.
-//! Volume*: Short on press, auto-repeated every 200 ms after being held for 500 ms, for at most
-//! 10 s.
-//! Devices that disappear (ENODEV) are looked up again every 3 s; SYN_DROPPED triggers a state
-//! resync.
+//!   Model::mute_key  (KEY_MUTE 113 на adc_keypad Мини) -> MuteToggle (отключение микрофонов
+//!   там программное)
+//! переключатель (gpio-keys, KEY bitmap бит 113 KEY_MUTE, SW bitmap 0x4000 = SW_MUTE_DEVICE (14)):
+//!   аппаратный ползунок или кнопка отключения микрофонов; SW_MUTE_DEVICE=1 — микрофоны
+//!   выключены. Его нажатия и отпускания KEY_MUTE игнорируются, источник правды — состояние
+//!   переключателя (начальное значение — через EVIOCGSW).
+//! Action: Short при отпускании раньше 800 мс, Long сразу, как только кнопку продержали 800 мс.
+//! Volume*: Short при нажатии, при удержании дольше 500 мс — автоповтор каждые 200 мс, не дольше
+//! 10 с.
+//! Пропавшие устройства (ENODEV) ищутся заново каждые 3 с; SYN_DROPPED запускает пересинхронизацию
+//! состояния.
 
 use std::cell::Cell;
 use std::fs::File;
