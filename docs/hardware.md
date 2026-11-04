@@ -14,7 +14,7 @@
 | Лайт 2 | `plum`, `prune` | `plum` — станция мейнтейнера; `prune` — контрибьютор: [#57](https://github.com/Morvex885/pulsar/issues/57) | [station-lite2](https://hackalice.me/devices/station-lite2/) | [lite2.md](lite2.md) |
 | Мини 2 | `station-mini2` | контрибьюторы: [#9](https://github.com/Morvex885/pulsar/pull/9), станция из [#38](https://github.com/Morvex885/pulsar/issues/38) | [station-mini2](https://hackalice.me/devices/station-mini2/) | [mini2.md](mini2.md) |
 | Мини 3 | `bergamot` | контрибьютор: [#30](https://github.com/Morvex885/pulsar/pull/30) | [station-mini3](https://hackalice.me/devices/station-mini3/) | [mini3.md](mini3.md) |
-| Мини | `yandexmini` | контрибьютор: [#35](https://github.com/Morvex885/pulsar/pull/35) | [station-mini](https://hackalice.me/devices/station-mini/) | [mini.md](mini.md) |
+| Мини | `yandexmini` | контрибьюторы: [#35](https://github.com/Morvex885/pulsar/pull/35), [#68](https://github.com/Morvex885/pulsar/pull/68), [#74](https://github.com/Morvex885/pulsar/issues/74) | [station-mini](https://hackalice.me/devices/station-mini/) | [mini.md](mini.md) |
 
 Авторитетны данные Миди и Лайт 2 на плате `plum`; данные контрибьюторов не перепроверены.
 
