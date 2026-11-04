@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
     /// Кодовое имя из devicetree: "cucumber", "plum", "prune", "station-mini2", "bergamot",
-    /// "yandexmini".
+    /// "pickle", "yandexmini".
     pub codename: &'static str,
     /// ESPHome node name prefix; the MAC suffix is appended.
     pub host_prefix: &'static str,
@@ -134,7 +134,7 @@ impl CaptureFormat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LedStrip {
     pub count: i32,
-    /// sysfs numbering starts at 0 (Midi, Mini 3) or 1 (Lite 2, Mini 2).
+    /// Нумерация sysfs начинается с 0 (Миди, Мини 3, Мини 3 Про) или с 1 (Лайт 2, Мини 2).
     pub first_index: i32,
     /// "/dev/fb0"; "" = none: sysfs LEDs only.
     pub fb_dev: &'static str,
@@ -315,9 +315,9 @@ static PRUNE: Model = Model {
     ..LITE2
 };
 
-// set_volume.sh on the Mini 2 is `amixer set 'Master' <percent>%`: raw = percent of 255, no dB
-// offset and no lowest step.
-const MINI2_VOLUME: &[VolumePoint] = &[
+// set_volume.sh у Мини 2 и (по вики) у Мини 3 Про — `amixer set 'Master' <percent>%`: raw —
+// процент от 255, без сдвига в дБ и без нижней ступени.
+const PERCENT_VOLUME: &[VolumePoint] = &[
     VolumePoint { level: 0, raw: 0 },
     VolumePoint {
         level: 20,
@@ -375,7 +375,7 @@ static MINI2: Model = Model {
     alsa_lib: "",
     software_volume: false,
     amp_enable_paths: &[],
-    volume_map: MINI2_VOLUME,
+    volume_map: PERCENT_VOLUME,
     volume_min_step: false,
     // Датчик есть не на всех станциях: см. docs/mini2.md, «Светодиоды и часы».
     has_lux: false,
@@ -514,6 +514,73 @@ static MINI3: Model = Model {
     zigbee_boot: "",
 };
 
+/// Станция Мини 3 Про: см. docs/mini3pro.md.
+static MINI3PRO: Model = Model {
+    codename: "pickle",
+    host_prefix: "yandex-mini3pro-",
+    friendly_name: "Яндекс Станция Мини 3 Про",
+    model_name: "Yandex Station Mini 3 Pro",
+    capture_pcm: "hw:0,2",
+    capture_rate: 48000,
+    capture_channels: 4,
+    capture_format: CaptureFormat::S16,
+    // Раскладка со слов контрибьютора: см. docs/mini3pro.md, «Не проверено».
+    mic_channels: &[0, 1, 2],
+    spk_channels: &[3],
+    vqe_preset: "pickle",
+    led_prefix: "pickle",
+    ring: LedStrip {
+        count: 16,
+        first_index: 0,
+        fb_dev: "/dev/fb1",
+        fb_name: "ring",
+        trigger: "ledfb-ring",
+        sysfs_kind: "ring",
+        i2c_dev: "",
+        i2c_addr: 0,
+    },
+    logo: LedStrip {
+        count: 6,
+        first_index: 0,
+        fb_dev: "/dev/fb0",
+        fb_name: "logo",
+        trigger: "ledfb-logo",
+        sysfs_kind: "logo",
+        i2c_dev: "",
+        i2c_addr: 0,
+    },
+    // Раскладка часов Лайт 2 на плате plum: см. docs/mini3pro.md, «Светодиоды и часы».
+    clock_dir: "/sys/class/leds/pickle:white:clock",
+    clock_seg_base: 'A',
+    clock_pos_base: 0,
+    clock_colon: &["DH", "DL"],
+    clock_aux: &["H0", "H1", "H2", "H3", "DEGREE"],
+    clock_center: "DM",
+    clock_chip_current: false,
+    has_clock: true,
+    keys_input: "aw933xx",
+    mute_input: "mute",
+    mute_gpio: 0,
+    action_key: 582,
+    mute_key: 0,
+    error_sound: "ru-RU/playback_error.mp3",
+    wake_sound: "common/spotter_start.mp3",
+    cancel_sound: "common/spotter_cancel.mp3",
+    timer_sound: "common/timer.wav",
+    volume_sound: "common/volume_sound.mp3",
+    playback_pcm: "speakers",
+    alsa_config: "",
+    alsa_lib: "",
+    software_volume: false,
+    amp_enable_paths: &[],
+    volume_map: PERCENT_VOLUME,
+    volume_min_step: false,
+    has_lux: true,
+    zigbee_tty: "",
+    zigbee_reset: "",
+    zigbee_boot: "",
+};
+
 impl Model {
     /// Process-wide ALSA setup, before any thread or audio library is started. Only the Mini sets
     /// ALSA_CONFIG_PATH: its dmix PCM lives in /data/pulsar/asound.conf (put there by
@@ -593,6 +660,7 @@ pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
         b"yandex,prune" => Some(&PRUNE),
         b"yandex,station-mini2" => Some(&MINI2),
         b"yandex,bergamot" => Some(&MINI3),
+        b"yandex,pickle" => Some(&MINI3PRO),
         _ => None,
     })
 }
@@ -726,6 +794,21 @@ mod tests {
         ] {
             assert!(model_from_compatible(raw).is_none(), "{raw:?}");
         }
+    }
+
+    #[test]
+    fn pickle_is_mini3pro() {
+        // compatible по вики: вариант платы, затем модель.
+        let m = model_from_compatible(b"yandex,pickle-evt\0yandex,pickle\0amlogic, a4\0").unwrap();
+        assert_eq!(m.codename, "pickle");
+        assert_eq!((m.capture_pcm, m.capture_channels), ("hw:0,2", 4));
+        assert_eq!(m.mic_channels, &[0, 1, 2]);
+        assert_eq!(m.spk_channels, &[3]);
+        assert_eq!((m.ring.count, m.logo.count), (16, 6));
+        assert!(m.has_clock && m.has_lux && !m.volume_min_step);
+        assert_eq!(m.zigbee_tty, "");
+        // Один вариант платы — не модель.
+        assert!(model_from_compatible(b"yandex,pickle-evt\0amlogic, a4\0").is_none());
     }
 
     #[test]

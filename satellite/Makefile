@@ -1,13 +1,13 @@
-# Cross-build for Yandex Stations with cargo-zigbuild: one binary per userland ABI.
-#   ARCH=aarch64  64-bit userspace (Station Midi, glibc 2.36)
-#   ARCH=armhf    32-bit userspace (Station Lite 2, Mini 2, Mini 3 and Mini; also Midi images with
-#                  an armhf userland), built for glibc 2.23 (the Mini's; the others have 2.30)
-# `make` builds both daemons; `make ARCH=armhf` one of them. Output: build/<arch>/pulsar (stripped,
-# the one deployed) and build/<arch>/pulsar.debug (line tables, for `addr2line -f -e` on the crash
-# report; non-PIE, so the addresses in it are absolute). `make ARCH=armhf tools` builds every tool
-# (crates/*/src/bin/*.rs) into build/<arch>/tools/, `make ARCH=armhf build/armhf/tools/<name>` one
-# of them. `make check`: fmt, clippy and tests on the host (without sendspin-cpp); clippy also
-# for both stations, through cargo-zigbuild.
+# Кросс-сборка для Яндекс Станций через cargo-zigbuild: по бинарнику на ABI userland.
+#   ARCH=aarch64  64-битный userspace (Станция Миди и Мини 3 Про, glibc 2.36)
+#   ARCH=armhf    32-битный userspace (Станция Лайт 2, Мини 2, Мини 3 и Мини; а также образы Миди
+#                  с armhf userland), сборка под glibc 2.23 (как у Мини; у остальных 2.30)
+# `make` собирает оба демона, `make ARCH=armhf` — один. Выход: build/<arch>/pulsar (без символов,
+# его и ставят) и build/<arch>/pulsar.debug (таблицы строк для `addr2line -f -e` по crash-отчёту;
+# не PIE, поэтому адреса в нём абсолютные). `make ARCH=armhf tools` собирает все утилиты
+# (crates/*/src/bin/*.rs) в build/<arch>/tools/, `make ARCH=armhf build/armhf/tools/<name>` — одну
+# из них. `make check`: fmt, clippy и тесты на хосте (без sendspin-cpp); clippy — ещё и для обеих
+# станций, через cargo-zigbuild.
 #
 # The Sendspin player links sendspin-cpp and its dependencies statically. They are fetched once
 # (pinned commits/tags, see third_party/fetch.sh) into third_party/src/ and built per ARCH with

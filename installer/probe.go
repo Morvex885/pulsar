@@ -18,25 +18,29 @@ func modelName(code string) string {
 		return "Yandex Station Mini 2"
 	case "bergamot":
 		return "Yandex Station Mini 3"
+	case "pickle":
+		return "Yandex Station Mini 3 Pro"
 	case "yandexmini":
 		return "Yandex Station Mini"
 	}
 	return ""
 }
 
-// abis lists the userspace ABIs a model's firmware runs, its usual one first; nil = model not
-// supported. The installed binary is build/<arch>/pulsar for the first ABI whose dynamic loader
-// is on the station. A second ABI is only for a userspace actually seen on that model: some Midi
-// images run a 32-bit userspace on the 64-bit kernel (#13) and need the armhf build (its ALSA
-// ABI is the one in audio/alsa_abi.h, #14). Lite 2, Mini 2, Mini 3 and Mini stay armhf-only: no
-// 64-bit userspace has been seen on them, and the aarch64 binary needs glibc 2.34 — on a miss it
-// would crash-loop back to the Yandex stack (no .prev on a first install). The armhf build
-// targets glibc 2.23, the Mini's; the 2.30 userlands of the Lite 2, Mini 2 and Mini 3 run it as
-// well.
+// abis — ABI userspace, на которых работает прошивка модели, обычная первой; nil — модель не
+// поддерживается. Ставится build/<arch>/pulsar для первой ABI, чей динамический загрузчик есть на
+// станции. Вторая ABI — только для userspace, действительно встреченного на этой модели: часть
+// образов Миди работает с 32-битным userspace на 64-битном ядре (#13), им нужна armhf-сборка
+// (ABI alsa-lib этих образов — #14). Лайт 2, Мини 2, Мини 3 и Мини — только armhf: 64-битного
+// userspace на них не встречали, а aarch64-бинарнику нужна glibc 2.34 — при промахе он ушёл бы в
+// crash-цикл и вернул стек Яндекса (при первой установке .prev нет). armhf-сборка собрана под
+// glibc 2.23 (как у Мини), userland 2.30 у Лайт 2, Мини 2 и Мини 3 её тоже запускает. Мини 3 Про —
+// только aarch64: на ней встречали лишь 64-битный userland (glibc 2.36).
 func abis(code string) []string {
 	switch code {
 	case "cucumber":
 		return []string{"aarch64", "armhf"}
+	case "pickle":
+		return []string{"aarch64"}
 	case "plum", "prune", "station-mini2", "bergamot", "yandexmini":
 		return []string{"armhf"}
 	}

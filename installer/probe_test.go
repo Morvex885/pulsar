@@ -26,6 +26,8 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 		{"station-mini2 without its loader is skipped", "station-mini2", []string{"aarch64"}, ""},
 		{"bergamot is armhf", "bergamot", []string{"aarch64", "armhf"}, "armhf"},
 		{"bergamot without its loader is skipped", "bergamot", []string{"aarch64"}, ""},
+		{"pickle is aarch64", "pickle", []string{"aarch64", "armhf"}, "aarch64"},
+		{"pickle without its loader is skipped", "pickle", []string{"armhf"}, ""},
 		{"mini is armhf", "yandexmini", []string{"aarch64", "armhf"}, "armhf"},
 		{"mini without its loader is skipped", "yandexmini", []string{"aarch64"}, ""},
 		{"no compatible loader", "cucumber", nil, ""},
@@ -71,6 +73,7 @@ func TestStationCode(t *testing.T) {
 		{"yandex,prune-evt2\namlogic, axg", "prune-evt2", false},
 		{"yandex,bergamot-evt1\nyandex,bergamot\namlogic, axg", "bergamot", true},
 		{"yandex,bergamot-evt1\namlogic, axg", "bergamot-evt1", false},
+		{"yandex,pickle-evt\nyandex,pickle\namlogic, a4", "pickle", true},
 		// Mini 2: the codename contains a hyphen.
 		{"yandex,station-mini2\namlogic, axg", "station-mini2", true},
 		// adb's pty line ends and the old separator (spaces) work too.
