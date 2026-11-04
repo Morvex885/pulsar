@@ -6,6 +6,7 @@
 mod entities;
 mod logic;
 mod media;
+mod speech_numbers;
 mod voice;
 
 use std::collections::{BTreeMap, HashMap};
@@ -86,6 +87,7 @@ enum Tk {
     UpdateRetry,
     /// Exit after an installed update.
     UpdateExit,
+    SpeechNumber,
 }
 
 /// What a `play()` was for: the C++ completion callback and the values it captured.
@@ -185,6 +187,7 @@ pub struct Controller {
     voice_run: u64,
     tts_url: String,
     tts_played: bool,
+    speech_display: speech_numbers::SpeechDisplay,
     /// A run's TTS_START left HA's assist satellite "responding" until AnnounceFinished, also
     /// when nothing plays here, and that report is still to be sent (`send_tts_report`).
     tts_report_owed: bool,
@@ -593,6 +596,7 @@ impl Controller {
             voice_run: 0,
             tts_url: String::new(),
             tts_played: false,
+            speech_display: speech_numbers::SpeechDisplay::default(),
             tts_report_owed: false,
             followup: logic::Followup::default(),
             announcing: false,
@@ -740,7 +744,7 @@ impl Controller {
             Tk::Watchdog => self.abort_dialog("no progress from Home Assistant, giving up"),
             Tk::FollowupWait => {
                 info!("follow-up: no speech started, conversation ends");
-                self.finish_interaction();
+                self.end_silent_followup();
             }
             Tk::TimerTick => self.show_timers(),
             Tk::RingTick => self.ring_timer(),
@@ -748,11 +752,20 @@ impl Controller {
             Tk::UpdateRetry => self.maybe_auto_update(),
             // exit 0: supervise.sh starts the new binary
             Tk::UpdateExit => self.exit = Some(ExitReason::Updated),
+            Tk::SpeechNumber => self.update_speech_number(),
         }
     }
 
     fn on_player(&mut self, ev: PlayerEvent) {
         match ev {
+            PlayerEvent::Started { id } => {
+                if self.phase == Phase::Speaking
+                    && matches!(self.pending.get(&id), Some(Pending::Tts { dialog }) if *dialog == self.dialog)
+                {
+                    self.speech_display.start();
+                    self.update_speech_number();
+                }
+            }
             // HA media state follows playback (C++ Player::on_state hook).
             PlayerEvent::State(ch, s) => {
                 if ch == Channel::Music {

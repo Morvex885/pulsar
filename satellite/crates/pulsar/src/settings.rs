@@ -43,6 +43,8 @@ pub struct Settings {
     pub clock_brightness: f32,
     /// Clock level follows the light sensor, with `clock_brightness` as the ceiling.
     pub clock_auto_brightness: bool,
+    /// Числа из ответа голосового ассистента на часах («Clock spoken numbers»).
+    pub clock_spoken_numbers: bool,
     /// Clock text scroll step.
     pub clock_scroll_ms: i32,
     /// User ring light.
@@ -91,6 +93,7 @@ impl Default for Settings {
             clock_on: true,
             clock_brightness: 1.0,
             clock_auto_brightness: true,
+            clock_spoken_numbers: false,
             clock_scroll_ms: 400,
             light: LightState::default(),
             wake_word: "alisa".into(),
@@ -155,6 +158,7 @@ impl Settings {
                 b"clock_on" => self.clock_on = on,
                 b"clock_brightness" => self.clock_brightness = fv,
                 b"clock_auto_brightness" => self.clock_auto_brightness = on,
+                b"clock_spoken_numbers" => self.clock_spoken_numbers = on,
                 // C++ int(float): truncation (Rust saturates where C++ is undefined).
                 b"clock_scroll_ms" => self.clock_scroll_ms = (fv as i32).clamp(100, 2000),
                 b"light_on" => self.light.on = on,
@@ -218,7 +222,7 @@ impl Settings {
              zigbee_role={}\nzigbee_flash_failed={:x}\nnearest_answers={}\nmusic_viz={}\n\
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
              clock_auto_brightness={}\nfollowup_duration_s={}\nclock_format={}\n\
-             command_start_offset_ms={}\n",
+             command_start_offset_ms={}\nclock_spoken_numbers={}\n",
             f(self.volume),
             f(self.volume_legacy),
             b(self.muted),
@@ -248,6 +252,7 @@ impl Settings {
             self.followup_duration_s,
             self.clock_format,
             self.command_start_offset_ms,
+            b(self.clock_spoken_numbers),
         )
     }
 

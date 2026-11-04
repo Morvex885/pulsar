@@ -232,6 +232,7 @@ impl Server {
             key::SW_MICROPHONES => SwitchId::Microphones,
             key::SW_CLOCK => SwitchId::Clock,
             key::SW_CLOCK_AUTO_BRI => SwitchId::ClockAutoBrightness,
+            key::SW_CLOCK_SPOKEN_NUMBERS => SwitchId::ClockSpokenNumbers,
             key::SW_AUTO_UPDATE => SwitchId::AutoUpdate,
             key::SW_NEAREST_ANSWERS => SwitchId::NearestAnswers,
             key::SW_VOICE_INDICATION => SwitchId::VoiceIndication,
