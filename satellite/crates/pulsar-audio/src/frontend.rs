@@ -11,7 +11,8 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{
-    AtomicBool, AtomicU32, AtomicU64, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed,
+    AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering::AcqRel, Ordering::Acquire,
+    Ordering::Relaxed,
 };
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -20,10 +21,10 @@ use std::time::Duration;
 use log::{error, info, warn};
 use pulsar_alsa::{Format, HwRequest, HwTrace, Pcm, Stream};
 use pulsar_core::MusicFrame;
-use pulsar_core::model::{CaptureFormat, Model, PrerollRule};
+use pulsar_core::model::{CaptureFormat, Model};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::engine::{Engine, Stage, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
+use crate::engine::{Engine, SPOTTER_RATE, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
 use crate::spectrum::SpectrumAnalyzer;
 
 /// Wake word level window: 1.5 s in 32 ms blocks at 16 kHz, independent of VQE chunk size.
@@ -35,8 +36,10 @@ const LEVEL_SAMPLES: usize = 512;
 /// Pre-roll ring: 1.024 s at 16 kHz (32 chunks of 32 ms, 64 of 16 ms on the Mini 3 and Mini),
 /// more than any wake word's confirmation delay.
 const PREROLL_SAMPLES: usize = 16384;
-/// End of speech for the "wake timing" log: the newest block within 20 dB (power) of the
-/// loudest one in the level window.
+/// Сэмплов выхода VQE (входа спотера) в миллисекунде.
+const SAMPLES_PER_MS: usize = SPOTTER_RATE as usize / 1000;
+/// Конец речи для строки лога "wake anchor": самый новый блок окна уровня в пределах 20 дБ
+/// (по мощности) от самого громкого.
 const SPEECH_END_RATIO: f32 = 0.01;
 
 /// ALSA buffer in VQE chunks: 256 ms with 32 ms chunks, 128 ms on the Mini 3 and Mini (16 ms);
@@ -55,10 +58,10 @@ pub enum FrontendEvent {
     Wake {
         phrase: String,
         level_db: f32,
-        /// 16 kHz mono audio from the end of the wake word up to and including the confirming
-        /// chunk, oldest first; empty without values for the model (`Model::wake_preroll`).
-        /// The `Audio` events after it continue it without a gap until
-        /// [`FrontendHandle::wake_handled`].
+        /// 16 кГц моно от точки хита спотера (`spotter_get_unhandled_nbytes`, сдвиг
+        /// [`FrontendHandle::set_command_offset`]) до конца подтверждающего чанка, старые первыми;
+        /// пусто без якоря или при сдвиге дальше подтверждения. События `Audio` после него
+        /// продолжают его без разрыва до [`FrontendHandle::wake_handled`].
         preroll: Vec<i16>,
     },
     Command {
@@ -163,10 +166,10 @@ impl FrontendHandle {
             .try_update(AcqRel, Acquire, |v| v.checked_sub(1));
     }
 
-    /// Pre-roll in [`FrontendEvent::Wake`] on/off (`Model::wake_preroll`). On by default; the
-    /// stream hold after a `Wake` does not depend on it.
-    pub fn set_preroll(&self, on: bool) {
-        self.inner.shared.preroll.store(on, Relaxed);
+    /// Сдвиг начала пре-ролла от точки хита спотера, мс: плюс — позже, минус — раньше. По
+    /// умолчанию 0.
+    pub fn set_command_offset(&self, ms: i32) {
+        self.inner.shared.command_offset_ms.store(ms, Relaxed);
     }
 
     /// While on, music features of the speaker reference come as [`FrontendEvent::Music`].
@@ -217,7 +220,7 @@ struct Shared {
     /// `Wake` events sent and not yet handled: audio keeps coming meanwhile, so nothing is lost
     /// between the confirmation and the owner's `set_streaming(true)`.
     wake_pending: AtomicU32,
-    preroll: AtomicBool,
+    command_offset_ms: AtomicI32,
     music: AtomicBool,
     pending_model: Mutex<Option<PathBuf>>,
     tap_on: AtomicBool,
@@ -238,7 +241,7 @@ impl Shared {
             commands: AtomicBool::new(false),
             stream: AtomicBool::new(false),
             wake_pending: AtomicU32::new(0),
-            preroll: AtomicBool::new(true),
+            command_offset_ms: AtomicI32::new(0),
             music: AtomicBool::new(false),
             pending_model: Mutex::new(None),
             tap_on: AtomicBool::new(false),
@@ -655,12 +658,12 @@ impl LevelHistory {
         }
     }
 
-    /// VQE chunks of `frame` samples from the newest sample back to the end of speech
-    /// (`speech_end_chunks` counts blocks; samples of an unfinished block count too).
-    fn speech_end(&self, frame: usize) -> Option<usize> {
+    /// Миллисекунд от самого нового сэмпла назад до конца речи (`speech_end_chunks` считает
+    /// блоки; сэмплы недособранного блока тоже считаются).
+    fn speech_end_ms(&self) -> Option<usize> {
         let newest = (self.pos + LEVEL_CHUNKS - 1) % LEVEL_CHUNKS;
         speech_end_chunks(&self.values, newest)
-            .map(|k| (k * LEVEL_SAMPLES + self.used) / frame.max(1))
+            .map(|k| (k * LEVEL_SAMPLES + self.used) / SAMPLES_PER_MS)
     }
 }
 
@@ -709,15 +712,25 @@ impl PrerollRing {
         self.filled = 0;
     }
 
-    /// The last `n` chunks (at most as many as stored), oldest first.
-    pub(crate) fn last(&self, n: usize) -> Vec<i16> {
-        let n = n.min(self.filled);
+    /// Сэмплов в кольце.
+    pub(crate) fn stored(&self) -> usize {
+        self.filled * self.frame
+    }
+
+    /// Последние `samples` сэмплов (не больше сохранённых), старые первыми.
+    pub(crate) fn tail(&self, samples: usize) -> Vec<i16> {
+        let n = samples.min(self.stored());
+        if n == 0 {
+            return Vec::new();
+        }
         let total = self.chunks();
-        let mut out = Vec::with_capacity(n * self.frame);
-        for k in (1..=n).rev() {
-            let at = (self.next + total - k) % total * self.frame;
+        let k = n.div_ceil(self.frame);
+        let mut out = Vec::with_capacity(k * self.frame);
+        for c in (1..=k).rev() {
+            let at = (self.next + total - c) % total * self.frame;
             out.extend_from_slice(&self.buf[at..at + self.frame]);
         }
+        out.drain(..out.len() - n);
         out
     }
 }
@@ -733,24 +746,22 @@ fn speech_end_chunks(h: &[f32; LEVEL_CHUNKS], newest: usize) -> Option<usize> {
     (0..LEVEL_CHUNKS).find(|&k| h[(newest + LEVEL_CHUNKS - k) % LEVEL_CHUNKS] >= floor)
 }
 
-/// Pre-roll length in chunks for `rule`, given the chunks since the 1st-stage hit.
-fn preroll_chunks(rule: Option<PrerollRule>, first_stage_age: Option<usize>) -> usize {
-    match (rule, first_stage_age) {
-        (None, _) => 0,
-        (Some(PrerollRule::Fixed(n)), _) => n as usize,
-        (Some(PrerollRule::FirstStage { offset, .. }), Some(a)) => {
-            (a as i64 + i64::from(offset)).max(0) as usize
-        }
-        (Some(PrerollRule::FirstStage { fallback, .. }), None) => fallback as usize,
-    }
+/// Сэмплов пре-ролла: звук после точки хита со сдвигом `shift_ms`. Якорь старше кольца —
+/// 0: так значение ошибочно, и в кольце было бы само слово.
+fn preroll_samples(after: Option<usize>, shift_ms: i32, stored: usize) -> usize {
+    let Some(a) = after.filter(|&a| a <= stored) else {
+        return 0;
+    };
+    let n = a as i64 - i64::from(shift_ms) * SAMPLES_PER_MS as i64;
+    n.clamp(0, stored as i64) as usize
 }
 
-/// "-" for None in the "wake timing" log.
-struct Chunks(Option<usize>);
+/// Значение или "-" для None в строке лога "wake anchor".
+struct Opt<T>(Option<T>);
 
-impl std::fmt::Display for Chunks {
+impl<T: std::fmt::Display> std::fmt::Display for Opt<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
+        match &self.0 {
             Some(n) => write!(f, "{n}"),
             None => f.write_str("-"),
         }
@@ -779,16 +790,13 @@ fn processing(
     let mut music_was_on = false;
     let frame = eng.frame();
     let mut ring = PrerollRing::new(PREROLL_SAMPLES / frame.max(1), frame);
-    // Chunks since the wake spotter's 1st-stage hit, while its verifier waits.
-    let mut first_stage_age: Option<usize> = None;
 
     while shared.running() {
         let pending = lock(&shared.pending_model).take();
-        if let Some(dir) = pending {
-            first_stage_age = None;
-            if !eng.set_wake_model(&dir) {
-                error!("failed to switch wake word model to {}", dir.display());
-            }
+        if let Some(dir) = pending
+            && !eng.set_wake_model(&dir)
+        {
+            error!("failed to switch wake word model to {}", dir.display());
         }
         // Exactly one VQE chunk.
         {
@@ -844,45 +852,34 @@ fn processing(
         }
 
         if shared.detect.load(Relaxed) {
-            // Kept for the level window's 1.5 s, whatever the VQE chunk.
-            first_stage_age = first_stage_age
-                .map(|a| a + 1)
-                .filter(|&a| a * frame < LEVEL_CHUNKS * LEVEL_SAMPLES);
-            let spotted = eng.feed_wake();
-            match spotted.stage {
-                Stage::FirstStageHit => first_stage_age = Some(0),
-                Stage::Rejected => first_stage_age = None,
-                Stage::None => {}
-            }
-            if !spotted.phrases.is_empty() {
+            let hits = eng.feed_wake();
+            if !hits.is_empty() {
                 let level_db = wake_level_db(&level_hist.values);
-                let speech_end = level_hist.speech_end(frame);
-                let rule = shared
-                    .preroll
-                    .load(Relaxed)
-                    .then(|| model.wake_preroll.iter().find(|p| p.id == eng.wake_id()))
-                    .flatten()
-                    .map(|p| p.rule);
-                let n = preroll_chunks(rule, first_stage_age).min(ring.chunks());
-                let preroll = ring.last(n);
-                info!(
-                    "wake timing: first_stage={} speech_end={} preroll={}",
-                    Chunks(first_stage_age),
-                    Chunks(speech_end),
-                    preroll.len() / frame
-                );
-                first_stage_age = None;
-                for phrase in spotted.phrases {
+                let speech_end = level_hist.speech_end_ms();
+                let offset_ms = shared.command_offset_ms.load(Relaxed);
+                for hit in hits {
+                    // ring.push выше в этой же итерации: конец кольца = конец поданного спотеру,
+                    // так что ring.tail(after) начинается в точке хита.
+                    let stored = ring.stored();
+                    if let Some(a) = hit.after.filter(|&a| a > stored) {
+                        warn!("wake anchor {a} samples back, the ring holds {stored}; no pre-roll");
+                    }
+                    let n = preroll_samples(hit.after, offset_ms, stored);
+                    let preroll = ring.tail(n);
+                    info!(
+                        "wake anchor: unhandled={} preroll={} ms speech_end={} ms",
+                        Opt(hit.unhandled),
+                        n / SAMPLES_PER_MS,
+                        Opt(speech_end)
+                    );
                     shared.wake_pending.fetch_add(1, Relaxed);
                     let _ = tx.send(FrontendEvent::Wake {
-                        phrase,
+                        phrase: hit.phrase,
                         level_db,
-                        preroll: preroll.clone(),
+                        preroll,
                     });
                 }
             }
-        } else {
-            first_stage_age = None;
         }
         if shared.commands.load(Relaxed) {
             for word in eng.feed_command() {
@@ -963,27 +960,28 @@ mod tests {
     }
 
     #[test]
-    fn preroll_ring_keeps_the_last_chunks_oldest_first() {
+    fn preroll_ring_keeps_the_last_samples_oldest_first() {
         // 3 chunks of 2 samples; chunk k holds the samples k, k.
         let mut r = PrerollRing::new(3, 2);
         let chunk = |k: i16| [f32::from(k) / 32768.0; 2];
-        assert!(r.last(2).is_empty());
+        assert!(r.tail(2).is_empty());
         assert_eq!(r.push(&chunk(1)), Some(&[1i16, 1][..]));
         // Asked for more than stored: what there is.
-        assert_eq!(r.last(3), [1, 1]);
+        assert_eq!(r.tail(3), [1, 1]);
         for k in 2..=5 {
             r.push(&chunk(k));
         }
         // Wrapped twice: chunks 3, 4, 5 remain.
-        assert_eq!(r.last(3), [3, 3, 4, 4, 5, 5]);
-        assert_eq!(r.last(2), [4, 4, 5, 5]);
-        assert_eq!(r.last(9), [3, 3, 4, 4, 5, 5]);
-        assert!(r.last(0).is_empty());
+        assert_eq!(r.stored(), 6);
+        assert_eq!(r.tail(3), [4, 5, 5]);
+        assert_eq!(r.tail(6), [3, 3, 4, 4, 5, 5]);
+        assert_eq!(r.tail(99), [3, 3, 4, 4, 5, 5]);
+        assert!(r.tail(0).is_empty());
         // A chunk of another length breaks the timeline: nothing older survives it.
         assert_eq!(r.push(&[0.0; 3]), None);
-        assert!(r.last(3).is_empty());
+        assert!(r.tail(3).is_empty());
         r.push(&chunk(6));
-        assert_eq!(r.last(3), [6, 6]);
+        assert_eq!(r.tail(3), [6, 6]);
     }
 
     #[test]
@@ -1005,17 +1003,19 @@ mod tests {
     }
 
     #[test]
-    fn preroll_length_per_rule() {
-        let first = |offset, fallback| Some(PrerollRule::FirstStage { offset, fallback });
-        assert_eq!(preroll_chunks(None, Some(5)), 0);
-        assert_eq!(preroll_chunks(Some(PrerollRule::Fixed(7)), None), 7);
-        assert_eq!(preroll_chunks(Some(PrerollRule::Fixed(7)), Some(2)), 7);
-        assert_eq!(preroll_chunks(first(3, 9), Some(4)), 7);
-        assert_eq!(preroll_chunks(first(-3, 9), Some(4)), 1);
-        // An anchor closer than the offset: nothing rather than the word itself.
-        assert_eq!(preroll_chunks(first(-3, 9), Some(2)), 0);
-        // No 1st-stage hit before the confirmation.
-        assert_eq!(preroll_chunks(first(-3, 9), None), 9);
+    fn preroll_from_the_anchor_with_shift() {
+        assert_eq!(preroll_samples(Some(800), 0, 16384), 800);
+        // Плюс — позже, минус — раньше: 16 мс = 256 сэмплов.
+        assert_eq!(preroll_samples(Some(800), 16, 16384), 544);
+        assert_eq!(preroll_samples(Some(800), -16, 16384), 1056);
+        assert_eq!(preroll_samples(Some(100), 16, 16384), 0);
+        // Сдвиг назад упирается в кольцо.
+        assert_eq!(preroll_samples(Some(16000), -160, 16384), 16384);
+        // Якорь старше кольца: пусто, а не всё кольцо со словом.
+        assert_eq!(preroll_samples(Some(20000), 0, 16384), 0);
+        // Якорь ровно на начале кольца — ещё внутри.
+        assert_eq!(preroll_samples(Some(16384), 0, 16384), 16384);
+        assert_eq!(preroll_samples(None, -16, 16384), 0);
     }
 
     #[test]
