@@ -46,6 +46,11 @@ impl SpeechDisplay {
         changed.then(String::new)
     }
 
+    /// Очередь начата и ещё не сброшена текстом нового ответа.
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
     pub fn wake(&self) -> Option<i64> {
         self.until
     }
@@ -295,7 +300,7 @@ fn numeric_component(token: &str) -> bool {
         || matches!(word(token).as_str(), "минус" | "плюс")
 }
 
-/// Текст HA не содержит выравнивания слов со звуком; порядок чисел сохраняется.
+/// Числа текста ответа по порядку; см. docs/voice.md, «Голосовой ассистент HA (ESPHome)».
 pub(super) fn from_text(input: &str) -> Vec<String> {
     let mut numbers = Vec::new();
     let tokens: Vec<_> = input.split_whitespace().collect();
@@ -347,13 +352,15 @@ pub(super) fn from_text(input: &str) -> Vec<String> {
             i += 1;
             continue;
         };
-        // «Один момент» и «ни одного» не сообщают измеренного значения.
+        // «Один момент», «одну секунду» и «ни одного» не сообщают измеренного значения.
         if consumed == 1
             && unit(tokens[i]) == Some(1)
-            && (tokens
-                .get(i + 1)
-                .is_some_and(|s| matches!(word(s).as_str(), "момент" | "мгновение"))
-                || (i > 0 && word(tokens[i - 1]) == "ни" && !boundary(tokens[i - 1])))
+            && (tokens.get(i + 1).is_some_and(|s| {
+                matches!(
+                    word(s).as_str(),
+                    "момент" | "мгновение" | "секунду" | "секундочку" | "минутку"
+                )
+            }) || (i > 0 && word(tokens[i - 1]) == "ни" && !boundary(tokens[i - 1])))
         {
             negative = false;
             i += consumed;
@@ -409,6 +416,23 @@ fn minutes(tokens: &[&str], i: usize) -> Option<(String, usize)> {
     }
     Some((value, count))
 }
+
+/// Время ответа в формате часов: в 12h — без ведущего нуля, как `font::time_glyphs`.
+pub(super) fn clock_text(text: String, hour12: bool) -> String {
+    let b = text.as_bytes();
+    let time =
+        b.len() == 5 && b[2] == b':' && [b[0], b[1], b[3], b[4]].iter().all(u8::is_ascii_digit);
+    if !hour12 || !time {
+        return text;
+    }
+    let hour = (b[0] - b'0') * 10 + (b[1] - b'0');
+    let hour = match hour % 12 {
+        0 => 12,
+        h => h,
+    };
+    format!("{hour:>2}:{}", &text[3..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,6 +460,9 @@ mod tests {
             ("плюс два градуса, минус двадцать три", vec!["2", "-23"]),
             ("5, завтра 6.", vec!["5", "6"]),
             ("123 12-34 1.2.3 -", vec!["123"]),
+            ("Одну секунду", vec![]),
+            ("одну минутку, сейчас посмотрю", vec![]),
+            ("Таймер на 1 секунду", vec!["1"]),
         ] {
             assert_eq!(from_text(text), expected, "{text}");
         }
@@ -445,6 +472,15 @@ mod tests {
                 ["20", "5"]
             );
         }
+    }
+
+    #[test]
+    fn clock_text_follows_format() {
+        assert_eq!(clock_text("21:05".into(), true), " 9:05");
+        assert_eq!(clock_text("00:30".into(), true), "12:30");
+        assert_eq!(clock_text("12:00".into(), true), "12:00");
+        assert_eq!(clock_text("21:05".into(), false), "21:05");
+        assert_eq!(clock_text("12  ".into(), true), "12  ");
     }
 
     #[test]
@@ -486,9 +522,14 @@ mod tests {
             assert_eq!(display.tick(0, 400).as_deref(), Some("12  "));
             display.followup();
             assert_eq!(display.tick(3000, 400).as_deref(), Some("  34"));
+            // Тихий конец follow-up дочитывает очередь, пока новый ответ её не сбросил.
+            assert!(display.started());
             if text_first {
                 display.text("7");
                 assert_eq!(display.tick(4000, 400), None);
+                // Текст без воспроизведения: старое «  34» без таймера, его надо погасить.
+                assert!(!display.started());
+                assert_eq!(display.wake(), None);
                 display.start();
             } else {
                 display.start();

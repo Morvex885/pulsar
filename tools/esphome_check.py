@@ -22,6 +22,11 @@ Scenarios against the daemon (a test instance: PULSAR_PORT_OFFSET, service stopp
                      INTENT_START, --think-s, INTENT_END, TTS_END with --tts-url, RUN_END); waits
                      --speak-s for the answer to play out and checks that no other run starts
                      (continue_conversation=0) and the media player ends IDLE.
+                     --speech-text: the answer text (INTENT_END speech, TTS_START text);
+                     --spoken-numbers: clock_display and clock_spoken_numbers switched on first
+                     and restored at the end (the clock is read on the station, sysfs);
+                     restoring clock_spoken_numbers to off clears the numbers still queued, so
+                     to watch the whole queue switch it on beforehand.
   scenario-timer     timer STARTED (--seconds, default 70 here), --hold-s, then FINISHED and
                      --ring-s of ringing. Nothing in the API stops the ring (button, wake word or
                      "стоп" do; it ends by itself after 15 min): stop the instance afterwards.
@@ -56,6 +61,7 @@ Scenarios against the daemon (a test instance: PULSAR_PORT_OFFSET, service stopp
                        off       duration 0: no follow-up start at all;
                        set-zero  duration set to 0 at t0+1: stop within 1.5 s.
                      Whether the close was quiet is read in the daemon log ("follow-up: ...").
+                     --speech-text and --spoken-numbers as in scenario-voice (first run's answer).
 The LED ring and clock states (LISTENING, THINKING, SPEAKING, TIMER_RING, the timer) are read on
 the station meanwhile (sysfs); the --*-s pauses leave time for that.
 
@@ -343,9 +349,44 @@ async def expect(w, name, key, send, pred, timeout=3.0):
     return s
 
 
+async def clock_switches_on(client, w, ents):
+    """Включает clock_display и clock_spoken_numbers; возвращает (oid, key, состояние до), None — сущности нет."""
+    oids = ("clock_display", "clock_spoken_numbers")
+    missing = [oid for oid in oids if oid not in ents]
+    if missing:
+        FAILURES.append(f"spoken numbers: no {', '.join(missing)} entity")
+        return None
+    saved = []
+    for oid in oids:
+        key = ents[oid].key
+        saved.append((oid, key, w.latest.get(key)))
+        await expect(w, f"switch {oid} -> True", key, lambda: client.switch_command(key, True), lambda s: s.state)
+    return saved
+
+
+async def clock_switches_restore(client, w, saved):
+    for oid, key, orig in saved:
+        if orig is not None:
+            v = orig.state
+            await expect(w, f"switch {oid} -> {v} (restored)", key, lambda: client.switch_command(key, v), lambda s: s.state == v)
+
+
 async def cmd_scenario_voice(client, args):
     w = Watch(client)
     ents, _ = await entities_of(client)
+    saved = []
+    if args.spoken_numbers:
+        await asyncio.sleep(0.8)
+        saved = await clock_switches_on(client, w, ents)
+        if saved is None:
+            return
+    try:
+        await voice_case(client, w, ents, args)
+    finally:
+        await clock_switches_restore(client, w, saved)
+
+
+async def voice_case(client, w, ents, args):
     media = ents["media_player"].key
     E = VoiceAssistantEventType
     starts = []
@@ -363,9 +404,10 @@ async def cmd_scenario_voice(client, args):
         print(f"  STT_END INTENT_START; thinking {args.think_s} s (audio chunks so far {audio['chunks']})")
         await asyncio.sleep(args.think_s)
         client.send_voice_assistant_event(
-            E.VOICE_ASSISTANT_INTENT_END, {"conversation_id": "c1", "continue_conversation": "0"}
+            E.VOICE_ASSISTANT_INTENT_END,
+            {"conversation_id": "c1", "continue_conversation": "0", "speech": args.speech_text},
         )
-        client.send_voice_assistant_event(E.VOICE_ASSISTANT_TTS_START, {"text": "ok"})
+        client.send_voice_assistant_event(E.VOICE_ASSISTANT_TTS_START, {"text": args.speech_text})
         client.send_voice_assistant_event(E.VOICE_ASSISTANT_TTS_END, {"url": args.tts_url})
         client.send_voice_assistant_event(E.VOICE_ASSISTANT_RUN_END, None)
         print("  INTENT_END TTS_START TTS_END RUN_END; speaking")
@@ -466,7 +508,7 @@ async def cmd_scenario_entities(client, args):
     def st(oid):
         return orig[oid].state if orig.get(oid) is not None else None
 
-    switches = ["microphones", "clock_display", "nearest_station_answers", "voice_indication"]
+    switches = ["microphones", "clock_display", "clock_spoken_numbers", "nearest_station_answers", "voice_indication"]
     if "hardware_mic_mute" in k and st("hardware_mic_mute"):
         # Under the mute button's mute "on" is refused: the switch comes back off.
         await expect(w, "switch microphones -> True (refused: mute button)", k["microphones"], lambda: client.switch_command(k["microphones"], True), lambda s: not s.state)
@@ -561,6 +603,11 @@ async def cmd_scenario_followup(client, args):
     key = ents["followup_duration"].key
     orig = w.latest.get(key)
     n = 0 if args.case == "off" else args.followup_s
+    saved = []
+    if args.spoken_numbers:
+        saved = await clock_switches_on(client, w, ents)
+        if saved is None:
+            return
     await expect(w, f"number followup_duration -> {n}", key, lambda: client.number_command(key, n), lambda s: abs(s.state - n) < 1e-3)
     try:
         await followup_case(client, w, key, args, n)
@@ -568,6 +615,7 @@ async def cmd_scenario_followup(client, args):
         if orig is not None:
             v = orig.state
             await expect(w, f"number followup_duration -> {v} (restored)", key, lambda: client.number_command(key, v), lambda s: abs(s.state - v) < 1e-3)
+        await clock_switches_restore(client, w, saved)
 
 
 async def followup_case(client, w, key, args, n):
@@ -631,8 +679,8 @@ async def followup_case(client, w, key, args, n):
     send(E.VOICE_ASSISTANT_STT_END, {"text": "test"})
     send(E.VOICE_ASSISTANT_INTENT_START)
     await asyncio.sleep(0.3)
-    send(E.VOICE_ASSISTANT_INTENT_END, {"conversation_id": "c1", "continue_conversation": "1"})
-    send(E.VOICE_ASSISTANT_TTS_START, {"text": "ok"})
+    send(E.VOICE_ASSISTANT_INTENT_END, {"conversation_id": "c1", "continue_conversation": "1", "speech": args.speech_text})
+    send(E.VOICE_ASSISTANT_TTS_START, {"text": args.speech_text})
     send(E.VOICE_ASSISTANT_TTS_END, {"url": args.tts_url})
     send(E.VOICE_ASSISTANT_RUN_END)
     print("run 1: INTENT_END continue_conversation=1, TTS_END, RUN_END")
@@ -817,6 +865,10 @@ async def main():
     p.add_argument("--case", default="silence", choices=["speech", "silence", "no-text", "no-vad", "off", "set-zero"],
                    help="scenario-followup case")
     p.add_argument("--followup-s", type=int, default=3, help="scenario-followup duration, 1..10")
+    p.add_argument("--speech-text", default="ok",
+                   help="scenario-voice / scenario-followup: answer text, sent as INTENT_END speech and TTS_START text")
+    p.add_argument("--spoken-numbers", action="store_true",
+                   help="scenario-voice / scenario-followup: switch clock_display and clock_spoken_numbers on first, restored at the end")
     args = p.parse_args()
     if not 0.0 <= args.media_volume <= 0.2:
         p.error("--media-volume must be between 0 and 0.2")

@@ -51,6 +51,7 @@ pub(super) mod key {
     pub const NUMBER_FOLLOWUP_DURATION: u32 = 34;
     pub const SELECT_CLOCK_FORMAT: u32 = 35;
     pub const NUMBER_COMMAND_OFFSET: u32 = 36;
+    pub const SW_CLOCK_SPOKEN_NUMBERS: u32 = 37;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -124,6 +125,7 @@ pub(super) struct Cache {
     sw_microphones: BoolState,
     sw_clock: BoolState,
     sw_clock_auto_bri: BoolState,
+    sw_clock_spoken_numbers: BoolState,
     sw_auto_update: BoolState,
     sw_nearest_answers: BoolState,
     sw_voice_indication: BoolState,
@@ -159,6 +161,7 @@ impl Cache {
             sw_microphones: BoolState::default(),
             sw_clock: BoolState::default(),
             sw_clock_auto_bri: BoolState::default(),
+            sw_clock_spoken_numbers: BoolState::default(),
             sw_auto_update: BoolState::default(),
             sw_nearest_answers: BoolState::default(),
             sw_voice_indication: BoolState::default(),
@@ -260,6 +263,7 @@ impl Server {
         match id {
             SwitchId::Clock => self.cfg.has_clock,
             SwitchId::ClockAutoBrightness => self.cfg.has_clock && self.cfg.has_auto_brightness,
+            SwitchId::ClockSpokenNumbers => self.cfg.has_clock,
             SwitchId::Microphones
             | SwitchId::AutoUpdate
             | SwitchId::NearestAnswers
@@ -320,6 +324,15 @@ impl Server {
                 key::SW_CLOCK_AUTO_BRI,
                 "Clock auto brightness",
                 "mdi:brightness-auto",
+                cfg,
+            ));
+        }
+        if self.switch_listed(SwitchId::ClockSpokenNumbers) {
+            out.push(switch(
+                "clock_spoken_numbers",
+                key::SW_CLOCK_SPOKEN_NUMBERS,
+                "Clock spoken numbers",
+                "mdi:numeric",
                 cfg,
             ));
         }
@@ -747,10 +760,11 @@ impl Server {
         let to = Some(id);
         let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
         let c = &self.cache;
-        let (mic, clock, auto_bri, auto, nearest, voice, hw) = (
+        let (mic, clock, auto_bri, spoken, auto, nearest, voice, hw) = (
             c.sw_microphones,
             c.sw_clock,
             c.sw_clock_auto_bri,
+            c.sw_clock_spoken_numbers,
             c.sw_auto_update,
             c.sw_nearest_answers,
             c.sw_voice_indication,
@@ -764,6 +778,9 @@ impl Server {
         }
         if self.switch_listed(SwitchId::ClockAutoBrightness) {
             self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK_AUTO_BRI, auto_bri, to);
+        }
+        if self.switch_listed(SwitchId::ClockSpokenNumbers) {
+            self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK_SPOKEN_NUMBERS, spoken, to);
         }
         self.send_bool(msg::SWITCH_STATE, key::SW_AUTO_UPDATE, auto, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_NEAREST_ANSWERS, nearest, to);
@@ -919,6 +936,9 @@ impl Server {
                     SwitchId::Clock => (&mut c.sw_clock, key::SW_CLOCK),
                     SwitchId::ClockAutoBrightness => {
                         (&mut c.sw_clock_auto_bri, key::SW_CLOCK_AUTO_BRI)
+                    }
+                    SwitchId::ClockSpokenNumbers => {
+                        (&mut c.sw_clock_spoken_numbers, key::SW_CLOCK_SPOKEN_NUMBERS)
                     }
                     SwitchId::AutoUpdate => (&mut c.sw_auto_update, key::SW_AUTO_UPDATE),
                     SwitchId::NearestAnswers => {

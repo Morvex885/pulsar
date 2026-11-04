@@ -68,6 +68,7 @@ impl Controller {
         let api = &self.api;
         api.publish_switch(SwitchId::Clock, self.st.clock_on);
         api.publish_switch(SwitchId::ClockAutoBrightness, self.st.clock_auto_brightness);
+        api.publish_switch(SwitchId::ClockSpokenNumbers, self.st.clock_spoken_numbers);
         api.publish_switch(SwitchId::AutoUpdate, self.st.auto_update);
         api.publish_switch(SwitchId::NearestAnswers, self.st.nearest_answers);
         api.publish_switch(SwitchId::VoiceIndication, self.st.voice_indication);
@@ -170,6 +171,12 @@ impl Controller {
                 self.st.clock_auto_brightness = state;
                 self.clock.set_auto_brightness(state);
             }
+            SwitchId::ClockSpokenNumbers => {
+                self.st.clock_spoken_numbers = state;
+                if !state {
+                    self.clear_speech_display();
+                }
+            }
             SwitchId::AutoUpdate => self.st.auto_update = state,
             SwitchId::NearestAnswers => self.st.nearest_answers = state,
             SwitchId::VoiceIndication => {
@@ -219,7 +226,7 @@ impl Controller {
                     && self.followup.awaiting_speech()
                 {
                     info!("follow-up: turned off, conversation ends");
-                    self.finish_interaction();
+                    self.end_silent_followup();
                 }
             }
             NumberId::LedSpeed => {
