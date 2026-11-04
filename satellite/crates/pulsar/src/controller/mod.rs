@@ -259,20 +259,35 @@ fn model_dir(id: &str) -> PathBuf {
 }
 
 /// Activation models are directories under MODELS — the firmware decides which words it carries.
+/// A model counts only when its directory holds `acoustic_model.nnet`.
 fn wake_word_available(id: &str) -> bool {
-    !id.is_empty() && model_dir(id).join("acoustic_model.nnet").is_file()
+    !id.is_empty()
+        && !id.contains('/')
+        && !id.starts_with('.')
+        && model_dir(id).join("acoustic_model.nnet").is_file()
 }
 
-/// Every activation model on this firmware, alisa first when present.
+/// Every activation model on this firmware, `alisa` first when present.
+///
+/// Errors are reported, never silently dropped: a half-listed model set would hide a word the user
+/// already selected, and `wake_word` would then be "reset" for no reason.
 fn wake_word_names() -> Vec<String> {
     let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(MODELS) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if wake_word_available(&name) {
-                out.push(name);
+    match std::fs::read_dir(MODELS) {
+        Ok(rd) => {
+            for entry in rd {
+                match entry {
+                    Ok(e) => {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        if wake_word_available(&name) {
+                            out.push(name);
+                        }
+                    }
+                    Err(e) => warn!("activation model unreadable in {MODELS}: {e}"),
+                }
             }
         }
+        Err(e) => warn!("cannot list activation models in {MODELS}: {e}"),
     }
     out.sort_by(|a, b| match (a.as_str(), b.as_str()) {
         ("alisa", "alisa") => std::cmp::Ordering::Equal,
@@ -280,20 +295,31 @@ fn wake_word_names() -> Vec<String> {
         (_, "alisa") => std::cmp::Ordering::Greater,
         _ => a.cmp(b),
     });
-    if out.is_empty() {
-        out.push("alisa".into());
-    }
     out
+}
+
+/// The saved word if the firmware has it, otherwise the first model that does exist — `alisa` when
+/// present, else whatever the device ships. A device with only `yandex`/`yasmina` must not be left
+/// asking the spotter for a directory that is not there.
+fn resolve_wake_word(saved: &str, available: &[String]) -> String {
+    if available.iter().any(|n| n == saved) {
+        return saved.to_string();
+    }
+    if !saved.is_empty() {
+        warn!("wake word {saved:?} is not on this device; falling back");
+    }
+    available
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "alisa".to_string())
 }
 
 /// The phrase Home Assistant shows for a model directory (English, as the rest of the API).
 fn wake_word_phrase(id: &str) -> String {
-    // Both scripts: the word is the same in either language, and Home Assistant shows this one
-    // line as the option label, so a Russian and an English user both recognise it.
     match id {
-        "alisa" => "Алиса / Alisa".into(),
-        "yandex" => "Яндекс / Yandex".into(),
-        "yasmina" => "Ясмина / Yasmina".into(),
+        "alisa" => "Alisa".into(),
+        "yandex" => "Yandex".into(),
+        "yasmina" => "Yasmina".into(),
         other => other.to_string(),
     }
 }
@@ -338,9 +364,8 @@ impl Controller {
             VERSION,
             BUILD_TIME,
         );
-        if !wake_word_available(&st.wake_word) {
-            st.wake_word = "alisa".into();
-        }
+        let wake_names = wake_word_names();
+        st.wake_word = resolve_wake_word(&st.wake_word, &wake_names);
         let case_colors = pulsar_hw::case_colors();
         let dir = logic::state_dir(state_path.as_os_str());
         let strings = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -361,7 +386,8 @@ impl Controller {
         };
         let cfg = ApiConfig {
             port: ports.api,
-            wake_words: wake_word_names()
+            wake_words: wake_names
+                .clone()
                 .into_iter()
                 .map(|id| WakeWordInfo {
                     phrase: wake_word_phrase(&id),
