@@ -317,9 +317,9 @@ fn resolve_wake_word(saved: &str, available: &[String]) -> String {
 /// The phrase Home Assistant shows for a model directory (English, as the rest of the API).
 fn wake_word_phrase(id: &str) -> String {
     match id {
-        "alisa" => "Alisa".into(),
-        "yandex" => "Yandex".into(),
-        "yasmina" => "Yasmina".into(),
+        "alisa" => "Алиса / Alisa".into(),
+        "yandex" => "Яндекс / Yandex".into(),
+        "yasmina" => "Ясмина / Yasmina".into(),
         other => other.to_string(),
     }
 }
