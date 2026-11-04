@@ -1,7 +1,7 @@
-# Cross-build for Yandex Stations with cargo-zigbuild: one binary per userland ABI.
-#   ARCH=aarch64  64-bit userspace (Station Midi, glibc 2.36)
-#   ARCH=armhf    32-bit userspace (Station Lite 2, Mini 2, Mini 3 and Mini; also Midi images with
-#                  an armhf userland), built for glibc 2.23 (the Mini's; the others have 2.30)
+# Кросс-сборка для Яндекс Станций через cargo-zigbuild: по бинарю на ABI userland.
+#   ARCH=aarch64  64-битный userspace (Станция Миди, glibc 2.36)
+#   ARCH=armhf    32-битный userspace (Лайт 2, Станция 2, Мини 2, Мини 3 и Мини; также образы
+#                  Миди с armhf-userland), сборка под glibc 2.23 (как у Мини; у остальных 2.30)
 # `make` builds both daemons; `make ARCH=armhf` one of them. Output: build/<arch>/pulsar (stripped,
 # the one deployed) and build/<arch>/pulsar.debug (line tables, for `addr2line -f -e` on the crash
 # report; non-PIE, so the addresses in it are absolute). `make ARCH=armhf tools` builds every tool

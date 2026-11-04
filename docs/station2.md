@@ -24,8 +24,8 @@ Init-скрипты, `hardvold.config` и earcons мейнтейнер свер�
 - VQE: пресет `yandexmidi`, 4 микрофона, 2 референса, выход 16 кГц (`quasar.cfg`,
   `audiod.audioDevice.vqe`).
 - Воспроизведение: штатный плеер играет в `default` (`quasar.cfg`); ветка `default` —
-  `dmix_spk_plug` → `playback_metrics_tap` → `dmix_spk`, без softvol; регулятор `Master` создаёт
-  `soft_volume` (вики, «Звук»).
+  `dmix_spk_plug` → `playback_metrics_tap` → `dmix_spk`, без softvol (регулятор `Master` — в вики,
+  «Звук»).
 - Громкость: штатный `/usr/bin/hardvold` работает и при остановленном `maind`. По
   `/etc/hardvold.config` он переводит `Master Playback Volume` в `SY6045S Master Playback Volume`
   по кривой −51…0 дБ; регуляторы `SY6045S Ch1/Ch2` не трогает. Запись `SY6045S Master` в обход

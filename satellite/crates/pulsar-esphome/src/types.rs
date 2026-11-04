@@ -70,7 +70,8 @@ pub struct ApiConfig {
     pub has_hw_mic_mute: bool,
     /// The model has the action button and volume keys (the Event «Button» entity).
     pub has_buttons: bool,
-    /// Геометрия светодиодной раскладки, совпадает с дескриптором модели.
+    /// Раскладка модели (`Model::led_layout`): object_id и имя лампы — «ring»/«Ring» или
+    /// «panel»/«Panel».
     pub led_layout: LedLayout,
     /// File holding the Noise encryption key (base64 of 32 bytes, as ESPHome's `api: encryption:
     /// key`). Missing or empty file: plaintext (and provisioning with the all-zeros key). HA may

@@ -321,6 +321,29 @@ fn panel_show_temporary_keeps_the_panel_layout() {
     );
 }
 
+#[test]
+fn panel_user_light_effect_uses_the_panel_layout() {
+    // Лампа «Panel» с эффектом: Radar рисуется лучом панели, а не заливкой кольца.
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(
+        Cmd::UserLight {
+            on: true,
+            color: RED,
+            brightness: 1.0,
+            effect: "Radar".into(),
+            transition_ms: 0,
+        },
+        0,
+    );
+    c.frame(0);
+    c.frame(1000);
+    let px = &c.px[..88 * 3];
+    assert!(
+        px.chunks(3).any(|p| p != &px[..3]),
+        "Radar лампы залит одним цветом"
+    );
+}
+
 /// The actor on a capture sink.
 fn spawn_capture(n: usize, nlogo: usize) -> (LedsHandle, Captured, JoinHandle<()>) {
     let frames = Rc::new(RefCell::new(Vec::new()));

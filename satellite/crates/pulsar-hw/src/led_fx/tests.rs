@@ -244,12 +244,19 @@ fn panel_rainbow_hue_keeps_moving_after_long_uptime() {
         let mut b = vec![Col::default(); 88];
         assert!(panel_effect(name, rgb(255, 255, 255), 1.0, t, &mut a));
         assert!(panel_effect(name, rgb(255, 255, 255), 1.0, t + 0.1, &mut b));
-        // Яркость светодиода сокращается при нормировке, остаётся только оттенок.
+        // Яркость светодиода сокращается при нормировке, остаётся только оттенок; допуск — на
+        // округление f32 разной яркости в двух кадрах.
         let moved = a
             .iter()
             .zip(&b)
             .filter_map(|(x, y)| Some((hue(x)?, hue(y)?)))
-            .any(|(x, y)| x != y);
+            .any(|(x, y)| {
+                (x.0 - y.0)
+                    .abs()
+                    .max((x.1 - y.1).abs())
+                    .max((x.2 - y.2).abs())
+                    > 1e-3
+            });
         assert!(moved, "{name}: оттенок не сдвинулся за 0,1 с");
     }
 }

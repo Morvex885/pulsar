@@ -35,7 +35,8 @@ pub struct Model {
     /// Физическая раскладка светодиодов; определяет тип эффектов и геометрию панели.
     pub led_layout: LedLayout,
 
-    /// Prefix of the per-channel sysfs LEDs "<led_prefix>:<color>:<ring|logo><index>".
+    /// Префикс поканальных sysfs-светодиодов "<led_prefix>:<color>:<ring|logo><index>"; пусто — их
+    /// нет (Мини, Станция 2).
     pub led_prefix: &'static str,
     pub ring: LedStrip,
     /// `logo.count == 0`: no logo.
@@ -143,8 +144,9 @@ impl CaptureFormat {
     }
 }
 
-/// An Nx1 BGR framebuffer behind an ledfb trigger, with per-channel sysfs LEDs as fallback, or an
-/// IS31FL323x I2C controller (18 channels = 6 RGB pixels).
+/// Лента светодиодов: фреймбуфер (24 bpp B, G, R за ledfb-триггером; 32 bpp R, G, B, W панели
+/// Станции 2 без триггера) с поканальными sysfs-светодиодами как фолбэком, если они есть, либо
+/// I²C-контроллер IS31FL323x (18 каналов = 6 RGB-пикселей).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LedStrip {
     pub count: i32,
@@ -586,7 +588,8 @@ static STATION2: Model = Model {
     volume_sound: "common/volume_sound.mp3",
     // Штатный маршрут без дополнительного softvol: см. docs/station2.md, «Звук».
     playback_pcm: "default",
-    // Master создаёт softvol soft_volume, а не default: см. docs/station2.md, «Звук».
+    // Master создаёт softvol soft_volume, а не default:
+    // https://hackalice.me/devices/station-2/#audio.
     master_pcm: "soft_volume",
     alsa_config: "",
     alsa_lib: "",

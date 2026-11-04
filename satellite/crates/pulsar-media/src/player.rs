@@ -1,9 +1,9 @@
 //! Воспроизведение через GStreamer из прошивки Яндекса в PCM воспроизведения модели
 //! (`Model::playback_pcm`: dmix, обычно за softvol — см. `Model::master_pcm`). Два независимых
 //! канала:
-//!   Music    - media_player content, can be paused / ducked.
-//!   Announce - TTS, announcements, earcons; plays over (ducked) music. Decoded by its playbin,
-//!              played by the writer of [`crate::pcm_out`] instead of an alsasink.
+//!   Music    — содержимое media_player, ставится на паузу и приглушается.
+//!   Announce — TTS, объявления, earcons; играет поверх приглушённой музыки. Декодируется своим
+//!              playbin, выводится писателем [`crate::pcm_out`] вместо alsasink.
 //!
 //! Threading: a dedicated thread runs a GMainLoop on the default GMainContext; the bus watches and
 //! timeouts live there, and so does the state machine ([`Machine`], in a thread-local). Handle

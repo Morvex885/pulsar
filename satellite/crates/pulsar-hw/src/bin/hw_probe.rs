@@ -21,7 +21,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use pulsar_clock::ClockHandle;
-use pulsar_core::model::{LedStrip, Model};
+use pulsar_core::model::{LedLayout, LedStrip, Model};
 use pulsar_core::{AmbientDimmer, ClockShot, MusicFrame, UiState, actors};
 use pulsar_hw::{Button, InputEvent, InputHandle, LedsHandle, Press, Rgb};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -407,8 +407,13 @@ fn led_steps(leds: &LedsHandle, music: &Rc<Cell<bool>>, model: &Model) -> Vec<St
     red.check = Some([FULL_FB, 0, 0]);
     steps.push(red);
     let l = leds.clone();
-    steps.push(step("led_show Comet green 3 s", move || {
-        l.show_temporary("Comet".into(), Rgb { r: 0, g: 255, b: 0 }, 3);
+    // Эффект, который HA пропустит в led_show для этой раскладки (`effect_names`).
+    let show = match model.led_layout {
+        LedLayout::Ring => "Comet",
+        LedLayout::Station2Panel => "Radar",
+    };
+    steps.push(step(format!("led_show {show} green 3 s"), move || {
+        l.show_temporary(show.into(), Rgb { r: 0, g: 255, b: 0 }, 3);
     }));
     let l = leds.clone();
     steps.push(step("show_volume 0.2 (user light off)", move || {
