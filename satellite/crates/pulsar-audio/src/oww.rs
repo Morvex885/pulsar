@@ -56,6 +56,8 @@ pub struct Oww {
     /// Score of the last completed frame, and the best one since the last read.
     pub last_score: f32,
     pub max_score: f32,
+    /// One utterance crosses the threshold on several 80 ms frames; suppress the repeats.
+    last_fire: Option<std::time::Instant>,
 }
 
 impl Oww {
@@ -112,6 +114,7 @@ impl Oww {
             error: None,
             last_score: 0.0,
             max_score: 0.0,
+            last_fire: None,
         };
         // Warm the queues so the first frames are not scored against silence padding.
         for _ in 0..MEL_FRAMES {
@@ -183,7 +186,18 @@ impl Oww {
         if score > self.max_score {
             self.max_score = score;
         }
-        Ok((score >= self.threshold).then_some(score))
+        if score < self.threshold {
+            return Ok(None);
+        }
+        // One phrase, one wake: 1.5 s is longer than any tail of the same utterance and shorter
+        // than saying the word twice on purpose.
+        if let Some(at) = self.last_fire
+            && at.elapsed() < std::time::Duration::from_millis(1500)
+        {
+            return Ok(None);
+        }
+        self.last_fire = Some(std::time::Instant::now());
+        Ok(Some(score))
     }
 
     fn melspectrogram(&mut self, chunk: &[f32]) -> TractResult<Vec<f32>> {
