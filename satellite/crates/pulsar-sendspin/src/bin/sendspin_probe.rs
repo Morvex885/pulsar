@@ -71,8 +71,8 @@ impl VolumeCap {
             }
         };
         if !ctl.mixer_exists(MASTER) {
-            // Opening the softvol PCM once creates the control.
-            drop(Pcm::open(model.playback_pcm, Stream::Playback, true));
+            // Однократное открытие PCM со softvol создаёт регулятор.
+            drop(Pcm::open(model.master_pcm, Stream::Playback, true));
             if !ctl.mixer_exists(MASTER) {
                 println!("volume: no '{MASTER}' on hw:0, not capped");
                 return Ok(None);

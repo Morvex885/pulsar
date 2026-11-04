@@ -1,12 +1,11 @@
-//! Master output volume: the softvol "Master Playback Volume" of the model's playback PCM
-//! (`Model::playback_pcm`) on card 0 (2 values, 0..255, linear in dB, Midi -60 dB..0 dB; TLV
-//! mute=0, i.e. raw 0 is the bottom of the range, not silence), on the stock curve of the model
-//! (`Model::volume_map`): volume v is platform level v * top level. The control is a user control
-//! that alsa-lib creates the first time the playback PCM is opened, so [`Mixer::open`]
-//! instantiates it if missing.
+//! Мастер-громкость: softvol «Master Playback Volume» на карте 0 (0..255, линейно в дБ, у Миди
+//! 2 значения и −60 дБ..0 дБ; TLV mute=0, то есть raw 0 — низ шкалы, а не тишина) по штатной
+//! кривой модели (`Model::volume_map`): громкость v — уровень платформы v × верхний уровень.
+//! Регулятор — пользовательский контрол, который alsa-lib создаёт при первом открытии его PCM
+//! (`Model::master_pcm`), поэтому [`Mixer::open`] создаёт его, если его нет.
 //!
-//! The curves live in `pulsar_core::volume` and repeat the C++ arithmetic step by step (f32 / f64 /
-//! int as there): state.conf values written by one binary are read by the other (`.prev`).
+//! Кривые живут в `pulsar_core::volume` и повторяют арифметику C++ шаг за шагом (f32 / f64 / int,
+//! как там): значения state.conf, записанные одним бинарём, читает другой (`.prev`).
 
 use log::{debug, error, info};
 use pulsar_alsa::{Ctl, Pcm, Stream};
@@ -49,8 +48,8 @@ impl Mixer {
             }
         };
         if !ctl.mixer_exists(MASTER) {
-            // Opening the softvol PCM once creates the control.
-            drop(Pcm::open(model.playback_pcm, Stream::Playback, true));
+            // Однократное открытие PCM со softvol создаёт регулятор.
+            drop(Pcm::open(model.master_pcm, Stream::Playback, true));
             if !ctl.mixer_exists(MASTER) {
                 error!("mixer: control '{MASTER}' not found");
                 return mixer;
@@ -126,6 +125,7 @@ mod tests {
             b"yandex,plum\0",
             b"yandex,station-mini2\0",
             b"yandex,bergamot\0",
+            b"yandex,station-midi\0",
         ] {
             let m = model_from_compatible(c).unwrap();
             for k in 0..=20 {

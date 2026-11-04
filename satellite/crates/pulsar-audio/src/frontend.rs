@@ -1023,7 +1023,8 @@ mod tests {
         let midi = model_from_compatible(b"yandex,cucumber\0").unwrap();
         let lite2 = model_from_compatible(b"yandex,plum\0").unwrap();
         let mini3 = model_from_compatible(b"yandex,bergamot\0").unwrap();
-        for m in [midi, lite2, mini3] {
+        let station2 = model_from_compatible(b"yandex,station-midi\0").unwrap();
+        for m in [midi, lite2, mini3, station2] {
             let nch = m.capture_channels as usize;
             let frames = 4;
             // Sample = frame * 100 + channel.

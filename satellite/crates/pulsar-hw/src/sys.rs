@@ -10,8 +10,9 @@ use std::os::unix::fs::{FileExt as _, OpenOptionsExt as _};
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
-/// `struct fb_var_screeninfo` (linux/fb.h): 40 32-bit fields. Only handed back to the driver
-/// (FBIOPAN_DISPLAY takes the offsets read by FBIOGET_VSCREENINFO), never interpreted.
+/// `struct fb_var_screeninfo` (linux/fb.h): 40 32-битных полей. Драйверу возвращается как есть
+/// (FBIOPAN_DISPLAY берёт смещения, прочитанные FBIOGET_VSCREENINFO); читается только
+/// `bits_per_pixel` (поле 6).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct FbVarScreeninfo([u32; 40]);

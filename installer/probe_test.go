@@ -26,6 +26,8 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 		{"station-mini2 without its loader is skipped", "station-mini2", []string{"aarch64"}, ""},
 		{"bergamot is armhf", "bergamot", []string{"aarch64", "armhf"}, "armhf"},
 		{"bergamot without its loader is skipped", "bergamot", []string{"aarch64"}, ""},
+		{"station-midi is armhf", "station-midi", []string{"aarch64", "armhf"}, "armhf"},
+		{"station-midi without its loader is skipped", "station-midi", []string{"aarch64"}, ""},
 		{"mini is armhf", "yandexmini", []string{"aarch64", "armhf"}, "armhf"},
 		{"mini without its loader is skipped", "yandexmini", []string{"aarch64"}, ""},
 		{"no compatible loader", "cucumber", nil, ""},
@@ -75,6 +77,8 @@ func TestStationCode(t *testing.T) {
 		{"yandex,station-mini2\namlogic, axg", "station-mini2", true},
 		// adb's pty line ends and the old separator (spaces) work too.
 		{"yandex,station-mini2\r\namlogic, axg\r\n", "station-mini2", true},
+		// Станция 2: кодовое имя с дефисом; это не Миди (cucumber).
+		{"yandex,station-midi\namlogic, axg", "station-midi", true},
 		{"yandex,cucumber-dvt2 yandex,cucumber amlogic, a5", "cucumber", true},
 		// Some other station: named from its codename, then skipped as unsupported.
 		{"yandex,station\namlogic, axg", "station", false},

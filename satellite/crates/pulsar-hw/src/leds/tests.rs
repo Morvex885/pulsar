@@ -290,6 +290,37 @@ fn layer_changes_fade_but_volume_cuts_in() {
     assert_eq!(&c.px[..3], &to_px(vol[0], c.dim(), None));
 }
 
+#[test]
+fn panel_without_logo_shows_steady_mute() {
+    // У Станции 2 нет логотипа: ровный mute показывает панель и перекрывает лампу.
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(user(true), 0);
+    c.apply(Cmd::Muted(true), 0);
+    assert_eq!(c.active_layer(0), Layer::Mute);
+}
+
+#[test]
+fn panel_show_temporary_keeps_the_panel_layout() {
+    // ShowTemporary пересоздаёт состояние эффекта: Radar остаётся панельным лучом, а не заливкой.
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(
+        Cmd::ShowTemporary {
+            effect: "Radar".into(),
+            color: RED,
+            seconds: 10,
+        },
+        0,
+    );
+    // Смена слоя гаснет/разгорается 250 мс от первого кадра: к 1000 мс переход закончен.
+    c.frame(0);
+    c.frame(1000);
+    let px = &c.px[..88 * 3];
+    assert!(
+        px.chunks(3).any(|p| p != &px[..3]),
+        "Radar на панели залит одним цветом"
+    );
+}
+
 /// The actor on a capture sink.
 fn spawn_capture(n: usize, nlogo: usize) -> (LedsHandle, Captured, JoinHandle<()>) {
     let frames = Rc::new(RefCell::new(Vec::new()));

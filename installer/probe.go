@@ -26,15 +26,15 @@ func modelName(code string) string {
 	return ""
 }
 
-// abis lists the userspace ABIs a model's firmware runs, its usual one first; nil = model not
-// supported. The installed binary is build/<arch>/pulsar for the first ABI whose dynamic loader
-// is on the station. A second ABI is only for a userspace actually seen on that model: some Midi
-// images run a 32-bit userspace on the 64-bit kernel (#13) and need the armhf build (its ALSA
-// ABI is the one in audio/alsa_abi.h, #14). Lite 2, Mini 2, Mini 3 and Mini stay armhf-only: no
-// 64-bit userspace has been seen on them, and the aarch64 binary needs glibc 2.34 — on a miss it
-// would crash-loop back to the Yandex stack (no .prev on a first install). The armhf build
-// targets glibc 2.23, the Mini's; the 2.30 userlands of the Lite 2, Mini 2 and Mini 3 run it as
-// well.
+// abis перечисляет ABI userspace прошивок модели, обычный — первым; nil — модель не
+// поддерживается. Ставится build/<arch>/pulsar для первого ABI, чей динамический загрузчик есть
+// на станции. Второй ABI — только для userspace, действительно встреченного на этой модели: часть
+// образов Миди запускает 32-битный userspace на 64-битном ядре (#13), им нужна armhf-сборка (её
+// ABI ALSA — из audio/alsa_abi.h, #14). Лайт 2, Мини 2, Мини 3, Мини и Станция 2 — только armhf:
+// 64-битного userspace на них не видели, а aarch64-бинарю нужна glibc 2.34 — при промахе он ушёл
+// бы в цикл падений обратно на стек Яндекса (при первой установке .prev нет). armhf-сборка
+// нацелена на glibc 2.23 (как у Мини); userland 2.30 у Лайт 2, Мини 2, Мини 3 и Станции 2 её
+// тоже запускает.
 func abis(code string) []string {
 	switch code {
 	case "cucumber":

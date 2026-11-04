@@ -82,9 +82,13 @@ pub struct Model {
     /// muted sources "other" (app / remote) and "smart_tts" (smart volume); keys and voice words
     /// click.
     pub volume_sound: &'static str,
-    /// ALSA playback PCM (dmix + the softvol "Master Playback Volume"): GStreamer's alsasink,
-    /// the Sendspin sink, and the PCM the mixer opens to create the control.
+    /// PCM воспроизведения ALSA (dmix, обычно за softvol «Master Playback Volume» — см.
+    /// `master_pcm`): alsasink GStreamer, вывод объявлений и Sendspin.
     pub playback_pcm: &'static str,
+    /// PCM со softvol «Master Playback Volume» (на hw:0): однократное открытие создаёт регулятор,
+    /// если его ещё нет (softvol — пользовательский контрол alsa-lib). Обычно совпадает с
+    /// `playback_pcm`; пусто — у моделей с программной громкостью, где регулятора нет.
+    pub master_pcm: &'static str,
     /// ALSA config selected through ALSA_CONFIG_PATH before any thread starts (the Mini's dmix);
     /// empty: the firmware's /etc/asound.conf.
     pub alsa_config: &'static str,
@@ -95,20 +99,14 @@ pub struct Model {
     /// Sysfs-затворы усилителя: в каждый пишется "1" до и после открытия PCM воспроизведения
     /// (`pulsar_alsa::enable_output`). Пусто: затвора нет.
     pub amp_enable_paths: &'static [&'static str],
-    /// ALSA mixer controls (on hw:0) written to the given value in enable_output, after the sysfs
-    /// gates and spk_mute_ctl. The Station 2's channel gains (SY6045S Ch1 and Ch2 Playback Volume)
-    /// sit at their 0 dB value (159; 255 there is +48 dB and distorts). Its SY6045S Master is left
-    /// alone: hardvold drives it from Master Playback Volume, and writing it here fights that
-    /// daemon (см. docs/station2.md, «Звук»). Empty: none.
-    pub amp_mixer_vals: &'static [(&'static str, i64)],
 
-    /// Stock volume curve: platform level -> raw value (0..255) of the softvol "Master Playback
-    /// Volume" on `playback_pcm`, piecewise linear between the points; the first point is
-    /// level 0 (raw 0), the last one the top level. quasar.cfg volume_capability
-    /// .volume_manager_settings.platformToAlsaMap. One platform level is 5 % on the 20-level maps;
-    /// maind's Alice volume (0..10, "громче" / "тише") is platform level / 2 rounded half up.
-    /// quasar.cfg changeStepPercent is the step of maind's gradual volume change
-    /// (start_volume_change), not of the keys or the voice words.
+    /// Штатная кривая громкости: уровень платформы -> сырое значение (0..255) softvol «Master
+    /// Playback Volume» (`master_pcm`), кусочно-линейная между точками; первая точка — уровень 0
+    /// (raw 0), последняя — верхний уровень. В quasar.cfg — volume_capability
+    /// .volume_manager_settings.platformToAlsaMap. На 20-уровневых картах один уровень платформы —
+    /// 5 %; громкость Алисы в maind (0..10, «громче» / «тише») — уровень платформы / 2 с
+    /// округлением половины вверх. changeStepPercent в quasar.cfg — шаг плавного изменения
+    /// громкости в maind (start_volume_change), а не кнопок и голосовых команд.
     pub volume_map: &'static [VolumePoint],
     /// true: any audible volume is at least the map's second point (the stock firmware never
     /// sets the raw values below it).
@@ -250,11 +248,11 @@ static MIDI: Model = Model {
     timer_sound: "common/timer.wav",
     volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
+    master_pcm: "speakers",
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
     amp_enable_paths: &[],
-    amp_mixer_vals: &[],
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
     has_lux: true,
@@ -312,11 +310,11 @@ static LITE2: Model = Model {
     timer_sound: "common/timer.wav",
     volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
+    master_pcm: "speakers",
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
     amp_enable_paths: &[],
-    amp_mixer_vals: &[],
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
     has_lux: true,
@@ -392,11 +390,11 @@ static MINI2: Model = Model {
     timer_sound: "common/timer.opus",
     volume_sound: "common/volume_sound.opus",
     playback_pcm: "default",
+    master_pcm: "default",
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
     amp_enable_paths: &[],
-    amp_mixer_vals: &[],
     volume_map: MINI2_VOLUME,
     volume_min_step: false,
     // Датчик есть не на всех станциях: см. docs/mini2.md, «Светодиоды и часы».
@@ -454,6 +452,7 @@ static MINI: Model = Model {
     volume_sound: "common/volume_sound.mp3",
     // dmix over hw:0,0; defined in /data/pulsar/asound.conf and selected via ALSA_CONFIG_PATH.
     playback_pcm: "mini",
+    master_pcm: "",
     alsa_config: "/data/pulsar/asound.conf",
     alsa_lib: "/system/vendor/quasar/libs/libasound.so.2",
     // No softvol "speakers" PCM and the hardware "Master" control does not attenuate the output;
@@ -461,7 +460,6 @@ static MINI: Model = Model {
     software_volume: true,
     // см. docs/mini.md, «Звук»
     amp_enable_paths: &["/sys/class/tdm_state/amp_table"],
-    amp_mixer_vals: &[],
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
     has_lux: false,
@@ -527,11 +525,11 @@ static MINI3: Model = Model {
     timer_sound: "common/timer.wav",
     volume_sound: "common/volume_sound.mp3",
     playback_pcm: "speakers",
+    master_pcm: "speakers",
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
     amp_enable_paths: &[],
-    amp_mixer_vals: &[],
     volume_map: MINI3_VOLUME,
     volume_min_step: true,
     has_lux: true,
@@ -555,9 +553,8 @@ static STATION2: Model = Model {
     vqe_preset: "yandexmidi",
     led_layout: LedLayout::Station2Panel,
     led_prefix: "",
-    // 88 светодиодов (индексы 0..87) на /dev/fb0 89×1 32 bpp под контроллером Gowin; 89-й
-    // пиксель (индекс 88) не загорается. Панель — двумерная сетка, поэтому эффекты и сущность
-    // «Light» работают с панелью, а не кольцом: см. docs/station2.md, «Светодиоды и часы».
+    // Панель Gowin: 88 светодиодов на /dev/fb0, 89-й пиксель не горит —
+    // https://hackalice.me/devices/station-2/#led.
     ring: LedStrip {
         count: 88,
         first_index: 0,
@@ -589,16 +586,12 @@ static STATION2: Model = Model {
     volume_sound: "common/volume_sound.mp3",
     // Штатный маршрут без дополнительного softvol: см. docs/station2.md, «Звук».
     playback_pcm: "default",
+    // Master создаёт softvol soft_volume, а не default: см. docs/station2.md, «Звук».
+    master_pcm: "soft_volume",
     alsa_config: "",
     alsa_lib: "",
     software_volume: false,
     amp_enable_paths: &[],
-    // Master усилителя оставляем hardvold; каналы — на заводском уровне 0 дБ:
-    // см. docs/station2.md, «Звук».
-    amp_mixer_vals: &[
-        ("SY6045S Ch1 Playback Volume", 159),
-        ("SY6045S Ch2 Playback Volume", 159),
-    ],
     // set_volume.sh Яндекса = `amixer set 'Master' <процент>%`: raw = процент от 255, без нижней
     // ступени — линейная кривая, как у Мини 2 (у неё тот же сценарий без platformToAlsaMap).
     volume_map: MINI2_VOLUME,
@@ -820,6 +813,7 @@ mod tests {
         assert_eq!(m.ring.count, 88);
         assert_eq!(m.capture_rate, 48_000);
         assert_eq!(m.playback_pcm, "default");
+        assert_eq!(m.master_pcm, "soft_volume");
         assert_eq!(m.led_layout, LedLayout::Station2Panel);
         assert!(!m.has_clock);
         assert!(m.has_lux);
@@ -828,20 +822,11 @@ mod tests {
     }
 
     #[test]
-    fn station2_leaves_master_to_hardvold() {
-        let m = model_from_compatible(b"yandex,station-midi\0").unwrap();
-        assert!(
-            !m.amp_mixer_vals
-                .iter()
-                .any(|(name, _)| { *name == "SY6045S Master Playback Volume" })
-        );
-        assert_eq!(
-            m.amp_mixer_vals,
-            &[
-                ("SY6045S Ch1 Playback Volume", 159),
-                ("SY6045S Ch2 Playback Volume", 159),
-            ]
-        );
+    fn master_pcm_exactly_where_volume_is_hardware() {
+        // Без master_pcm у модели с аппаратной громкостью Mixer не создаст регулятор Master.
+        for m in [&MIDI, &LITE2, &PRUNE, &MINI2, &MINI, &MINI3, &STATION2] {
+            assert_eq!(m.master_pcm.is_empty(), m.software_volume, "{}", m.codename);
+        }
     }
 
     #[test]

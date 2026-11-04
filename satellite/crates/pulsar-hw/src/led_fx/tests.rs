@@ -204,20 +204,30 @@ fn panel_names_are_ring_noops_on_a_ring_layout() {
 #[test]
 fn panel_effect_returns_true_for_every_panel_name() {
     let mut out = vec![Col::default(); 88];
-    for name in [
-        "Radar",
-        "Ripple",
-        "Rain",
-        "Matrix",
-        "Plasma",
-        "Waves",
-        "Spiral",
-        "Heartbeat",
-    ] {
+    for &name in crate::effect_names(LedLayout::Station2Panel) {
         assert!(
             panel_effect(name, rgb(255, 0, 255), 1.0, 0.0, &mut out),
             "{name}"
         );
+    }
+}
+
+#[test]
+fn panel_effects_keep_moving_after_long_uptime() {
+    // t растёт всё время работы демона; при 1e7 с (~116 суток) у f32 шаг 1 с.
+    let t = 10_000_000.0;
+    for &name in crate::effect_names(LedLayout::Station2Panel) {
+        let mut a = vec![Col::default(); 88];
+        let mut b = vec![Col::default(); 88];
+        assert!(
+            panel_effect(name, rgb(255, 0, 255), 1.0, t, &mut a),
+            "{name}"
+        );
+        assert!(
+            panel_effect(name, rgb(255, 0, 255), 1.0, t + 0.1, &mut b),
+            "{name}"
+        );
+        assert_ne!(a, b, "{name}: кадр не сдвинулся за 0,1 с");
     }
 }
 
@@ -241,7 +251,7 @@ fn panel_effect_writes_exactly_88_leds_and_no_more() {
 
 #[test]
 fn panel_effect_plain_color_uses_rainbow() {
-    // Ахроматический цвет (белый): должна быть радуга, а не просто белый.
+    // Ахроматический цвет пользователя: Radar рисует луч радугой, а не серым.
     let mut out = vec![Col::default(); 88];
     assert!(panel_effect(
         "Radar",
@@ -250,10 +260,12 @@ fn panel_effect_plain_color_uses_rainbow() {
         0.0,
         &mut out
     ));
-    // Должен быть цвет — не все каналы равны.
-    let all_eq = out[0].r == out[0].g && out[0].g == out[0].b;
     assert!(
-        !all_eq || out[0].r == 0.0,
-        "achromatic input should produce colour"
+        out.iter().any(|o| o.r.max(o.g).max(o.b) > 0.0),
+        "луч не горит"
+    );
+    assert!(
+        out.iter().any(|o| o.r != o.g || o.g != o.b),
+        "луч серый, а не радужный"
     );
 }

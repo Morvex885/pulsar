@@ -537,7 +537,7 @@ impl EffectState {
 
 /// Физическое положение (столбец, ряд) каждого светодиода панели Станции 2: шахматная сетка
 /// 15×13, индексы 0..83 — панель, 84..87 — четыре центральных светодиода логотипа. Карта — из
-/// вики, см. docs/station2.md, «Светодиоды и часы». Имена восьми 2D-эффектов взяты из
+/// вики: https://hackalice.me/devices/station-2/#led. Имена восьми 2D-эффектов взяты из
 /// [#29](https://github.com/Morvex885/pulsar/pull/29), их отрисовка — своя.
 const PANEL_XY: [(i8, i8); 88] = [
     (1, 0),
@@ -645,7 +645,6 @@ fn panel_effect(name: &str, c: Col, bri: f32, t: f64, out: &mut [Col]) -> bool {
     let sat = c.r.max(c.g).max(c.b) - c.r.min(c.g).min(c.b);
     let plain = sat < 0.1;
     let n = out.len().min(PANEL_XY.len());
-    let tf = t as f32;
     for (i, o) in out.iter_mut().take(n).enumerate() {
         let (col, row) = PANEL_XY[i];
         // Шаг — полстолбца на светодиод (ряды в шахматном порядке), затем нормировка к −1..1.
@@ -656,21 +655,21 @@ fn panel_effect(name: &str, c: Col, bri: f32, t: f64, out: &mut [Col]) -> bool {
         let col_out = match name {
             "Radar" => {
                 // Луч, делающий оборот за 2 с, с мягко затухающим хвостом.
-                let sweep = (tf * 0.5) % 1.0 * TAU;
+                let sweep = ((t * 0.5) % 1.0) as f32 * TAU;
                 let d = (sweep - angle).rem_euclid(TAU);
                 let k = if d < 1.2 { (-d * 1.8).exp() } else { 0.0 };
                 let hub = if r < 0.12 { 0.6 } else { 0.0 };
                 if plain {
-                    hsv(tf / 8.0, 1.0, 1.0) * k.max(hub)
+                    hsv(((t / 8.0) % 1.0) as f32, 1.0, 1.0) * k.max(hub)
                 } else {
                     c * k.max(hub)
                 }
             }
             "Ripple" => {
                 // Кольца, расходящиеся от центра.
-                let k = 0.5 + 0.5 * (TAU * (r * 1.6 - tf * 0.55)).cos();
+                let k = 0.5 + 0.5 * (TAU * (r * 1.6 - ((t * 0.55) % 1.0) as f32)).cos();
                 let base = if plain {
-                    hsv((tf / 14.0 + r * 0.15) % 1.0, 1.0, 1.0)
+                    hsv((((t / 14.0) % 1.0) as f32 + r * 0.15) % 1.0, 1.0, 1.0)
                 } else {
                     c
                 };
@@ -680,7 +679,7 @@ fn panel_effect(name: &str, c: Col, bri: f32, t: f64, out: &mut [Col]) -> bool {
                 // Капли, падающие вниз по столбцу: период и скорость зависят от столбца.
                 let phase = (x * 3.7).sin().abs();
                 let speed = 0.7 + 0.9 * phase;
-                let head = ((tf * speed + phase) % 1.4) - 0.2;
+                let head = ((((t * f64::from(speed)) % 1.4) as f32 + phase) % 1.4) - 0.2;
                 let ry = (row as f32) / 12.0;
                 let behind = head - ry;
                 let k = if (0.0..=0.45).contains(&behind) {
@@ -701,22 +700,23 @@ fn panel_effect(name: &str, c: Col, bri: f32, t: f64, out: &mut [Col]) -> bool {
                 }
             }
             "Plasma" => {
-                let v = (x * 2.6 + tf).sin()
-                    + (y * 2.2 + tf * 0.7).sin()
-                    + ((x + y) * 1.8 + tf * 0.5).sin()
-                    + (r * 3.0 - tf * 0.6).sin();
+                let v = (x * 2.6 + (t % f64::from(TAU)) as f32).sin()
+                    + (y * 2.2 + ((t * 0.7) % f64::from(TAU)) as f32).sin()
+                    + ((x + y) * 1.8 + ((t * 0.5) % f64::from(TAU)) as f32).sin()
+                    + (r * 3.0 - ((t * 0.6) % f64::from(TAU)) as f32).sin();
                 hsv((v / 4.0 * 0.35 + 0.55) % 1.0, 1.0, 1.0)
             }
             "Waves" => {
                 // Горизонтальные полосы, идущие вверх и искажаемые по x.
-                let k = 0.5 + 0.5 * (TAU * (y * 0.9 - tf * 0.35) + x * 1.4).sin();
+                let k = 0.5 + 0.5 * (TAU * (y * 0.9 - ((t * 0.35) % 1.0) as f32) + x * 1.4).sin();
                 let base = if plain { hsv(0.55, 0.9, 1.0) } else { c };
                 base * (0.12 + 0.88 * k * k)
             }
             "Spiral" => {
-                let k = 0.5 + 0.5 * (angle * 2.0 + r * 4.0 - tf * 3.0).cos();
+                let k =
+                    0.5 + 0.5 * (angle * 2.0 + r * 4.0 - ((t * 3.0) % f64::from(TAU)) as f32).cos();
                 let base = if plain {
-                    hsv((tf / 10.0 + r * 0.2) % 1.0, 1.0, 1.0)
+                    hsv((((t / 10.0) % 1.0) as f32 + r * 0.2) % 1.0, 1.0, 1.0)
                 } else {
                     c
                 };
@@ -724,7 +724,7 @@ fn panel_effect(name: &str, c: Col, bri: f32, t: f64, out: &mut [Col]) -> bool {
             }
             "Heartbeat" => {
                 // Два радиальных импульса за 1,2 с.
-                let p = (tf % 1.2) / 1.2;
+                let p = ((t % 1.2) / 1.2) as f32;
                 let pulse = (-((p - 0.15) / 0.09).powi(2)).exp()
                     + 0.7 * (-((p - 0.42) / 0.09).powi(2)).exp();
                 let base = if plain { stock(0xff1030, 1.0) } else { c };

@@ -90,20 +90,7 @@ const PANEL_EFFECT_NAMES: [&str; 8] = [
 /// After "Off" and "All styles", in `fx::Style` order.
 const MUSIC_STYLES: [&str; 6] = ["Off", "All styles", "Spectrum", "Pulse", "Disco", "Polar"];
 
-#[cfg(test)]
-mod layout_tests {
-    use super::*;
-
-    #[test]
-    fn effect_names_are_selected_by_layout() {
-        assert!(effect_names(LedLayout::Ring).contains(&"Rainbow"));
-        assert!(!effect_names(LedLayout::Ring).contains(&"Radar"));
-        assert!(effect_names(LedLayout::Station2Panel).contains(&"Radar"));
-        assert!(!effect_names(LedLayout::Station2Panel).contains(&"Rainbow"));
-    }
-}
-
-/// Effects of the user light and `show_temporary` ("" = solid colour).
+/// Эффекты пользовательской лампы и `show_temporary` для раскладки модели ("" — сплошной цвет).
 pub fn effect_names(layout: LedLayout) -> &'static [&'static str] {
     match layout {
         LedLayout::Ring => &EFFECT_NAMES,
@@ -365,8 +352,8 @@ impl LedsHandle {
         self.send(Cmd::TimerStarted);
     }
 
-    /// Эффект (один из effect_names(), "" — сплошной цвет) на полной яркости на секунды;
-    /// seconds <= 0: 5 s, capped at 3600 s. Replaces the previous one.
+    /// Эффект (один из `effect_names` модели, "" — сплошной цвет) на полной яркости на `seconds`
+    /// с; `seconds` ≤ 0 — 5 с, не больше 3600 с. Заменяет предыдущий.
     pub fn show_temporary(&self, effect: String, color: Rgb, seconds: i32) {
         self.send(Cmd::ShowTemporary {
             effect,
@@ -574,7 +561,7 @@ impl Output {
             n,
             last: vec![0; (n + nlogo) * 3],
             has_last: false,
-            bgr: Vec::with_capacity(n.max(nlogo) * 3),
+            bgr: Vec::with_capacity(n.max(nlogo) * 4),
             warn: Default::default(),
         }
     }
@@ -661,9 +648,9 @@ impl Output {
     }
 }
 
-/// Записывает RGB-пиксели во фреймбуфер как BGR (24 bpp, ledfb-ленты) или RGB+0 (32 bpp,
-/// панель Gowin Станции 2; четвёртый байт пишется нулём, порядок каналов не проверен) и
-/// фиксирует кадр.
+/// Записывает RGB-пиксели во фреймбуфер и фиксирует кадр: 24 bpp (ledfb-ленты) — B, G, R;
+/// 32 bpp (панель Gowin Станции 2) — R, G, B, W по вики, белый канал не используется и пишется
+/// нулём.
 fn write_fb(
     fb: &mut Framebuffer,
     px: &[u8],
@@ -674,7 +661,6 @@ fn write_fb(
 ) -> bool {
     bgr.clear();
     if fb.bits_per_pixel() == 32 {
-        // Station 2's Gowin panel: 4 bytes per pixel, R,G,B then an unused fourth byte.
         for p in px.as_chunks::<3>().0 {
             bgr.extend_from_slice(&[p[0], p[1], p[2], 0]);
         }
