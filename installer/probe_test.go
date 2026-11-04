@@ -21,6 +21,7 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 		{"cucumber falls back to armhf userspace", "cucumber", []string{"armhf"}, "armhf"},
 		{"plum stays armhf", "plum", []string{"aarch64", "armhf"}, "armhf"},
 		{"plum without its loader is skipped", "plum", []string{"aarch64"}, ""},
+		{"prune is armhf", "prune", []string{"aarch64", "armhf"}, "armhf"},
 		{"station-mini2 is armhf", "station-mini2", []string{"aarch64", "armhf"}, "armhf"},
 		{"station-mini2 without its loader is skipped", "station-mini2", []string{"aarch64"}, ""},
 		{"bergamot is armhf", "bergamot", []string{"aarch64", "armhf"}, "armhf"},
@@ -65,6 +66,9 @@ func TestStationCode(t *testing.T) {
 		// Board-specific variants come first; only the exact supported codename may win.
 		{"yandex,cucumber-dvt2\nyandex,cucumber\namlogic, a5", "cucumber", true},
 		{"yandex,plum\namlogic, axg", "plum", true},
+		// Лайт 2 на плате prune (#57): вариант платы перед кодовым именем.
+		{"yandex,prune-evt2\nyandex,prune\namlogic, axg", "prune", true},
+		{"yandex,prune-evt2\namlogic, axg", "prune-evt2", false},
 		{"yandex,bergamot-evt1\nyandex,bergamot\namlogic, axg", "bergamot", true},
 		{"yandex,bergamot-evt1\namlogic, axg", "bergamot-evt1", false},
 		// Mini 2: the codename contains a hyphen.

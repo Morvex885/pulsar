@@ -11,12 +11,12 @@
 | Модель | Кодовое имя | Данные | Вики | Doc модели |
 |---|---|---|---|---|
 | Миди | `cucumber` | станция мейнтейнера | [station-midi](https://hackalice.me/devices/station-midi/) | [midi.md](midi.md) |
-| Лайт 2 | `plum` | станция мейнтейнера | [station-lite2](https://hackalice.me/devices/station-lite2/) | [lite2.md](lite2.md) |
+| Лайт 2 | `plum`, `prune` | `plum` — станция мейнтейнера; `prune` — контрибьютор: [#57](https://github.com/Morvex885/pulsar/issues/57) | [station-lite2](https://hackalice.me/devices/station-lite2/) | [lite2.md](lite2.md) |
 | Мини 2 | `station-mini2` | контрибьюторы: [#9](https://github.com/Morvex885/pulsar/pull/9), станция из [#38](https://github.com/Morvex885/pulsar/issues/38) | [station-mini2](https://hackalice.me/devices/station-mini2/) | [mini2.md](mini2.md) |
 | Мини 3 | `bergamot` | контрибьютор: [#30](https://github.com/Morvex885/pulsar/pull/30) | [station-mini3](https://hackalice.me/devices/station-mini3/) | [mini3.md](mini3.md) |
 | Мини | `yandexmini` | контрибьютор: [#35](https://github.com/Morvex885/pulsar/pull/35) | [station-mini](https://hackalice.me/devices/station-mini/) | [mini.md](mini.md) |
 
-Авторитетны данные Миди и Лайт 2; данные контрибьюторов не перепроверены.
+Авторитетны данные Миди и Лайт 2 на плате `plum`; данные контрибьюторов не перепроверены.
 
 ## Библиотеки Яндекса (C API)
 
@@ -46,9 +46,9 @@ Wake word, командный спотер и эхоподавление раб�
 - События спотера (`event_id_to_str`): 2 и 5 — срабатывания (`CONFIRMATION_1ST_STAGE` и
   `_2ND_STAGE`), 3 — `1ST_STAGE_HIT` (верификатор ждёт ещё данных), 6 — отказ второй стадии.
   Спотер подтверждает слово через несколько чанков после того, как оно закончилось. По замеру
-  `frontend_probe` от 2026-10-28 обе модели Лайт 2 и «Яндекс» на Миди события 3 не выдают
-  (подтверждают событием 2), а у «Алисы» на Миди событие 3 приходит в одном чанке с 5. Как
-  измерять пре-ролл, описано в
+  `frontend_probe` от 2026-10-28 обе модели спотера на Лайт 2 (плата `plum`) и «Яндекс» на Миди
+  события 3 не выдают (подтверждают событием 2), а у «Алисы» на Миди событие 3 приходит в одном
+  чанке с 5. Как измерять пре-ролл, описано в
   [voice.md, «Пре-ролл: методика измерения»](voice.md#пре-ролл-методика-измерения).
 - `libquasar_gstreamer.so` — GStreamer 1.14.5 из прошивки, тоже загружается через `dlopen`. При
   переходе PLAYING → PAUSED его alsasink делает `snd_pcm_drop`: на Миди каждая пауза съедала около
@@ -71,7 +71,8 @@ alsa-lib на armhf-образах Миди версионированная (AL
 | Модель | RAM (MemTotal) | Источник |
 |---|---|---|
 | Миди | ~974 МиБ | вики (MemTotal 997788 kB) |
-| Лайт 2 | ~237 МиБ | мейнтейнер |
+| Лайт 2, плата `plum` | ~237 МиБ | мейнтейнер |
+| Лайт 2, плата `prune` | ~238 МиБ, tmpfs ~119 МиБ | #57 (MemTotal 243512 kB) |
 | Мини 2 | ~238 МиБ | вики (MemTotal 243996 kB) |
 | Мини 3 | ~238 МиБ | вики (MemTotal 243908 kB) |
 | Мини | ~236 МиБ, tmpfs ~118 МиБ | вики (MemTotal 242028 kB); tmpfs — #35 |
