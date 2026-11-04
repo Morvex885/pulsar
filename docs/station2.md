@@ -13,7 +13,7 @@ Init-скрипты, `hardvold.config` и earcons мейнтейнер свер�
 
 - Загрузчик — `/lib/ld-linux-armhf.so.3`, glibc 2.30: ставится сборка `armhf`.
 - `S29led_panel_midi` загружает модуль панели `gowin_led_device`; `S99zpulsar` сортируется после
-  него и после `S99quasar`.
+  него.
 
 ## Звук
 
