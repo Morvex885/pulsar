@@ -3,6 +3,7 @@
 # Switch key 32 "Command right after wake word" added after key 28, not published.
 # Switch key 33 "Clock auto brightness" added after key 3 (clock and light sensor present), not published.
 # Number key 34 "Follow-up duration" added after "LED speed", not published.
+# Select key 35 "Clock format" added after "Clock music" (clock present), published 24h.
 DeviceInfo api_encryption_provisionable=False api_encryption_supported=True api_outgoing_connection_supported=False area={area_id=0, name=''} areas=[] bluetooth_mac_address='' bluetooth_proxy_feature_flags=0 compilation_time=* devices=[] esphome_version='2026.9.0' friendly_name='Яндекс Станция Миди (selftest)' has_deep_sleep=False legacy_bluetooth_proxy_version=0 legacy_voice_assistant_version=0 mac_address=* manufacturer='Yandex' model='Yandex Station Midi' name='pulsar-selftest' project_name='pulsar.satellite' project_version=* serial_proxies=[] suggested_area='' uses_password=False voice_assistant_feature_flags=61 webserver_port=0 zwave_home_id=0 zwave_proxy_feature_flags=0
 MediaPlayerInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE feature_flags=1070605 icon='' key=1 name='Media Player' object_id='media_player' supported_formats=[{bitrate=0, format='flac', num_channels=2, purpose=MediaPlayerFormatPurpose.DEFAULT, sample_bytes=2, sample_rate=48000}, {bitrate=0, format='flac', num_channels=1, purpose=MediaPlayerFormatPurpose.ANNOUNCEMENT, sample_bytes=2, sample_rate=48000}] supports_pause=True
 SwitchInfo assumed_state=False device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE icon='mdi:microphone' key=2 name='Microphones' object_id='microphones'
@@ -17,6 +18,7 @@ NumberInfo device_class='' device_id=0 disabled_by_default=False entity_category
 SelectInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:equalizer' key=26 name='Music visualization' object_id='music_visualization' options=['Off', 'All styles', 'Spectrum']
 SelectInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:palette' key=29 name='Case color' object_id='case_color' options=['None', 'blue']
 SelectInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:equalizer-outline' key=31 name='Clock music' object_id='clock_music' options=['Off', 'Levels']
+SelectInfo device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='mdi:hours-24' key=35 name='Clock format' object_id='clock_format' options=['24h', '12h']
 UpdateInfo device_class='firmware' device_id=0 disabled_by_default=False entity_category=EntityCategory.CONFIG icon='' key=19 name='Firmware' object_id='firmware'
 BinarySensorInfo device_class='' device_id=0 disabled_by_default=False entity_category=EntityCategory.DIAGNOSTIC icon='mdi:microphone-off' is_status_binary_sensor=False key=4 name='Hardware mic mute' object_id='hardware_mic_mute'
 SensorInfo accuracy_decimals=0 device_class='illuminance' device_id=0 disabled_by_default=False entity_category=EntityCategory.NONE force_update=False icon='' key=5 legacy_last_reset_type=LastResetType.NONE name='Illuminance' object_id='illuminance' state_class=SensorStateClass.MEASUREMENT unit_of_measurement='lx'
@@ -63,5 +65,6 @@ followup_duration: NumberState device_id=0 key=34 missing_state=True state=0
 music_visualization: SelectState device_id=0 key=26 missing_state=False state='All styles'
 case_color: SelectState device_id=0 key=29 missing_state=False state='None'
 clock_music: SelectState device_id=0 key=31 missing_state=False state='Off'
+clock_format: SelectState device_id=0 key=35 missing_state=False state='24h'
 zigbee_role: SelectState device_id=0 key=21 missing_state=False state='Coordinator'
 zigbee: TextSensorState device_id=0 key=24 missing_state=False state='coordinator: PAN 0x1234, channel 15'

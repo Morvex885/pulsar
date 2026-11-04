@@ -34,6 +34,7 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         music_styles: s(&["Off", "All styles", "Spectrum"]),
         case_colors: s(&["None", "blue"]),
         clock_music_styles: s(&["Off", "Levels"]),
+        clock_formats: s(&["24h", "12h"]),
         zigbee_modes: s(&["Coordinator", "Router"]),
         has_clock: true,
         has_lux: true,
@@ -55,6 +56,7 @@ fn publish_selftest_states(h: &ApiHandle) {
     h.publish_select(SelectId::MusicViz, "All styles");
     h.publish_select(SelectId::CaseColor, "None");
     h.publish_select(SelectId::ClockMusic, "Off");
+    h.publish_select(SelectId::ClockFormat, "24h");
     h.publish_binary_sensor(BinarySensorId::HwMicMute, false);
     h.publish_number(NumberId::ClockBrightness, 50.0);
     h.publish_light(&LightState {
@@ -270,6 +272,10 @@ async fn commands_are_validated_like_cxx() {
                 .await;
             c.send(msg::SELECT_CMD, select(key::SELECT_CLOCK_MUSIC, "Levels"))
                 .await;
+            c.send(msg::SELECT_CMD, select(key::SELECT_CLOCK_FORMAT, "12h"))
+                .await;
+            c.send(msg::SELECT_CMD, select(key::SELECT_CLOCK_FORMAT, "13h"))
+                .await;
             c.send(
                 msg::SWITCH_CMD,
                 kv(key::SW_NEAREST_ANSWERS, |w| w.boolean(2, true, true)),
@@ -299,6 +305,7 @@ async fn commands_are_validated_like_cxx() {
                     ApiEvent::Select(SelectId::MusicViz, "Spectrum".into()),
                     ApiEvent::Select(SelectId::ZigbeeMode, "Router".into()),
                     ApiEvent::Select(SelectId::ClockMusic, "Levels".into()),
+                    ApiEvent::Select(SelectId::ClockFormat, "12h".into()),
                     ApiEvent::Switch(SwitchId::NearestAnswers, true),
                     ApiEvent::Switch(SwitchId::VoiceIndication, false),
                     ApiEvent::Switch(SwitchId::WakePreroll, true),
@@ -722,6 +729,7 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
                 key::TEXT_CLOCK,
                 key::SELECT_CLOCK_FACE,
                 key::SELECT_CLOCK_MUSIC,
+                key::SELECT_CLOCK_FORMAT,
                 key::ACTION_CLOCK_TEXT,
                 key::ACTION_CLOCK_FACE,
                 key::BS_HW_MIC_MUTE,
@@ -754,6 +762,7 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
             h.publish_text(TextId::ClockText, "x");
             h.publish_select(SelectId::ClockFace, "None");
             h.publish_select(SelectId::ClockMusic, "Off");
+            h.publish_select(SelectId::ClockFormat, "24h");
             h.publish_select(SelectId::CaseColor, "None");
             h.publish_binary_sensor(BinarySensorId::HwMicMute, false);
             h.publish_sensor(SensorId::Illuminance, 12.5);

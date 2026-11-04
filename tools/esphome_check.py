@@ -500,7 +500,7 @@ async def cmd_scenario_entities(client, args):
             v = st(oid)
             restore.append((f"number {oid} -> {v}", k[oid], lambda o=oid, x=v: client.number_command(k[o], x), lambda s, x=v: abs(s.state - x) < 1e-3))
 
-    for oid in ["clock_face", "music_visualization", "case_color", "clock_music"]:
+    for oid in ["clock_face", "music_visualization", "case_color", "clock_music", "clock_format"]:
         if oid not in k:
             continue
         opts = ents[oid].options
