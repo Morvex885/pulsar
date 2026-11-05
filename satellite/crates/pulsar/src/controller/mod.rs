@@ -943,5 +943,7 @@ impl Controller {
 
     fn update_detection(&self) {
         self.mic.set_detection(!self.mic_muted());
+        // The engine choice is persisted; apply it on start and whenever detection is restored.
+        self.mic.set_oww(self.st.wake_engine == "oww");
     }
 }
