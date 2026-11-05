@@ -295,6 +295,8 @@ async fn run(port: u16, name: String, run_s: i64, key_path: Option<PathBuf>) -> 
     let cfg = ApiConfig {
         port,
         wake_words: vec![ww("alisa", "Алиса"), ww("yandex", "Яндекс")],
+
+        wake_engines: Vec::new(),
         active_wake_words: strings(&["alisa"]),
         light_effects: strings(&["Rainbow", "Pulse"]),
         clock_faces: strings(&["None", "Smiley"]),
