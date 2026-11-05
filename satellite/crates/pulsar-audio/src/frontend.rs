@@ -162,11 +162,14 @@ impl FrontendHandle {
     /// Whether OpenWakeWord hits become wake words (the Yandex spotter is unaffected).
     pub fn set_oww(&self, on: bool) {
         self.inner.shared.oww_on.store(on, Relaxed);
+        self.inner.shared.oww_gen.fetch_add(1, Relaxed);
     }
 
     /// Wake word detection on/off (e.g. software mute). On by default.
     pub fn set_detection(&self, on: bool) {
         self.inner.shared.detect.store(on, Relaxed);
+        // Anything the detector heard before this point belongs to the previous state.
+        self.inner.shared.oww_gen.fetch_add(1, Relaxed);
     }
 
     /// Command spotter on/off (commands without the wake word).
@@ -237,6 +240,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Written by the handle, read by the threads (and the counters the other way round).
+/// A hit from the detector together with the detection generation it was heard under.
+type OwwHit = Arc<Mutex<Option<(u32, String)>>>;
+
 struct Shared {
     running: AtomicBool,
     // With stop_cv: wakes the capture thread's reopen delay on stop.
@@ -253,6 +259,9 @@ struct Shared {
     music: AtomicBool,
     /// OpenWakeWord hits count as wake words only while this is set (HA select «Wake engine»).
     oww_on: AtomicBool,
+    /// Bumped whenever `detect` or `oww_on` changes: a hit computed under the previous state is
+    /// stale (it was heard while muted, or with the engine off) and must not become a Wake.
+    oww_gen: AtomicU32,
     pending_model: Mutex<Option<PathBuf>>,
     tap_on: AtomicBool,
     tap: Mutex<Option<UnboundedSender<Vec<i16>>>>,
@@ -267,6 +276,7 @@ impl Shared {
         Shared {
             running: AtomicBool::new(false),
             oww_on: AtomicBool::new(false),
+            oww_gen: AtomicU32::new(0),
             stop_lock: Mutex::new(()),
             stop_cv: Condvar::new(),
             detect: AtomicBool::new(true),
@@ -832,23 +842,23 @@ fn processing(
     // a slow detector can never starve capture (which showed up as "processing behind, dropping
     // frames"). A hit arrives as a phrase in `oww_hit` and is turned into a Wake here, where the
     // pre-roll ring lives.
-    let mut oww_hit: Option<Arc<Mutex<Option<String>>>> = None;
-    let mut oww_tx: Option<SyncSender<Vec<f32>>> = None;
+    let mut oww_hit: Option<OwwHit> = None;
+    let mut oww_tx: Option<SyncSender<(u32, Vec<f32>)>> = None;
     let mut oww_dropped: u64 = 0;
     if let Some(owwm) = oww.take() {
         let name = owwm.name.clone();
-        let hit = Arc::new(Mutex::new(None::<String>));
-        let (txq, rxq) = sync_channel::<Vec<f32>>(8);
+        let hit = Arc::new(Mutex::new(None::<(u32, String)>));
+        let (txq, rxq) = sync_channel::<(u32, Vec<f32>)>(8);
         let slot = hit.clone();
         match std::thread::Builder::new()
             .name("oww".into())
             .spawn(move || {
                 let mut o = owwm;
-                while let Ok(chunk) = rxq.recv() {
+                while let Ok((seq, chunk)) = rxq.recv() {
                     if o.push(&chunk).is_some() {
                         let mut g = lock(&slot);
                         if g.is_none() {
-                            *g = Some(o.name.clone());
+                            *g = Some((seq, o.name.clone()));
                         }
                     }
                     if let Some(e) = o.error.take() {
@@ -929,9 +939,12 @@ fn processing(
                 if let Some(q) = oww_tx.as_ref()
                     && shared.oww_on.load(Relaxed)
                 {
+                    // the chunk carries the generation it was captured under, so a hit computed
+                    // after a mute or an engine switch can be told apart from a live one.
+                    let seq = shared.oww_gen.load(Relaxed);
                     // try_send, never block: a full queue means the detector is behind, and the
                     // audio path matters more than the discarded 80 ms.
-                    match q.try_send(d.to_vec()) {
+                    match q.try_send((seq, d.to_vec())) {
                         Ok(()) => {}
                         Err(std::sync::mpsc::TrySendError::Full(_)) => oww_dropped += 1,
                         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
@@ -948,10 +961,13 @@ fn processing(
 
         // OpenWakeWord's hit is reported by its thread; build the Wake here so the pre-roll comes
         // from the ring this loop owns.
+        // The slot is taken unconditionally: a hit from before a mute or an engine switch is
+        // dropped here instead of firing on the first frame after the state changes.
         if let Some(slot) = oww_hit.as_ref()
+            && let Some((seq, phrase)) = lock(slot).take()
+            && seq == shared.oww_gen.load(Relaxed)
             && shared.detect.load(Relaxed)
             && shared.oww_on.load(Relaxed)
-            && let Some(phrase) = lock(slot).take()
         {
             let level_db = wake_level_db(&level_hist.values);
             let speech_end = level_hist.speech_end_ms();
