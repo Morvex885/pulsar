@@ -159,6 +159,11 @@ impl FrontendHandle {
         *lock(&self.inner.shared.pending_model) = (!dir.as_os_str().is_empty()).then_some(dir);
     }
 
+    /// Whether OpenWakeWord hits become wake words (the Yandex spotter is unaffected).
+    pub fn set_oww(&self, on: bool) {
+        self.inner.shared.oww_on.store(on, Relaxed);
+    }
+
     /// Wake word detection on/off (e.g. software mute). On by default.
     pub fn set_detection(&self, on: bool) {
         self.inner.shared.detect.store(on, Relaxed);
@@ -246,6 +251,8 @@ struct Shared {
     command_offset_ms: AtomicI32,
     mic_gain_db: AtomicU32,
     music: AtomicBool,
+    /// OpenWakeWord hits count as wake words only while this is set (HA select «Wake engine»).
+    oww_on: AtomicBool,
     pending_model: Mutex<Option<PathBuf>>,
     tap_on: AtomicBool,
     tap: Mutex<Option<UnboundedSender<Vec<i16>>>>,
@@ -259,6 +266,7 @@ impl Shared {
     fn new() -> Self {
         Shared {
             running: AtomicBool::new(false),
+            oww_on: AtomicBool::new(false),
             stop_lock: Mutex::new(()),
             stop_cv: Condvar::new(),
             detect: AtomicBool::new(true),
@@ -918,7 +926,9 @@ fn processing(
         // first: its Acquire pairs with `wake_handled`, after the owner's `set_streaming(true)`.
         match omni {
             Some(d) => {
-                if let Some(q) = oww_tx.as_ref() {
+                if let Some(q) = oww_tx.as_ref()
+                    && shared.oww_on.load(Relaxed)
+                {
                     // try_send, never block: a full queue means the detector is behind, and the
                     // audio path matters more than the discarded 80 ms.
                     match q.try_send(d.to_vec()) {
@@ -940,6 +950,7 @@ fn processing(
         // from the ring this loop owns.
         if let Some(slot) = oww_hit.as_ref()
             && shared.detect.load(Relaxed)
+            && shared.oww_on.load(Relaxed)
             && let Some(phrase) = lock(slot).take()
         {
             let level_db = wake_level_db(&level_hist.values);
