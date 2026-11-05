@@ -863,6 +863,14 @@ impl Server {
                 to,
             );
         }
+        if self.cfg.wake_engines.len() > 1 {
+            self.send_cached_str(
+                msg::SELECT_STATE,
+                key::SELECT_WAKE_ENGINE,
+                |c| &c.wake_engine,
+                to,
+            );
+        }
         if has_clock {
             self.send_cached_str(
                 msg::SELECT_STATE,
