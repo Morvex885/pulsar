@@ -73,6 +73,8 @@ pub struct ApiConfig {
     /// Раскладка модели (`Model::led_layout`): object_id и имя лампы — «ring»/«Ring» или
     /// «panel»/«Panel».
     pub led_layout: LedLayout,
+    /// Есть модель голосовой биометрии, а значит, её сущности и действия.
+    pub has_speaker_id: bool,
     /// File holding the Noise encryption key (base64 of 32 bytes, as ESPHome's `api: encryption:
     /// key`). Missing or empty file: plaintext (and provisioning with the all-zeros key). HA may
     /// set or rotate it with NoiseEncryptionSetKeyRequest. None: encryption unsupported.
@@ -96,6 +98,7 @@ impl Default for ApiConfig {
             has_lux: true,
             has_hw_mic_mute: true,
             has_buttons: true,
+            has_speaker_id: false,
             has_auto_brightness: true,
             led_layout: LedLayout::default(),
             key_path: None,
@@ -279,6 +282,7 @@ pub enum SwitchId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SensorId {
     Illuminance = 1,
+    VoiceProgress = 2,
 }
 
 #[repr(u32)]
@@ -303,6 +307,11 @@ pub fn followup_duration_s(v: f32) -> Option<u32> {
 /// wake word; минус — раньше (ближе к слову), плюс — позже (ближе к команде).
 pub const COMMAND_OFFSET_MIN_MS: i32 = -100;
 pub const COMMAND_OFFSET_MAX_MS: i32 = 200;
+
+/// Предел длины «Voice name» для HA. Сервер не зависит от pulsar-audio, поэтому совпадение с
+/// пределом галереи проверяет тест в крейте pulsar: иначе HA пропустит имя, которое демон
+/// отклонит.
+pub const VOICE_NAME_MAX_CHARS: u32 = 32;
 
 /// «Command start offset» из команды HA или `state.conf` — целые мс в пределах; `None` для NaN и
 /// бесконечности (значение не меняется).
@@ -329,6 +338,7 @@ pub enum NumberId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextId {
     ClockText = 1,
+    VoiceName = 2,
 }
 
 #[repr(u32)]
@@ -347,12 +357,18 @@ pub enum SelectId {
 pub enum ButtonId {
     ZigbeeJoin = 1,
     ZigbeeLeave = 2,
+    VoiceStart = 3,
+    VoiceCancel = 4,
+    VoiceForget = 5,
 }
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextSensorId {
     Zigbee = 1,
+    Speaker = 2,
+    SpeakerStatus = 3,
+    VoicePrompt = 4,
 }
 
 /// User-defined actions; arguments (text | face, seconds).
@@ -361,6 +377,8 @@ pub enum TextSensorId {
 pub enum ActionId {
     ClockShowText = 1,
     ClockShowFace = 2,
+    SpeakerEnroll = 3,
+    SpeakerForget = 4,
 }
 
 /// Event types: "action", "action_long", "volume_up", "volume_down".

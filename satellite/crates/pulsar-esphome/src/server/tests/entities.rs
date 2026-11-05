@@ -42,6 +42,7 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         has_lux: true,
         has_hw_mic_mute: true,
         has_buttons: true,
+        has_speaker_id: false,
         has_auto_brightness: true,
         key_path: None,
     };
@@ -424,6 +425,16 @@ async fn commands_are_validated_like_cxx() {
             .await;
             c.send(
                 msg::EXECUTE_SERVICE_REQ,
+                action(key::ACTION_SPEAKER_ENROLL, &[s("Мама")]),
+            )
+            .await;
+            c.send(
+                msg::EXECUTE_SERVICE_REQ,
+                action(key::ACTION_SPEAKER_FORGET, &[s("Мама")]),
+            )
+            .await;
+            c.send(
+                msg::EXECUTE_SERVICE_REQ,
                 action(
                     key::ACTION_LED_SHOW,
                     &[s("None"), s("#ff0000"), (None, Some(3), None)],
@@ -448,6 +459,17 @@ async fn commands_are_validated_like_cxx() {
             .await;
             c.send(msg::EXECUTE_SERVICE_REQ, action(999, &[s("a"), s("b")]))
                 .await;
+            c.send(msg::BUTTON_CMD, kv(key::BUTTON_VOICE_START, |_| {}))
+                .await;
+            c.send(msg::BUTTON_CMD, kv(key::BUTTON_VOICE_CANCEL, |_| {}))
+                .await;
+            c.send(msg::BUTTON_CMD, kv(key::BUTTON_VOICE_FORGET, |_| {}))
+                .await;
+            c.send(
+                msg::TEXT_CMD,
+                kv(key::TEXT_VOICE_NAME, |w| w.str(2, "Мама", false)),
+            )
+            .await;
             let act = |id, v: &str, seconds| ApiEvent::Action {
                 id,
                 value: v.into(),
@@ -464,8 +486,14 @@ async fn commands_are_validated_like_cxx() {
                     act(ActionId::ClockShowText, "Hi", -5),
                     act(ActionId::ClockShowFace, "Smiley", 7),
                     act(ActionId::ClockShowFace, "", 0),
+                    act(ActionId::SpeakerEnroll, "Мама", 0),
+                    act(ActionId::SpeakerForget, "Мама", 0),
                     show("", "#ff0000"),
                     show("Pulse", "red"),
+                    ApiEvent::Button(ButtonId::VoiceStart),
+                    ApiEvent::Button(ButtonId::VoiceCancel),
+                    ApiEvent::Button(ButtonId::VoiceForget),
+                    ApiEvent::Text(TextId::VoiceName, "Мама".into()),
                 ]
             );
 
@@ -653,6 +681,8 @@ async fn states_go_to_subscribers_and_zigbee_entities_need_modes() {
             assert!(!keys.contains(&key::SELECT_ZIGBEE_MODE));
             assert!(!keys.contains(&key::TEXT_ZIGBEE));
             assert!(!keys.contains(&key::BUTTON_ZIGBEE_JOIN));
+            assert!(!keys.contains(&key::TEXT_SPEAKER));
+            assert!(!keys.contains(&key::ACTION_SPEAKER_ENROLL));
             p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
             let states = p.sync().await;
             // Cached value replayed; no Zigbee states.
@@ -688,6 +718,91 @@ async fn states_go_to_subscribers_and_zigbee_entities_need_modes() {
             p.send(msg::BUTTON_CMD, &kv(key::BUTTON_ZIGBEE_JOIN, |_| {}))
                 .await;
             assert!(drain(&mut p, &mut rx).await.is_empty());
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn speaker_id_lists_its_entities_and_replays_published_states() {
+    local()
+        .run_until(async {
+            let (id, mut cfg) = selftest("now");
+            cfg.has_speaker_id = true;
+            let (h, mut rx, port) = start_with(id, cfg);
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            event(&mut rx).await;
+            // Демон публикует состояния до подписки HA: они должны прийти при подписке.
+            h.publish_text_sensor(TextSensorId::Speaker, "Мама");
+            h.publish_text_sensor(TextSensorId::SpeakerStatus, "Мама 0.91");
+            h.publish_text_sensor(TextSensorId::VoicePrompt, "Скажите фразу");
+            h.publish_text(TextId::VoiceName, "Мама");
+            p.send(msg::LIST_ENTITIES_REQ, &Writer::new()).await;
+            let mut keys = Vec::new();
+            let mut name_max = None;
+            loop {
+                let (t, m) = p.recv().await.unwrap();
+                if t == msg::LIST_DONE {
+                    break;
+                }
+                let k = field(&m, 2).unwrap().u32();
+                if k == key::TEXT_VOICE_NAME {
+                    name_max = field(&m, 9).map(|f| f.u32());
+                }
+                keys.push(k);
+            }
+            for k in [
+                key::TEXT_SPEAKER,
+                key::TEXT_SPEAKER_STATUS,
+                key::TEXT_VOICE_NAME,
+                key::BUTTON_VOICE_START,
+                key::BUTTON_VOICE_CANCEL,
+                key::BUTTON_VOICE_FORGET,
+                key::SENSOR_VOICE_PROGRESS,
+                key::TEXT_VOICE_PROMPT,
+                key::ACTION_SPEAKER_ENROLL,
+                key::ACTION_SPEAKER_FORGET,
+            ] {
+                assert!(keys.contains(&k), "missing entity key {k}");
+            }
+            assert_eq!(name_max, Some(VOICE_NAME_MAX_CHARS));
+            p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+            let states = p.sync().await;
+            let replayed = |k| {
+                states
+                    .iter()
+                    .find(|(_, m)| state_key(m) == Some(k))
+                    .map(|(t, m)| (*t, field(m, 2).unwrap().str()))
+            };
+            assert_eq!(
+                replayed(key::TEXT_SPEAKER),
+                Some((msg::TEXT_SENSOR_STATE, "Мама".into()))
+            );
+            assert_eq!(
+                replayed(key::TEXT_SPEAKER_STATUS),
+                Some((msg::TEXT_SENSOR_STATE, "Мама 0.91".into()))
+            );
+            assert_eq!(
+                replayed(key::TEXT_VOICE_PROMPT),
+                Some((msg::TEXT_SENSOR_STATE, "Скажите фразу".into()))
+            );
+            assert_eq!(
+                replayed(key::TEXT_VOICE_NAME),
+                Some((msg::TEXT_STATE, "Мама".into()))
+            );
+            // Прогресс без опубликованного значения не отправляется: HA показал бы ложный 0.
+            assert!(
+                !states
+                    .iter()
+                    .any(|(_, m)| state_key(m) == Some(key::SENSOR_VOICE_PROGRESS)),
+                "{states:?}"
+            );
+            h.publish_sensor(SensorId::VoiceProgress, 40.0);
+            let got = p.sync().await;
+            assert_eq!(got.len(), 1, "{got:?}");
+            assert_eq!(got[0].0, msg::SENSOR_STATE);
+            assert_eq!(state_key(&got[0].1), Some(key::SENSOR_VOICE_PROGRESS));
+            assert_eq!(field(&got[0].1, 2).unwrap().flt(), 40.0);
         })
         .await;
 }

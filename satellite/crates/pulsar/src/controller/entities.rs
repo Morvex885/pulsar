@@ -78,6 +78,7 @@ impl Controller {
         api.publish_number(NumberId::ClockBrightness, self.st.clock_brightness * 100.0);
         api.publish_number(NumberId::ClockScroll, self.st.clock_scroll_ms as f32);
         api.publish_text(TextId::ClockText, &self.clock_text);
+        api.publish_text(TextId::VoiceName, &self.voice_name);
         api.publish_select(SelectId::ClockFace, &self.clock_face);
         api.publish_number(NumberId::LedSpeed, self.st.led_speed);
         api.publish_number(
@@ -247,6 +248,11 @@ impl Controller {
     }
 
     fn on_text(&mut self, id: TextId, value: String) {
+        if id == TextId::VoiceName {
+            self.voice_name = value;
+            self.api.publish_text(id, &self.voice_name);
+            return;
+        }
         self.clock.set_text(value.clone());
         self.api.publish_text(id, &value);
         // Text and face replace each other on the display; the clock already dropped the face.
@@ -330,6 +336,12 @@ impl Controller {
     }
 
     fn on_button(&mut self, id: ButtonId) {
+        if matches!(
+            id,
+            ButtonId::VoiceStart | ButtonId::VoiceCancel | ButtonId::VoiceForget
+        ) {
+            return self.on_voice_button(id);
+        }
         let Some(z) = &self.zigbee else {
             return;
         };
@@ -340,10 +352,14 @@ impl Controller {
         match id {
             ButtonId::ZigbeeJoin => z.join(),
             ButtonId::ZigbeeLeave => z.leave(),
+            _ => {}
         }
     }
 
     fn on_action(&mut self, id: ActionId, value: String, seconds: i32) {
+        if matches!(id, ActionId::SpeakerEnroll | ActionId::SpeakerForget) {
+            return self.on_speaker_action(id, value);
+        }
         let text = id == ActionId::ClockShowText;
         info!(
             "clock: temporary {} '{value}' for {seconds} s",
