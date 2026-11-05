@@ -234,13 +234,33 @@ fn stt_stop_words() {
 
 #[test]
 fn command_gating() {
-    // The window after the wake word: 2.5 s of LISTENING / PROCESSING.
-    assert!(after_wake(Phase::Listening, 12_499, 10_000));
-    assert!(!after_wake(Phase::Listening, 12_500, 10_000));
-    assert!(after_wake(Phase::Processing, 12_499, 10_000));
-    assert!(!after_wake(Phase::Processing, 12_500, 10_000));
-    assert!(!after_wake(Phase::Idle, 10_001, 10_000));
-    assert!(!after_wake(Phase::Speaking, 10_001, 10_000));
+    // Окно wake word: 2,5 с в LISTENING / PROCESSING.
+    assert!(after_wake(Phase::Listening, true, 12_499, 10_000));
+    assert!(!after_wake(Phase::Listening, true, 12_500, 10_000));
+    assert!(after_wake(Phase::Processing, true, 12_499, 10_000));
+    assert!(!after_wake(Phase::Processing, true, 12_500, 10_000));
+    assert!(!after_wake(Phase::Idle, true, 10_001, 10_000));
+    assert!(!after_wake(Phase::Speaking, true, 10_001, 10_000));
+}
+
+#[test]
+fn non_wake_dialog_has_no_command_window() {
+    use VoiceCommand::*;
+    // Кнопка, продолжение и HA открывают диалог без wake word, даже при играющей музыке.
+    for phase in [Phase::Listening, Phase::Processing] {
+        for elapsed in [0, 1, COMMAND_AFTER_WAKE_MS - 1, COMMAND_AFTER_WAKE_MS] {
+            let wake = after_wake(phase, false, 10_000 + elapsed, 10_000);
+            assert!(!wake, "{phase:?}, {elapsed}");
+            let in_dialog = !wake;
+            for command in [Stop, Pause, Resume, Louder, Quieter, Next, Prev] {
+                assert_eq!(
+                    command_allowed(command, wake, in_dialog, true, true),
+                    command == Stop,
+                    "{phase:?}, {elapsed}, {command:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
