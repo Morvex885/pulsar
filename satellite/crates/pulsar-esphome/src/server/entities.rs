@@ -440,22 +440,23 @@ impl Server {
                 &self.cfg.clock_music_styles,
                 cfg,
             ));
-            if self.cfg.wake_engines.len() > 1 {
-                out.push(select(
-                    "wake_engine",
-                    key::SELECT_WAKE_ENGINE,
-                    "Wake engine",
-                    "mdi:account-voice",
-                    &self.cfg.wake_engines,
-                    cfg,
-                ));
-            }
             out.push(select(
                 "clock_format",
                 key::SELECT_CLOCK_FORMAT,
                 "Clock format",
                 "mdi:hours-24",
                 &self.cfg.clock_formats,
+                cfg,
+            ));
+        }
+        // Not clock-related: every station that has more than one engine can pick between them.
+        if self.cfg.wake_engines.len() > 1 {
+            out.push(select(
+                "wake_engine",
+                key::SELECT_WAKE_ENGINE,
+                "Wake engine",
+                "mdi:account-voice",
+                &self.cfg.wake_engines,
                 cfg,
             ));
         }
