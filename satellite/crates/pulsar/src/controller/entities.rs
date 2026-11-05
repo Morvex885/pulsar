@@ -131,7 +131,6 @@ impl Controller {
         // HA speaks only after it has registered the entity list, so this is the first
         // moment a state published at connect is certain to land (a brand-new entity is
         // otherwise 'unavailable' until its first change).
-        self.api.publish_select(SelectId::WakeEngine, &self.st.wake_engine);
 
         info!("time from HA: epoch={epoch} tz='{tz}' (local clock now follows TZ)");
     }
