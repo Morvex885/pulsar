@@ -12,7 +12,6 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 
-use tract_core::internal::RunnableModel;
 use tract_onnx::prelude::*;
 
 /// openWakeWord's frame: 80 ms of 16 kHz audio.
@@ -21,7 +20,6 @@ const CHUNK: usize = 1280;
 const MEL_LOOKBACK: usize = 160 * 3;
 const MEL_INPUT: usize = MEL_LOOKBACK + CHUNK;
 /// One mel frame per 160-sample hop, three hops consumed by the window: 8 frames per chunk.
-const MELS_PER_CHUNK: usize = MEL_INPUT / 160 - 3;
 /// The embedding model looks at the last 76 of the 80 mel frames kept; the classifier at 16
 /// embeddings.
 const MEL_FRAMES: usize = 80;
@@ -118,10 +116,12 @@ impl Oww {
         };
         // Warm the queues so the first frames are not scored against silence padding.
         for _ in 0..MEL_FRAMES {
-            oww.mels.push_back(vec![0.0; MELS_PER_CHUNK * 32]);
+            // One mel frame is 32 values; a wider vector would make the embedding window the
+            // wrong size and `push` would return no score until it aged out.
+            oww.mels.push_back(vec![0.0; 32]);
         }
         for _ in 0..FEATURES {
-            oww.feats.extend(std::iter::repeat(0.0).take(EMB_DIM));
+            oww.feats.extend(std::iter::repeat_n(0.0, EMB_DIM));
         }
         Ok(oww)
     }
