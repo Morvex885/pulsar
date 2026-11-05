@@ -43,6 +43,8 @@ pub struct ApiConfig {
     pub wake_words: Vec<WakeWordInfo>,
     /// Initially active ids.
     pub active_wake_words: Vec<String>,
+    /// Select «Wake engine» options: the firmware spotter and OpenWakeWord.
+    pub wake_engines: Vec<String>,
     /// Эффекты лампы («Ring» или «Panel» — по `led_layout`), кроме "None".
     pub light_effects: Vec<String>,
     /// Select «Clock face» options, "None" first.
@@ -91,6 +93,7 @@ impl Default for ApiConfig {
             case_colors: Vec::new(),
             clock_music_styles: Vec::new(),
             clock_formats: Vec::new(),
+            wake_engines: Vec::new(),
             zigbee_modes: Vec::new(),
             has_clock: true,
             has_lux: true,
@@ -340,6 +343,7 @@ pub enum SelectId {
     CaseColor = 4,
     ClockMusic = 5,
     ClockFormat = 6,
+    WakeEngine = 7,
 }
 
 #[repr(u32)]

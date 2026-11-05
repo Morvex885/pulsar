@@ -91,6 +91,7 @@ impl Controller {
         api.publish_select(SelectId::MusicViz, &self.st.music_viz);
         api.publish_select(SelectId::ClockMusic, &self.st.clock_music);
         api.publish_select(SelectId::ClockFormat, &self.st.clock_format);
+        api.publish_select(SelectId::WakeEngine, &self.st.wake_engine);
         api.publish_select(SelectId::CaseColor, self.case_color_option());
         if let Some(z) = &self.zigbee {
             api.publish_select(
@@ -285,6 +286,18 @@ impl Controller {
                 let _ = self.persist_now();
                 self.api.publish_select(id, pulsar_zigbee::role(role).label);
                 self.exit = Some(ExitReason::ZigbeeRoleChanged);
+            }
+            SelectId::WakeEngine => {
+                if option != "yandex" && option != "oww" {
+                    return;
+                }
+                // The detector thread is already running; this only decides whether its hits are
+                // forwarded as wake words, so switching is instant and reversible.
+                self.mic.set_oww(option == "oww");
+                self.st.wake_engine = option.clone();
+                self.persist();
+                self.api.publish_select(id, &option);
+                info!("wake engine -> {option}");
             }
             SelectId::MusicViz => {
                 self.leds.set_music_style(option.clone());
