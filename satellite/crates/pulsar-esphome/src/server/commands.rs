@@ -313,6 +313,11 @@ impl Server {
                 &self.cfg.clock_music_styles,
                 "clock music",
             ),
+            key::SELECT_WAKE_ENGINE => (
+                SelectId::WakeEngine,
+                &self.cfg.wake_engines,
+                "wake engine",
+            ),
             key::SELECT_CLOCK_FORMAT => (
                 SelectId::ClockFormat,
                 &self.cfg.clock_formats,

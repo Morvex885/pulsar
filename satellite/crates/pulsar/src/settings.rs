@@ -50,6 +50,9 @@ pub struct Settings {
     /// User ring light.
     pub light: LightState,
     pub wake_word: String,
+    /// Wake engine: "yandex" (the firmware spotter) or "oww" (OpenWakeWord, when its models are
+    /// present in /data/pulsar/oww).
+    pub wake_engine: String,
     /// POSIX TZ (the default matches what the Yandex firmware showed); updated from HA.
     pub tz: String,
     /// Install new releases without asking.
@@ -103,6 +106,7 @@ impl Default for Settings {
             music_viz: "All styles".into(),
             clock_music: "Off".into(),
             clock_format: "24h".into(),
+            wake_engine: "yandex".into(),
             led_speed: 1.0,
             voice_indication: true,
             followup_duration_s: 10,
@@ -168,6 +172,7 @@ impl Settings {
                 b"light_b" => self.light.b = fv,
                 b"light_effect" => self.light.effect = v,
                 b"wake_word" => self.wake_word = v,
+                b"wake_engine" => self.wake_engine = v,
                 b"tz" => self.tz = v,
                 b"auto_update" => self.auto_update = on,
                 b"nearest_answers" => self.nearest_answers = on,
@@ -218,7 +223,7 @@ impl Settings {
         format!(
             "volume2={}\nvolume={}\nmuted={}\nmic_muted={}\nclock_on={}\nclock_brightness={}\n\
              clock_scroll_ms={}\nlight_on={}\nlight_brightness={}\nlight_r={}\nlight_g={}\n\
-             light_b={}\nlight_effect={}\nwake_word={}\ntz={}\nauto_update={}\nupdate_attempt={}\n\
+             light_b={}\nlight_effect={}\nwake_word={}\nwake_engine={}\ntz={}\nauto_update={}\nupdate_attempt={}\n\
              zigbee_role={}\nzigbee_flash_failed={:x}\nnearest_answers={}\nmusic_viz={}\n\
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
              clock_auto_brightness={}\nfollowup_duration_s={}\nclock_format={}\n\
@@ -237,6 +242,7 @@ impl Settings {
             f(self.light.b),
             self.light.effect,
             self.wake_word,
+            self.wake_engine,
             self.tz,
             b(self.auto_update),
             self.update_attempt,
