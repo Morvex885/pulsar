@@ -337,6 +337,7 @@ impl Controller {
                 })
                 .collect(),
             active_wake_words: vec![initial_wake_word],
+            wake_engines: strings(&["yandex", "oww"]),
             light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
             clock_faces: with_none(strings(pulsar_clock::face_names())),
             music_styles: strings(pulsar_hw::music_styles()),

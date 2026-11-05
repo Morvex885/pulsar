@@ -56,6 +56,7 @@ pub(super) mod key {
     pub const NUMBER_MIC_GAIN: u32 = 38;
     pub const SW_WAKE_SOUND: u32 = 39;
     pub const SW_CLOCK_COLON_BLINK: u32 = 40;
+    pub const SELECT_WAKE_ENGINE: u32 = 41;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -153,6 +154,7 @@ pub(super) struct Cache {
     case_color: StrState,
     clock_music: StrState,
     clock_format: StrState,
+    wake_engine: StrState,
     pub(super) light: LightState,
     rssi: FloatState,
     ip: Option<Ipv4Addr>,
@@ -192,6 +194,7 @@ impl Cache {
             case_color: StrState::default(),
             clock_music: StrState::default(),
             clock_format: StrState::default(),
+            wake_engine: StrState::default(),
             light: LightState::default(),
             rssi: FloatState::default(),
             ip: None,
@@ -471,6 +474,16 @@ impl Server {
                 &self.cfg.clock_music_styles,
                 cfg,
             ));
+            if self.cfg.wake_engines.len() > 1 {
+                out.push(select(
+                    "wake_engine",
+                    key::SELECT_WAKE_ENGINE,
+                    "Wake engine",
+                    "mdi:account-voice",
+                    &self.cfg.wake_engines,
+                    cfg,
+                ));
+            }
             out.push(select(
                 "clock_format",
                 key::SELECT_CLOCK_FORMAT,
@@ -1092,6 +1105,7 @@ impl Server {
                     SelectId::CaseColor => key::SELECT_CASE_COLOR,
                     SelectId::ClockMusic => key::SELECT_CLOCK_MUSIC,
                     SelectId::ClockFormat => key::SELECT_CLOCK_FORMAT,
+                    SelectId::WakeEngine => key::SELECT_WAKE_ENGINE,
                 };
                 if on
                     && (has_clock
@@ -1110,6 +1124,7 @@ impl Server {
                     SelectId::CaseColor => &mut c.case_color,
                     SelectId::ClockMusic => &mut c.clock_music,
                     SelectId::ClockFormat => &mut c.clock_format,
+                    SelectId::WakeEngine => &mut c.wake_engine,
                 };
                 *s = StrState { has: true, v };
             }
