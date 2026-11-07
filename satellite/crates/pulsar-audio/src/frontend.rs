@@ -24,7 +24,7 @@ use pulsar_core::MusicFrame;
 use pulsar_core::model::{CaptureFormat, Model};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::engine::{Engine, SPOTTER_RATE, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
+use crate::engine::{Engine, SPOTTER_RATE, VQE_OMNI, stt_output, to_s16};
 use crate::spectrum::SpectrumAnalyzer;
 
 /// Wake word level window: 1.5 s in 32 ms blocks at 16 kHz, independent of VQE chunk size.
@@ -790,6 +790,7 @@ fn processing(
     let mut music_was_on = false;
     let frame = eng.frame();
     let mut ring = PrerollRing::new(PREROLL_SAMPLES / frame.max(1), frame);
+    let stt_vqe = stt_output(model);
 
     while shared.running() {
         let pending = lock(&shared.pending_model).take();
@@ -840,7 +841,7 @@ fn processing(
         // handled holds the stream open: the owner switches streaming on only when it handles
         // the event, and the chunks in between continue the pre-roll. `wake_pending` is read
         // first: its Acquire pairs with `wake_handled`, after the owner's `set_streaming(true)`.
-        match eng.output(VQE_OMNI_WITH_GAIN) {
+        match eng.output(stt_vqe) {
             Some(d) => {
                 if let Some(slot) = ring.push(d)
                     && (shared.wake_pending.load(Acquire) > 0 || shared.stream.load(Relaxed))

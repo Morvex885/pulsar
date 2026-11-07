@@ -32,6 +32,9 @@ pub struct Model {
     pub mic_channels: &'static [u32],
     pub spk_channels: &'static [u32],
     pub vqe_preset: &'static str,
+    /// true: в HA идёт выход VQE `VQE_OMNI_WITH_GAIN` (основной канал с усилением пресета), false —
+    /// `VQE_OMNI` без него; см. docs/hardware.md, «Библиотеки Яндекса (C API)».
+    pub stt_preset_gain: bool,
     /// Физическая раскладка светодиодов; определяет тип эффектов и геометрию панели.
     pub led_layout: LedLayout,
 
@@ -206,6 +209,7 @@ static MIDI: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5, 6, 7],
     vqe_preset: "cucumber",
+    stt_preset_gain: true,
     led_layout: LedLayout::Ring,
     led_prefix: "cucumber",
     ring: LedStrip {
@@ -279,6 +283,7 @@ static LITE2: Model = Model {
     mic_channels: &[0, 2],
     spk_channels: &[6],
     vqe_preset: "plum",
+    stt_preset_gain: true,
     led_layout: LedLayout::Ring,
     led_prefix: "plum",
     ring: LedStrip {
@@ -358,6 +363,7 @@ static MINI2: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[4, 5],
     vqe_preset: "yandexmini_2",
+    stt_preset_gain: true,
     led_layout: LedLayout::Ring,
     led_prefix: "mini2",
     ring: LedStrip {
@@ -420,6 +426,8 @@ static MINI: Model = Model {
     mic_channels: &[0, 1, 2, 3],
     spk_channels: &[6, 7],
     vqe_preset: "yandexmini",
+    // см. docs/mini.md, «Звук»
+    stt_preset_gain: false,
     led_layout: LedLayout::Ring,
     led_prefix: "",
     ring: LedStrip {
@@ -493,6 +501,7 @@ static MINI3: Model = Model {
     mic_channels: &[0, 1, 2],
     spk_channels: &[6],
     vqe_preset: "bergamot",
+    stt_preset_gain: true,
     led_layout: LedLayout::Ring,
     led_prefix: "bergamot",
     // The driver calls the 6-zone ring "logo" (/dev/fb0 6×1, AW21018); there is no separate logo.
@@ -554,6 +563,7 @@ static MINI3PRO: Model = Model {
     mic_channels: &[0, 1, 2],
     spk_channels: &[3],
     vqe_preset: "pickle",
+    stt_preset_gain: true,
     led_layout: LedLayout::Ring,
     led_prefix: "pickle",
     ring: LedStrip {
@@ -622,6 +632,7 @@ static STATION2: Model = Model {
     mic_channels: &[0, 2, 4, 7],
     spk_channels: &[8, 9],
     vqe_preset: "yandexmidi",
+    stt_preset_gain: true,
     led_layout: LedLayout::Station2Panel,
     led_prefix: "",
     // Панель Gowin: 88 светодиодов на /dev/fb0, 89-й пиксель не горит —
@@ -838,6 +849,7 @@ mod tests {
         assert_eq!(m.logo.count, 0);
         assert!(m.software_volume);
         assert!(!m.has_clock && !m.has_lux);
+        assert!(!m.stt_preset_gain);
         // Only KEY_MUTE on the keypad: it toggles the mute, and there is no «Button» entity.
         assert_eq!((m.action_key, m.mute_key), (0, 113));
         assert!(!m.has_button_events());

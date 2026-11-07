@@ -13,8 +13,9 @@
 //! раскладку wake-спотера pulsar (`LEGACY_SPOTTER_TO_VQE`); SPK=<ch>[,<ch>...] заменяет каналы
 //! захвата референса динамика; в отличие от C++-утилиты, их должно быть столько, сколько берёт
 //! пресет VQE модели (библиотека не получает других количеств).
-//! OUT=<wav>: выход VQE_OMNI_WITH_GAIN (его же демон кладёт в кольцо пре-ролла, с тем же
-//! преобразованием в s16) пишется WAV 16 кГц моно, по кадру на чанк; сэмпл `at` в нём — точка хита.
+//! OUT=<wav>: выход VQE, который демон кладёт в кольцо пре-ролла и шлёт в HA (`stt_output` модели,
+//! с тем же преобразованием в s16), пишется WAV 16 кГц моно, по кадру на чанк; сэмпл `at` в нём —
+//! точка хита.
 //! SUBMIT=<n>: подавать спотеру куски по `n` сэмплов на канал (по умолчанию — кадр VQE), события
 //! читаются после каждой подачи; остаток в конце файла не подаётся.
 #![deny(unsafe_code)]
@@ -27,8 +28,7 @@ use std::process::ExitCode;
 
 use pulsar_audio::engine::{
     LEGACY_SPOTTER_TO_VQE, Lib, LoadError, SPOTTER_RATE, SPOTTER_TO_VQE, SPOTTER_TYPES, Spotter,
-    SpotterConf, VQE_MODELS, VQE_OMNI_WITH_GAIN, Vqe, VqeStep, preload_deps, spotter_layout,
-    to_s16,
+    SpotterConf, VQE_MODELS, Vqe, VqeStep, preload_deps, spotter_layout, stt_output, to_s16,
 };
 
 const DEFAULT_MODEL: &str = "/system/vendor/quasar/spotter_models/activation/alisa";
@@ -204,6 +204,7 @@ fn run() -> u8 {
         return 1;
     }
     let (mic_ch, spk_ch) = (m.mic_channels, spk_channels.as_slice());
+    let out_vqe = stt_output(m);
     let (nmic, nspk) = (mic_ch.len(), spk_ch.len());
     let mut raw = vec![0u8; frames * cap * 2];
     let mut input = vec![0i16; frames * cap];
@@ -268,14 +269,14 @@ fn run() -> u8 {
         }
         if let Some(w) = wav_out.as_mut() {
             // Тот же выход и то же преобразование, что у кольца пре-ролла демона.
-            let d = match vqe.output(VQE_OMNI_WITH_GAIN) {
+            let d = match vqe.output(out_vqe) {
                 Ok(d) if d.len() >= frame => d,
                 Ok(d) => {
-                    out!("out {VQE_OMNI_WITH_GAIN}: {} of {frame} samples", d.len());
+                    out!("out {out_vqe}: {} of {frame} samples", d.len());
                     return 1;
                 }
                 Err(e) => {
-                    out!("out {VQE_OMNI_WITH_GAIN}: {e}");
+                    out!("out {out_vqe}: {e}");
                     return 1;
                 }
             };
