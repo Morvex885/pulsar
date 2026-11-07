@@ -43,6 +43,11 @@
   файле. `mv_ioguard` пишет соседний `/sys/class/tdm_state/aux_table` и переключает mixer по
   `numid`; затворы ли это, не проверялось.
 - VQE: пресет `yandexmini`: 4 микрофона, 2 референса, 48 кГц, чанк 768 → 256 @ 16 кГц.
+- Выходы VQE на командах в HA (записи `debug_recording_dir`, 5 команд на каждом, сборка 0.6.0):
+  `VQE_OMNI_WITH_GAIN` — около трети отсчётов в клиппинге, фон −13…−19 dBFS, STT путает слова;
+  `VQE_OMNI` — клиппинга нет, фон около −45 dBFS, речь около −20 dBFS. `spotterChannelName` в
+  `quasar.cfg` Мини — `vqe_0`, как у Миди ([hardware.md, «Библиотеки Яндекса (C
+  API)»](hardware.md#библиотеки-яндекса-c-api)).
 - Спотеры: те же модели прошивки; не замерялись.
 - alsa-lib версионированная, `/system/vendor/quasar/libs/libasound.so.2` — вне путей поиска
   загрузчика.
@@ -60,6 +65,9 @@
 
 ART7182 ([#68](https://github.com/Morvex885/pulsar/pull/68)) на YNDX-0004, сборка 0.5.3 с затвором
 только `amp_table`: ответы Assist и объявления звучат через динамик.
+
+artemdanielov на прошивке `3.211.373.4.16.4829693628.20261104`, сборка 0.6.0 с `VQE_OMNI` в HA:
+wake word → HA Assist (STT, ответ TTS через динамик), таймеры.
 
 ## Не проверено
 

@@ -24,6 +24,15 @@ pub const VQE_BEAMFORMING: i32 = 7;
 pub const VQE_BNR: i32 = 8;
 pub const VQE_OMNI_WITH_GAIN: i32 = 9;
 
+/// Выход VQE, который идёт в HA (поток и пре-ролл); см. `Model::stt_preset_gain`.
+pub fn stt_output(model: &pulsar_core::model::Model) -> i32 {
+    if model.stt_preset_gain {
+        VQE_OMNI_WITH_GAIN
+    } else {
+        VQE_OMNI
+    }
+}
+
 /// Тип канала спотера (0..5) -> выход VQE: контракт библиотеки, общий для всех моделей.
 /// Командная модель на VQE_OMNI_WITH_GAIN не срабатывала (ww_offline: 0/14 против 10/14 на
 /// VQE_OMNI). См. docs/hardware.md, «Библиотеки Яндекса (C API)».
@@ -540,6 +549,14 @@ fn feed(vqe: &Vqe, frame: usize, s: &mut Slot) -> Vec<Hit> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stt_output_follows_the_model() {
+        let midi = pulsar_core::model::model_from_compatible(b"yandex,cucumber\0").unwrap();
+        let mini = pulsar_core::model::model_from_dt_id(b"axg_s420_v03\0").unwrap();
+        assert_eq!(stt_output(midi), VQE_OMNI_WITH_GAIN);
+        assert_eq!(stt_output(mini), VQE_OMNI);
+    }
+
     use super::*;
 
     #[test]
