@@ -53,6 +53,7 @@ pub(super) mod key {
     pub const SELECT_CLOCK_FORMAT: u32 = 35;
     pub const NUMBER_COMMAND_OFFSET: u32 = 36;
     pub const SW_CLOCK_SPOKEN_NUMBERS: u32 = 37;
+    pub const NUMBER_MIC_GAIN: u32 = 38;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -139,6 +140,7 @@ pub(super) struct Cache {
     led_speed: FloatState,
     followup_duration: FloatState,
     command_offset: FloatState,
+    mic_gain: FloatState,
     clock_text: StrState,
     clock_face: StrState,
     zigbee_mode: StrState,
@@ -175,6 +177,7 @@ impl Cache {
             led_speed: FloatState::default(),
             followup_duration: FloatState::default(),
             command_offset: FloatState::default(),
+            mic_gain: FloatState::default(),
             clock_text: StrState::default(),
             clock_face: StrState::default(),
             zigbee_mode: StrState::default(),
@@ -397,6 +400,14 @@ impl Server {
                 10.0,
             ),
             "ms",
+        ));
+        out.push(number(
+            "microphone_gain",
+            key::NUMBER_MIC_GAIN,
+            "Microphone gain",
+            "mdi:microphone-plus",
+            (0.0, crate::MIC_GAIN_MAX_DB as f32, 1.0),
+            "dB",
         ));
         let select = |oid, key, name, icon, options: &[String], category: Option<u32>| {
             let mut w = Writer::new();
@@ -836,6 +847,12 @@ impl Server {
             self.cache.command_offset,
             to,
         );
+        self.send_float(
+            msg::NUMBER_STATE,
+            key::NUMBER_MIC_GAIN,
+            self.cache.mic_gain,
+            to,
+        );
         self.send_cached_str(
             msg::SELECT_STATE,
             key::SELECT_MUSIC_VIZ,
@@ -993,6 +1010,7 @@ impl Server {
                         (&mut c.followup_duration, key::NUMBER_FOLLOWUP_DURATION)
                     }
                     NumberId::CommandOffset => (&mut c.command_offset, key::NUMBER_COMMAND_OFFSET),
+                    NumberId::MicGain => (&mut c.mic_gain, key::NUMBER_MIC_GAIN),
                 };
                 *s = FloatState { has: true, v };
                 let s = *s;
@@ -1003,6 +1021,7 @@ impl Server {
                             NumberId::LedSpeed
                                 | NumberId::FollowupDuration
                                 | NumberId::CommandOffset
+                                | NumberId::MicGain
                         ))
                 {
                     self.send_float(msg::NUMBER_STATE, key, s, None);

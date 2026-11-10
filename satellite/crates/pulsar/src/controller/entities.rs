@@ -88,6 +88,7 @@ impl Controller {
             NumberId::CommandOffset,
             self.st.command_start_offset_ms as f32,
         );
+        api.publish_number(NumberId::MicGain, self.st.mic_gain_db as f32);
         api.publish_select(SelectId::MusicViz, &self.st.music_viz);
         api.publish_select(SelectId::ClockMusic, &self.st.clock_music);
         api.publish_select(SelectId::ClockFormat, &self.st.clock_format);
@@ -241,6 +242,14 @@ impl Controller {
                 self.st.command_start_offset_ms = ms;
                 self.mic.set_command_offset(ms);
                 self.api.publish_number(id, ms as f32);
+            }
+            NumberId::MicGain => {
+                let Some(db) = pulsar_esphome::mic_gain_db(value) else {
+                    return;
+                };
+                self.st.mic_gain_db = db;
+                self.mic.set_mic_gain(db);
+                self.api.publish_number(id, db as f32);
             }
         }
         self.persist();

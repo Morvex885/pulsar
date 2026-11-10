@@ -13,8 +13,9 @@
 //! раскладку wake-спотера pulsar (`LEGACY_SPOTTER_TO_VQE`); SPK=<ch>[,<ch>...] заменяет каналы
 //! захвата референса динамика; в отличие от C++-утилиты, их должно быть столько, сколько берёт
 //! пресет VQE модели (библиотека не получает других количеств).
-//! OUT=<wav>: выход VQE_OMNI_WITH_GAIN (его же демон кладёт в кольцо пре-ролла, с тем же
+//! OUT=<wav>: выход VQE_OMNI (его же демон кладёт в кольцо пре-ролла и шлёт в HA, с тем же
 //! преобразованием в s16) пишется WAV 16 кГц моно, по кадру на чанк; сэмпл `at` в нём — точка хита.
+//! GAIN_DB=<n>: усиление OUT в дБ, как «Microphone gain» демона (по умолчанию 0).
 //! SUBMIT=<n>: подавать спотеру куски по `n` сэмплов на канал (по умолчанию — кадр VQE), события
 //! читаются после каждой подачи; остаток в конце файла не подаётся.
 #![deny(unsafe_code)]
@@ -27,7 +28,7 @@ use std::process::ExitCode;
 
 use pulsar_audio::engine::{
     LEGACY_SPOTTER_TO_VQE, Lib, LoadError, SPOTTER_RATE, SPOTTER_TO_VQE, SPOTTER_TYPES, Spotter,
-    SpotterConf, VQE_MODELS, VQE_OMNI_WITH_GAIN, Vqe, VqeStep, preload_deps, spotter_layout,
+    SpotterConf, VQE_MODELS, VQE_OMNI, Vqe, VqeStep, db_to_gain, preload_deps, spotter_layout,
     to_s16,
 };
 
@@ -196,6 +197,11 @@ fn run() -> u8 {
         },
         None => None,
     };
+    let out_gain = db_to_gain(
+        std::env::var("GAIN_DB")
+            .ok()
+            .map_or(0, |s| atoi(&s).max(0) as u32),
+    );
 
     let nch = layout.types.len();
     // Без каналов цикл подачи по SUBMIT не продвигался бы.
@@ -267,21 +273,21 @@ fn run() -> u8 {
             }
         }
         if let Some(w) = wav_out.as_mut() {
-            // Тот же выход и то же преобразование, что у кольца пре-ролла демона.
-            let d = match vqe.output(VQE_OMNI_WITH_GAIN) {
+            // Тот же выход, усиление и преобразование, что у кольца пре-ролла демона.
+            let d = match vqe.output(VQE_OMNI) {
                 Ok(d) if d.len() >= frame => d,
                 Ok(d) => {
-                    out!("out {VQE_OMNI_WITH_GAIN}: {} of {frame} samples", d.len());
+                    out!("out {VQE_OMNI}: {} of {frame} samples", d.len());
                     return 1;
                 }
                 Err(e) => {
-                    out!("out {VQE_OMNI_WITH_GAIN}: {e}");
+                    out!("out {VQE_OMNI}: {e}");
                     return 1;
                 }
             };
             let bytes: Vec<u8> = d[..frame]
                 .iter()
-                .flat_map(|&v| to_s16(v).to_le_bytes())
+                .flat_map(|&v| to_s16(v * out_gain).to_le_bytes())
                 .collect();
             if let Err(e) = w.write_all(&bytes) {
                 out!("OUT: {}", strerror(&e));

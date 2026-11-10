@@ -28,3 +28,4 @@ followup_duration_s=10
 clock_format=12h
 command_start_offset_ms=0
 clock_spoken_numbers=0
+mic_gain_db=0

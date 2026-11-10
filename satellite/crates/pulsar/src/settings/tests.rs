@@ -3,8 +3,9 @@
 // `zig c++ -std=c++20 -O2`. save_*.conf — `save` значений ниже; load_*.out — `load` из load_*.in,
 // затем `save`. С тех пор правились руками: `clock_auto_brightness` (после `clock_music`);
 // `followup_duration_s` (10); `clock_format` (12h в load_odd.in, bogus → 24h в load_edge.in);
-// `command_start_offset_ms` (0); `clock_spoken_numbers` (0, последним). `wake_preroll` (бывший
-// переключатель) больше не пишется и не читается; в load_odd.in остался как неизвестный ключ.
+// `command_start_offset_ms` (0); `clock_spoken_numbers` (0); `mic_gain_db` (0, последним).
+// `wake_preroll` (бывший переключатель) больше не пишется и не читается; в load_odd.in остался как
+// неизвестный ключ.
 
 use super::*;
 
@@ -410,5 +411,23 @@ fn command_start_offset_roundtrips_negative_and_clamps() {
     for (value, expected) in [("-500", -100), ("999", 200), ("12.6", 13), ("NaN", 13)] {
         st.parse(format!("command_start_offset_ms={value}\n").as_bytes());
         assert_eq!(st.command_start_offset_ms, expected, "{value}");
+    }
+}
+
+#[test]
+fn mic_gain_defaults_to_stock_roundtrips_and_clamps() {
+    let mut st = Settings::default();
+    // Файл прежней сборки ключа не содержит: канал как в стоке.
+    st.parse(b"command_start_offset_ms=0\n");
+    assert_eq!(st.mic_gain_db, 0);
+    for db in [0, 12, 34, 40] {
+        st.mic_gain_db = db;
+        let mut loaded = Settings::default();
+        loaded.parse(st.serialize().as_bytes());
+        assert_eq!(loaded.mic_gain_db, db);
+    }
+    for (value, expected) in [("-5", 0), ("99", 40), ("33.6", 34), ("NaN", 34)] {
+        st.parse(format!("mic_gain_db={value}\n").as_bytes());
+        assert_eq!(st.mic_gain_db, expected, "{value}");
     }
 }

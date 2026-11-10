@@ -3,7 +3,8 @@
 Первое поколение. Данные контрибьюторов, не перепроверены: PR
 [#35](https://github.com/Morvex885/pulsar/pull/35) (devqcf), затворы выхода —
 [#68](https://github.com/Morvex885/pulsar/pull/68) (ART7182) и
-[#74](https://github.com/Morvex885/pulsar/issues/74) (kadkin-a). Железо —
+[#74](https://github.com/Morvex885/pulsar/issues/74) (kadkin-a), уровни выходов VQE —
+[#78](https://github.com/Morvex885/pulsar/pull/78) (artemdanielov). Железо —
 [вики](https://hackalice.me/devices/station-mini/); здесь только то, чего там нет
 ([AGENTS.md, «Документация»](../AGENTS.md#документация)).
 
@@ -43,6 +44,12 @@
   файле. `mv_ioguard` пишет соседний `/sys/class/tdm_state/aux_table` и переключает mixer по
   `numid`; затворы ли это, не проверялось.
 - VQE: пресет `yandexmini`: 4 микрофона, 2 референса, 48 кГц, чанк 768 → 256 @ 16 кГц.
+- Выходы VQE на командах в HA ([#78](https://github.com/Morvex885/pulsar/pull/78): записи
+  `debug_recording_dir`, по 5 команд; релиз 0.6.0 с `VQE_OMNI_WITH_GAIN` и тестовая сборка на его
+  базе с `VQE_OMNI`): `VQE_OMNI_WITH_GAIN` — около трети отсчётов в насыщении, фон −13…−19 dBFS,
+  STT путает слова; `VQE_OMNI` — насыщения нет, фон около −45 dBFS, речь около −20 dBFS. Какой
+  канал сток даёт распознаванию — [hardware.md, «Библиотеки Яндекса (C
+  API)»](hardware.md#библиотеки-яндекса-c-api).
 - Спотеры: те же модели прошивки; не замерялись.
 - alsa-lib версионированная, `/system/vendor/quasar/libs/libasound.so.2` — вне путей поиска
   загрузчика.
@@ -60,6 +67,10 @@
 
 ART7182 ([#68](https://github.com/Morvex885/pulsar/pull/68)) на YNDX-0004, сборка 0.5.3 с затвором
 только `amp_table`: ответы Assist и объявления звучат через динамик.
+
+artemdanielov ([#78](https://github.com/Morvex885/pulsar/pull/78)) на прошивке
+`3.211.373.4.16.4829693628.20261104`, тестовая сборка на базе 0.6.0 с `VQE_OMNI` в HA: wake word →
+HA Assist (STT, ответ TTS через динамик), таймеры.
 
 ## Не проверено
 

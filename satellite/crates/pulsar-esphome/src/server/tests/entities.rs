@@ -719,11 +719,12 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
                 }
                 keys.push(field(&m, 2).unwrap().u32());
             }
-            // 16 сущностей и сервис led_show; нет часов, Lux, аппаратного MUTE, цвета корпуса и
+            // 17 сущностей и сервис led_show; нет часов, Lux, аппаратного MUTE, цвета корпуса и
             // Button.
-            assert_eq!(keys.len(), 17, "keys: {keys:?}");
+            assert_eq!(keys.len(), 18, "keys: {keys:?}");
             assert!(keys.contains(&key::NUMBER_FOLLOWUP_DURATION));
             assert!(keys.contains(&key::NUMBER_COMMAND_OFFSET));
+            assert!(keys.contains(&key::NUMBER_MIC_GAIN));
             assert!(keys.contains(&key::ACTION_LED_SHOW));
             let absent = [
                 key::SW_CLOCK,
@@ -1089,6 +1090,60 @@ async fn command_offset_is_universal_config_clamped_and_replayed() {
                     .find(|(_, m)| state_key(m) == Some(key::NUMBER_COMMAND_OFFSET))
                     .unwrap();
                 assert_eq!(field(m, 2).unwrap().flt(), -30.0);
+            })
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn mic_gain_is_universal_config_clamped_and_replayed() {
+    for has_clock in [true, false] {
+        local()
+            .run_until(async {
+                let (id, mut cfg) = selftest("now");
+                cfg.has_clock = has_clock;
+                let (h, mut rx, port) = start_with(id, cfg);
+                let mut p = Peer::connect(port).await;
+                p.hello("HA").await;
+                event(&mut rx).await;
+                p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+                p.sync().await;
+                for (input, expected) in [
+                    (-3.0, Some(0.0)),
+                    (33.6, Some(34.0)),
+                    (99.0, Some(40.0)),
+                    (f32::NAN, None),
+                    (f32::INFINITY, None),
+                ] {
+                    p.send(
+                        msg::NUMBER_CMD,
+                        &kv(key::NUMBER_MIC_GAIN, |w| w.flt(2, input, true)),
+                    )
+                    .await;
+                    assert_eq!(
+                        drain(&mut p, &mut rx).await,
+                        expected
+                            .map(|v| ApiEvent::Number(NumberId::MicGain, v))
+                            .into_iter()
+                            .collect::<Vec<_>>(),
+                        "{input}"
+                    );
+                }
+                // Состояние уходит и на моделях без часов, и повторяется новому подписчику.
+                h.publish_number(NumberId::MicGain, 34.0);
+                let pushed = p.sync().await;
+                let (_, m) = pushed
+                    .iter()
+                    .find(|(_, m)| state_key(m) == Some(key::NUMBER_MIC_GAIN))
+                    .unwrap();
+                assert_eq!(field(m, 2).unwrap().flt(), 34.0);
+                p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+                let replayed = p.sync().await;
+                let (_, m) = replayed
+                    .iter()
+                    .find(|(_, m)| state_key(m) == Some(key::NUMBER_MIC_GAIN))
+                    .unwrap();
+                assert_eq!(field(m, 2).unwrap().flt(), 34.0);
             })
             .await;
     }
