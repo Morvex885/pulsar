@@ -24,7 +24,7 @@ use pulsar_core::MusicFrame;
 use pulsar_core::model::{CaptureFormat, Model};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::engine::{Engine, SPOTTER_RATE, VQE_OMNI, VQE_OMNI_WITH_GAIN, to_s16};
+use crate::engine::{Engine, SPOTTER_RATE, VQE_OMNI, db_to_gain, to_s16};
 use crate::spectrum::SpectrumAnalyzer;
 
 /// Wake word level window: 1.5 s in 32 ms blocks at 16 kHz, independent of VQE chunk size.
@@ -172,6 +172,11 @@ impl FrontendHandle {
         self.inner.shared.command_offset_ms.store(ms, Relaxed);
     }
 
+    /// Усиление звука для HA (`Audio` и пре-ролл), дБ; 0 — выход VQE как есть. По умолчанию 0.
+    pub fn set_mic_gain(&self, db: u32) {
+        self.inner.shared.mic_gain_db.store(db, Relaxed);
+    }
+
     /// While on, music features of the speaker reference come as [`FrontendEvent::Music`].
     pub fn set_music_analysis(&self, on: bool) {
         self.inner.shared.music.store(on, Relaxed);
@@ -221,6 +226,7 @@ struct Shared {
     /// between the confirmation and the owner's `set_streaming(true)`.
     wake_pending: AtomicU32,
     command_offset_ms: AtomicI32,
+    mic_gain_db: AtomicU32,
     music: AtomicBool,
     pending_model: Mutex<Option<PathBuf>>,
     tap_on: AtomicBool,
@@ -242,6 +248,7 @@ impl Shared {
             stream: AtomicBool::new(false),
             wake_pending: AtomicU32::new(0),
             command_offset_ms: AtomicI32::new(0),
+            mic_gain_db: AtomicU32::new(0),
             music: AtomicBool::new(false),
             pending_model: Mutex::new(None),
             tap_on: AtomicBool::new(false),
@@ -690,9 +697,9 @@ impl PrerollRing {
         self.buf.len() / self.frame.max(1)
     }
 
-    /// Stores one chunk and returns it as s16. A chunk of another length breaks the timeline:
-    /// the ring is cleared and nothing is stored.
-    pub(crate) fn push(&mut self, d: &[f32]) -> Option<&[i16]> {
+    /// Кладёт один чанк, умноженный на `gain` (с насыщением), и возвращает его как s16. Чанк
+    /// другой длины рвёт шкалу времени: кольцо очищается, ничего не сохраняется.
+    pub(crate) fn push(&mut self, d: &[f32], gain: f32) -> Option<&[i16]> {
         if d.len() != self.frame || self.frame == 0 || self.buf.is_empty() {
             self.clear();
             return None;
@@ -700,7 +707,7 @@ impl PrerollRing {
         let at = self.next * self.frame;
         let slot = &mut self.buf[at..at + self.frame];
         for (o, &v) in slot.iter_mut().zip(d) {
-            *o = to_s16(v);
+            *o = to_s16(v * gain);
         }
         self.next = (self.next + 1) % self.chunks();
         self.filled = (self.filled + 1).min(self.chunks());
@@ -790,6 +797,8 @@ fn processing(
     let mut music_was_on = false;
     let frame = eng.frame();
     let mut ring = PrerollRing::new(PREROLL_SAMPLES / frame.max(1), frame);
+    let mut gain_db = shared.mic_gain_db.load(Relaxed);
+    let mut gain = db_to_gain(gain_db);
 
     while shared.running() {
         let pending = lock(&shared.pending_model).take();
@@ -827,22 +836,32 @@ fn processing(
             continue;
         }
 
-        // Уровень для арбитража — с VQE_OMNI: он очищен от собственного воспроизведения станции
-        // и, в отличие от VQE_OMNI_WITH_GAIN, не проходит усиление пресета, так что не зависит от
-        // настройки усиления модели; см. docs/hardware.md, «Библиотеки Яндекса (C API)».
-        if let Some(d) = eng.output(VQE_OMNI)
+        // В HA и в кольцо пре-ролла идёт VQE_OMNI — главный канал распознавания стока, с усилением
+        // `set_mic_gain`; см. docs/hardware.md, «Библиотеки Яндекса (C API)». Уровень для арбитража
+        // считается по нему же без усиления: он очищен от собственного воспроизведения станции и
+        // не зависит от настройки.
+        let omni = eng.output(VQE_OMNI);
+        if let Some(d) = omni
             && !d.is_empty()
         {
             level_hist.push(d);
+        }
+
+        // Смена усиления очищает кольцо: в пре-ролле одной команды уровень не скачет.
+        let db = shared.mic_gain_db.load(Relaxed);
+        if db != gain_db {
+            gain_db = db;
+            gain = db_to_gain(db);
+            ring.clear();
         }
 
         // Every chunk goes into the ring, so a pre-roll never spans a gap. A `Wake` not yet
         // handled holds the stream open: the owner switches streaming on only when it handles
         // the event, and the chunks in between continue the pre-roll. `wake_pending` is read
         // first: its Acquire pairs with `wake_handled`, after the owner's `set_streaming(true)`.
-        match eng.output(VQE_OMNI_WITH_GAIN) {
+        match omni {
             Some(d) => {
-                if let Some(slot) = ring.push(d)
+                if let Some(slot) = ring.push(d, gain)
                     && (shared.wake_pending.load(Acquire) > 0 || shared.stream.load(Relaxed))
                 {
                     let _ = tx.send(FrontendEvent::Audio(slot.to_vec()));
@@ -965,11 +984,11 @@ mod tests {
         let mut r = PrerollRing::new(3, 2);
         let chunk = |k: i16| [f32::from(k) / 32768.0; 2];
         assert!(r.tail(2).is_empty());
-        assert_eq!(r.push(&chunk(1)), Some(&[1i16, 1][..]));
+        assert_eq!(r.push(&chunk(1), 1.0), Some(&[1i16, 1][..]));
         // Asked for more than stored: what there is.
         assert_eq!(r.tail(3), [1, 1]);
         for k in 2..=5 {
-            r.push(&chunk(k));
+            r.push(&chunk(k), 1.0);
         }
         // Wrapped twice: chunks 3, 4, 5 remain.
         assert_eq!(r.stored(), 6);
@@ -978,10 +997,19 @@ mod tests {
         assert_eq!(r.tail(99), [3, 3, 4, 4, 5, 5]);
         assert!(r.tail(0).is_empty());
         // A chunk of another length breaks the timeline: nothing older survives it.
-        assert_eq!(r.push(&[0.0; 3]), None);
+        assert_eq!(r.push(&[0.0; 3], 1.0), None);
         assert!(r.tail(3).is_empty());
-        r.push(&chunk(6));
+        r.push(&chunk(6), 1.0);
         assert_eq!(r.tail(3), [6, 6]);
+        // Усиление применяется до перевода в s16 и насыщается на его границах.
+        assert_eq!(
+            r.push(&chunk(100), db_to_gain(34)),
+            Some(&[5012i16, 5012][..])
+        );
+        assert_eq!(
+            r.push(&[0.5, -0.5], db_to_gain(34)),
+            Some(&[32767i16, -32768][..])
+        );
     }
 
     #[test]

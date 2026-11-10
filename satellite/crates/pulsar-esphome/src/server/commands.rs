@@ -269,6 +269,12 @@ impl Server {
                 };
                 (NumberId::CommandOffset, ms as f32)
             }
+            key::NUMBER_MIC_GAIN => {
+                let Some(db) = crate::mic_gain_db(v) else {
+                    return;
+                };
+                (NumberId::MicGain, db as f32)
+            }
             _ => return,
         };
         self.emit(ApiEvent::Number(id, v));

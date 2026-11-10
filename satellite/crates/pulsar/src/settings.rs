@@ -70,6 +70,9 @@ pub struct Settings {
     pub followup_duration_s: u32,
     /// Сдвиг начала звука запроса от точки хита спотера wake word, мс («Command start offset»).
     pub command_start_offset_ms: i32,
+    /// Усиление звука запроса перед отправкой в HA, дБ («Microphone gain»); 0 — канал VQE как
+    /// есть.
+    pub mic_gain_db: u32,
     /// Stem of `pulsar_hw::case_colors()`, "" = none.
     pub led_case_color: String,
     /// Release being installed. Still set after a restart into another version: that release
@@ -111,6 +114,8 @@ impl Default for Settings {
             // («Открой шторы» → «Закрой шторы»), запаса между ними нет. При 0 одна фраза из 35
             // получила лишнее «Так,» перед целой командой; перевёрнутых команд нет.
             command_start_offset_ms: 0,
+            // см. docs/voice.md, «Голосовой ассистент HA (ESPHome)»
+            mic_gain_db: 0,
             led_case_color: String::new(),
             update_attempt: String::new(),
             zigbee_role: Mode::Off,
@@ -195,6 +200,11 @@ impl Settings {
                         self.command_start_offset_ms = ms;
                     }
                 }
+                b"mic_gain_db" => {
+                    if let Some(db) = pulsar_esphome::mic_gain_db(fv) {
+                        self.mic_gain_db = db;
+                    }
+                }
                 b"led_case_color" => self.led_case_color = v,
                 _ => {}
             }
@@ -222,7 +232,7 @@ impl Settings {
              zigbee_role={}\nzigbee_flash_failed={:x}\nnearest_answers={}\nmusic_viz={}\n\
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
              clock_auto_brightness={}\nfollowup_duration_s={}\nclock_format={}\n\
-             command_start_offset_ms={}\nclock_spoken_numbers={}\n",
+             command_start_offset_ms={}\nclock_spoken_numbers={}\nmic_gain_db={}\n",
             f(self.volume),
             f(self.volume_legacy),
             b(self.muted),
@@ -253,6 +263,7 @@ impl Settings {
             self.clock_format,
             self.command_start_offset_ms,
             b(self.clock_spoken_numbers),
+            self.mic_gain_db,
         )
     }
 

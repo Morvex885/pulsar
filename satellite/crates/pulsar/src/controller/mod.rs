@@ -455,6 +455,7 @@ impl Controller {
             Some(PathBuf::from(COMMAND_MODEL)),
         );
         mic.set_command_offset(st.command_start_offset_ms);
+        mic.set_mic_gain(st.mic_gain_db);
 
         let ss_cfg = SendspinConfig {
             name: id.friendly_name.clone(),

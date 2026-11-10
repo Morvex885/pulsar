@@ -131,6 +131,11 @@ pub fn to_s16(v: f32) -> i16 {
     }
 }
 
+/// Усиление в дБ -> множитель отсчётов перед [`to_s16`].
+pub fn db_to_gain(db: u32) -> f32 {
+    10f32.powf(db as f32 / 20.0)
+}
+
 /// Where the events of one fed chunk come from (a spotter, or a script in tests).
 pub(crate) trait EventSource {
     /// Next event; None after an error (logged).
