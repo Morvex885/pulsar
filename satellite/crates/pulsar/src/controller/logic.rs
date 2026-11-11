@@ -252,10 +252,11 @@ pub fn stt_stop(text: &str) -> bool {
     words.peek().is_some() && words.all(|w| command_of(w) == Some(VoiceCommand::Stop))
 }
 
-/// Within the window after the wake word that opened this dialog: HA may end the speech of a
-/// short "Алиса, громче" (PROCESSING) before the command spotter confirms the word.
-pub fn after_wake(phase: Phase, now: i64, listen_started_ms: i64) -> bool {
-    matches!(phase, Phase::Listening | Phase::Processing)
+/// Окно только диалога, открытого wake word: HA может завершить короткую фразу
+/// «Алиса, громче» (PROCESSING) раньше подтверждения командного спотера.
+pub fn after_wake(phase: Phase, wake_dialog: bool, now: i64, listen_started_ms: i64) -> bool {
+    wake_dialog
+        && matches!(phase, Phase::Listening | Phase::Processing)
         && now - listen_started_ms < COMMAND_AFTER_WAKE_MS
 }
 
@@ -282,7 +283,7 @@ pub fn owns_music(
 /// громкости — пока звучит (ответ, объявление, звонок таймера) или владеет музыкой, и транспорт —
 /// только для своей музыки. После wake-слова (окно диалога или слово, удержанное через выигранный
 /// этой станцией арбитраж) проходит любая команда. В диалоге за пределами этого окна (`in_dialog`:
-/// LISTENING / PROCESSING после конца `after_wake`) проходит только «стоп» и отменяет диалог:
+/// LISTENING / PROCESSING без `after_wake`) проходит только «стоп» и отменяет диалог:
 /// остальные слова — часть запроса. Принятый компромисс: «стоп»-слово внутри запроса
 /// («хватит ли …») тоже отменяет диалог.
 pub fn command_allowed(
