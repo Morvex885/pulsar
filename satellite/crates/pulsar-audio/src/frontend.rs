@@ -14,6 +14,7 @@ use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering::AcqRel, Ordering::Acquire,
     Ordering::Relaxed,
 };
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -24,7 +25,8 @@ use pulsar_core::MusicFrame;
 use pulsar_core::model::{CaptureFormat, Model};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::engine::{Engine, SPOTTER_RATE, VQE_OMNI, db_to_gain, to_s16};
+use crate::engine::{Engine, SPOTTER_RATE, VQE_OMNI, VQE_OMNI_WITH_GAIN, db_to_gain, to_s16};
+use crate::oww;
 use crate::spectrum::SpectrumAnalyzer;
 
 /// Wake word level window: 1.5 s in 32 ms blocks at 16 kHz, independent of VQE chunk size.
@@ -41,6 +43,8 @@ const SAMPLES_PER_MS: usize = SPOTTER_RATE as usize / 1000;
 /// Конец речи для строки лога "wake anchor": самый новый блок окна уровня в пределах 20 дБ
 /// (по мощности) от самого громкого.
 const SPEECH_END_RATIO: f32 = 0.01;
+/// Where the OpenWakeWord models live when that engine is installed.
+const OWW_DIR: &str = "/data/pulsar/oww";
 
 /// ALSA buffer in VQE chunks: 256 ms with 32 ms chunks, 128 ms on the Mini 3 and Mini (16 ms);
 /// the device may grant less (Lite 2: 2048 frames).
@@ -112,11 +116,25 @@ pub fn spawn(
         _events: tx.clone(),
     };
     let command_dir = command_model_dir.filter(|d| !d.as_os_str().is_empty());
+    // OpenWakeWord takes over detection when its models are installed; the VQE (echo
+    // cancellation) and the command spotter stay Yandex. The Yandex wake spotter is still
+    // started — an empty model path crashes its C wrapper — but it is never fed while
+    // OpenWakeWord runs.
+    let oww = match oww::Oww::load(std::path::Path::new(OWW_DIR)) {
+        Ok(o) => {
+            info!("wake engine: openWakeWord '{}' (yandex spotter off)", o.name);
+            Some(o)
+        }
+        Err(e) => {
+            info!("wake engine: yandex spotter ({e})");
+            None
+        }
+    };
     let started = match Engine::start(model, &wake_model_dir, command_dir.as_deref()) {
         Some(eng) => {
             inner.frame = eng.frame();
             inner
-                .start_threads(model, eng, tx)
+                .start_threads(model, eng, oww, tx)
                 .inspect_err(|e| error!("audio threads: {e}"))
                 .is_ok()
         }
@@ -141,9 +159,17 @@ impl FrontendHandle {
         *lock(&self.inner.shared.pending_model) = (!dir.as_os_str().is_empty()).then_some(dir);
     }
 
+    /// Whether OpenWakeWord hits become wake words (the Yandex spotter is unaffected).
+    pub fn set_oww(&self, on: bool) {
+        self.inner.shared.oww_on.store(on, Relaxed);
+        self.inner.shared.oww_gen.fetch_add(1, Relaxed);
+    }
+
     /// Wake word detection on/off (e.g. software mute). On by default.
     pub fn set_detection(&self, on: bool) {
         self.inner.shared.detect.store(on, Relaxed);
+        // Anything the detector heard before this point belongs to the previous state.
+        self.inner.shared.oww_gen.fetch_add(1, Relaxed);
     }
 
     /// Command spotter on/off (commands without the wake word).
@@ -214,6 +240,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Written by the handle, read by the threads (and the counters the other way round).
+/// A hit from the detector together with the detection generation it was heard under.
+type OwwHit = Arc<Mutex<Option<(u32, String)>>>;
+
 struct Shared {
     running: AtomicBool,
     // With stop_cv: wakes the capture thread's reopen delay on stop.
@@ -228,6 +257,11 @@ struct Shared {
     command_offset_ms: AtomicI32,
     mic_gain_db: AtomicU32,
     music: AtomicBool,
+    /// OpenWakeWord hits count as wake words only while this is set (HA select «Wake engine»).
+    oww_on: AtomicBool,
+    /// Bumped whenever `detect` or `oww_on` changes: a hit computed under the previous state is
+    /// stale (it was heard while muted, or with the engine off) and must not become a Wake.
+    oww_gen: AtomicU32,
     pending_model: Mutex<Option<PathBuf>>,
     tap_on: AtomicBool,
     tap: Mutex<Option<UnboundedSender<Vec<i16>>>>,
@@ -241,6 +275,8 @@ impl Shared {
     fn new() -> Self {
         Shared {
             running: AtomicBool::new(false),
+            oww_on: AtomicBool::new(false),
+            oww_gen: AtomicU32::new(0),
             stop_lock: Mutex::new(()),
             stop_cv: Condvar::new(),
             detect: AtomicBool::new(true),
@@ -296,6 +332,7 @@ impl Inner {
         &mut self,
         model: &'static Model,
         eng: Engine,
+        oww: Option<oww::Oww>,
         tx: UnboundedSender<FrontendEvent>,
     ) -> std::io::Result<()> {
         let nch = model.capture_channels as usize;
@@ -318,7 +355,7 @@ impl Inner {
             std::thread::Builder::new()
                 .name("audio-process".into())
                 .stack_size(PROCESSING_STACK)
-                .spawn(move || processing(model, eng, &shared, &pipe, &tx))?,
+                .spawn(move || processing(model, eng, oww, &shared, &pipe, &tx))?,
         );
         Ok(())
     }
@@ -778,6 +815,7 @@ impl<T: std::fmt::Display> std::fmt::Display for Opt<T> {
 fn processing(
     model: &'static Model,
     mut eng: Engine,
+    mut oww: Option<oww::Oww>,
     shared: &Shared,
     pipe: &Pipe,
     tx: &UnboundedSender<FrontendEvent>,
@@ -799,6 +837,43 @@ fn processing(
     let mut ring = PrerollRing::new(PREROLL_SAMPLES / frame.max(1), frame);
     let mut gain_db = shared.mic_gain_db.load(Relaxed);
     let mut gain = db_to_gain(gain_db);
+
+    // OpenWakeWord runs on its own thread: this loop only copies chunks into a bounded channel, so
+    // a slow detector can never starve capture (which showed up as "processing behind, dropping
+    // frames"). A hit arrives as a phrase in `oww_hit` and is turned into a Wake here, where the
+    // pre-roll ring lives.
+    let mut oww_hit: Option<OwwHit> = None;
+    let mut oww_tx: Option<SyncSender<(u32, Vec<f32>)>> = None;
+    let mut oww_dropped: u64 = 0;
+    if let Some(owwm) = oww.take() {
+        let name = owwm.name.clone();
+        let hit = Arc::new(Mutex::new(None::<(u32, String)>));
+        let (txq, rxq) = sync_channel::<(u32, Vec<f32>)>(8);
+        let slot = hit.clone();
+        match std::thread::Builder::new()
+            .name("oww".into())
+            .spawn(move || {
+                let mut o = owwm;
+                while let Ok((seq, chunk)) = rxq.recv() {
+                    if o.push(&chunk).is_some() {
+                        let mut g = lock(&slot);
+                        if g.is_none() {
+                            *g = Some((seq, o.name.clone()));
+                        }
+                    }
+                    if let Some(e) = o.error.take() {
+                        error!("oww: graph error: {e}");
+                    }
+                }
+            }) {
+            Ok(_) => {
+                info!("wake engine: openWakeWord '{name}' on its own thread (yandex spotter still fed)");
+                oww_hit = Some(hit);
+                oww_tx = Some(txq);
+            }
+            Err(e) => error!("oww: thread failed to start ({e}); wake word stays Yandex only"),
+        }
+    }
 
     while shared.running() {
         let pending = lock(&shared.pending_model).take();
@@ -861,6 +936,20 @@ fn processing(
         // first: its Acquire pairs with `wake_handled`, after the owner's `set_streaming(true)`.
         match omni {
             Some(d) => {
+                if let Some(q) = oww_tx.as_ref()
+                    && shared.oww_on.load(Relaxed)
+                {
+                    // the chunk carries the generation it was captured under, so a hit computed
+                    // after a mute or an engine switch can be told apart from a live one.
+                    let seq = shared.oww_gen.load(Relaxed);
+                    // try_send, never block: a full queue means the detector is behind, and the
+                    // audio path matters more than the discarded 80 ms.
+                    match q.try_send((seq, d.to_vec())) {
+                        Ok(()) => {}
+                        Err(std::sync::mpsc::TrySendError::Full(_)) => oww_dropped += 1,
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
+                    }
+                }
                 if let Some(slot) = ring.push(d, gain)
                     && (shared.wake_pending.load(Acquire) > 0 || shared.stream.load(Relaxed))
                 {
@@ -870,6 +959,37 @@ fn processing(
             None => ring.clear(),
         }
 
+        // OpenWakeWord's hit is reported by its thread; build the Wake here so the pre-roll comes
+        // from the ring this loop owns.
+        // The slot is taken unconditionally: a hit from before a mute or an engine switch is
+        // dropped here instead of firing on the first frame after the state changes.
+        if let Some(slot) = oww_hit.as_ref()
+            && let Some((seq, phrase)) = lock(slot).take()
+            && seq == shared.oww_gen.load(Relaxed)
+            && shared.detect.load(Relaxed)
+            && shared.oww_on.load(Relaxed)
+        {
+            let level_db = wake_level_db(&level_hist.values);
+            let speech_end = level_hist.speech_end_ms();
+            let offset_ms = shared.command_offset_ms.load(Relaxed);
+            // No spotter anchor exists for an external engine: the hit arrives after its 80 ms
+            // window, so the useful pre-roll is everything the ring holds.
+            let n = preroll_samples(Some(ring.stored()), offset_ms, ring.stored());
+            let preroll = ring.tail(n);
+            info!(
+                "oww: '{phrase}' fired preroll={} ms speech_end={} ms dropped={oww_dropped}",
+                n / SAMPLES_PER_MS,
+                Opt(speech_end)
+            );
+            shared.wake_pending.fetch_add(1, Relaxed);
+            let _ = tx.send(FrontendEvent::Wake {
+                phrase,
+                level_db,
+                preroll,
+            });
+        }
+
+        // The Yandex spotter keeps running, so «Алиса» / «Ясмина» and «hey jarvis» all work.
         if shared.detect.load(Relaxed) {
             let hits = eng.feed_wake();
             if !hits.is_empty() {

@@ -29,6 +29,8 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
     let cfg = ApiConfig {
         port: 0,
         wake_words: vec![ww("alisa", "Алиса"), ww("yandex", "Яндекс")],
+
+        wake_engines: Vec::new(),
         active_wake_words: s(&["alisa"]),
         light_effects: s(&["Rainbow", "Pulse"]),
         clock_faces: s(&["None", "Smiley"]),

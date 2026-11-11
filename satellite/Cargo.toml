@@ -24,6 +24,10 @@ libloading = "=0.9.0"
 snow = { version = "=0.10.0", default-features = false, features = ["use-chacha20poly1305", "use-sha2", "use-curve25519", "use-getrandom"] }
 socket2 = { version = "=0.6.5", features = ["all"] }
 cc = "=1.10.0"
+# OpenWakeWord inference is pure Rust (tract), so it cross-builds for the stations
+# without an ONNX Runtime binary per target.
+tract-onnx = "=0.23.9"
+tract-core = "=0.23.9"
 
 [profile.release]
 opt-level = 3
