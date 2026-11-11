@@ -381,9 +381,11 @@ mount -o remount,rw / && rm -f /etc/init.d/S99zpulsar; mount -o remount,ro /
 
 ## Music Assistant
 
-Music Assistant with Sendspin support finds the speaker by itself: the player "Yandex Station Midi",
-"Yandex Station 2", "Yandex Station Lite 2", "Yandex Station Mini 2", "Yandex Station Mini 3",
-"Yandex Station Mini 3 Pro" or "Yandex Station Mini" with type **Sendspin**. Music is lossless
+Music Assistant with Sendspin support finds the speaker by itself: the player is named after the
+model's `friendly_name`, which stays Russian — «Яндекс Станция Миди» (Yandex Station Midi),
+«Яндекс Станция 2» (Station 2), «Яндекс Станция Лайт 2» (Lite 2), «Яндекс Станция Мини 2» (Mini 2),
+«Яндекс Станция Мини 3» (Mini 3), «Яндекс Станция Мини 3 Про» (Mini 3 Pro) or «Яндекс Станция Мини»
+(Mini) — with type **Sendspin**. Music is lossless
 (FLAC), the speaker's volume and voice commands control the MA player. Synchronized playback in
 groups with other Sendspin players is provided for by the protocol, but has not been tested yet. The
 output delay is set in the Sendspin player settings in Music Assistant; MA stores it itself and
