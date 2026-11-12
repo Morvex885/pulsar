@@ -35,8 +35,10 @@ const FRAME_SHIFT: usize = 384;
 const FFT_LEN: usize = 1024;
 const MEL_BINS: usize = 80;
 const PREEMPHASIS: f32 = 0.97;
-// Минимальное положительное float: как energy floor в Kaldi.
-const LOG_FLOOR: f32 = 1.192_092_9e-7;
+// Минимальное положительное float: как energy floor в Kaldi. Им же ограничена снизу энергия кадра:
+// при пороге в 1 отсчёт² цифровая тишина в паузах тихой речи (VQE_OMNI без «Microphone gain»)
+// оказывалась ближе 30 дБ к пику и шла в отпечаток как речь.
+pub(crate) const LOG_FLOOR: f32 = 1.192_092_9e-7;
 // Вход body.tflite: 20 кадров fbank; выход — 20 кадров по 128 признаков.
 const BODY_FRAMES: usize = 20;
 const BODY_DIM: usize = 128;
@@ -192,7 +194,7 @@ pub fn fbank(pcm: &[i16]) -> Features {
         let mut bins = [0.0f32; MEL_BINS];
         mel.apply(&power, &mut bins);
         out.frames.push(bins);
-        out.energy_db.push(10.0 * energy.max(1.0).log10());
+        out.energy_db.push(10.0 * energy.max(LOG_FLOOR).log10());
     }
     out
 }
@@ -839,5 +841,48 @@ mod tests {
         assert!(mean.abs() < 1e-3);
         let long = select_speech(&fbank(&tone(300.0, 20.0, 8000.0))).unwrap();
         assert_eq!(long.len(), MAX_SPEECH_FRAMES);
+    }
+    /// Слоги по 0,3 с через 0,2 с пауз, с шумом размаха `noise_amp`.
+    fn syllables(voice_amp: f32, noise_amp: f32) -> Vec<i16> {
+        let mut seed = 1u32;
+        (0..4 * 16000)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5;
+                let t = i as f32 / SAMPLE_RATE;
+                let voice = if (t % 0.5) < 0.3 {
+                    (2.0 * std::f32::consts::PI * 220.0 * t).sin()
+                        + (2.0 * std::f32::consts::PI * 1800.0 * t).sin() * 0.3
+                } else {
+                    0.0
+                };
+                (voice * voice_amp + noise * noise_amp).round() as i16
+            })
+            .collect()
+    }
+
+    /// После #81 в узнавание идёт VQE_OMNI с «Microphone gain»: на Миди при 0 дБ речь около
+    /// -62 dBFS (rms ~26), фон около -85 dBFS, а голоса записаны на прежнем выходе, в 50 раз
+    /// громче. Кадры речи те же, признаки после CMN почти совпадают.
+    #[test]
+    fn quiet_speech_gives_the_features_of_loud_speech() {
+        let quiet = select_speech(&fbank(&syllables(37.0, 6.2))).unwrap();
+        let loud = select_speech(&fbank(&syllables(37.0 * 50.0, 6.2 * 50.0))).unwrap();
+        assert_eq!(quiet.len(), loud.len());
+        let diffs: Vec<f32> = quiet
+            .iter()
+            .zip(&loud)
+            .flat_map(|(q, l)| q.iter().zip(l).map(|(a, b)| (a - b).abs()))
+            .collect();
+        let mean = diffs.iter().sum::<f32>() / diffs.len() as f32;
+        assert!(mean < 0.15, "{mean}");
+    }
+
+    /// Цифровая тишина в паузах тихой речи — не речь, как и в паузах громкой.
+    #[test]
+    fn digital_silence_after_quiet_speech_is_not_speech() {
+        let quiet = select_speech(&fbank(&syllables(37.0, 0.0))).unwrap();
+        let loud = select_speech(&fbank(&syllables(37.0 * 50.0, 0.0))).unwrap();
+        assert_eq!(quiet.len(), loud.len());
     }
 }
