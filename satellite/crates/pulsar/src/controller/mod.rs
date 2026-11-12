@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use log::{debug, error, info, warn};
 use pulsar_audio::FrontendEvent;
+use pulsar_audio::speaker::SpeakerEvent;
 use pulsar_core::model::Model;
 use pulsar_core::{ClockShot, Timers, UiState, now_ms};
 use pulsar_esphome::{ApiConfig, ApiEvent, ApiHandle, WakeWordInfo};
@@ -36,6 +37,9 @@ const COMMAND_MODEL: &str = "/system/vendor/quasar/spotter_models/command";
 const SOUNDS: &str = "/system/vendor/quasar/sounds/";
 
 const DUCK_GAIN: f32 = 0.15;
+const SPEAKER_UNKNOWN: &str = "unknown";
+/// Отдельный файл: откат на .prev его не трогает.
+const SPEAKER_STORE: &str = "speakers.conf";
 const TIMER_RING_MAX_MS: i64 = 15 * 60 * 1000;
 // Longest wait for the next pipeline event before the dialog is given up locally. HA's voice
 // command segmenter ends speech capture after at most 15 s of audio. Between INTENT_START and
@@ -78,6 +82,9 @@ enum Tk {
     Watchdog,
     /// В follow-up-реплике речь не началась за окно.
     FollowupWait,
+    /// Фраза записи голоса слишком длинная.
+    EnrollPhrase,
+    EnrollExpire,
     /// The shown running HA timer runs out.
     TimerTick,
     /// Next round of the timer ring.
@@ -115,6 +122,7 @@ struct Rx {
     lux: Option<UnboundedReceiver<f32>>,
     sendspin: Option<UnboundedReceiver<SendspinEvent>>,
     zigbee: Option<UnboundedReceiver<ZigbeeEvent>>,
+    speaker: Option<UnboundedReceiver<SpeakerEvent>>,
     updater: Option<UnboundedReceiver<UpdateEvent>>,
 }
 
@@ -142,6 +150,15 @@ pub struct Controller {
     mixer: Mixer,
     player: PlayerHandle,
     mic: pulsar_audio::FrontendHandle,
+    speaker: Option<pulsar_audio::speaker::SpeakerHandle>,
+    /// Результат старой реплики не публикуется.
+    speaker_seq: u64,
+    /// Активационное слово начинает образец, а не диалог.
+    enroll_active: bool,
+    voice_name: String,
+    /// Чтобы обновить подсказку при смене активационного слова.
+    enroll_view: Option<pulsar_audio::speaker::EnrollView>,
+    enroll_phrase: Option<pulsar_audio::speaker::Endpointer>,
     mdns: Option<MdnsHandle>,
     api: ApiHandle,
     rx: Rx,
@@ -353,6 +370,7 @@ impl Controller {
             has_hw_mic_mute: !model.mute_input.is_empty() || model.mute_gpio != 0,
             has_buttons: model.has_button_events(),
             led_layout: model.led_layout,
+            has_speaker_id: model.speaker_id && pulsar_audio::speaker::available(),
             key_path: Some(logic::in_dir(&dir, "api_key")),
             has_auto_brightness: lux_rx.is_some(),
         };
@@ -456,6 +474,12 @@ impl Controller {
         );
         mic.set_command_offset(st.command_start_offset_ms);
         mic.set_mic_gain(st.mic_gain_db);
+        let (speaker, speaker_rx) = if model.speaker_id && pulsar_audio::speaker::available() {
+            let (handle, rx) = pulsar_audio::speaker::spawn(dir.join(SPEAKER_STORE));
+            (Some(handle), Some(rx))
+        } else {
+            (None, None)
+        };
 
         let ss_cfg = SendspinConfig {
             name: id.friendly_name.clone(),
@@ -558,11 +582,18 @@ impl Controller {
             mixer,
             player,
             mic,
+            speaker,
+            speaker_seq: 0,
+            enroll_active: false,
+            voice_name: String::new(),
+            enroll_view: None,
+            enroll_phrase: None,
             mdns,
             api,
             rx: Rx {
                 api: Some(api_rx),
                 frontend: Some(mic_rx),
+                speaker: speaker_rx,
                 player: Some(player_rx),
                 arbiter: Some(arbiter_rx),
                 input: input_rx,
@@ -687,6 +718,10 @@ impl Controller {
                     Some(ev) => self.on_frontend(ev),
                     None => self.rx.frontend = None,
                 },
+                ev = recv(&mut self.rx.speaker) => match ev {
+                    Some(ev) => self.on_speaker(ev),
+                    None => self.speaker_lost(),
+                },
                 ev = recv(&mut self.rx.arbiter) => match ev {
                     Some(ArbiterEvent::Decided { claim_id, won, best, peers }) => {
                         if self.arbitrating && self.arb_claim == Some(claim_id) {
@@ -748,6 +783,8 @@ impl Controller {
                 info!("follow-up: no speech started, conversation ends");
                 self.end_silent_followup();
             }
+            Tk::EnrollPhrase => self.enroll_phrase_end(),
+            Tk::EnrollExpire => self.enroll_expired(),
             Tk::TimerTick => self.show_timers(),
             Tk::RingTick => self.ring_timer(),
             Tk::UpdateCheck => self.check_update(),
@@ -802,7 +839,12 @@ impl Controller {
             }
             FrontendEvent::Command { word } => self.on_command(&word, false),
             FrontendEvent::Audio(pcm) => {
-                if self.phase == Phase::Listening {
+                if self.enroll_phrase.is_some() {
+                    self.enroll_audio(pcm);
+                } else if self.phase == Phase::Listening {
+                    if let Some(speaker) = &self.speaker {
+                        speaker.audio(pcm.clone());
+                    }
                     self.api.voice_send_audio(pcm);
                 } else if self.arbitrating {
                     // The request goes on with what was said right after the wake word.
@@ -862,7 +904,9 @@ impl Controller {
                 Phase::Listening => UiState::Listening,
                 Phase::Processing => UiState::Thinking,
                 Phase::Speaking => UiState::Speaking,
-                Phase::Idle if self.arbitrating => UiState::Listening,
+                Phase::Idle if self.arbitrating || self.enroll_phrase.is_some() => {
+                    UiState::Listening
+                }
                 Phase::Idle if self.announcing => UiState::Speaking,
                 Phase::Idle => UiState::Idle,
             }

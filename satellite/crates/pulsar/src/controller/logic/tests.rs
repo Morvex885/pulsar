@@ -389,7 +389,16 @@ fn volume_click_gating() {
 
 #[test]
 fn idle_and_auto_update() {
-    let idle = |phase, a, r, m, ss, z| idle_for_update(phase, a, r, m, ss, z);
+    let idle = |phase, a, r, m, ss, z| idle_for_update(phase, a, r, m, ss, z, false);
+    assert!(!idle_for_update(
+        Phase::Idle,
+        false,
+        false,
+        PlayState::Idle,
+        false,
+        false,
+        true
+    ));
     assert!(idle(
         Phase::Idle,
         false,

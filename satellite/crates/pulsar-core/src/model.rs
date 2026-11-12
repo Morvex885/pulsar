@@ -115,6 +115,8 @@ pub struct Model {
     /// false: the station may lack the ambient light sensor; the Illuminance entity then exists
     /// only when the sensor opens at start, and a missing sensor is logged at info.
     pub has_lux: bool,
+    /// Проверено на этой модели: падение в чужой libtflite зациклит перезапуски демона.
+    pub speaker_id: bool,
 
     /// Zigbee radio: Telink co-processor on a UART; its reset and boot lines are GPIO value
     /// files (active low, 1 = asserted) exported by the kernel's zb_control driver.
@@ -258,6 +260,7 @@ static MIDI: Model = Model {
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
     has_lux: true,
+    speaker_id: true,
     // Telink B91 (quasar.cfg zigbee.tty.port). Reset and boot are GPIOZ_11 / GPIOZ_9
     // (devicetree node "zigbee", driver zb_control); maind drives them through these files when
     // quasar.cfg zigbee.zbControl is set, as it is on this firmware.
@@ -320,6 +323,7 @@ static LITE2: Model = Model {
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
     has_lux: true,
+    speaker_id: false,
     zigbee_tty: "",
     zigbee_reset: "",
     zigbee_boot: "",
@@ -401,6 +405,7 @@ static MINI2: Model = Model {
     volume_min_step: false,
     // Датчик есть не на всех станциях: см. docs/mini2.md, «Светодиоды и часы».
     has_lux: false,
+    speaker_id: false,
     zigbee_tty: "",
     zigbee_reset: "",
     zigbee_boot: "",
@@ -465,6 +470,7 @@ static MINI: Model = Model {
     volume_map: STOCK_VOLUME,
     volume_min_step: true,
     has_lux: false,
+    speaker_id: false,
     zigbee_tty: "",
     zigbee_reset: "",
     zigbee_boot: "",
@@ -535,6 +541,7 @@ static MINI3: Model = Model {
     volume_map: MINI3_VOLUME,
     volume_min_step: true,
     has_lux: true,
+    speaker_id: false,
     zigbee_tty: "",
     zigbee_reset: "",
     zigbee_boot: "",
@@ -604,6 +611,7 @@ static MINI3PRO: Model = Model {
     volume_map: PERCENT_VOLUME,
     volume_min_step: false,
     has_lux: true,
+    speaker_id: false,
     zigbee_tty: "",
     zigbee_reset: "",
     zigbee_boot: "",
@@ -668,6 +676,7 @@ static STATION2: Model = Model {
     volume_map: PERCENT_VOLUME,
     volume_min_step: false,
     has_lux: true,
+    speaker_id: false,
     zigbee_tty: "",
     zigbee_reset: "",
     zigbee_boot: "",
@@ -774,6 +783,7 @@ mod tests {
         let m =
             model_from_compatible(b"yandex,cucumber-dvt2\0yandex,cucumber\0amlogic, a5\0").unwrap();
         assert_eq!(m.codename, "cucumber");
+        assert!(m.speaker_id);
         assert_eq!(m.capture_rate, 96000);
         assert_eq!(m.logo.count, 6);
         assert_eq!(m.zigbee_tty, "/dev/ttyS2");
