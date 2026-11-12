@@ -410,7 +410,8 @@ pub fn sw_mute_after_hw_event(sw_muted: bool, event: InputEvent) -> bool {
     sw_muted && !matches!(event, InputEvent::Mute(false))
 }
 
-/// Restarting cuts off whatever plays: automatic installs wait for silence.
+/// Restarting cuts off whatever plays: automatic installs wait for silence. Перезапуск сбросил бы
+/// и идущую запись голоса: принятые фразы хранятся только в памяти.
 pub fn idle_for_update(
     phase: Phase,
     announcing: bool,
@@ -418,8 +419,10 @@ pub fn idle_for_update(
     music: PlayState,
     sendspin_streaming: bool,
     zigbee_flashing: bool,
+    enrolling: bool,
 ) -> bool {
     phase == Phase::Idle
+        && !enrolling
         && !announcing
         && !timer_ringing
         && music != PlayState::Playing

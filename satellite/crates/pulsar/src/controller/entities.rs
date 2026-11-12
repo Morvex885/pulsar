@@ -154,6 +154,8 @@ impl Controller {
                     logic::sw_mute_after_switch(state, self.st.mic_muted, self.hw_mic_muted);
                 if !state {
                     self.cancel_arbitration();
+                    // Сказанное после выключения не должно попасть в образец голоса.
+                    self.enroll_phrase_abort();
                     if self.phase == logic::Phase::Listening {
                         self.finish_interaction();
                     }
@@ -471,6 +473,7 @@ impl Controller {
             InputEvent::Mute(m) | InputEvent::MuteSync(m) => {
                 if m {
                     self.cancel_arbitration();
+                    self.enroll_phrase_abort();
                 }
                 self.hw_mic_muted = m;
                 info!("hardware mic mute: {}", u8::from(m));
@@ -617,6 +620,7 @@ impl Controller {
             self.player.state(Channel::Music),
             self.sendspin_streaming(),
             self.zigbee_flashing(),
+            self.enroll_active || self.enroll_phrase.is_some(),
         )
     }
 

@@ -217,7 +217,7 @@ fn level_db(pcm: &[i16]) -> f32 {
     let sum: f32 = pcm.iter().map(|&s| f32::from(s) * f32::from(s)).sum();
     #[allow(clippy::cast_precision_loss)]
     let mean = sum / pcm.len() as f32;
-    10.0 * mean.max(1.0).log10()
+    10.0 * mean.max(super::LOG_FLOOR).log10()
 }
 
 #[cfg(test)]
@@ -321,6 +321,19 @@ mod tests {
             quiet + 1 + 10,
             (PHRASE_MIN_MS * SAMPLE_RATE_MS).div_ceil(512)
         );
+    }
+
+    /// После #81 фраза приходит тише на «Microphone gain» (на Миди при 0 дБ — на 34 дБ): конец
+    /// фразы определяется там же, и цифровая тишина после тихой речи тоже пауза.
+    #[test]
+    fn phrase_end_does_not_depend_on_the_gain() {
+        let end = |speech: i16, pause: i16| {
+            let mut e = Endpointer::new();
+            assert_eq!(chunks_until_end(&mut e, speech, 30), None);
+            chunks_until_end(&mut e, pause, 100).expect("end")
+        };
+        assert_eq!(end(5000, 100), end(100, 2));
+        assert_eq!(end(5000, 0), end(8, 0));
     }
 
     #[test]
