@@ -1027,7 +1027,7 @@ impl Controller {
     }
 
     /// Законченный образец решит рабочий поток, незаконченный отбросится при следующем начале.
-    fn enroll_phrase_abort(&mut self) {
+    pub(super) fn enroll_phrase_abort(&mut self) {
         if self.enroll_phrase.take().is_none() {
             return;
         }
