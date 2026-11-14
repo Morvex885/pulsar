@@ -12,6 +12,7 @@
 |---|---|---|---|---|
 | Миди | `cucumber` | станция мейнтейнера | [station-midi](https://hackalice.me/devices/station-midi/) | [midi.md](midi.md) |
 | Лайт 2 | `plum`, `prune` | `plum` — станция мейнтейнера; `prune` — контрибьютор: [#57](https://github.com/Morvex885/pulsar/issues/57) | [station-lite2](https://hackalice.me/devices/station-lite2/) | [lite2.md](lite2.md) |
+| Лайт | `station-micro` | контрибьютор | [station-lite](https://hackalice.me/devices/station-lite/) | [lite.md](lite.md) |
 | Станция 2 | `station-midi` | контрибьютор: [#58](https://github.com/Morvex885/pulsar/pull/58) | [station-2](https://hackalice.me/devices/station-2/) | [station2.md](station2.md) |
 | Мини 2 | `station-mini2` | контрибьюторы: [#9](https://github.com/Morvex885/pulsar/pull/9), станция из [#38](https://github.com/Morvex885/pulsar/issues/38) | [station-mini2](https://hackalice.me/devices/station-mini2/) | [mini2.md](mini2.md) |
 | Мини 3 | `bergamot` | контрибьютор: [#30](https://github.com/Morvex885/pulsar/pull/30) | [station-mini3](https://hackalice.me/devices/station-mini3/) | [mini3.md](mini3.md) |
@@ -69,8 +70,8 @@ Wake word, командный спотер и эхоподавление раб�
   пресета; у `cucumber` и `plum` — 50 по отношению отсчётов выходов 9 и 6; AGC пресета выключен) —
   только звонки (`phone_calls.*.channel`), в `audiosender.availableChannels` его нет. Так в
   `quasar.cfg` system-разделов с пресетами VQE `cucumber` (Миди), `plum` (Лайт 2), `yandexmini`
-  (Мини), `yandexmini_2` (Мини 2), `yandexmidi` (Станция 2), а также `orion`, `mango` и
-  `yandexmicro` (pulsar их не поддерживает); `bergamot` и `pickle` не смотрелись.
+  (Мини), `yandexmini_2` (Мини 2), `yandexmidi` (Станция 2), `yandexmicro` (Лайт), а также
+  `orion` и `mango` (pulsar их не поддерживает); `bergamot` и `pickle` не смотрелись.
   Уровень `vqe_0` у моделей разный ([lite2.md, «Звук»](lite2.md#звук), [mini.md,
   «Звук»](mini.md#звук)); параметр `omniChannelGainCoefficientInVqe` есть только в
   `libyandex_evil.so` Мини. Усиливает ли сток `vqe_0` сам, неизвестно: перевод float → s16 в
@@ -113,6 +114,7 @@ alsa-lib на armhf-образах Миди версионированная (AL
 | Миди | ~974 МиБ | вики (MemTotal 997788 kB) |
 | Лайт 2, плата `plum` | ~237 МиБ | мейнтейнер |
 | Лайт 2, плата `prune` | ~238 МиБ, tmpfs ~119 МиБ | #57 (MemTotal 243512 kB) |
+| Лайт | ~238 МиБ, tmpfs ~119 МиБ | замер (MemTotal 243952 kB) |
 | Станция 2 | ~490 МиБ | вики (MemTotal 501664 kB) |
 | Мини 2 | ~238 МиБ | вики (MemTotal 243996 kB) |
 | Мини 3 | ~238 МиБ | вики (MemTotal 243908 kB) |

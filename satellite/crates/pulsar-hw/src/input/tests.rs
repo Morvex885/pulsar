@@ -128,6 +128,32 @@ async fn mute_key_toggles_once_per_press() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn mute_key_on_its_own_device() {
+    // Лайт: KEY_MUTE приходит с отдельного устройства-кнопки, а не с сенсорных кнопок.
+    let mut r = Rig::with_keys(KEY_ACTION, KEY_MUTE);
+    r.m.mute_is_switch = false;
+    r.feed(Dev::Mute, &key(KEY_MUTE, 1));
+    assert_eq!(r.events(), [InputEvent::MuteToggle]);
+    r.feed(Dev::Mute, &key(KEY_MUTE, 0));
+    assert_eq!(r.events(), []);
+    // Потерянные события у кнопки не восстанавливаются: состояние переключателя не запрашивается
+    // (Rig паникует на втором запросе, а здесь не должно быть ни одного).
+    r.sw = Err(io::ErrorKind::Unsupported.into());
+    r.feed(
+        Dev::Mute,
+        &[ev(EV_SYN, SYN_DROPPED, 0), ev(EV_SYN, SYN_REPORT, 0)],
+    );
+    assert_eq!(r.events(), []);
+    assert!(!r.m.muted.get());
+
+    // У переключателя (Миди и др.) его KEY_MUTE по-прежнему игнорируется.
+    let mut r = Rig::with_keys(KEY_ACTION, KEY_MUTE);
+    r.feed(Dev::Mute, &key(KEY_MUTE, 1));
+    r.feed(Dev::Mute, &key(KEY_MUTE, 0));
+    assert_eq!(r.events(), []);
+}
+
+#[tokio::test(start_paused = true)]
 async fn no_action_key_leaves_key_voicecommand_unhandled() {
     // The Mini: mute button only.
     let mut r = Rig::with_keys(0, KEY_MUTE);

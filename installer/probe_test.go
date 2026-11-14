@@ -22,6 +22,8 @@ func TestArchOfUsesAvailableUserlandABI(t *testing.T) {
 		{"plum stays armhf", "plum", []string{"aarch64", "armhf"}, "armhf"},
 		{"plum without its loader is skipped", "plum", []string{"aarch64"}, ""},
 		{"prune is armhf", "prune", []string{"aarch64", "armhf"}, "armhf"},
+		{"station-micro is armhf", "station-micro", []string{"aarch64", "armhf"}, "armhf"},
+		{"station-micro without its loader is skipped", "station-micro", []string{"aarch64"}, ""},
 		{"station-mini2 is armhf", "station-mini2", []string{"aarch64", "armhf"}, "armhf"},
 		{"station-mini2 without its loader is skipped", "station-mini2", []string{"aarch64"}, ""},
 		{"bergamot is armhf", "bergamot", []string{"aarch64", "armhf"}, "armhf"},
@@ -73,6 +75,8 @@ func TestStationCode(t *testing.T) {
 		// Лайт 2 на плате prune (#57): вариант платы перед кодовым именем.
 		{"yandex,prune-evt2\nyandex,prune\namlogic, axg", "prune", true},
 		{"yandex,prune-evt2\namlogic, axg", "prune-evt2", false},
+		// Лайт первого поколения: кодовое имя с дефисом, это не Лайт 2.
+		{"yandex,station-micro\namlogic, axg", "station-micro", true},
 		{"yandex,bergamot-evt1\nyandex,bergamot\namlogic, axg", "bergamot", true},
 		{"yandex,bergamot-evt1\namlogic, axg", "bergamot-evt1", false},
 		{"yandex,pickle-evt\nyandex,pickle\namlogic, a4", "pickle", true},

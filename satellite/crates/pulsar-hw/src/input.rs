@@ -6,7 +6,9 @@
 //! Мини 2: сенсорные кнопки "sar0_pad0", устройства-переключателя нет: фиксируемая линия
 //! отключения микрофонов — GPIO (`Model::mute_gpio`, низкий уровень = микрофоны выключены),
 //! опрос каждые 100 мс. Мини: клавиатура "adc_keypad" только с кнопкой отключения микрофонов без
-//! фиксации. У остальных коды кнопок и переключателя общие:
+//! фиксации. Лайт: сенсорные кнопки "sar0_pad0", кнопка отключения микрофонов без фиксации —
+//! отдельное устройство "gpio-keys-filter" (`Model::mute_key_input`, только KEY_MUTE, без EV_SW).
+//! У остальных коды кнопок и переключателя общие:
 //!
 //! сенсорные кнопки (ёмкостные, только EV_KEY; KEY bitmap Миди "40 0 0 0 0 0 0 0 c000000000000 0"):
 //!   Model::action_key (KEY_VOICECOMMAND 582) -> Action
@@ -113,8 +115,9 @@ pub fn spawn_input(
     let keys = (!model.keys_input.is_empty())
         .then(|| open_dev(model.keys_input, false))
         .flatten();
-    let mute = (!model.mute_input.is_empty())
-        .then(|| open_dev(model.mute_input, false))
+    let mute_name = mute_dev_name(model);
+    let mute = (!mute_name.is_empty())
+        .then(|| open_dev(mute_name, false))
         .flatten();
     let mute_gpio = if model.mute_gpio == 0 {
         None
@@ -127,8 +130,11 @@ pub fn spawn_input(
     let muted = Rc::new(Cell::new(false));
     let (tx, rx) = unbounded_channel();
     let mut m = Machine::new(Rc::clone(&muted), tx, model.action_key, model.mute_key);
+    m.mute_is_switch = !model.mute_input.is_empty();
     // The state the controller starts from: no event for it.
-    if let Some(fd) = &mute {
+    if m.mute_is_switch
+        && let Some(fd) = &mute
+    {
         m.read_mute_state(fd.get_ref().switch_state(), false);
     }
     if let Some(f) = &mute_gpio
@@ -136,7 +142,7 @@ pub fn spawn_input(
     {
         m.set_muted(v, false);
     }
-    if mute.is_some() || mute_gpio.is_some() {
+    if (m.mute_is_switch && mute.is_some()) || mute_gpio.is_some() {
         info!(
             "input: initial hardware mute {}",
             if muted.get() { "on" } else { "off" }
@@ -161,6 +167,16 @@ pub fn spawn_input(
         },
         rx,
     ))
+}
+
+/// Устройство в слоте «mute»: переключатель микрофонов (`Model::mute_input`) или, если его нет,
+/// отдельное устройство кнопки без фиксации (`Model::mute_key_input`); пусто — ни того, ни другого.
+fn mute_dev_name(model: &Model) -> &'static str {
+    if model.mute_input.is_empty() {
+        model.mute_key_input
+    } else {
+        model.mute_input
+    }
 }
 
 /// /dev/input/eventN of the device with the given name in a /proc/bus/input/devices listing.
@@ -286,6 +302,9 @@ struct Machine {
     action_key: u16,
     /// Momentary mic mute button of this model (`Model::mute_key`); 0: none.
     mute_key: u16,
+    /// Устройство в слоте «mute» — переключатель (EV_SW, состояние через EVIOCGSW); false —
+    /// кнопка без фиксации (`Model::mute_key_input`), у неё только нажатия `mute_key`.
+    mute_is_switch: bool,
     /// Press time; None = not pressed.
     action_down: Option<i64>,
     last_action_ms: Option<i64>,
@@ -322,6 +341,7 @@ impl Machine {
             tx,
             action_key,
             mute_key,
+            mute_is_switch: true,
             action_down: None,
             last_action_ms: None,
             action_long_sent: false,
@@ -544,7 +564,11 @@ impl Machine {
                     self.set_dropped(dev, false);
                     match dev {
                         Dev::Keys => self.resync_keys(key_state()),
-                        Dev::Mute => self.read_mute_state(switch_state(), true),
+                        Dev::Mute if self.mute_is_switch => {
+                            self.read_mute_state(switch_state(), true);
+                        }
+                        // Кнопка без фиксации: пропущенное нажатие не восстановить.
+                        Dev::Mute => {}
                     }
                 }
                 continue;
@@ -553,6 +577,15 @@ impl Machine {
                 continue;
             }
             if e.type_ == EV_KEY && dev == Dev::Keys {
+                self.on_key(e.code, e.value);
+            } else if e.type_ == EV_KEY
+                && dev == Dev::Mute
+                && !self.mute_is_switch
+                && self.mute_key != 0
+                && e.code == self.mute_key
+            {
+                // KEY_MUTE переключателя игнорируется (источник правды — EV_SW), а у отдельной
+                // кнопки без фиксации это и есть нажатие.
                 self.on_key(e.code, e.value);
             } else if e.type_ == EV_SW && e.code == SW_MUTE_DEVICE {
                 self.set_muted(e.value != 0, true);
@@ -601,10 +634,13 @@ impl Devices {
             self.keys = open_dev(self.model.keys_input, true);
             m.keys_dropped = false;
         }
-        if self.mute.is_none() && !self.model.mute_input.is_empty() {
-            self.mute = open_dev(self.model.mute_input, true);
+        let mute_name = mute_dev_name(self.model);
+        if self.mute.is_none() && !mute_name.is_empty() {
+            self.mute = open_dev(mute_name, true);
             m.mute_dropped = false;
-            if let Some(fd) = &self.mute {
+            if m.mute_is_switch
+                && let Some(fd) = &self.mute
+            {
                 m.read_mute_state(fd.get_ref().switch_state(), true);
             }
         }

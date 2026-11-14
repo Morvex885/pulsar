@@ -74,6 +74,9 @@ pub struct Model {
     /// Key code of a momentary microphone-mute button on `keys_input` that toggles the software
     /// mute (the Mini's KEY_MUTE 113); 0: none.
     pub mute_key: u16,
+    /// Отдельное evdev-устройство, на котором приходит `mute_key` (у Лайт кнопка микрофона —
+    /// своё устройство, не сенсорные кнопки); пусто — `mute_key` приходит с `keys_input`.
+    pub mute_key_input: &'static str,
     /// Earcons, relative to /system/vendor/quasar/sounds/.
     pub error_sound: &'static str,
     pub wake_sound: &'static str,
@@ -244,6 +247,7 @@ static MIDI: Model = Model {
     mute_gpio: 0,
     action_key: 582,
     mute_key: 0,
+    mute_key_input: "",
     error_sound: "ru-RU/vins_error.wav",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -306,6 +310,7 @@ static LITE2: Model = Model {
     mute_gpio: 0,
     action_key: 582,
     mute_key: 0,
+    mute_key_input: "",
     error_sound: "ru-RU/playback_error.mp3",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -335,7 +340,7 @@ static PRUNE: Model = Model {
     ..LITE2
 };
 
-// set_volume.sh у Мини 2 и (по вики) у Мини 3 Про и Станции 2 — `amixer set 'Master' <percent>%`:
+// set_volume.sh у Мини 2, Лайт и (по вики) у Мини 3 Про и Станции 2 — `amixer set 'Master' <percent>%`:
 // raw — процент от 255, без сдвига в дБ и без нижней ступени.
 const PERCENT_VOLUME: &[VolumePoint] = &[
     VolumePoint { level: 0, raw: 0 },
@@ -344,6 +349,68 @@ const PERCENT_VOLUME: &[VolumePoint] = &[
         raw: 255,
     },
 ];
+
+/// Станция Лайт (первое поколение): см. docs/lite.md.
+static LITE: Model = Model {
+    codename: "station-micro",
+    host_prefix: "yandex-lite-",
+    friendly_name: "Яндекс Станция Лайт",
+    model_name: "Yandex Station Lite",
+    capture_pcm: "default",
+    capture_rate: 48000,
+    capture_channels: 6,
+    capture_format: CaptureFormat::S16,
+    mic_channels: &[0, 1, 2, 3],
+    spk_channels: &[4, 5],
+    vqe_preset: "yandexmicro",
+    led_layout: LedLayout::Ring,
+    led_prefix: "micro",
+    // Только sysfs: см. docs/lite.md, «Светодиоды».
+    ring: LedStrip {
+        count: 3,
+        first_index: 1,
+        fb_dev: "",
+        fb_name: "",
+        trigger: "",
+        sysfs_kind: "ring",
+        i2c_dev: "",
+        i2c_addr: 0,
+    },
+    logo: NO_STRIP,
+    clock_dir: "",
+    clock_seg_base: 'A',
+    clock_pos_base: 0,
+    clock_colon: &[],
+    clock_aux: &[],
+    clock_center: "",
+    clock_chip_current: false,
+    has_clock: false,
+    keys_input: "sar0_pad0",
+    mute_input: "",
+    mute_gpio: 0,
+    action_key: 582,
+    // Кнопка микрофона без фиксации на своём устройстве: см. docs/lite.md, «Кнопки и микрофоны».
+    mute_key: 113,
+    mute_key_input: "gpio-keys-filter",
+    // Earcons в .opus, как у Мини 2.
+    error_sound: "ru-RU/playback_error.opus",
+    wake_sound: "common/spotter_start.opus",
+    cancel_sound: "common/spotter_cancel.opus",
+    timer_sound: "common/timer.opus",
+    volume_sound: "common/volume_sound.opus",
+    playback_pcm: "default",
+    master_pcm: "default",
+    alsa_config: "",
+    alsa_lib: "",
+    software_volume: false,
+    amp_enable_paths: &[],
+    volume_map: PERCENT_VOLUME,
+    volume_min_step: false,
+    has_lux: false,
+    zigbee_tty: "",
+    zigbee_reset: "",
+    zigbee_boot: "",
+};
 
 /// Станция Мини 2: см. docs/mini2.md.
 static MINI2: Model = Model {
@@ -385,6 +452,7 @@ static MINI2: Model = Model {
     mute_gpio: 414,
     action_key: 582,
     mute_key: 0,
+    mute_key_input: "",
     // Earcons в .opus: см. docs/mini2.md, «Звук».
     error_sound: "ru-RU/playback_error.opus",
     wake_sound: "common/spotter_start.opus",
@@ -447,6 +515,7 @@ static MINI: Model = Model {
     // The retail Mini has no TALK pad and no volume keys: adc_keypad sends only KEY_MUTE.
     action_key: 0,
     mute_key: 113,
+    mute_key_input: "",
     error_sound: "ru-RU/playback_error.mp3",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -521,6 +590,7 @@ static MINI3: Model = Model {
     mute_gpio: 0,
     action_key: 582,
     mute_key: 0,
+    mute_key_input: "",
     error_sound: "ru-RU/playback_error.mp3",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -590,6 +660,7 @@ static MINI3PRO: Model = Model {
     mute_gpio: 0,
     action_key: 582,
     mute_key: 0,
+    mute_key_input: "",
     error_sound: "ru-RU/playback_error.mp3",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -650,6 +721,7 @@ static STATION2: Model = Model {
     mute_gpio: 0,
     action_key: 582,
     mute_key: 0,
+    mute_key_input: "",
     error_sound: "ru-RU/playback_error.mp3",
     wake_sound: "common/spotter_start.mp3",
     cancel_sound: "common/spotter_cancel.mp3",
@@ -750,6 +822,7 @@ pub fn model_from_compatible(raw: &[u8]) -> Option<&'static Model> {
         b"yandex,cucumber" => Some(&MIDI),
         b"yandex,plum" => Some(&LITE2),
         b"yandex,prune" => Some(&PRUNE),
+        b"yandex,station-micro" => Some(&LITE),
         b"yandex,station-mini2" => Some(&MINI2),
         b"yandex,bergamot" => Some(&MINI3),
         b"yandex,pickle" => Some(&MINI3PRO),
@@ -811,6 +884,29 @@ mod tests {
         assert_eq!(m.ring.trigger, "led_ring_fb");
         assert_eq!(m.host_prefix, "yandex-lite2-");
         assert!(model_from_compatible(b"yandex,prune-evt2\0amlogic, axg\0").is_none());
+    }
+
+    #[test]
+    fn station_micro_is_lite() {
+        let m = model_from_compatible(b"yandex,station-micro\0amlogic, axg\0").unwrap();
+        assert_eq!(m.codename, "station-micro");
+        assert_eq!(m.host_prefix, "yandex-lite-");
+        assert_eq!(m.vqe_preset, "yandexmicro");
+        // Захват — склейка multi в /etc/asound.conf прошивки: 4 микрофона, затем 2 референса.
+        assert_eq!((m.capture_pcm, m.capture_channels), ("default", 6));
+        assert_eq!(m.mic_channels, &[0, 1, 2, 3]);
+        assert_eq!(m.spk_channels, &[4, 5]);
+        assert_eq!((m.ring.count, m.ring.first_index), (3, 1));
+        // Кольцо — только sysfs: стоковый maind тоже не включает led_ring_fb.
+        assert_eq!((m.ring.fb_dev, m.ring.trigger), ("", ""));
+        assert_eq!(m.logo.count, 0);
+        assert!(!m.has_clock && !m.has_lux && !m.volume_min_step);
+        // Кнопка микрофона — KEY_MUTE на своём устройстве, переключателя нет.
+        assert_eq!((m.action_key, m.mute_key), (582, 113));
+        assert_eq!(m.mute_key_input, "gpio-keys-filter");
+        assert_eq!((m.mute_input, m.mute_gpio), ("", 0));
+        assert!(m.has_button_events());
+        assert!(model_from_compatible(b"yandex,station-micro-evt\0amlogic, axg\0").is_none());
     }
 
     #[test]
@@ -897,7 +993,7 @@ mod tests {
     fn master_pcm_exactly_where_volume_is_hardware() {
         // Без master_pcm у модели с аппаратной громкостью Mixer не создаст регулятор Master.
         for m in [
-            &MIDI, &LITE2, &PRUNE, &MINI2, &MINI, &MINI3, &MINI3PRO, &STATION2,
+            &MIDI, &LITE2, &PRUNE, &LITE, &MINI2, &MINI, &MINI3, &MINI3PRO, &STATION2,
         ] {
             assert_eq!(m.master_pcm.is_empty(), m.software_volume, "{}", m.codename);
         }
