@@ -99,16 +99,18 @@ pub struct InputHandle {
 }
 
 impl InputHandle {
-    /// State of the mute switch: read at spawn (without a `Mute` event), then kept by the
-    /// actor before each `Mute` event and on every reopen.
+    /// Состояние переключателя микрофонов: читается при старте (без события `Mute`), затем актор
+    /// обновляет его перед каждым `Mute` и при переоткрытии. Без переключателя (Мини, Лайт —
+    /// кнопка без фиксации) всегда false.
     pub fn hw_muted(&self) -> bool {
         self.muted.get()
     }
 }
 
-/// Opens the touch keys (`Model::keys_input`) and the mute switch (`Model::mute_input`, or the
-/// GPIO `Model::mute_gpio`); Err when none opened. Missing or vanished devices are looked up
-/// again every 3 s.
+/// Открывает сенсорные кнопки (`Model::keys_input`) и источник отключения микрофонов:
+/// переключатель (`Model::mute_input` или GPIO `Model::mute_gpio`) либо отдельное устройство
+/// кнопки без фиксации (`Model::mute_key_input`); Err, если не открылось ничего. Пропавшие
+/// устройства ищутся заново каждые 3 с.
 pub fn spawn_input(
     model: &'static Model,
 ) -> Result<(InputHandle, UnboundedReceiver<InputEvent>), String> {
@@ -130,7 +132,7 @@ pub fn spawn_input(
     let muted = Rc::new(Cell::new(false));
     let (tx, rx) = unbounded_channel();
     let mut m = Machine::new(Rc::clone(&muted), tx, model.action_key, model.mute_key);
-    m.mute_is_switch = !model.mute_input.is_empty();
+    m.mute_is_switch = mute_dev_is_switch(model);
     // The state the controller starts from: no event for it.
     if m.mute_is_switch
         && let Some(fd) = &mute
@@ -177,6 +179,11 @@ fn mute_dev_name(model: &Model) -> &'static str {
     } else {
         model.mute_input
     }
+}
+
+/// Устройство в слоте «mute» — переключатель с EV_SW (иначе — кнопка без фиксации или ничего).
+fn mute_dev_is_switch(model: &Model) -> bool {
+    !model.mute_input.is_empty()
 }
 
 /// /dev/input/eventN of the device with the given name in a /proc/bus/input/devices listing.
@@ -587,7 +594,7 @@ impl Machine {
                 // KEY_MUTE переключателя игнорируется (источник правды — EV_SW), а у отдельной
                 // кнопки без фиксации это и есть нажатие.
                 self.on_key(e.code, e.value);
-            } else if e.type_ == EV_SW && e.code == SW_MUTE_DEVICE {
+            } else if e.type_ == EV_SW && e.code == SW_MUTE_DEVICE && self.mute_is_switch {
                 self.set_muted(e.value != 0, true);
             }
         }

@@ -133,6 +133,7 @@ fn percent_curve_has_no_lowest_step() {
     // any volume of a two-point map full volume).
     for c in [
         &b"yandex,station-mini2\0"[..],
+        b"yandex,station-micro\0",
         b"yandex,pickle\0",
         b"yandex,station-midi\0",
     ] {

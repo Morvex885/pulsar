@@ -2,6 +2,15 @@ package main
 
 import "testing"
 
+func TestLiteModel(t *testing.T) {
+	if got := modelName("station-micro"); got != "Yandex Station Lite" {
+		t.Fatalf("modelName(station-micro) = %q", got)
+	}
+	if hasZigbee("station-micro") {
+		t.Fatal("hasZigbee(station-micro) = true")
+	}
+}
+
 func TestMiniModel(t *testing.T) {
 	if got := modelName("yandexmini"); got != "Yandex Station Mini" {
 		t.Fatalf("modelName(yandexmini) = %q", got)

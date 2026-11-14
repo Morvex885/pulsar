@@ -136,12 +136,20 @@ async fn mute_key_on_its_own_device() {
     assert_eq!(r.events(), [InputEvent::MuteToggle]);
     r.feed(Dev::Mute, &key(KEY_MUTE, 0));
     assert_eq!(r.events(), []);
-    // Потерянные события у кнопки не восстанавливаются: состояние переключателя не запрашивается
-    // (Rig паникует на втором запросе, а здесь не должно быть ни одного).
-    r.sw = Err(io::ErrorKind::Unsupported.into());
+    // Потерянные события у кнопки не восстанавливаются: состояние переключателя не запрашивается.
+    // Rig отдал бы «микрофоны выключены» (бит SW_MUTE_DEVICE): запрос включил бы mute и послал
+    // событие Mute.
+    let mut sw = [0u8; 8];
+    sw[usize::from(SW_MUTE_DEVICE / 8)] |= 1 << (SW_MUTE_DEVICE % 8);
+    r.sw = Ok(sw);
     r.feed(
         Dev::Mute,
         &[ev(EV_SYN, SYN_DROPPED, 0), ev(EV_SYN, SYN_REPORT, 0)],
+    );
+    // EV_SW с устройства-кнопки тоже не источник состояния.
+    r.feed(
+        Dev::Mute,
+        &[ev(EV_SW, SW_MUTE_DEVICE, 1), ev(EV_SYN, SYN_REPORT, 0)],
     );
     assert_eq!(r.events(), []);
     assert!(!r.m.muted.get());
@@ -151,6 +159,23 @@ async fn mute_key_on_its_own_device() {
     r.feed(Dev::Mute, &key(KEY_MUTE, 1));
     r.feed(Dev::Mute, &key(KEY_MUTE, 0));
     assert_eq!(r.events(), []);
+}
+
+#[test]
+fn mute_slot_device_per_model() {
+    use pulsar_core::model::model_from_compatible;
+    // Лайт: в слоте «mute» — отдельная кнопка без фиксации, не переключатель.
+    let lite = model_from_compatible(b"yandex,station-micro\0").unwrap();
+    assert_eq!(mute_dev_name(lite), "gpio-keys-filter");
+    assert!(!mute_dev_is_switch(lite));
+    // Миди: переключатель, как и раньше.
+    let midi = model_from_compatible(b"yandex,cucumber\0").unwrap();
+    assert_eq!(mute_dev_name(midi), "mute");
+    assert!(mute_dev_is_switch(midi));
+    // Мини 2: ни переключателя-устройства, ни отдельной кнопки (линия GPIO).
+    let mini2 = model_from_compatible(b"yandex,station-mini2\0").unwrap();
+    assert_eq!(mute_dev_name(mini2), "");
+    assert!(!mute_dev_is_switch(mini2));
 }
 
 #[tokio::test(start_paused = true)]

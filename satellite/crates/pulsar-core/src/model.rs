@@ -71,8 +71,9 @@ pub struct Model {
     pub mute_gpio: u32,
     /// Key code of the action/TALK button (KEY_VOICECOMMAND 582); 0: no action button.
     pub action_key: u16,
-    /// Key code of a momentary microphone-mute button on `keys_input` that toggles the software
-    /// mute (the Mini's KEY_MUTE 113); 0: none.
+    /// Код кнопки отключения микрофонов без фиксации, которая переключает программное отключение
+    /// (KEY_MUTE 113 у Мини и Лайт); приходит с `keys_input` или, если задано, с `mute_key_input`;
+    /// 0 — кнопки нет.
     pub mute_key: u16,
     /// Отдельное evdev-устройство, на котором приходит `mute_key` (у Лайт кнопка микрофона —
     /// своё устройство, не сенсорные кнопки); пусто — `mute_key` приходит с `keys_input`.
@@ -153,7 +154,7 @@ impl CaptureFormat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LedStrip {
     pub count: i32,
-    /// Нумерация sysfs начинается с 0 (Миди, Мини 3, Мини 3 Про) или с 1 (Лайт 2, Мини 2).
+    /// Нумерация sysfs начинается с 0 (Миди, Мини 3, Мини 3 Про) или с 1 (Лайт, Лайт 2, Мини 2).
     pub first_index: i32,
     /// "/dev/fb0"; "" = none: sysfs LEDs only.
     pub fb_dev: &'static str,
@@ -365,7 +366,7 @@ static LITE: Model = Model {
     vqe_preset: "yandexmicro",
     led_layout: LedLayout::Ring,
     led_prefix: "micro",
-    // Только sysfs: см. docs/lite.md, «Светодиоды».
+    // Только sysfs: см. docs/lite.md, «Светодиоды и часы».
     ring: LedStrip {
         count: 3,
         first_index: 1,
@@ -996,6 +997,21 @@ mod tests {
             &MIDI, &LITE2, &PRUNE, &LITE, &MINI2, &MINI, &MINI3, &MINI3PRO, &STATION2,
         ] {
             assert_eq!(m.master_pcm.is_empty(), m.software_volume, "{}", m.codename);
+        }
+    }
+
+    #[test]
+    fn mute_key_input_only_with_a_mute_key_and_no_switch() {
+        // Отдельное устройство кнопки нужно только кнопке без фиксации и только без переключателя:
+        // при заданном mute_input оно молча не открылось бы, а без mute_key не делало бы ничего.
+        for m in [
+            &MIDI, &LITE2, &PRUNE, &LITE, &MINI2, &MINI, &MINI3, &MINI3PRO, &STATION2,
+        ] {
+            assert!(
+                m.mute_key_input.is_empty() || (m.mute_input.is_empty() && m.mute_key != 0),
+                "{}",
+                m.codename
+            );
         }
     }
 
