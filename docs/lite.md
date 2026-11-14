@@ -1,7 +1,8 @@
 # Лайт (`station-micro`)
 
 Станция первого поколения (devicetree `yandex,station-micro`, `deviceType` в `quasar.cfg` —
-`yandexmicro`). Данные контрибьютора, не перепроверены мейнтейнером; замеры на прошивке
+`yandexmicro`). Данные контрибьютора, не перепроверены: PR
+[#84](https://github.com/Morvex885/pulsar/pull/84) (Stalker-4x4); замеры на прошивке
 `0.369.1.46.4778262442.20261013.297`. Железо — [вики](https://hackalice.me/devices/station-lite/);
 здесь только то, чего на вики нет ([AGENTS.md, «Документация»](../AGENTS.md#документация)).
 

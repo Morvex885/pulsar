@@ -12,7 +12,7 @@
 |---|---|---|---|---|
 | Миди | `cucumber` | станция мейнтейнера | [station-midi](https://hackalice.me/devices/station-midi/) | [midi.md](midi.md) |
 | Лайт 2 | `plum`, `prune` | `plum` — станция мейнтейнера; `prune` — контрибьютор: [#57](https://github.com/Morvex885/pulsar/issues/57) | [station-lite2](https://hackalice.me/devices/station-lite2/) | [lite2.md](lite2.md) |
-| Лайт | `station-micro` | контрибьютор | [station-lite](https://hackalice.me/devices/station-lite/) | [lite.md](lite.md) |
+| Лайт | `station-micro` | контрибьютор: [#84](https://github.com/Morvex885/pulsar/pull/84) | [station-lite](https://hackalice.me/devices/station-lite/) | [lite.md](lite.md) |
 | Станция 2 | `station-midi` | контрибьютор: [#58](https://github.com/Morvex885/pulsar/pull/58) | [station-2](https://hackalice.me/devices/station-2/) | [station2.md](station2.md) |
 | Мини 2 | `station-mini2` | контрибьюторы: [#9](https://github.com/Morvex885/pulsar/pull/9), станция из [#38](https://github.com/Morvex885/pulsar/issues/38) | [station-mini2](https://hackalice.me/devices/station-mini2/) | [mini2.md](mini2.md) |
 | Мини 3 | `bergamot` | контрибьютор: [#30](https://github.com/Morvex885/pulsar/pull/30) | [station-mini3](https://hackalice.me/devices/station-mini3/) | [mini3.md](mini3.md) |
