@@ -14,8 +14,8 @@ pub enum LedLayout {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Model {
-    /// Кодовое имя из devicetree: "cucumber", "plum", "prune", "station-mini2", "bergamot",
-    /// "pickle", "yandexmini", "station-midi".
+    /// Кодовое имя из devicetree: "cucumber", "plum", "prune", "station-micro", "station-mini2",
+    /// "bergamot", "pickle", "yandexmini", "station-midi".
     pub codename: &'static str,
     /// ESPHome node name prefix; the MAC suffix is appended.
     pub host_prefix: &'static str,
@@ -393,7 +393,7 @@ static LITE: Model = Model {
     // Кнопка микрофона без фиксации на своём устройстве: см. docs/lite.md, «Кнопки и микрофоны».
     mute_key: 113,
     mute_key_input: "gpio-keys-filter",
-    // Earcons в .opus, как у Мини 2.
+    // Earcons в .opus: см. docs/lite.md, «Звук».
     error_sound: "ru-RU/playback_error.opus",
     wake_sound: "common/spotter_start.opus",
     cancel_sound: "common/spotter_cancel.opus",
