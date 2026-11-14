@@ -210,7 +210,7 @@ impl Endpointer {
     }
 }
 
-fn level_db(pcm: &[i16]) -> f32 {
+pub(super) fn level_db(pcm: &[i16]) -> f32 {
     if pcm.is_empty() {
         return f32::NEG_INFINITY;
     }

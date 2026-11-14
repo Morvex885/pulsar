@@ -57,6 +57,11 @@ const EARLY_MIN_SCORE: f32 = 0.75;
 const EARLY_MIN_LEAD: f32 = 0.10;
 // Предел звука одной реплики: 30 с, дальше звук не копится.
 const MAX_SAMPLES: usize = 30 * 16000;
+// VAD из HA объявляет конец речи после своей паузы, и текст уходит агенту через 150-250 мс; итог,
+// посчитанный только тогда, опаздывал к агенту на 40-100 мс. Поэтому итог считаем уже на паузе
+// в речи: тише пика на столько дБ и дольше стольких мс. Пауза короче паузы VAD из HA.
+const PAUSE_RANGE_DB: f32 = 20.0;
+const PAUSE_SAMPLES: usize = 300 * 16;
 
 /// Логарифмы мел-энергий по кадрам и энергия каждого кадра в дБ.
 #[derive(Debug, PartialEq)]
@@ -340,6 +345,47 @@ impl EarlyCheck {
     }
 }
 
+/// Пауза в речи по громкости: на ней итог считается заранее.
+struct PauseCheck {
+    peak_db: f32,
+    quiet_samples: usize,
+    /// Итог по этой паузе уже посчитан; речь после паузы снимает флаг.
+    settled: bool,
+}
+
+impl PauseCheck {
+    fn new() -> PauseCheck {
+        PauseCheck {
+            peak_db: f32::NEG_INFINITY,
+            quiet_samples: 0,
+            settled: false,
+        }
+    }
+
+    /// Следующий кусок звука; true — началась пауза и пора посчитать итог.
+    fn feed(&mut self, pcm: &[i16]) -> bool {
+        let db = enroll::level_db(pcm);
+        self.peak_db = self.peak_db.max(db);
+        if db >= self.peak_db - PAUSE_RANGE_DB {
+            self.quiet_samples = 0;
+            self.settled = false;
+            return false;
+        }
+        self.quiet_samples += pcm.len();
+        if self.settled || self.quiet_samples < PAUSE_SAMPLES {
+            return false;
+        }
+        self.settled = true;
+        true
+    }
+
+    /// Паузу не засчитывать: следующий тихий кусок снова её начнёт. Всегда false.
+    fn reopen(&mut self) -> bool {
+        self.settled = false;
+        false
+    }
+}
+
 enum Cmd {
     /// Номер реплики и образец ли она для записи голоса.
     Begin(u64, bool),
@@ -534,6 +580,18 @@ fn forget_voice(store: &Path, gallery: &mut Gallery, name: &str) -> bool {
     true
 }
 
+/// Кто говорит в `pcm`, и строка с оценками для журнала.
+fn identify(embedder: &mut Embedder, gallery: &Gallery, pcm: &[i16]) -> (Option<Match>, String) {
+    match embedder.embed(pcm) {
+        Ok(Some(emb)) => gallery.identify(&emb),
+        Ok(None) => (None, "too little speech".to_owned()),
+        Err(e) => {
+            warn!("speaker: {e}");
+            (None, "too little speech".to_owned())
+        }
+    }
+}
+
 fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) {
     let mut gallery = Gallery::load(store);
     let mut embedder = match Embedder::open() {
@@ -552,6 +610,7 @@ fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) 
     let mut active: Option<(u64, bool)> = None;
     let mut pcm: Vec<i16> = Vec::new();
     let mut early = EarlyCheck::new();
+    let mut pause = PauseCheck::new();
     let mut last = String::new();
     let _ = tx.send(SpeakerEvent::Status(status_text(&gallery, None, &last)));
     let _ = tx.send(view(None, EnrollNote::None, None));
@@ -561,12 +620,30 @@ fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) 
                 active = Some((seq, sample));
                 pcm.clear();
                 early = EarlyCheck::new();
+                pause = PauseCheck::new();
             }
             Cmd::Audio(chunk) => {
                 if active.is_some() && pcm.len() < MAX_SAMPLES {
                     pcm.extend_from_slice(&chunk);
                 }
+                // Пауза в первые 2 с — после активационного слова: команды в звуке ещё нет.
                 if let Some((seq, false)) = active
+                    && pause.feed(&chunk)
+                    && (pcm.len() >= EARLY_FIRST_SAMPLES || pause.reopen())
+                {
+                    // Итог на паузе: VAD_END из HA приходит, когда текст уже почти у агента.
+                    let (found, detail) = identify(&mut embedder, &gallery, &pcm);
+                    last.clone_from(&detail);
+                    let _ = tx.send(SpeakerEvent::Identified { seq, found, detail });
+                    let _ = tx.send(SpeakerEvent::Status(status_text(
+                        &gallery,
+                        enrolling.as_ref(),
+                        &last,
+                    )));
+                    continue;
+                }
+                if let Some((seq, false)) = active
+                    && !pause.settled
                     && early.due(pcm.len())
                     && let Ok(Some(emb)) = embedder.embed(&pcm)
                     && let Some(found) = early.update(gallery.identify(&emb).0)
@@ -586,6 +663,23 @@ fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) 
                     continue;
                 }
                 active = None;
+                // Итог уже ушёл на паузе, и речи после неё не было.
+                if !sample && pause.settled {
+                    pcm.clear();
+                    continue;
+                }
+                if !sample {
+                    let (found, detail) = identify(&mut embedder, &gallery, &pcm);
+                    pcm.clear();
+                    last.clone_from(&detail);
+                    let _ = tx.send(SpeakerEvent::Identified { seq, found, detail });
+                    let _ = tx.send(SpeakerEvent::Status(status_text(
+                        &gallery,
+                        enrolling.as_ref(),
+                        &last,
+                    )));
+                    continue;
+                }
                 let embedding = embedder.embed(&pcm);
                 pcm.clear();
                 let embedding = match embedding {
@@ -595,24 +689,15 @@ fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) 
                         None
                     }
                 };
-                if sample {
-                    // Запись могли отменить, пока шла фраза.
-                    if enrolling.is_none() {
-                        continue;
-                    }
-                    let (note, sound, detail) =
-                        enroll_sample(store, &mut gallery, &mut enrolling, embedding);
-                    info!("speaker: sample: {detail}");
-                    last = detail;
-                    let _ = tx.send(view(enrolling.as_ref(), note, Some(sound)));
-                } else {
-                    let (found, detail) = match &embedding {
-                        Some(emb) => gallery.identify(emb),
-                        None => (None, "too little speech".to_owned()),
-                    };
-                    last.clone_from(&detail);
-                    let _ = tx.send(SpeakerEvent::Identified { seq, found, detail });
+                // Запись могли отменить, пока шла фраза.
+                if enrolling.is_none() {
+                    continue;
                 }
+                let (note, sound, detail) =
+                    enroll_sample(store, &mut gallery, &mut enrolling, embedding);
+                info!("speaker: sample: {detail}");
+                last = detail;
+                let _ = tx.send(view(enrolling.as_ref(), note, Some(sound)));
                 let _ = tx.send(SpeakerEvent::Status(status_text(
                     &gallery,
                     enrolling.as_ref(),
@@ -777,6 +862,37 @@ mod tests {
             Some(Some("a".into()))
         );
         assert_eq!(name(e.update(None)), Some(None));
+    }
+
+    fn pause_after(p: &mut PauseCheck, amp: i16, max: usize) -> Option<usize> {
+        (0..max).find(|_| p.feed(&[amp; 512]))
+    }
+
+    #[test]
+    fn pause_settles_once_and_speech_reopens_it() {
+        let mut p = PauseCheck::new();
+        assert_eq!(pause_after(&mut p, 5000, 50), None);
+        let quiet = pause_after(&mut p, 5, 50).expect("pause");
+        assert_eq!(quiet + 1, PAUSE_SAMPLES.div_ceil(512));
+        assert!(p.settled);
+        // Тишина дальше итог не пересчитывает.
+        assert_eq!(pause_after(&mut p, 5, 50), None);
+        // Речь после паузы: итог снова считается на следующей паузе.
+        assert_eq!(pause_after(&mut p, 5000, 1), None);
+        assert!(!p.settled);
+        assert!(pause_after(&mut p, 5, 50).is_some());
+    }
+
+    /// Тихая речь (после #81) и громкая дают паузу на одном и том же куске.
+    #[test]
+    fn pause_does_not_depend_on_the_gain() {
+        let at = |speech: i16, quiet: i16| {
+            let mut p = PauseCheck::new();
+            assert_eq!(pause_after(&mut p, speech, 30), None);
+            pause_after(&mut p, quiet, 50).expect("pause")
+        };
+        assert_eq!(at(5000, 100), at(100, 2));
+        assert_eq!(at(5000, 0), at(8, 0));
     }
 
     fn tone(hz: f32, secs: f32, amp: f32) -> Vec<i16> {
