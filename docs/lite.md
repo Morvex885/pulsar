@@ -7,12 +7,13 @@
 
 ## Userland и хранилище
 
-- Стоковый init-скрипт — `S99quasar`; dropbear root-метода — `S99zdropbear` (`S99zpulsar`
-  сортируется между ними).
-- alsa-lib неверсионированная, как у Лайт 2: `alsa_abi_probe` — PASS.
+- dropbear root-метода — `S99zdropbear`: `S99zpulsar` сортируется между ним и стоковым скриптом
+  ([development.md, «Установка и станция»](development.md#установка-и-станция)).
 
 ## Звук
 
+- alsa-lib неверсионированная, как у Лайт 2: `alsa_abi_probe` — PASS.
+- В `libyandex_evil.so` есть `spotter_get_unhandled_nbytes` (`strings` по библиотеке станции).
 - Захват: PCM `default` прошивки (`/etc/asound.conf`: `asym` → `multi_capture`) — склейка двух
   устройств: 4 микрофона из `hw:0,1` (каналы 0, 2, 4, 6 из 8) и обратная связь динамика из
   `hw:0,0` (2 канала). Итого 6 каналов @ 48 кГц, S16: микрофоны — каналы 0–3, референс — 4–5. Так
