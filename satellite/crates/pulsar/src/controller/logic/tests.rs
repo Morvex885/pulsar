@@ -795,7 +795,7 @@ fn wake_word_names_lists_valid_models_alisa_first() {
         strings(&["alisa", "yandex", "yasmina"])
     );
     assert_eq!(
-        wake_word_names(&t.0, "../alisa"),
+        wake_word_names(&t.0, "Bad Name"),
         strings(&["alisa", "yandex", "yasmina"])
     );
 

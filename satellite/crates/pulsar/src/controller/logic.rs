@@ -619,7 +619,6 @@ pub fn wake_word_names(models: &Path, saved: &str) -> Vec<String> {
         Ok(rd) => rd,
         Err(e) => {
             warn!("cannot list activation models in {}: {e}", models.display());
-            out.sort_by(|a, b| (a != "alisa", a).cmp(&(b != "alisa", b)));
             return out;
         }
     };
