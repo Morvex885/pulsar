@@ -128,6 +128,57 @@ async fn mute_key_toggles_once_per_press() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn mute_key_on_its_own_device() {
+    // Лайт: KEY_MUTE приходит с отдельного устройства-кнопки, а не с сенсорных кнопок.
+    let mut r = Rig::with_keys(KEY_ACTION, KEY_MUTE);
+    r.m.mute_is_switch = false;
+    r.feed(Dev::Mute, &key(KEY_MUTE, 1));
+    assert_eq!(r.events(), [InputEvent::MuteToggle]);
+    r.feed(Dev::Mute, &key(KEY_MUTE, 0));
+    assert_eq!(r.events(), []);
+    // Потерянные события у кнопки не восстанавливаются: состояние переключателя не запрашивается.
+    // Rig отдал бы «микрофоны выключены» (бит SW_MUTE_DEVICE): запрос включил бы mute и послал
+    // событие Mute.
+    let mut sw = [0u8; 8];
+    sw[usize::from(SW_MUTE_DEVICE / 8)] |= 1 << (SW_MUTE_DEVICE % 8);
+    r.sw = Ok(sw);
+    r.feed(
+        Dev::Mute,
+        &[ev(EV_SYN, SYN_DROPPED, 0), ev(EV_SYN, SYN_REPORT, 0)],
+    );
+    // EV_SW с устройства-кнопки тоже не источник состояния.
+    r.feed(
+        Dev::Mute,
+        &[ev(EV_SW, SW_MUTE_DEVICE, 1), ev(EV_SYN, SYN_REPORT, 0)],
+    );
+    assert_eq!(r.events(), []);
+    assert!(!r.m.muted.get());
+
+    // У переключателя (Миди и др.) его KEY_MUTE по-прежнему игнорируется.
+    let mut r = Rig::with_keys(KEY_ACTION, KEY_MUTE);
+    r.feed(Dev::Mute, &key(KEY_MUTE, 1));
+    r.feed(Dev::Mute, &key(KEY_MUTE, 0));
+    assert_eq!(r.events(), []);
+}
+
+#[test]
+fn mute_slot_device_per_model() {
+    use pulsar_core::model::model_from_compatible;
+    // Лайт: в слоте «mute» — отдельная кнопка без фиксации, не переключатель.
+    let lite = model_from_compatible(b"yandex,station-micro\0").unwrap();
+    assert_eq!(mute_dev_name(lite), "gpio-keys-filter");
+    assert!(!mute_dev_is_switch(lite));
+    // Миди: переключатель, как и раньше.
+    let midi = model_from_compatible(b"yandex,cucumber\0").unwrap();
+    assert_eq!(mute_dev_name(midi), "mute");
+    assert!(mute_dev_is_switch(midi));
+    // Мини 2: ни переключателя-устройства, ни отдельной кнопки (линия GPIO).
+    let mini2 = model_from_compatible(b"yandex,station-mini2\0").unwrap();
+    assert_eq!(mute_dev_name(mini2), "");
+    assert!(!mute_dev_is_switch(mini2));
+}
+
+#[tokio::test(start_paused = true)]
 async fn no_action_key_leaves_key_voicecommand_unhandled() {
     // The Mini: mute button only.
     let mut r = Rig::with_keys(0, KEY_MUTE);

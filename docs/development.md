@@ -108,10 +108,10 @@ userspace, действительно встреченного на этой м�
   tmpfs: [hardware.md, «RAM и tmpfs»](hardware.md#ram-и-tmpfs).
 
 **Цепочка загрузки:** busybox init → `rcS` (запускает `/etc/init.d/S??*` по порядку с `start` и
-ждёт каждый) → скрипт прошивки: `S97quasar` (Миди), `S99quasar` (Лайт 2; Мини 2 и Станция 2 — по
-данным контрибьюторов), `S99onboot.sh` (Мини, по данным контрибьюторов) → `onboot.sh` (adbd через
-`activate_adb.sh check`, quasar в фоне; возвращается) → `S99zpulsar` → `boot.sh` в фоне →
-ожидание quasar, `/system/vendor/quasar/q stop` (`q` есть на Лайт 2; Мини 2 и Станция 2 — по
+ждёт каждый) → скрипт прошивки: `S97quasar` (Миди), `S99quasar` (Лайт 2; Лайт, Мини 2 и Станция 2
+— по данным контрибьюторов), `S99onboot.sh` (Мини, по данным контрибьюторов) → `onboot.sh` (adbd
+через `activate_adb.sh check`, quasar в фоне; возвращается) → `S99zpulsar` → `boot.sh` в фоне →
+ожидание quasar, `/system/vendor/quasar/q stop` (`q` есть на Лайт 2; Лайт, Мини 2 и Станция 2 — по
 данным контрибьюторов) → `supervise.sh`. Мини 3 (`bergamot`) и Мини 3 Про (`pickle`) поддерживают
 `boot.sh` и установщик, но их скрипты прошивки не записаны. Условия, при которых `boot.sh` не
 трогает стек Яндекса, — в его заголовке и комментариях. Root через AliceBridge добавляет в
