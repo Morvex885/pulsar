@@ -252,8 +252,9 @@ pub fn stt_stop(text: &str) -> bool {
     words.peek().is_some() && words.all(|w| command_of(w) == Some(VoiceCommand::Stop))
 }
 
-/// Окно только диалога, открытого wake word: HA может завершить короткую фразу
-/// «Алиса, громче» (PROCESSING) раньше подтверждения командного спотера.
+/// Окно после wake word, открывшего этот диалог (у диалога от кнопки, продолжения и HA окна нет).
+/// PROCESSING входит: HA может завершить короткую фразу «Алиса, громче» раньше подтверждения
+/// командного спотера.
 pub fn after_wake(phase: Phase, wake_dialog: bool, now: i64, listen_started_ms: i64) -> bool {
     wake_dialog
         && matches!(phase, Phase::Listening | Phase::Processing)
