@@ -703,3 +703,17 @@ fn names() {
     assert_eq!(time_formats(), ["24h", "12h"]);
     assert_eq!(face_names().len(), 19);
 }
+
+#[test]
+fn colon_stays_lit_when_blink_is_off() {
+    let mut l = Layers::new();
+    let second_half = || Wall {
+        first_half: false,
+        ..wall()
+    };
+    assert_eq!(l.compose(NOW, wall).0.colon, 255);
+    assert_eq!(l.compose(NOW + 500, second_half).0.colon, 0);
+    l.colon_blink = false;
+    assert_eq!(l.compose(NOW, wall).0, time_frame());
+    assert_eq!(l.compose(NOW + 500, second_half).0, time_frame());
+}

@@ -362,6 +362,14 @@ fn ducking() {
 }
 
 #[test]
+fn wake_cue_table() {
+    assert_eq!(wake_cue(false, true), WakeCue::Keep);
+    assert_eq!(wake_cue(false, false), WakeCue::Keep);
+    assert_eq!(wake_cue(true, true), WakeCue::Sound);
+    assert_eq!(wake_cue(true, false), WakeCue::Cut);
+}
+
+#[test]
 fn volume_click_gating() {
     let click =
         |before, after, phase| want_volume_click(before, after, phase, false, false, false, false);

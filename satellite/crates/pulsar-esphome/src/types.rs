@@ -273,6 +273,8 @@ pub enum SwitchId {
     VoiceIndication = 5,
     ClockAutoBrightness = 7,
     ClockSpokenNumbers = 8,
+    WakeSound = 9,
+    ClockColonBlink = 10,
 }
 
 #[repr(u32)]

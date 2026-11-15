@@ -43,6 +43,8 @@ pub struct Settings {
     pub clock_brightness: f32,
     /// Clock level follows the light sensor, with `clock_brightness` as the ceiling.
     pub clock_auto_brightness: bool,
+    /// Двоеточие времени мигает раз в секунду; выключено — горит постоянно.
+    pub clock_colon_blink: bool,
     /// Числа из ответа голосового ассистента на часах («Clock spoken numbers»).
     pub clock_spoken_numbers: bool,
     /// Clock text scroll step.
@@ -66,6 +68,8 @@ pub struct Settings {
     pub led_speed: f32,
     /// Listening / thinking / speaking shown on the ring and the clock.
     pub voice_indication: bool,
+    /// Звук начала прослушивания: после wake word и по кнопке действия.
+    pub wake_sound: bool,
     /// Сколько ждать начала речи в follow-up-реплике, с; 0 — не продолжать разговор.
     pub followup_duration_s: u32,
     /// Сдвиг начала звука запроса от точки хита спотера wake word, мс («Command start offset»).
@@ -96,6 +100,7 @@ impl Default for Settings {
             clock_on: true,
             clock_brightness: 1.0,
             clock_auto_brightness: true,
+            clock_colon_blink: true,
             clock_spoken_numbers: false,
             clock_scroll_ms: 400,
             light: LightState::default(),
@@ -108,6 +113,7 @@ impl Default for Settings {
             clock_format: "24h".into(),
             led_speed: 1.0,
             voice_indication: true,
+            wake_sound: true,
             followup_duration_s: 10,
             // Подбор 2026-11-04 (Миди, 35 фраз «Алиса»/«Яндекс», STT faster-whisper): хвост
             // «Алисы» («Так,» перед командой) — до +20 мс, с +30 мс отрезается начало команды
@@ -163,6 +169,7 @@ impl Settings {
                 b"clock_on" => self.clock_on = on,
                 b"clock_brightness" => self.clock_brightness = fv,
                 b"clock_auto_brightness" => self.clock_auto_brightness = on,
+                b"clock_colon_blink" => self.clock_colon_blink = on,
                 b"clock_spoken_numbers" => self.clock_spoken_numbers = on,
                 // C++ int(float): truncation (Rust saturates where C++ is undefined).
                 b"clock_scroll_ms" => self.clock_scroll_ms = (fv as i32).clamp(100, 2000),
@@ -190,6 +197,7 @@ impl Settings {
                     };
                 }
                 b"voice_indication" => self.voice_indication = on,
+                b"wake_sound" => self.wake_sound = on,
                 b"followup_duration_s" => {
                     if let Some(s) = pulsar_esphome::followup_duration_s(fv) {
                         self.followup_duration_s = s;
@@ -232,7 +240,8 @@ impl Settings {
              zigbee_role={}\nzigbee_flash_failed={:x}\nnearest_answers={}\nmusic_viz={}\n\
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
              clock_auto_brightness={}\nfollowup_duration_s={}\nclock_format={}\n\
-             command_start_offset_ms={}\nclock_spoken_numbers={}\nmic_gain_db={}\n",
+             command_start_offset_ms={}\nclock_spoken_numbers={}\nmic_gain_db={}\n\
+             wake_sound={}\nclock_colon_blink={}\n",
             f(self.volume),
             f(self.volume_legacy),
             b(self.muted),
@@ -264,6 +273,8 @@ impl Settings {
             self.command_start_offset_ms,
             b(self.clock_spoken_numbers),
             self.mic_gain_db,
+            b(self.wake_sound),
+            b(self.clock_colon_blink),
         )
     }
 
