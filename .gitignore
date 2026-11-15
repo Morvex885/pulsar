@@ -16,6 +16,8 @@
 /platform-tools/
 # CMake's compiler probe through zig may leave a file named "-".
 /satellite/-
+# Байткод Python, который интерпретатор создаёт рядом со скриптами tools/.
+__pycache__/
 
 # Test recordings / synthesized speech.
 *.wav

@@ -1,8 +1,9 @@
-//! Audio playback through the GStreamer build bundled with the Yandex firmware into the model's
-//! ALSA playback PCM (`Model::playback_pcm`: dmix + softvol). Two independent channels:
-//!   Music    - media_player content, can be paused / ducked.
-//!   Announce - TTS, announcements, earcons; plays over (ducked) music. Decoded by its playbin,
-//!              played by the writer of [`crate::pcm_out`] instead of an alsasink.
+//! Воспроизведение через GStreamer из прошивки Яндекса в PCM воспроизведения модели
+//! (`Model::playback_pcm`: dmix, обычно за softvol — см. `Model::master_pcm`). Два независимых
+//! канала:
+//!   Music    — содержимое media_player, ставится на паузу и приглушается.
+//!   Announce — TTS, объявления, earcons; играет поверх приглушённой музыки. Декодируется своим
+//!              playbin, выводится писателем [`crate::pcm_out`] вместо alsasink.
 //!
 //! Threading: a dedicated thread runs a GMainLoop on the default GMainContext; the bus watches and
 //! timeouts live there, and so does the state machine ([`Machine`], in a thread-local). Handle
@@ -83,6 +84,10 @@ pub struct PlayId(pub u64);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlayerEvent {
     State(Channel, PlayState),
+    /// Начало вывода ANNOUNCE; id позволяет отбрасывать события заменённого ответа.
+    Started {
+        id: PlayId,
+    },
     /// Exactly once per `play()`: ok = every url played to its end. A list cut short by `stop()`
     /// or by a later `play()` on the same channel gets ok = false, sent by that call itself (so
     /// it precedes anything the new playback reports). Intended difference from C++: a list that
@@ -650,9 +655,14 @@ impl Machine {
         }
         match ev {
             OutEvent::Started(_) => {
+                if c.reached_playing {
+                    return;
+                }
                 c.reached_playing = true;
                 if c.want_play {
+                    let id = c.item;
                     self.set_state(ch, PlayState::Playing);
+                    self.shared.send(PlayerEvent::Started { id });
                 }
             }
             OutEvent::PlayedOut(_) => {
@@ -1106,7 +1116,7 @@ mod tests {
 
     use Channel::{Announce, Music};
     use PlayState::{Error as Failed, Idle, Loading, Paused, Playing};
-    use PlayerEvent::{Done, State};
+    use PlayerEvent::{Done, Started, State};
 
     fn unescape(s: &str) -> String {
         let mut out = String::new();
@@ -1487,7 +1497,11 @@ mod tests {
         // The next url starts once the output has played this one out.
         assert_eq!(
             r.events(),
-            [State(Announce, Loading), State(Announce, Playing)]
+            [
+                State(Announce, Loading),
+                State(Announce, Playing),
+                Started { id }
+            ]
         );
         r.out(OutEvent::PlayedOut(1));
         assert_eq!(
@@ -1541,7 +1555,9 @@ mod tests {
         assert!(r.calls().is_empty());
         assert!(r.events().is_empty());
         r.out(OutEvent::Started(2));
-        assert_eq!(r.events(), [State(Announce, Playing)]);
+        assert_eq!(r.events(), [State(Announce, Playing), Started { id: b }]);
+        r.out(OutEvent::Started(2));
+        assert!(r.events().is_empty());
         r.out(OutEvent::Failed(2));
         assert_eq!(
             r.events(),

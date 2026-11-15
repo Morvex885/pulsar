@@ -31,7 +31,7 @@ Assistant через ESPHome Native API, Music Assistant через Sendspin, н
 | задача | doc | skill |
 |---|---|---|
 | код демона: крейты, модель исполнения, FMA, `state.conf`, порты | [docs/architecture.md](docs/architecture.md) | — |
-| голос: HA voice assistant, стоковый maind, арбитраж, пре-ролл | [docs/voice.md](docs/voice.md) | — |
+| голос: HA voice assistant, стоковый maind, арбитраж | [docs/voice.md](docs/voice.md) | — |
 | железо: указатель моделей и вики, библиотеки Яндекса, новая модель; факты модели — `docs/<модель>.md` | [docs/hardware.md](docs/hardware.md) | `add-station-model` |
 | Zigbee (Миди), прошивки `radio/` | [docs/zigbee.md](docs/zigbee.md) | `zigbee-radio` |
 | сборка, CI, установщик, супервизор, обновления, релиз, падение | [docs/development.md](docs/development.md) | `release`, `crash-decode` |

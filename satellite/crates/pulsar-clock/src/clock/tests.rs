@@ -15,12 +15,60 @@ fn wall() -> Wall {
 }
 
 fn time_frame() -> Frame {
-    glyph_frame(font::time_glyphs(12, 34), true)
+    glyph_frame(font::time_glyphs(12, 34, false), true)
 }
 
 fn text_frame(s: &str) -> Frame {
     let (g, colon) = font::text_glyphs(&font::layout_text(s.as_bytes()), 0, 400);
     glyph_frame(g, colon)
+}
+
+#[test]
+fn spoken_number_respects_clock_and_dialog_lifecycle() {
+    let mut l = Layers::new();
+    l.enabled = false;
+    l.set_ui_state(UiState::Speaking, NOW);
+    l.set_speech_number("-9", NOW);
+    assert_eq!(l.compose(NOW, wall).0, Frame::default());
+    l.enabled = true;
+    assert_eq!(l.compose(NOW, wall).0, text_frame("-9"));
+    l.flash_number(42, NOW);
+    assert_eq!(
+        l.compose(NOW, wall).0,
+        glyph_frame(font::number_glyphs(42), false)
+    );
+    l.flash_until = 0;
+    l.show_code("1234".into(), NOW);
+    assert_eq!(
+        l.compose(NOW, wall).0,
+        glyph_frame(font::code_glyphs(b"1234", 0, CODE_PAGE_MS), false)
+    );
+    l.code.clear();
+    l.set_ui_state(UiState::TimerRing, NOW);
+    assert_eq!(l.compose(NOW, wall).0, clock_fx::render(Anim::Ringing, 0));
+    l.set_ui_state(UiState::Idle, NOW);
+    assert_eq!(l.compose(NOW, wall).0, text_frame("-9"));
+    l.set_speech_number("", NOW);
+    assert_eq!(l.compose(NOW, wall).0, time_frame());
+}
+
+#[test]
+fn spoken_12h_time_matches_clock_time() {
+    let mut l = Layers::new();
+    l.set_speech_number(" 9:05", NOW);
+    assert_eq!(
+        l.compose(NOW, wall).0,
+        glyph_frame(font::time_glyphs(21, 5, true), true)
+    );
+}
+
+#[test]
+fn long_spoken_number_scrolls() {
+    let mut l = Layers::new();
+    l.set_speech_number("12345", NOW);
+    assert_eq!(l.compose(NOW + 50, wall).1, 350);
+    l.set_speech_number("1234", NOW);
+    assert_eq!(l.compose(NOW + 50, wall).1, 0);
 }
 
 fn bands(x: f32) -> MusicFrame {
@@ -130,6 +178,18 @@ fn layer_priority() {
     assert_eq!(l.compose(NOW, wall).0, clock_fx::levels(&l.mus_in));
     l.media = false;
     assert_eq!(l.compose(NOW, wall).0, time_frame());
+}
+
+#[test]
+fn time_follows_the_format() {
+    let mut l = Layers::new();
+    // 15 ч: у 12:34 из wall() оба формата совпадают.
+    let pm = || Wall { hour: 15, ..wall() };
+    let shown = |h12| glyph_frame(font::time_glyphs(15, 34, h12), true);
+    assert_eq!(l.compose(NOW, pm), (shown(false), 0));
+    l.hour12 = true;
+    assert_eq!(l.compose(NOW, pm), (shown(true), 0));
+    assert_ne!(shown(true), shown(false));
 }
 
 #[test]
@@ -640,5 +700,6 @@ async fn unavailable_clock_is_a_no_op() {
 #[test]
 fn names() {
     assert_eq!(music_styles(), ["Off", "Levels"]);
+    assert_eq!(time_formats(), ["24h", "12h"]);
     assert_eq!(face_names().len(), 19);
 }

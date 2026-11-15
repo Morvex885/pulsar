@@ -30,10 +30,10 @@
 //! (`Model::clock_center`). No global current: maind dims through the per-segment brightness
 //! value (0..255), and so do we.
 //!
-//! Content, first active wins: pairing code (even when disabled) > volume number > voice state
-//! (TIMER_RING always, LISTENING / THINKING / SPEAKING with voice indication on) > update install
-//! (dark) > one-shot > timer countdown > temporary layer > Text / Face > music levels > time.
-//! Disabled: dark.
+//! Приоритет: код сопряжения > громкость > звонок таймера > число из ответа > голосовой
+//! ассистент (LISTENING / THINKING / SPEAKING при включённой индикации) > установка обновления
+//! (темнота) > одноразовая анимация > таймер > временный слой > Text / Face > музыка > время.
+//! При выключенном дисплее остаётся только код сопряжения.
 
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd as _;
@@ -85,6 +85,7 @@ const VIZ_CYCLE_MS: i64 = 30_000;
 const VIZ_TIME_MS: i64 = 3000;
 
 const MUSIC_STYLES: [&str; 2] = ["Off", "Levels"];
+const TIME_FORMATS: [&str; 2] = ["24h", "12h"];
 
 /// Names of `set_face` indices: the 17 static faces, then "Blink", "All faces".
 pub fn face_names() -> &'static [&'static str] {
@@ -94,6 +95,11 @@ pub fn face_names() -> &'static [&'static str] {
 /// Clock music styles ("Clock music" select).
 pub fn music_styles() -> &'static [&'static str] {
     &MUSIC_STYLES
+}
+
+/// Форматы времени (Select «Clock format»).
+pub fn time_formats() -> &'static [&'static str] {
+    &TIME_FORMATS
 }
 
 fn shot_anim(s: ClockShot) -> Anim {
@@ -195,6 +201,8 @@ struct Layers {
     /// Temporary layer (actions).
     overlay: Option<Content>,
     overlay_until: i64,
+    /// Временный слой числа из ответа.
+    speech_number: Option<Content>,
     scroll_ms: i64,
     ui: UiState,
     voice_indication: bool,
@@ -208,6 +216,8 @@ struct Layers {
     levels_on: bool,
     media: bool,
     viz: bool,
+    /// Select «Clock format» = "12h": часы 1..12.
+    hour12: bool,
     /// Per digit, 0..1 within its range.
     mus_in: [f32; DIGITS],
     mus_shown: [f32; DIGITS],
@@ -232,6 +242,7 @@ impl Layers {
             base: None,
             overlay: None,
             overlay_until: 0,
+            speech_number: None,
             scroll_ms: 400,
             ui: UiState::Idle,
             voice_indication: true,
@@ -243,6 +254,7 @@ impl Layers {
             levels_on: false,
             media: false,
             viz: false,
+            hour12: false,
             mus_in: [0.0; DIGITS],
             mus_shown: [0.0; DIGITS],
             ranges: [Range::default(); 2],
@@ -283,6 +295,15 @@ impl Layers {
         } else {
             self.base = Some(Content::Text { cells, since: now });
         }
+    }
+
+    fn set_speech_number(&mut self, utf8: &str, now: i64) {
+        let cells = font::layout_text(utf8.as_bytes());
+        self.speech_number = if cells.is_empty() {
+            None
+        } else {
+            Some(Content::Text { cells, since: now })
+        };
     }
 
     fn set_face(&mut self, index: i32, now: i64) {
@@ -430,14 +451,32 @@ impl Layers {
             let g = font::code_glyphs(self.code.as_bytes(), now - self.code_since, CODE_PAGE_MS);
             return (glyph_frame(g, false), 0);
         }
+        if self.enabled && now < self.flash_until {
+            let g = font::number_glyphs(self.flash_value);
+            return (glyph_frame(g, false), self.flash_until - now);
+        }
         if !self.enabled {
             return (Frame::default(), 0);
         }
+        // Ответ ассистента не должен скрывать звонок таймера.
+        if self.voice == Some(Anim::Ringing) {
+            return (
+                clock_fx::render(Anim::Ringing, now - self.voice_t0),
+                FX_FRAME_MS - (now - self.voice_t0) % FX_FRAME_MS,
+            );
+        }
+        if let Some(number) = &self.speech_number {
+            let (g, colon) = number.glyphs(now, self.scroll_ms);
+            let step = number.step(self.scroll_ms);
+            let next = if step == 0 {
+                0
+            } else {
+                step - (now - number.since()) % step
+            };
+            return (glyph_frame(g, colon), next);
+        }
         let frame_step = |t0: i64| FX_FRAME_MS - (now - t0) % FX_FRAME_MS;
-        if now < self.flash_until {
-            let g = font::number_glyphs(self.flash_value);
-            (glyph_frame(g, false), self.flash_until - now)
-        } else if let Some(v) = self.voice {
+        if let Some(v) = self.voice {
             (
                 clock_fx::render(v, now - self.voice_t0),
                 frame_step(self.voice_t0),
@@ -497,7 +536,7 @@ impl Layers {
             let w = wall();
             // Colon on for the first half of every second.
             (
-                glyph_frame(font::time_glyphs(w.hour, w.min), w.first_half),
+                glyph_frame(font::time_glyphs(w.hour, w.min, self.hour12), w.first_half),
                 0,
             )
         }
@@ -692,6 +731,7 @@ enum Cmd {
     ShowCode(String),
     ClearCode,
     SetText(String),
+    SetSpeechNumber(String),
     SetFace(i32),
     SetScrollMs(i32),
     ShowTemporaryText(String, i32),
@@ -701,6 +741,7 @@ enum Cmd {
     Play(ClockShot),
     SetUpdating(bool),
     SetMusicStyle(String),
+    SetTimeFormat(String),
     SetMediaPlaying(bool),
     MusicFrame(MusicFrame, bool),
 }
@@ -775,6 +816,7 @@ impl Clock {
             Cmd::ShowCode(digits) => l.show_code(digits, now),
             Cmd::ClearCode => l.code.clear(),
             Cmd::SetText(s) => l.set_text(&s, now),
+            Cmd::SetSpeechNumber(s) => l.set_speech_number(&s, now),
             Cmd::SetFace(i) => l.set_face(i, now),
             Cmd::SetScrollMs(ms) => l.set_scroll_ms(ms),
             Cmd::ShowTemporaryText(s, secs) => l.show_temporary_text(&s, secs, now),
@@ -784,6 +826,7 @@ impl Clock {
             Cmd::Play(s) => l.play(s, now),
             Cmd::SetUpdating(on) => l.updating = on,
             Cmd::SetMusicStyle(style) => l.levels_on = style == "Levels",
+            Cmd::SetTimeFormat(f) => l.hour12 = f == "12h",
             Cmd::SetMediaPlaying(on) => l.media = on,
             Cmd::MusicFrame(f, from_sendspin) => {
                 // Frames only feed the meters; the frame timer draws them.
@@ -931,6 +974,11 @@ impl ClockHandle {
         self.send(Cmd::SetText(utf8));
     }
 
+    /// Число из ответа при включённом дисплее. Пустая строка убирает слой.
+    pub fn set_speech_number(&self, utf8: String) {
+        self.send(Cmd::SetSpeechNumber(utf8));
+    }
+
     /// Index into `face_names()`; -1 = none.
     pub fn set_face(&self, index: i32) {
         self.send(Cmd::SetFace(index));
@@ -973,6 +1021,11 @@ impl ClockHandle {
     /// One of `music_styles()`.
     pub fn set_music_style(&self, style: String) {
         self.send(Cmd::SetMusicStyle(style));
+    }
+
+    /// Одно из `time_formats()`.
+    pub fn set_time_format(&self, format: String) {
+        self.send(Cmd::SetTimeFormat(format));
     }
 
     pub fn set_media_playing(&self, playing: bool) {

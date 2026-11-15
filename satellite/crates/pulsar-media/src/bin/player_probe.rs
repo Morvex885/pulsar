@@ -202,6 +202,7 @@ impl Probe {
                 println!("[{:6.2}] state {name} -> {}", self.ts(), sname(s));
                 return Step::Continue;
             }
+            PlayerEvent::Started { .. } => return Step::Continue,
             PlayerEvent::Done { id, ok } => (Some(id), u8::from(ok)),
         };
         if id == self.music_id {

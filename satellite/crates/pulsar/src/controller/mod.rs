@@ -6,6 +6,7 @@
 mod entities;
 mod logic;
 mod media;
+mod speech_numbers;
 mod voice;
 
 use std::collections::{BTreeMap, HashMap};
@@ -86,6 +87,7 @@ enum Tk {
     UpdateRetry,
     /// Exit after an installed update.
     UpdateExit,
+    SpeechNumber,
 }
 
 /// What a `play()` was for: the C++ completion callback and the values it captured.
@@ -185,6 +187,7 @@ pub struct Controller {
     voice_run: u64,
     tts_url: String,
     tts_played: bool,
+    speech_display: speech_numbers::SpeechDisplay,
     /// A run's TTS_START left HA's assist satellite "responding" until AnnounceFinished, also
     /// when nothing plays here, and that report is still to be sent (`send_tts_report`).
     tts_report_owed: bool,
@@ -331,11 +334,12 @@ impl Controller {
                 },
             ],
             active_wake_words: vec![st.wake_word.clone()],
-            light_effects: strings(pulsar_hw::effect_names()),
+            light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
             clock_faces: with_none(strings(pulsar_clock::face_names())),
             music_styles: strings(pulsar_hw::music_styles()),
             case_colors: with_none(case_colors.clone()),
             clock_music_styles: strings(pulsar_clock::music_styles()),
+            clock_formats: strings(pulsar_clock::time_formats()),
             zigbee_modes: if model.zigbee_tty.is_empty() {
                 Vec::new()
             } else {
@@ -346,9 +350,9 @@ impl Controller {
             },
             has_clock: model.has_clock || pulsar_clock::panel_present(model),
             has_lux: model.has_lux || lux_rx.is_some(),
-            has_wake_preroll: !model.wake_preroll.is_empty(),
             has_hw_mic_mute: !model.mute_input.is_empty() || model.mute_gpio != 0,
             has_buttons: model.has_button_events(),
+            led_layout: model.led_layout,
             key_path: Some(logic::in_dir(&dir, "api_key")),
             has_auto_brightness: lux_rx.is_some(),
         };
@@ -371,6 +375,7 @@ impl Controller {
         clock.set_scroll_ms(st.clock_scroll_ms);
         clock.set_voice_indication(st.voice_indication);
         clock.set_music_style(st.clock_music.clone());
+        clock.set_time_format(st.clock_format.clone());
         leds.set_speed(st.led_speed);
         leds.set_voice_indication(st.voice_indication);
         leds.set_music_style(st.music_viz.clone());
@@ -449,7 +454,8 @@ impl Controller {
             model_dir(&st.wake_word),
             Some(PathBuf::from(COMMAND_MODEL)),
         );
-        mic.set_preroll(st.wake_preroll);
+        mic.set_command_offset(st.command_start_offset_ms);
+        mic.set_mic_gain(st.mic_gain_db);
 
         let ss_cfg = SendspinConfig {
             name: id.friendly_name.clone(),
@@ -592,6 +598,7 @@ impl Controller {
             voice_run: 0,
             tts_url: String::new(),
             tts_played: false,
+            speech_display: speech_numbers::SpeechDisplay::default(),
             tts_report_owed: false,
             followup: logic::Followup::default(),
             announcing: false,
@@ -739,7 +746,7 @@ impl Controller {
             Tk::Watchdog => self.abort_dialog("no progress from Home Assistant, giving up"),
             Tk::FollowupWait => {
                 info!("follow-up: no speech started, conversation ends");
-                self.finish_interaction();
+                self.end_silent_followup();
             }
             Tk::TimerTick => self.show_timers(),
             Tk::RingTick => self.ring_timer(),
@@ -747,11 +754,20 @@ impl Controller {
             Tk::UpdateRetry => self.maybe_auto_update(),
             // exit 0: supervise.sh starts the new binary
             Tk::UpdateExit => self.exit = Some(ExitReason::Updated),
+            Tk::SpeechNumber => self.update_speech_number(),
         }
     }
 
     fn on_player(&mut self, ev: PlayerEvent) {
         match ev {
+            PlayerEvent::Started { id } => {
+                if self.phase == Phase::Speaking
+                    && matches!(self.pending.get(&id), Some(Pending::Tts { dialog }) if *dialog == self.dialog)
+                {
+                    self.speech_display.start();
+                    self.update_speech_number();
+                }
+            }
             // HA media state follows playback (C++ Player::on_state hook).
             PlayerEvent::State(ch, s) => {
                 if ch == Channel::Music {

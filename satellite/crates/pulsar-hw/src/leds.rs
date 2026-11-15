@@ -30,7 +30,7 @@ use std::io;
 use std::os::fd::AsRawFd as _;
 
 use log::{error, info, warn};
-use pulsar_core::model::{LedStrip, Model};
+use pulsar_core::model::{LedLayout, LedStrip, Model};
 use pulsar_core::{AmbientDimmer, MUSIC_STALE_MS, MusicFrame, SENDSPIN_FRESH_MS, Timers, UiState};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
@@ -75,12 +75,27 @@ const EFFECT_NAMES: [&str; 10] = [
     "Night light",
 ];
 
+/// Двумерные эффекты панели Станции 2 (`led_fx::panel_effect`) — для панели, не для кольца.
+const PANEL_EFFECT_NAMES: [&str; 8] = [
+    "Radar",
+    "Ripple",
+    "Rain",
+    "Matrix",
+    "Plasma",
+    "Waves",
+    "Spiral",
+    "Heartbeat",
+];
+
 /// After "Off" and "All styles", in `fx::Style` order.
 const MUSIC_STYLES: [&str; 6] = ["Off", "All styles", "Spectrum", "Pulse", "Disco", "Polar"];
 
-/// Effects of the user light and `show_temporary` ("" = solid colour).
-pub fn effect_names() -> &'static [&'static str] {
-    &EFFECT_NAMES
+/// Эффекты пользовательской лампы и `show_temporary` для раскладки модели ("" — сплошной цвет).
+pub fn effect_names(layout: LedLayout) -> &'static [&'static str] {
+    match layout {
+        LedLayout::Ring => &EFFECT_NAMES,
+        LedLayout::Station2Panel => &PANEL_EFFECT_NAMES,
+    }
 }
 
 pub fn music_styles() -> &'static [&'static str] {
@@ -337,8 +352,8 @@ impl LedsHandle {
         self.send(Cmd::TimerStarted);
     }
 
-    /// Effect (one of effect_names(), "" = solid colour) at full brightness for seconds;
-    /// seconds <= 0: 5 s, capped at 3600 s. Replaces the previous one.
+    /// Эффект (один из `effect_names` модели, "" — сплошной цвет) на полной яркости на `seconds`
+    /// с; `seconds` ≤ 0 — 5 с, не больше 3600 с. Заменяет предыдущий.
     pub fn show_temporary(&self, effect: String, color: Rgb, seconds: i32) {
         self.send(Cmd::ShowTemporary {
             effect,
@@ -420,7 +435,7 @@ pub fn spawn_leds(model: &'static Model) -> LedsHandle {
     };
     let opened = !matches!(sink, Sink::None);
     let (tx, rx) = unbounded_channel();
-    let comp = Compositor::new(n, nlogo);
+    let comp = Compositor::new(n, nlogo, model.led_layout);
     let out = Output::new(sink, n, nlogo);
     pulsar_core::actors::spawn_actor("leds", run(comp, out, rx, opened));
     LedsHandle { tx }
@@ -546,7 +561,7 @@ impl Output {
             n,
             last: vec![0; (n + nlogo) * 3],
             has_last: false,
-            bgr: Vec::with_capacity(n.max(nlogo) * 3),
+            bgr: Vec::with_capacity(n.max(nlogo) * 4),
             warn: Default::default(),
         }
     }
@@ -633,7 +648,9 @@ impl Output {
     }
 }
 
-/// Writes RGB pixels to a framebuffer as BGR and latches them.
+/// Записывает RGB-пиксели во фреймбуфер и фиксирует кадр: 24 bpp (ledfb-ленты) — B, G, R;
+/// 32 bpp (панель Gowin Станции 2) — R, G, B, W по вики, белый канал не используется и пишется
+/// нулём.
 fn write_fb(
     fb: &mut Framebuffer,
     px: &[u8],
@@ -643,8 +660,14 @@ fn write_fb(
     now: i64,
 ) -> bool {
     bgr.clear();
-    for p in px.as_chunks::<3>().0 {
-        bgr.extend_from_slice(&[p[2], p[1], p[0]]);
+    if fb.bits_per_pixel() == 32 {
+        for p in px.as_chunks::<3>().0 {
+            bgr.extend_from_slice(&[p[0], p[1], p[2], 0]);
+        }
+    } else {
+        for p in px.as_chunks::<3>().0 {
+            bgr.extend_from_slice(&[p[2], p[1], p[0]]);
+        }
     }
     let ok = match fb.write(bgr) {
         Ok(k) if k == bgr.len() => true,
@@ -691,15 +714,19 @@ fn trigger_is(led: &str, trig: &str) -> bool {
         .is_some_and(|t| t.contains(&format!("[{trig}]")))
 }
 
-/// Opens one strip's framebuffer if its trigger is active and the fb has the expected name.
+/// Открывает фреймбуфер ленты, если имя fb совпадает с моделью и LED-триггер ленты (если он у неё
+/// есть) активен.
 fn open_strip_fb(model: &Model, s: &LedStrip) -> Option<Framebuffer> {
     if s.fb_dev.is_empty() {
         return None; // sysfs-only ring (Mini 2)
     }
-    let red0 = led_name(model, s, "red", 0);
-    if !trigger_is(&red0, s.trigger) {
-        warn!("leds: trigger {} not active on {red0}", s.trigger);
-        return None;
+    // У панели Станции 2 нет LED-триггера: драйвер Gowin отдаёт только фреймбуфер.
+    if !s.trigger.is_empty() {
+        let red0 = led_name(model, s, "red", 0);
+        if !trigger_is(&red0, s.trigger) {
+            warn!("leds: trigger {} not active on {red0}", s.trigger);
+            return None;
+        }
     }
     let dev = s.fb_dev.rsplit('/').next().unwrap_or(s.fb_dev);
     let name = pulsar_core::sysfs::read_file(&format!("/sys/class/graphics/{dev}/name"))
@@ -764,6 +791,9 @@ fn open_fb(model: &Model, nlogo: usize) -> Option<Sink> {
 }
 
 fn open_sysfs(model: &Model, n: usize, nlogo: usize) -> Option<Vec<File>> {
+    if model.led_prefix.is_empty() {
+        return None; // нет поканальных sysfs-светодиодов (Станция 2)
+    }
     let mut files = Vec::with_capacity((n + nlogo) * 3);
     for i in 0..n + nlogo {
         for c in ["red", "green", "blue"] {
@@ -864,6 +894,9 @@ fn to_px(c: Col, d: f32, matrix: Option<&Matrix>) -> [u8; 3] {
 struct Compositor {
     n: usize,
     nlogo: usize,
+    /// Раскладка модели: нужна при сбросе слоёв эффектов, чтобы временный эффект панели
+    /// (`led_show` с Radar и т. п.) снова попал в `panel_effect`, а не в кольцевую отрисовку.
+    layout: LedLayout,
     /// Lite 2: no logo, mute shown on the ring.
     short_ring: bool,
     matrix: Option<Matrix>,
@@ -930,11 +963,12 @@ struct Compositor {
 }
 
 impl Compositor {
-    fn new(n: usize, nlogo: usize) -> Self {
+    fn new(n: usize, nlogo: usize, layout: LedLayout) -> Self {
         let all = n + nlogo;
         Self {
             n,
             nlogo,
+            layout,
             short_ring: !fx::wide(n),
             matrix: None,
             state: UiState::Idle,
@@ -950,12 +984,12 @@ impl Compositor {
             show_effect: String::new(),
             show_col: Col::default(),
             show_until: 0,
-            show_fx: fx::EffectState::default(),
+            show_fx: fx::EffectState::default().with_layout(layout),
             user_on: false,
             user_col: fx::rgb(255, 255, 255),
             user_bri: 1.0,
             user_effect: String::new(),
-            user_fx: fx::EffectState::default(),
+            user_fx: fx::EffectState::default().with_layout(layout),
             user_changed: false,
             user_transition: 0,
             style: 0,
@@ -1049,7 +1083,7 @@ impl Compositor {
                 self.show_col = to_col(color);
                 let seconds = if seconds <= 0 { 5 } else { seconds.min(3600) };
                 self.show_until = now + i64::from(seconds) * 1000;
-                self.show_fx = fx::EffectState::default();
+                self.show_fx = fx::EffectState::default().with_layout(self.layout);
             }
             Cmd::ClearTemporary => {
                 if !self.show_on {
@@ -1261,7 +1295,7 @@ impl Compositor {
             Layer::OneShot
         } else if self.show_on {
             Layer::Show
-        } else if self.short_ring && self.muted {
+        } else if (self.short_ring || self.nlogo == 0) && self.muted {
             Layer::Mute
         } else if self.user_on && self.user_bri > 0.0 {
             Layer::User
