@@ -8,6 +8,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 
 use log::warn;
+use pulsar_audio::ModelId;
 use pulsar_audio::engine::MODEL_FILES;
 
 use pulsar_core::model::Model;
@@ -632,6 +633,37 @@ pub fn wake_word_names(models: &Path) -> Vec<String> {
     }
     out.sort_by(|a, b| (a != "alisa", a).cmp(&(b != "alisa", b)));
     out
+}
+
+/// Смена модели wake word: последний запрос к фронтенду и есть ли загруженная модель.
+#[derive(Debug, Default)]
+pub struct WakeSwitch {
+    pending: Option<(ModelId, String)>,
+    /// По последнему событию фронтенда модели нет: не загрузилась ни новая, ни прежняя.
+    empty: bool,
+}
+
+impl WakeSwitch {
+    /// Нужен ли запрос слова `id` при активном `active`: повтор ожидающего запроса не нужен,
+    /// выбор активного слова отменяет ожидающую смену или перезагружает модель, если её нет.
+    pub fn wants(&self, id: &str, active: &str) -> bool {
+        match &self.pending {
+            Some((_, p)) => p != id,
+            None => self.empty || id != active,
+        }
+    }
+
+    pub fn requested(&mut self, req: ModelId, id: String) {
+        self.pending = Some((req, id));
+    }
+
+    /// Событие `WakeModel`: ответ на устаревший запрос не снимает более новый.
+    pub fn answered(&mut self, req: ModelId, loaded: bool) {
+        if self.pending.as_ref().is_some_and(|(r, _)| *r == req) {
+            self.pending = None;
+        }
+        self.empty = !loaded;
+    }
 }
 
 /// Сохранённое слово, если модель есть на станции, иначе первая найденная (`alisa`, если есть):

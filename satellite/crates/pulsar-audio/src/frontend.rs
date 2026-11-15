@@ -72,15 +72,20 @@ pub enum FrontendEvent {
     Audio(Vec<i16>),
     /// One per 32 ms FFT window while music analysis is on.
     Music(MusicFrame),
-    /// Модель wake word, активная после старта или попытки [`FrontendHandle::set_model`].
-    /// `requested` — какую модель пытались загрузить (при старте — первый кандидат), `ok` — она
-    /// загрузилась. `dir` пуст, если модели нет.
+    /// Модель wake word, активная после старта (`id` 0) или запроса
+    /// [`FrontendHandle::set_model`] с этим `id`. `ok` — запрошенная модель (при старте — первый
+    /// кандидат) загрузилась. `dir` пуст, если модели нет. На запрос, вытесненный следующим до
+    /// применения, события нет.
     WakeModel {
-        requested: PathBuf,
+        id: ModelId,
         dir: PathBuf,
         ok: bool,
     },
 }
+
+/// Запрос смены модели wake word ([`FrontendHandle::set_model`]); 0 — модель старта.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelId(pub u64);
 
 /// Counters for frontend_probe.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -125,14 +130,17 @@ pub fn spawn(
         Some(eng) => {
             inner.frame = eng.frame();
             let dir = eng.wake_dir().to_path_buf();
-            let requested = wake_model_dirs.first().cloned().unwrap_or_default();
-            let ok = requested == dir;
+            let ok = wake_model_dirs.first() == Some(&dir);
             let started = inner
                 .start_threads(model, eng, tx.clone())
                 .inspect_err(|e| error!("audio threads: {e}"))
                 .is_ok();
             if started {
-                let _ = tx.send(FrontendEvent::WakeModel { requested, dir, ok });
+                let _ = tx.send(FrontendEvent::WakeModel {
+                    id: ModelId(0),
+                    dir,
+                    ok,
+                });
             }
             started
         }
@@ -153,9 +161,13 @@ pub fn spawn(
 
 impl FrontendHandle {
     /// Смена модели wake word (поток обработки применяет её перед следующим чанком); итог
-    /// приходит событием [`FrontendEvent::WakeModel`].
-    pub fn set_model(&self, dir: PathBuf) {
-        *lock(&self.inner.shared.pending_model) = (!dir.as_os_str().is_empty()).then_some(dir);
+    /// приходит событием [`FrontendEvent::WakeModel`] с возвращённым id. Новый запрос до
+    /// применения вытесняет прежний; пустой путь отменяет ожидающий запрос, события нет.
+    pub fn set_model(&self, dir: PathBuf) -> ModelId {
+        let s = &self.inner.shared;
+        let id = ModelId(s.next_model.fetch_add(1, Relaxed));
+        *lock(&s.pending_model) = (!dir.as_os_str().is_empty()).then_some((id, dir));
+        id
     }
 
     /// Wake word detection on/off (e.g. software mute). On by default.
@@ -245,7 +257,8 @@ struct Shared {
     command_offset_ms: AtomicI32,
     mic_gain_db: AtomicU32,
     music: AtomicBool,
-    pending_model: Mutex<Option<PathBuf>>,
+    pending_model: Mutex<Option<(ModelId, PathBuf)>>,
+    next_model: AtomicU64,
     tap_on: AtomicBool,
     tap: Mutex<Option<UnboundedSender<Vec<i16>>>>,
     captured_frames: AtomicU64,
@@ -268,6 +281,7 @@ impl Shared {
             mic_gain_db: AtomicU32::new(0),
             music: AtomicBool::new(false),
             pending_model: Mutex::new(None),
+            next_model: AtomicU64::new(1),
             tap_on: AtomicBool::new(false),
             tap: Mutex::new(None),
             captured_frames: AtomicU64::new(0),
@@ -819,7 +833,7 @@ fn processing(
 
     while shared.running() {
         let pending = lock(&shared.pending_model).take();
-        if let Some(requested) = pending {
+        if let Some((id, requested)) = pending {
             let ok = eng.set_wake_model(&requested);
             if !ok {
                 error!(
@@ -828,7 +842,7 @@ fn processing(
                 );
             }
             let dir = eng.wake_dir().to_path_buf();
-            let _ = tx.send(FrontendEvent::WakeModel { requested, dir, ok });
+            let _ = tx.send(FrontendEvent::WakeModel { id, dir, ok });
         }
         // Exactly one VQE chunk.
         {

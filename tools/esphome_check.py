@@ -86,6 +86,7 @@ from aioesphomeapi import (
     VoiceAssistantEventType,
     VoiceAssistantTimerEventType,
 )
+from aioesphomeapi.core import TimeoutAPIError
 
 MASKED_DEVICE_INFO = {"project_version", "compilation_time", "mac_address"}
 # object_id -> masked fields of its state
@@ -303,9 +304,16 @@ async def cmd_set_key(client, args):
 async def cmd_wake_word(client, args):
     await client.set_voice_assistant_configuration([args.wake_id])
     active = []
-    for _ in range(10):
-        await asyncio.sleep(0.5)
-        cfg = await client.get_voice_assistant_configuration(5.0)
+    deadline = time.monotonic() + 5.0
+    while (left := deadline - time.monotonic()) > 0:
+        await asyncio.sleep(min(0.5, left))
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        try:
+            cfg = await client.get_voice_assistant_configuration(left)
+        except TimeoutAPIError:
+            break
         active = list(cfg.active_wake_words)
         if active == [args.wake_id]:
             break

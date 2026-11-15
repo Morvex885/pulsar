@@ -810,3 +810,36 @@ fn wake_word_resolution_and_candidates() {
         strings(&["gone", "alisa", "yandex", "yasmina"])
     );
 }
+
+#[test]
+fn wake_switch_follows_the_last_request() {
+    use pulsar_audio::ModelId;
+    let mut w = WakeSwitch::default();
+    assert!(!w.wants("alisa", "alisa"));
+    assert!(w.wants("yasmina", "alisa"));
+    w.requested(ModelId(1), "yasmina".into());
+    assert!(!w.wants("yasmina", "alisa"));
+    // Выбор активного слова во время смены отменяет её.
+    assert!(w.wants("alisa", "alisa"));
+    w.requested(ModelId(2), "alisa".into());
+    w.requested(ModelId(3), "yasmina".into());
+    // Ответ на вытесненный запрос не снимает последний.
+    w.answered(ModelId(1), true);
+    assert!(!w.wants("yasmina", "yasmina"));
+    assert!(w.wants("alisa", "yasmina"));
+    w.answered(ModelId(3), true);
+    assert!(!w.wants("yasmina", "yasmina"));
+}
+
+#[test]
+fn wake_switch_reloads_when_no_model_is_loaded() {
+    use pulsar_audio::ModelId;
+    let mut w = WakeSwitch::default();
+    w.requested(ModelId(1), "yasmina".into());
+    // Не загрузилась ни новая, ни прежняя модель: повтор прежнего слова снова грузит её.
+    w.answered(ModelId(1), false);
+    assert!(w.wants("alisa", "alisa"));
+    w.requested(ModelId(2), "alisa".into());
+    w.answered(ModelId(2), true);
+    assert!(!w.wants("alisa", "alisa"));
+}

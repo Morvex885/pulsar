@@ -167,8 +167,7 @@ pub struct Controller {
     ring_stopped_in_dialog: bool,
     hw_mic_muted: bool,
     error_shown: bool,
-    /// Слово, запрошенное у фронтенда и ещё не подтверждённое событием `WakeModel`.
-    wake_requested: Option<String>,
+    wake_switch: logic::WakeSwitch,
     // Wake arbitration: the window between our claim and the decision. Microphone audio and a
     // command word heard in it are held until the decision.
     arbitrating: bool,
@@ -589,7 +588,7 @@ impl Controller {
             ring_stopped_in_dialog: false,
             hw_mic_muted,
             error_shown: false,
-            wake_requested: None,
+            wake_switch: logic::WakeSwitch::default(),
             arbitrating: false,
             arb_claim: None,
             arb_phrase: String::new(),
@@ -817,9 +816,7 @@ impl Controller {
                 self.leds.music_frame(f, false);
                 self.clock.music_frame(f, false);
             }
-            FrontendEvent::WakeModel { requested, dir, ok } => {
-                self.on_wake_model(&requested, &dir, ok);
-            }
+            FrontendEvent::WakeModel { id, dir, ok } => self.on_wake_model(id, &dir, ok),
         }
     }
 
