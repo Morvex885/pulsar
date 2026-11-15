@@ -76,7 +76,8 @@ maind играет звук громкости (sound 45, SimpleVolumeTonePlayer
   `pulsar-wake/1 <name> <wake> <busy> <level>` в UDP broadcast на `255.255.255.255:6054`, три копии
   с интервалом 40 мс (broadcast в Wi-Fi уходит без ACK и повторов).
   - `<name>` — имя устройства ESPHome (например, `yandex-midi-xxxxxx`);
-  - `<wake>` — id модели wake word (`alisa`, `yandex`);
+  - `<wake>` — id модели wake word: имя её каталога, 1–15 байт `[a-z0-9_-]` (`alisa`, `yandex`,
+    `yasmina`);
   - `<busy>` — `1`, если станция занята (говорит, играет объявление, звонит таймер), иначе `0`;
   - `<level>` — [уровень wake](#уровень-wake) в формате `%.1f`.
 

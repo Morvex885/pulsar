@@ -10,7 +10,7 @@ mod speech_numbers;
 mod voice;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use log::{debug, error, info, warn};
 use pulsar_audio::FrontendEvent;
@@ -165,6 +165,7 @@ pub struct Controller {
     wake_dialog: bool,
     hw_mic_muted: bool,
     error_shown: bool,
+    wake_switch: logic::WakeSwitch,
     // Wake arbitration: the window between our claim and the decision. Microphone audio and a
     // command word heard in it are held until the decision.
     arbitrating: bool,
@@ -296,9 +297,16 @@ impl Controller {
             VERSION,
             BUILD_TIME,
         );
-        if st.wake_word != "alisa" && st.wake_word != "yandex" {
-            st.wake_word = "alisa".into();
+        let mut wake_names = logic::wake_word_names(Path::new(MODELS), &st.wake_word);
+        if wake_names.is_empty() {
+            // Каталог не прочитан или пуст: список в HA не должен расходиться с активным словом.
+            wake_names.push("alisa".into());
         }
+        st.wake_word = logic::resolve_wake_word(&st.wake_word, &wake_names);
+        let wake_dirs = logic::wake_candidates(&st.wake_word, &wake_names)
+            .iter()
+            .map(|id| model_dir(id))
+            .collect::<Vec<_>>();
         let case_colors = pulsar_hw::case_colors();
         let dir = logic::state_dir(state_path.as_os_str());
         let strings = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -319,18 +327,14 @@ impl Controller {
         };
         let cfg = ApiConfig {
             port: ports.api,
-            wake_words: vec![
-                WakeWordInfo {
-                    id: "alisa".into(),
-                    phrase: "Алиса".into(),
+            wake_words: wake_names
+                .into_iter()
+                .map(|id| WakeWordInfo {
+                    phrase: logic::wake_word_phrase(&id),
+                    id,
                     languages: vec!["ru".into()],
-                },
-                WakeWordInfo {
-                    id: "yandex".into(),
-                    phrase: "Яндекс".into(),
-                    languages: vec!["ru".into()],
-                },
-            ],
+                })
+                .collect(),
             active_wake_words: vec![st.wake_word.clone()],
             light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
             clock_faces: with_none(strings(pulsar_clock::face_names())),
@@ -448,11 +452,8 @@ impl Controller {
             }
         };
         let hw_mic_muted = input.as_ref().is_some_and(InputHandle::hw_muted);
-        let (mic, mic_rx) = pulsar_audio::spawn(
-            model,
-            model_dir(&st.wake_word),
-            Some(PathBuf::from(COMMAND_MODEL)),
-        );
+        let (mic, mic_rx) =
+            pulsar_audio::spawn(model, wake_dirs, Some(PathBuf::from(COMMAND_MODEL)));
         mic.set_command_offset(st.command_start_offset_ms);
         mic.set_mic_gain(st.mic_gain_db);
 
@@ -584,6 +585,7 @@ impl Controller {
             wake_dialog: false,
             hw_mic_muted,
             error_shown: false,
+            wake_switch: logic::WakeSwitch::default(),
             arbitrating: false,
             arb_claim: None,
             arb_phrase: String::new(),
@@ -811,6 +813,7 @@ impl Controller {
                 self.leds.music_frame(f, false);
                 self.clock.music_frame(f, false);
             }
+            FrontendEvent::WakeModel { id, dir, ok } => self.on_wake_model(id, &dir, ok),
         }
     }
 

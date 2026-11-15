@@ -218,6 +218,17 @@ impl Lib {
         unsafe { (self.sp_errfree)(err) };
         Some(msg)
     }
+
+    /// Текст ошибки `spotter_conf_read` без `spotter_error_free`: освобождение такой ошибки роняет
+    /// процесс, поэтому она остаётся в памяти (одна на неудачную загрузку модели).
+    // см. docs/hardware.md, «Библиотеки Яндекса (C API)»
+    fn sp_conf_error(&self, err: P) -> Option<String> {
+        if err.is_null() {
+            return None;
+        }
+        // SAFETY: `err` — живая spotter_error, выставленная библиотекой; читается только текст.
+        Some(unsafe { text((self.sp_errmsg)(err)) })
+    }
 }
 
 /// Copies a C string; "" for null.
@@ -403,7 +414,7 @@ impl SpotterConf {
         let mut err = ptr::null_mut();
         // SAFETY: NUL-terminated directory, out-pointer to a local.
         let conf = unsafe { (lib.sp_conf_read)(dir.as_ptr(), &mut err) };
-        if let Some(e) = lib.sp_error(err) {
+        if let Some(e) = lib.sp_conf_error(err) {
             // A config returned together with an error is not trusted (nor freed: the C++
             // daemon did not touch it either).
             return Err(Some(e));
