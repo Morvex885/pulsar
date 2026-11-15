@@ -163,8 +163,6 @@ pub struct Controller {
     listen_started_ms: i64,
     /// Текущий диалог открыт wake word (не кнопкой, не продолжением диалога и не HA).
     wake_dialog: bool,
-    /// Звонок выключили посреди этого диалога «стоп» спотера или wake word, а диалог пошёл дальше.
-    ring_stopped_in_dialog: bool,
     hw_mic_muted: bool,
     error_shown: bool,
     wake_switch: logic::WakeSwitch,
@@ -585,7 +583,6 @@ impl Controller {
             phase: Phase::Idle,
             listen_started_ms: 0,
             wake_dialog: false,
-            ring_stopped_in_dialog: false,
             hw_mic_muted,
             error_shown: false,
             wake_switch: logic::WakeSwitch::default(),

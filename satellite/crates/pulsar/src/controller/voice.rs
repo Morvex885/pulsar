@@ -121,8 +121,6 @@ impl Controller {
                 self.arbiter
                     .claim(&self.st.wake_word, level_db, true, false);
             }
-            self.ring_stopped_in_dialog =
-                matches!(self.phase, Phase::Listening | Phase::Processing);
             return self.stop_timer_ring();
         }
         if matches!(self.phase, Phase::Listening | Phase::Processing) || self.arbitrating {
@@ -228,7 +226,6 @@ impl Controller {
         self.stop_sent = false;
         self.listen_started_ms = now_ms();
         self.wake_dialog = !phrase.is_empty();
-        self.ring_stopped_in_dialog = false;
         self.tts_url.clear();
         self.tts_played = false;
         self.clear_speech_display();
@@ -308,20 +305,10 @@ impl Controller {
                 {
                     info!("voice command: stop word in STT text");
                     // Во фразе только стоп-слова: отдавать HA нечего, диалог кончается и при
-                    // звонке таймера. Когда прозвучало слово, по тексту не узнать, поэтому действие
-                    // выбирается по тому, чем открыт диалог: от wake word — как «Алиса, стоп»
-                    // (самого wake word в тексте нет), иначе — как «стоп» посреди диалога.
-                    // Если звонок посреди этого диалога уже выключили «стоп» спотера или wake
-                    // word, а новый не звонит, слово здесь не применяется: иначе оно поставило бы
-                    // музыку на паузу.
+                    // звонке таймера. Прозвучало ли слово сразу после wake word, по событиям HA не
+                    // узнать, поэтому слово всегда действует как «стоп» посреди диалога: музыку на
+                    // паузу не ставит.
                     // см. docs/voice.md, «Голосовой ассистент HA (ESPHome)»
-                    if self.wake_dialog {
-                        self.finish_interaction();
-                        if self.timer_ringing || !self.ring_stopped_in_dialog {
-                            self.stop_word(false);
-                        }
-                        return;
-                    }
                     if self.timer_ringing {
                         self.stop_timer_ring();
                     }
@@ -573,9 +560,9 @@ impl Controller {
         self.play_announce(vec![path], Pending::Earcon { seq });
     }
 
-    /// Отменяет диалог LISTENING / PROCESSING: короткое нажатие кнопки действия, «стоп» после окна
-    /// wake word и «стоп» из текста STT в диалоге не от wake word. Объявление, играющее поверх
-    /// диалога, обрывается вместе с ним.
+    /// Отменяет диалог LISTENING / PROCESSING: короткое нажатие кнопки действия, «стоп» спотера
+    /// вне окна wake word и стоп-слова из текста STT. Объявление, играющее поверх диалога,
+    /// обрывается вместе с ним.
     fn cancel_dialog(&mut self) {
         self.interrupt_speech();
         self.play_closing_earcon(format!("{SOUNDS}{}", self.model.cancel_sound));
@@ -811,9 +798,13 @@ impl Controller {
             info!("voice command '{word}' held until the wake arbitration ends");
             return;
         }
-        let after_wake = logic::after_wake(self.phase, now_ms(), self.listen_started_ms);
-        // A dialog past the window after its wake word: its words are the request's, except
-        // "стоп".
+        let after_wake = logic::after_wake(
+            self.phase,
+            self.wake_dialog,
+            now_ms(),
+            self.listen_started_ms,
+        );
+        // Без wake word или после его окна слова относятся к запросу, кроме «стоп».
         let in_dialog = matches!(self.phase, Phase::Listening | Phase::Processing) && !after_wake;
         let sounding = self.phase == Phase::Speaking || self.announcing || self.timer_ringing;
         if !logic::command_allowed(
@@ -875,10 +866,9 @@ impl Controller {
         }
     }
 
-    /// «стоп» / «хватит» от спотера или из текста STT.
+    /// «стоп» / «хватит» от спотера.
     fn stop_word(&mut self, in_dialog: bool) {
         if self.timer_ringing {
-            self.ring_stopped_in_dialog = in_dialog;
             self.stop_timer_ring();
         } else if in_dialog {
             self.cancel_dialog();
