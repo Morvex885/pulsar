@@ -43,6 +43,7 @@ pub struct Settings {
     pub clock_brightness: f32,
     /// Clock level follows the light sensor, with `clock_brightness` as the ceiling.
     pub clock_auto_brightness: bool,
+    /// Двоеточие времени мигает раз в секунду; выключено — горит постоянно.
     pub clock_colon_blink: bool,
     /// Числа из ответа голосового ассистента на часах («Clock spoken numbers»).
     pub clock_spoken_numbers: bool,
@@ -67,7 +68,7 @@ pub struct Settings {
     pub led_speed: f32,
     /// Listening / thinking / speaking shown on the ring and the clock.
     pub voice_indication: bool,
-    /// Confirmation sound when listening starts.
+    /// Звук начала прослушивания: после wake word и по кнопке действия.
     pub wake_sound: bool,
     /// Сколько ждать начала речи в follow-up-реплике, с; 0 — не продолжать разговор.
     pub followup_duration_s: u32,

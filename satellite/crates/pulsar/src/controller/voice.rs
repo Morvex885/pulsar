@@ -234,9 +234,13 @@ impl Controller {
         self.clear_speech_display();
         self.followup = logic::Followup::default();
         self.update_duck();
-        if earcon && self.st.wake_sound {
-            let sound = format!("{SOUNDS}{}", self.model.wake_sound);
-            self.player.play(Channel::Announce, vec![sound]);
+        match logic::wake_cue(earcon, self.st.wake_sound) {
+            logic::WakeCue::Keep => {}
+            logic::WakeCue::Sound => {
+                let sound = format!("{SOUNDS}{}", self.model.wake_sound);
+                self.player.play(Channel::Announce, vec![sound]);
+            }
+            logic::WakeCue::Cut => self.player.stop(Channel::Announce),
         }
         // HA applies AnnounceFinished by forcing idle: an answer's report must not arrive over
         // the new dialog's listening state.

@@ -334,7 +334,7 @@ impl Server {
                 "clock_colon_blink",
                 key::SW_CLOCK_COLON_BLINK,
                 "Clock colon blink",
-                "mdi:clock-digital",
+                "mdi:dots-vertical",
                 cfg,
             ));
         }

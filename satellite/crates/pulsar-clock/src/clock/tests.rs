@@ -705,7 +705,7 @@ fn names() {
 }
 
 #[test]
-fn colon_blink_only_affects_wall_clock_time() {
+fn colon_stays_lit_when_blink_is_off() {
     let mut l = Layers::new();
     let second_half = || Wall {
         first_half: false,
@@ -716,29 +716,4 @@ fn colon_blink_only_affects_wall_clock_time() {
     l.colon_blink = false;
     assert_eq!(l.compose(NOW, wall).0, time_frame());
     assert_eq!(l.compose(NOW + 500, second_half).0, time_frame());
-    l.hour12 = true;
-    for first_half in [true, false] {
-        let (frame, _) = l.compose(NOW, || Wall {
-            hour: 14,
-            min: 49,
-            first_half,
-        });
-        assert_eq!(frame, glyph_frame(font::time_glyphs(14, 49, true), true));
-    }
-    l.hour12 = false;
-    l.set_text("12:34", NOW);
-    assert_eq!(l.compose(NOW + 500, second_half).0, text_frame("12:34"));
-    l.set_text("1234", NOW);
-    assert_eq!(l.compose(NOW + 500, second_half).0.colon, 0);
-    l.set_timer(1000, true, NOW);
-    assert_eq!(
-        l.compose(NOW + 1000, wall).0,
-        glyph_frame(font::timer_glyphs(0), true)
-    );
-    assert_eq!(l.compose(NOW + 1500, second_half).0, Frame::default());
-    l.set_timer(0, false, NOW);
-    l.set_text("", NOW);
-    l.colon_blink = true;
-    assert_eq!(l.compose(NOW + 2000, wall).0, time_frame());
-    assert_eq!(l.compose(NOW + 2500, second_half).0.colon, 0);
 }

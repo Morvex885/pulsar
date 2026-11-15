@@ -333,6 +333,26 @@ pub fn want_duck(
     phase != Phase::Idle || announcing || timer_ringing || closing_earcon
 }
 
+/// Что вход в LISTENING делает с каналом ANNOUNCE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WakeCue {
+    /// Канал не трогать: продолжение разговора и разговор, начатый из HA.
+    Keep,
+    /// Звук активации; его play() обрывает то, что ещё звучит.
+    Sound,
+    /// Звук активации выключен: то, что ещё звучит (earcon ошибки или отмены), обрывается,
+    /// иначе оно попадёт в запись для STT.
+    Cut,
+}
+
+pub fn wake_cue(earcon: bool, wake_sound: bool) -> WakeCue {
+    match (earcon, wake_sound) {
+        (false, _) => WakeCue::Keep,
+        (true, true) => WakeCue::Sound,
+        (true, false) => WakeCue::Cut,
+    }
+}
+
 /// A local volume change clicks on ANNOUNCE, which also carries the answer, announcements, the
 /// timer ring, closing earcons and the wake earcon: a new play() there cuts whatever plays. In
 /// LISTENING and while arbitrating the microphone audio goes to HA's speech-to-text. A level

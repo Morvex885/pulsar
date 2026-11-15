@@ -1152,70 +1152,24 @@ async fn mic_gain_is_universal_config_clamped_and_replayed() {
 }
 
 #[tokio::test]
-async fn wake_sound_switch_is_universal_and_replays_both_states() {
-    for has_clock in [true, false] {
+async fn wake_sound_and_colon_blink_switches_are_config_and_replay_both_states() {
+    for (sw, k, oid, name) in [
+        (
+            SwitchId::WakeSound,
+            key::SW_WAKE_SOUND,
+            "wake_sound",
+            "Wake sound",
+        ),
+        (
+            SwitchId::ClockColonBlink,
+            key::SW_CLOCK_COLON_BLINK,
+            "clock_colon_blink",
+            "Clock colon blink",
+        ),
+    ] {
         local()
             .run_until(async {
-                let (id, mut cfg) = selftest("now");
-                cfg.has_clock = has_clock;
-                let (h, mut rx, port) = start_with(id, cfg);
-                let mut p = Peer::connect(port).await;
-                p.hello("HA").await;
-                event(&mut rx).await;
-                p.send(msg::LIST_ENTITIES_REQ, &Writer::new()).await;
-                let mut found = false;
-                loop {
-                    let (t, m) = p.recv().await.unwrap();
-                    if t == msg::LIST_DONE {
-                        break;
-                    }
-                    if t == msg::LIST_SWITCH && field(&m, 2).unwrap().u32() == key::SW_WAKE_SOUND {
-                        found = true;
-                        assert_eq!(field(&m, 1).unwrap().str(), "wake_sound");
-                        assert_eq!(field(&m, 3).unwrap().str(), "Wake sound");
-                        assert_eq!(field(&m, 8).unwrap().u32(), 1);
-                    }
-                }
-                assert!(found);
-                p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
-                p.sync().await;
-                for on in [false, true] {
-                    p.send(
-                        msg::SWITCH_CMD,
-                        &kv(key::SW_WAKE_SOUND, |w| w.boolean(2, on, true)),
-                    )
-                    .await;
-                    assert_eq!(
-                        drain(&mut p, &mut rx).await,
-                        [ApiEvent::Switch(SwitchId::WakeSound, on)]
-                    );
-                    h.publish_switch(SwitchId::WakeSound, on);
-                    let pushed = p.sync().await;
-                    p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
-                    let replayed = p.sync().await;
-                    for states in [pushed, replayed] {
-                        let (_, m) = states
-                            .iter()
-                            .find(|(t, m)| {
-                                *t == msg::SWITCH_STATE && state_key(m) == Some(key::SW_WAKE_SOUND)
-                            })
-                            .unwrap();
-                        assert_eq!(field(m, 2).is_some_and(|f| f.u32() != 0), on);
-                    }
-                }
-            })
-            .await;
-    }
-}
-
-#[tokio::test]
-async fn clock_colon_blink_needs_only_the_clock_and_replays_both_states() {
-    for has_auto_brightness in [true, false] {
-        local()
-            .run_until(async {
-                let (id, mut cfg) = selftest("now");
-                cfg.has_clock = true;
-                cfg.has_auto_brightness = has_auto_brightness;
+                let (id, cfg) = selftest("now");
                 let (h, mut rx, port) = start_with(id, cfg);
                 let mut p = Peer::connect(port).await;
                 p.hello("HA").await;
@@ -1232,39 +1186,28 @@ async fn clock_colon_blink_needs_only_the_clock_and_replays_both_states() {
                         keys.insert(field(&m, 2).unwrap().u32()),
                         "duplicate entity key"
                     );
-                    if t == msg::LIST_SWITCH
-                        && field(&m, 2).unwrap().u32() == key::SW_CLOCK_COLON_BLINK
-                    {
+                    if t == msg::LIST_SWITCH && field(&m, 2).unwrap().u32() == k {
                         found = true;
-                        assert_eq!(field(&m, 1).unwrap().str(), "clock_colon_blink");
-                        assert_eq!(field(&m, 3).unwrap().str(), "Clock colon blink");
+                        assert_eq!(field(&m, 1).unwrap().str(), oid);
+                        assert_eq!(field(&m, 3).unwrap().str(), name);
                         assert_eq!(field(&m, 8).unwrap().u32(), 1);
                     }
                 }
-                assert!(found);
+                assert!(found, "{name}");
                 p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
                 p.sync().await;
                 for on in [false, true] {
-                    p.send(
-                        msg::SWITCH_CMD,
-                        &kv(key::SW_CLOCK_COLON_BLINK, |w| w.boolean(2, on, true)),
-                    )
-                    .await;
-                    assert_eq!(
-                        drain(&mut p, &mut rx).await,
-                        [ApiEvent::Switch(SwitchId::ClockColonBlink, on)]
-                    );
-                    h.publish_switch(SwitchId::ClockColonBlink, on);
+                    p.send(msg::SWITCH_CMD, &kv(k, |w| w.boolean(2, on, true)))
+                        .await;
+                    assert_eq!(drain(&mut p, &mut rx).await, [ApiEvent::Switch(sw, on)]);
+                    h.publish_switch(sw, on);
                     let pushed = p.sync().await;
                     p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
                     let replayed = p.sync().await;
                     for states in [pushed, replayed] {
                         let (_, m) = states
                             .iter()
-                            .find(|(t, m)| {
-                                *t == msg::SWITCH_STATE
-                                    && state_key(m) == Some(key::SW_CLOCK_COLON_BLINK)
-                            })
+                            .find(|(t, m)| *t == msg::SWITCH_STATE && state_key(m) == Some(k))
                             .unwrap();
                         assert_eq!(field(m, 2).is_some_and(|f| f.u32() != 0), on);
                     }

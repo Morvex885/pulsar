@@ -536,7 +536,7 @@ impl Layers {
             (clock_fx::levels(&self.mus_shown), MUSIC_FRAME_MS)
         } else {
             let w = wall();
-            // Keep the time separator lit continuously when blinking is disabled.
+            // Двоеточие горит первую половину каждой секунды; при выключенном мигании — постоянно.
             (
                 glyph_frame(
                     font::time_glyphs(w.hour, w.min, self.hour12),
@@ -1011,7 +1011,7 @@ impl ClockHandle {
         self.send(Cmd::SetUiState(s));
     }
 
-    /// Blink the time separator; when disabled, keep it lit continuously.
+    /// Мигание двоеточия при показе времени; выключено — двоеточие горит постоянно.
     pub fn set_colon_blink(&self, on: bool) {
         self.send(Cmd::SetColonBlink(on));
     }
