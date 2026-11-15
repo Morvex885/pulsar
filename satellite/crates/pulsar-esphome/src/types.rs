@@ -2,6 +2,7 @@
 //! values exchanged with Home Assistant. Numeric values are the protocol's (api.proto /
 //! aioesphomeapi), as in the C++ `api_server.h`.
 
+use pulsar_core::model::LedLayout;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -42,7 +43,7 @@ pub struct ApiConfig {
     pub wake_words: Vec<WakeWordInfo>,
     /// Initially active ids.
     pub active_wake_words: Vec<String>,
-    /// Ring light effects, besides "None".
+    /// Эффекты лампы («Ring» или «Panel» — по `led_layout`), кроме "None".
     pub light_effects: Vec<String>,
     /// Select «Clock face» options, "None" first.
     pub clock_faces: Vec<String>,
@@ -56,21 +57,22 @@ pub struct ApiConfig {
     pub clock_formats: Vec<String>,
     /// Select «Zigbee role» options; empty: no Zigbee entities (no radio).
     pub zigbee_modes: Vec<String>,
-    /// false: нет сущностей Clock display / Clock brightness / Clock auto brightness / Clock text
-    /// speed / Clock text / Clock face / Clock music / Clock format, нет действий clock_show_text /
-    /// clock_show_face, их состояния не отправляются.
+    /// false: нет сущностей Clock display / Clock brightness / Clock auto brightness / Clock spoken
+    /// numbers / Clock text speed / Clock text / Clock face / Clock music / Clock format, нет
+    /// действий clock_show_text / clock_show_face, их состояния не отправляются.
     pub has_clock: bool,
     /// false: no Illuminance sensor or lux states.
     pub has_lux: bool,
     /// false: no Clock auto brightness switch or its states (listed only with `has_clock` as
     /// well).
     pub has_auto_brightness: bool,
-    /// The model has wake-word pre-roll rules: the switch "Command right after wake word".
-    pub has_wake_preroll: bool,
     /// The model has a readable hardware microphone mute switch/key.
     pub has_hw_mic_mute: bool,
     /// The model has the action button and volume keys (the Event «Button» entity).
     pub has_buttons: bool,
+    /// Раскладка модели (`Model::led_layout`): object_id и имя лампы — «ring»/«Ring» или
+    /// «panel»/«Panel».
+    pub led_layout: LedLayout,
     /// File holding the Noise encryption key (base64 of 32 bytes, as ESPHome's `api: encryption:
     /// key`). Missing or empty file: plaintext (and provisioning with the all-zeros key). HA may
     /// set or rotate it with NoiseEncryptionSetKeyRequest. None: encryption unsupported.
@@ -92,10 +94,10 @@ impl Default for ApiConfig {
             zigbee_modes: Vec::new(),
             has_clock: true,
             has_lux: true,
-            has_wake_preroll: true,
             has_hw_mic_mute: true,
             has_buttons: true,
             has_auto_brightness: true,
+            led_layout: LedLayout::default(),
             key_path: None,
         }
     }
@@ -269,10 +271,10 @@ pub enum SwitchId {
     AutoUpdate = 3,
     NearestAnswers = 4,
     VoiceIndication = 5,
-    WakePreroll = 6,
     ClockAutoBrightness = 7,
-    WakeSound = 8,
-    ClockColonBlink = 9,
+    ClockSpokenNumbers = 8,
+    WakeSound = 9,
+    ClockColonBlink = 10,
 }
 
 #[repr(u32)]
@@ -299,7 +301,34 @@ pub fn followup_duration_s(v: f32) -> Option<u32> {
         .then(|| v.round().clamp(0.0, FOLLOWUP_DURATION_MAX_S as f32) as u32)
 }
 
-/// Яркость часов 0..100 %, прокрутка часов 100..2000 мс, скорость LED 0.25..4 ×, follow-up 0..10 с.
+/// Пределы «Command start offset», мс: сдвиг начала звука запроса от точки, где спотер распознал
+/// wake word; минус — раньше (ближе к слову), плюс — позже (ближе к команде).
+pub const COMMAND_OFFSET_MIN_MS: i32 = -100;
+pub const COMMAND_OFFSET_MAX_MS: i32 = 200;
+
+/// «Command start offset» из команды HA или `state.conf` — целые мс в пределах; `None` для NaN и
+/// бесконечности (значение не меняется).
+pub fn command_offset_ms(v: f32) -> Option<i32> {
+    v.is_finite().then(|| {
+        v.round()
+            .clamp(COMMAND_OFFSET_MIN_MS as f32, COMMAND_OFFSET_MAX_MS as f32) as i32
+    })
+}
+
+/// Верхняя граница «Microphone gain», дБ: с запасом выше 34 дБ — коэффициента 50, с которым
+/// библиотека отдаёт усиленный выход VQE.
+// см. docs/hardware.md, «Библиотеки Яндекса (C API)»
+pub const MIC_GAIN_MAX_DB: u32 = 40;
+
+/// «Microphone gain» из команды HA или `state.conf` — целые дБ 0..=MAX; `None` для NaN и
+/// бесконечности (значение не меняется).
+pub fn mic_gain_db(v: f32) -> Option<u32> {
+    v.is_finite()
+        .then(|| v.round().clamp(0.0, MIC_GAIN_MAX_DB as f32) as u32)
+}
+
+/// Яркость часов 0..100 %, прокрутка часов 100..2000 мс, скорость LED 0.25..4 ×, follow-up 0..10 с,
+/// сдвиг начала команды −100..200 мс, усиление микрофона 0..40 дБ.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NumberId {
@@ -307,6 +336,8 @@ pub enum NumberId {
     ClockScroll = 2,
     LedSpeed = 3,
     FollowupDuration = 4,
+    CommandOffset = 5,
+    MicGain = 6,
 }
 
 #[repr(u32)]

@@ -1,6 +1,5 @@
-//! Playback through the firmware's GStreamer (channels Music / Announce; Announce is played by
-//! our own ALSA writer) and the master volume
-//! (ALSA "Master Playback Volume", softvol of the model's playback PCM).
+//! Воспроизведение через GStreamer прошивки (каналы Music / Announce; Announce выводит свой
+//! ALSA-писатель) и мастер-громкость (softvol «Master Playback Volume» на PCM `Model::master_pcm`).
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]

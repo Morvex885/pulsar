@@ -67,13 +67,13 @@ impl Controller {
         self.publish_microphones();
         let api = &self.api;
         api.publish_switch(SwitchId::Clock, self.st.clock_on);
-        api.publish_switch(SwitchId::ClockAutoBrightness, self.st.clock_auto_brightness);
         api.publish_switch(SwitchId::ClockColonBlink, self.st.clock_colon_blink);
+        api.publish_switch(SwitchId::ClockAutoBrightness, self.st.clock_auto_brightness);
+        api.publish_switch(SwitchId::ClockSpokenNumbers, self.st.clock_spoken_numbers);
         api.publish_switch(SwitchId::AutoUpdate, self.st.auto_update);
         api.publish_switch(SwitchId::NearestAnswers, self.st.nearest_answers);
         api.publish_switch(SwitchId::VoiceIndication, self.st.voice_indication);
         api.publish_switch(SwitchId::WakeSound, self.st.wake_sound);
-        api.publish_switch(SwitchId::WakePreroll, self.st.wake_preroll);
         self.publish_update();
         let api = &self.api;
         api.publish_binary_sensor(BinarySensorId::HwMicMute, self.hw_mic_muted);
@@ -86,6 +86,11 @@ impl Controller {
             NumberId::FollowupDuration,
             self.st.followup_duration_s as f32,
         );
+        api.publish_number(
+            NumberId::CommandOffset,
+            self.st.command_start_offset_ms as f32,
+        );
+        api.publish_number(NumberId::MicGain, self.st.mic_gain_db as f32);
         api.publish_select(SelectId::MusicViz, &self.st.music_viz);
         api.publish_select(SelectId::ClockMusic, &self.st.clock_music);
         api.publish_select(SelectId::ClockFormat, &self.st.clock_format);
@@ -174,16 +179,18 @@ impl Controller {
                 self.clock.set_colon_blink(state);
             }
             SwitchId::WakeSound => self.st.wake_sound = state,
+            SwitchId::ClockSpokenNumbers => {
+                self.st.clock_spoken_numbers = state;
+                if !state {
+                    self.clear_speech_display();
+                }
+            }
             SwitchId::AutoUpdate => self.st.auto_update = state,
             SwitchId::NearestAnswers => self.st.nearest_answers = state,
             SwitchId::VoiceIndication => {
                 self.st.voice_indication = state;
                 self.leds.set_voice_indication(state);
                 self.clock.set_voice_indication(state);
-            }
-            SwitchId::WakePreroll => {
-                self.st.wake_preroll = state;
-                self.mic.set_preroll(state);
             }
         }
         self.api.publish_switch(id, state);
@@ -227,13 +234,29 @@ impl Controller {
                     && self.followup.awaiting_speech()
                 {
                     info!("follow-up: turned off, conversation ends");
-                    self.finish_interaction();
+                    self.end_silent_followup();
                 }
             }
             NumberId::LedSpeed => {
                 self.st.led_speed = cxx_clamp(value, 0.25, 4.0);
                 self.leds.set_speed(self.st.led_speed);
                 self.api.publish_number(id, self.st.led_speed);
+            }
+            NumberId::CommandOffset => {
+                let Some(ms) = pulsar_esphome::command_offset_ms(value) else {
+                    return;
+                };
+                self.st.command_start_offset_ms = ms;
+                self.mic.set_command_offset(ms);
+                self.api.publish_number(id, ms as f32);
+            }
+            NumberId::MicGain => {
+                let Some(db) = pulsar_esphome::mic_gain_db(value) else {
+                    return;
+                };
+                self.st.mic_gain_db = db;
+                self.mic.set_mic_gain(db);
+                self.api.publish_number(id, db as f32);
             }
         }
         self.persist();

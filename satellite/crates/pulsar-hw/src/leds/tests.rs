@@ -25,7 +25,7 @@ fn to_px_gamma_dim_cap() {
     assert_eq!(to_px(c, 1.0, None), [51, 204, 0]);
     assert_eq!(to_px(white, 0.5, None), [51, 51, 51]);
     // Ambient floor: 0.3 in the dark.
-    let mut comp = Compositor::new(3, 0);
+    let mut comp = Compositor::new(3, 0, LedLayout::Ring);
     assert!((comp.dim() - 1.0).abs() < 1e-6);
     comp.dimmer.update(0.0);
     assert!((comp.dim() - 0.3).abs() < 1e-6);
@@ -127,7 +127,7 @@ fn user(on: bool) -> Cmd {
 
 #[test]
 fn layer_priority() {
-    let mut c = Compositor::new(3, 0);
+    let mut c = Compositor::new(3, 0, LedLayout::Ring);
     assert_eq!(c.active_layer(0), Layer::Off);
     c.apply(Cmd::MediaPlaying(true), 0);
     assert_eq!(c.active_layer(0), Layer::Off, "music style Off");
@@ -162,7 +162,7 @@ fn layer_priority() {
     assert_eq!(c.active_layer(0), Layer::Volume);
     assert_eq!(c.active_layer(VOLUME_SHOW_MS), Layer::Voice);
     // Zero brightness hides the light.
-    let mut c = Compositor::new(24, 6);
+    let mut c = Compositor::new(24, 6, LedLayout::Ring);
     c.apply(
         Cmd::UserLight {
             on: true,
@@ -181,7 +181,7 @@ fn layer_priority() {
 
 #[test]
 fn timed_content_expires() {
-    let mut c = Compositor::new(24, 6);
+    let mut c = Compositor::new(24, 6, LedLayout::Ring);
     assert!(ui(&mut c, UiState::Error, 1000));
     // Idle during the error is ignored; it runs its 3.54 s to the end.
     assert!(!ui(&mut c, UiState::Idle, 4539));
@@ -192,7 +192,7 @@ fn timed_content_expires() {
     ui(&mut c, UiState::Error, 5000);
     assert!(ui(&mut c, UiState::Listening, 5001));
 
-    let mut c = Compositor::new(24, 6);
+    let mut c = Compositor::new(24, 6, LedLayout::Ring);
     c.apply(Cmd::Muted(false), 0);
     assert_eq!(c.sweep, Sweep::None, "first call: no one-shot");
     c.apply(Cmd::TimerStarted, 100);
@@ -230,7 +230,7 @@ fn timed_content_expires() {
     assert_eq!(c.show_until, 3_600_000);
 
     // Lite 2 unmute: no sweep, and a running mute flash ends with it.
-    let mut c = Compositor::new(3, 0);
+    let mut c = Compositor::new(3, 0, LedLayout::Ring);
     c.apply(Cmd::Muted(false), 0);
     c.apply(Cmd::Muted(true), 10);
     assert_eq!(c.sweep, Sweep::MuteOn);
@@ -240,7 +240,7 @@ fn timed_content_expires() {
 
 #[test]
 fn midi_logo_follows_voice_mute_or_ring_average() {
-    let mut c = Compositor::new(24, 6);
+    let mut c = Compositor::new(24, 6, LedLayout::Ring);
     c.apply(user(true), 0);
     c.frame(0);
     let red = to_px(fx::rgb(255, 0, 0), c.dim(), None);
@@ -263,7 +263,7 @@ fn midi_logo_follows_voice_mute_or_ring_average() {
 
 #[test]
 fn layer_changes_fade_but_volume_cuts_in() {
-    let mut c = Compositor::new(3, 0);
+    let mut c = Compositor::new(3, 0, LedLayout::Ring);
     c.frame(0);
     c.apply(
         Cmd::ShowTemporary {
@@ -290,12 +290,71 @@ fn layer_changes_fade_but_volume_cuts_in() {
     assert_eq!(&c.px[..3], &to_px(vol[0], c.dim(), None));
 }
 
+#[test]
+fn panel_without_logo_shows_steady_mute() {
+    // У Станции 2 нет логотипа: ровный mute показывает панель и перекрывает лампу.
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(user(true), 0);
+    c.apply(Cmd::Muted(true), 0);
+    assert_eq!(c.active_layer(0), Layer::Mute);
+}
+
+#[test]
+fn panel_show_temporary_keeps_the_panel_layout() {
+    // ShowTemporary пересоздаёт состояние эффекта: Radar остаётся панельным лучом, а не заливкой.
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(
+        Cmd::ShowTemporary {
+            effect: "Radar".into(),
+            color: RED,
+            seconds: 10,
+        },
+        0,
+    );
+    // Смена слоя гаснет/разгорается 250 мс от первого кадра: к 1000 мс переход закончен.
+    c.frame(0);
+    c.frame(1000);
+    let px = &c.px[..88 * 3];
+    assert!(
+        px.chunks(3).any(|p| p != &px[..3]),
+        "Radar на панели залит одним цветом"
+    );
+}
+
+#[test]
+fn panel_user_light_effect_uses_the_panel_layout() {
+    // Лампа «Panel» с эффектом: Radar рисуется лучом панели, а не заливкой кольца.
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(
+        Cmd::UserLight {
+            on: true,
+            color: RED,
+            brightness: 1.0,
+            effect: "Radar".into(),
+            transition_ms: 0,
+        },
+        0,
+    );
+    c.frame(0);
+    c.frame(1000);
+    let px = &c.px[..88 * 3];
+    assert!(
+        px.chunks(3).any(|p| p != &px[..3]),
+        "Radar лампы залит одним цветом"
+    );
+}
+
 /// The actor on a capture sink.
 fn spawn_capture(n: usize, nlogo: usize) -> (LedsHandle, Captured, JoinHandle<()>) {
     let frames = Rc::new(RefCell::new(Vec::new()));
     let out = Output::new(Sink::Capture(Rc::clone(&frames)), n, nlogo);
     let (tx, rx) = unbounded_channel();
-    let task = tokio::task::spawn_local(run(Compositor::new(n, nlogo), out, rx, true));
+    let task = tokio::task::spawn_local(run(
+        Compositor::new(n, nlogo, LedLayout::Ring),
+        out,
+        rx,
+        true,
+    ));
     (LedsHandle { tx }, frames, task)
 }
 
@@ -335,7 +394,7 @@ async fn volume_overlay_cuts_in_and_its_expiry_restores_the_light() {
     LocalSet::new()
         .run_until(async {
             let (leds, frames, task) = spawn_capture(3, 0);
-            let dim = Compositor::new(3, 0).dim();
+            let dim = Compositor::new(3, 0, LedLayout::Ring).dim();
             let red = to_px(fx::rgb(255, 0, 0), dim, None).repeat(3);
             leds.set_user_light(true, RED, 1.0, String::new(), 0);
             sleep_ms(500).await;

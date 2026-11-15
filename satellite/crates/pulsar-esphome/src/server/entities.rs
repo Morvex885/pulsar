@@ -3,6 +3,7 @@
 
 use std::net::Ipv4Addr;
 
+use pulsar_core::model::LedLayout;
 use tokio::time::Instant;
 
 use super::{ESPHOME_VERSION, PROJECT_NAME, Server, msg};
@@ -45,12 +46,16 @@ pub(super) mod key {
     pub const SELECT_CASE_COLOR: u32 = 29;
     pub const ACTION_LED_SHOW: u32 = 30;
     pub const SELECT_CLOCK_MUSIC: u32 = 31;
-    pub const SW_WAKE_PREROLL: u32 = 32;
+    // 32 — бывший switch «Command right after wake word»; не переиспользовать: HA помнит
+    // сущность по ключу.
     pub const SW_CLOCK_AUTO_BRI: u32 = 33;
     pub const NUMBER_FOLLOWUP_DURATION: u32 = 34;
     pub const SELECT_CLOCK_FORMAT: u32 = 35;
-    pub const SW_WAKE_SOUND: u32 = 37;
-    pub const SW_CLOCK_COLON_BLINK: u32 = 36;
+    pub const NUMBER_COMMAND_OFFSET: u32 = 36;
+    pub const SW_CLOCK_SPOKEN_NUMBERS: u32 = 37;
+    pub const NUMBER_MIC_GAIN: u32 = 38;
+    pub const SW_WAKE_SOUND: u32 = 39;
+    pub const SW_CLOCK_COLON_BLINK: u32 = 40;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -125,11 +130,11 @@ pub(super) struct Cache {
     sw_clock: BoolState,
     sw_clock_colon_blink: BoolState,
     sw_clock_auto_bri: BoolState,
+    sw_clock_spoken_numbers: BoolState,
     sw_auto_update: BoolState,
     sw_nearest_answers: BoolState,
     sw_voice_indication: BoolState,
     sw_wake_sound: BoolState,
-    sw_wake_preroll: BoolState,
     bs_hw_mute: BoolState,
     update: UpdateState,
     update_has: bool,
@@ -138,6 +143,8 @@ pub(super) struct Cache {
     clock_scroll: FloatState,
     led_speed: FloatState,
     followup_duration: FloatState,
+    command_offset: FloatState,
+    mic_gain: FloatState,
     clock_text: StrState,
     clock_face: StrState,
     zigbee_mode: StrState,
@@ -162,11 +169,11 @@ impl Cache {
             sw_clock: BoolState::default(),
             sw_clock_colon_blink: BoolState::default(),
             sw_clock_auto_bri: BoolState::default(),
+            sw_clock_spoken_numbers: BoolState::default(),
             sw_auto_update: BoolState::default(),
             sw_nearest_answers: BoolState::default(),
             sw_voice_indication: BoolState::default(),
             sw_wake_sound: BoolState::default(),
-            sw_wake_preroll: BoolState::default(),
             bs_hw_mute: BoolState::default(),
             update: UpdateState::default(),
             update_has: false,
@@ -175,6 +182,8 @@ impl Cache {
             clock_scroll: FloatState::default(),
             led_speed: FloatState::default(),
             followup_duration: FloatState::default(),
+            command_offset: FloatState::default(),
+            mic_gain: FloatState::default(),
             clock_text: StrState::default(),
             clock_face: StrState::default(),
             zigbee_mode: StrState::default(),
@@ -264,7 +273,7 @@ impl Server {
         match id {
             SwitchId::Clock | SwitchId::ClockColonBlink => self.cfg.has_clock,
             SwitchId::ClockAutoBrightness => self.cfg.has_clock && self.cfg.has_auto_brightness,
-            SwitchId::WakePreroll => self.cfg.has_wake_preroll,
+            SwitchId::ClockSpokenNumbers => self.cfg.has_clock,
             SwitchId::Microphones
             | SwitchId::AutoUpdate
             | SwitchId::NearestAnswers
@@ -338,6 +347,15 @@ impl Server {
                 cfg,
             ));
         }
+        if self.switch_listed(SwitchId::ClockSpokenNumbers) {
+            out.push(switch(
+                "clock_spoken_numbers",
+                key::SW_CLOCK_SPOKEN_NUMBERS,
+                "Clock spoken numbers",
+                "mdi:numeric",
+                cfg,
+            ));
+        }
         out.push(switch(
             "auto_update",
             key::SW_AUTO_UPDATE,
@@ -366,15 +384,6 @@ impl Server {
             "mdi:volume-high",
             cfg,
         ));
-        if self.cfg.has_wake_preroll {
-            out.push(switch(
-                "command_right_after_wake_word",
-                key::SW_WAKE_PREROLL,
-                "Command right after wake word",
-                "mdi:skip-backward",
-                cfg,
-            ));
-        }
         let number = |oid, key, name, icon, (min, max, step): (f32, f32, f32), unit| {
             let mut w = Writer::new();
             entity_head(&mut w, oid, key, name);
@@ -402,6 +411,26 @@ impl Server {
             "mdi:microphone-message",
             (0.0, crate::FOLLOWUP_DURATION_MAX_S as f32, 1.0),
             "s",
+        ));
+        out.push(number(
+            "command_start_offset",
+            key::NUMBER_COMMAND_OFFSET,
+            "Command start offset",
+            "mdi:arrow-expand-horizontal",
+            (
+                crate::COMMAND_OFFSET_MIN_MS as f32,
+                crate::COMMAND_OFFSET_MAX_MS as f32,
+                10.0,
+            ),
+            "ms",
+        ));
+        out.push(number(
+            "microphone_gain",
+            key::NUMBER_MIC_GAIN,
+            "Microphone gain",
+            "mdi:microphone-plus",
+            (0.0, crate::MIC_GAIN_MAX_DB as f32, 1.0),
+            "dB",
         ));
         let select = |oid, key, name, icon, options: &[String], category: Option<u32>| {
             let mut w = Writer::new();
@@ -488,7 +517,11 @@ impl Server {
             ));
         }
         let mut w = Writer::new();
-        entity_head(&mut w, "ring", key::LIGHT_RING, "Ring");
+        let (light_oid, light_name) = match self.cfg.led_layout {
+            LedLayout::Ring => ("ring", "Ring"),
+            LedLayout::Station2Panel => ("panel", "Panel"),
+        };
+        entity_head(&mut w, light_oid, key::LIGHT_RING, light_name);
         w.str(11, "None", true);
         for e in &self.cfg.light_effects {
             w.str(11, e, true);
@@ -766,15 +799,15 @@ impl Server {
         let to = Some(id);
         let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
         let c = &self.cache;
-        let (mic, clock, auto_bri, auto, nearest, voice, wake_sound, preroll, hw) = (
+        let (mic, clock, auto_bri, spoken, auto, nearest, voice, wake_sound, hw) = (
             c.sw_microphones,
             c.sw_clock,
             c.sw_clock_auto_bri,
+            c.sw_clock_spoken_numbers,
             c.sw_auto_update,
             c.sw_nearest_answers,
             c.sw_voice_indication,
             c.sw_wake_sound,
-            c.sw_wake_preroll,
             c.bs_hw_mute,
         );
         let colon_blink = c.sw_clock_colon_blink;
@@ -795,13 +828,13 @@ impl Server {
         if self.switch_listed(SwitchId::ClockAutoBrightness) {
             self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK_AUTO_BRI, auto_bri, to);
         }
+        if self.switch_listed(SwitchId::ClockSpokenNumbers) {
+            self.send_bool(msg::SWITCH_STATE, key::SW_CLOCK_SPOKEN_NUMBERS, spoken, to);
+        }
         self.send_bool(msg::SWITCH_STATE, key::SW_AUTO_UPDATE, auto, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_NEAREST_ANSWERS, nearest, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_VOICE_INDICATION, voice, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_WAKE_SOUND, wake_sound, to);
-        if self.cfg.has_wake_preroll {
-            self.send_bool(msg::SWITCH_STATE, key::SW_WAKE_PREROLL, preroll, to);
-        }
         self.send_update(to);
         if self.cfg.has_hw_mic_mute {
             self.send_bool(msg::BINARY_SENSOR_STATE, key::BS_HW_MIC_MUTE, hw, to);
@@ -840,6 +873,18 @@ impl Server {
             msg::NUMBER_STATE,
             key::NUMBER_FOLLOWUP_DURATION,
             self.cache.followup_duration,
+            to,
+        );
+        self.send_float(
+            msg::NUMBER_STATE,
+            key::NUMBER_COMMAND_OFFSET,
+            self.cache.command_offset,
+            to,
+        );
+        self.send_float(
+            msg::NUMBER_STATE,
+            key::NUMBER_MIC_GAIN,
+            self.cache.mic_gain,
             to,
         );
         self.send_cached_str(
@@ -951,6 +996,9 @@ impl Server {
                     SwitchId::ClockAutoBrightness => {
                         (&mut c.sw_clock_auto_bri, key::SW_CLOCK_AUTO_BRI)
                     }
+                    SwitchId::ClockSpokenNumbers => {
+                        (&mut c.sw_clock_spoken_numbers, key::SW_CLOCK_SPOKEN_NUMBERS)
+                    }
                     SwitchId::AutoUpdate => (&mut c.sw_auto_update, key::SW_AUTO_UPDATE),
                     SwitchId::NearestAnswers => {
                         (&mut c.sw_nearest_answers, key::SW_NEAREST_ANSWERS)
@@ -959,7 +1007,6 @@ impl Server {
                         (&mut c.sw_voice_indication, key::SW_VOICE_INDICATION)
                     }
                     SwitchId::WakeSound => (&mut c.sw_wake_sound, key::SW_WAKE_SOUND),
-                    SwitchId::WakePreroll => (&mut c.sw_wake_preroll, key::SW_WAKE_PREROLL),
                 };
                 *s = BoolState { has: true, v };
                 let s = *s;
@@ -1000,11 +1047,20 @@ impl Server {
                     NumberId::FollowupDuration => {
                         (&mut c.followup_duration, key::NUMBER_FOLLOWUP_DURATION)
                     }
+                    NumberId::CommandOffset => (&mut c.command_offset, key::NUMBER_COMMAND_OFFSET),
+                    NumberId::MicGain => (&mut c.mic_gain, key::NUMBER_MIC_GAIN),
                 };
                 *s = FloatState { has: true, v };
                 let s = *s;
                 if on
-                    && (has_clock || matches!(id, NumberId::LedSpeed | NumberId::FollowupDuration))
+                    && (has_clock
+                        || matches!(
+                            id,
+                            NumberId::LedSpeed
+                                | NumberId::FollowupDuration
+                                | NumberId::CommandOffset
+                                | NumberId::MicGain
+                        ))
                 {
                     self.send_float(msg::NUMBER_STATE, key, s, None);
                 }

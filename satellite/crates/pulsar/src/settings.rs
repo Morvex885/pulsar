@@ -44,6 +44,8 @@ pub struct Settings {
     /// Clock level follows the light sensor, with `clock_brightness` as the ceiling.
     pub clock_auto_brightness: bool,
     pub clock_colon_blink: bool,
+    /// Числа из ответа голосового ассистента на часах («Clock spoken numbers»).
+    pub clock_spoken_numbers: bool,
     /// Clock text scroll step.
     pub clock_scroll_ms: i32,
     /// User ring light.
@@ -67,10 +69,13 @@ pub struct Settings {
     pub voice_indication: bool,
     /// Confirmation sound when listening starts.
     pub wake_sound: bool,
-    /// Audio between the end of the wake word and its confirmation goes ahead of the request.
-    pub wake_preroll: bool,
     /// Сколько ждать начала речи в follow-up-реплике, с; 0 — не продолжать разговор.
     pub followup_duration_s: u32,
+    /// Сдвиг начала звука запроса от точки хита спотера wake word, мс («Command start offset»).
+    pub command_start_offset_ms: i32,
+    /// Усиление звука запроса перед отправкой в HA, дБ («Microphone gain»); 0 — канал VQE как
+    /// есть.
+    pub mic_gain_db: u32,
     /// Stem of `pulsar_hw::case_colors()`, "" = none.
     pub led_case_color: String,
     /// Release being installed. Still set after a restart into another version: that release
@@ -95,6 +100,7 @@ impl Default for Settings {
             clock_brightness: 1.0,
             clock_auto_brightness: true,
             clock_colon_blink: true,
+            clock_spoken_numbers: false,
             clock_scroll_ms: 400,
             light: LightState::default(),
             wake_word: "alisa".into(),
@@ -107,8 +113,14 @@ impl Default for Settings {
             led_speed: 1.0,
             voice_indication: true,
             wake_sound: true,
-            wake_preroll: true,
             followup_duration_s: 10,
+            // Подбор 2026-11-04 (Миди, 35 фраз «Алиса»/«Яндекс», STT faster-whisper): хвост
+            // «Алисы» («Так,» перед командой) — до +20 мс, с +30 мс отрезается начало команды
+            // («Открой шторы» → «Закрой шторы»), запаса между ними нет. При 0 одна фраза из 35
+            // получила лишнее «Так,» перед целой командой; перевёрнутых команд нет.
+            command_start_offset_ms: 0,
+            // см. docs/voice.md, «Голосовой ассистент HA (ESPHome)»
+            mic_gain_db: 0,
             led_case_color: String::new(),
             update_attempt: String::new(),
             zigbee_role: Mode::Off,
@@ -157,6 +169,7 @@ impl Settings {
                 b"clock_brightness" => self.clock_brightness = fv,
                 b"clock_auto_brightness" => self.clock_auto_brightness = on,
                 b"clock_colon_blink" => self.clock_colon_blink = on,
+                b"clock_spoken_numbers" => self.clock_spoken_numbers = on,
                 // C++ int(float): truncation (Rust saturates where C++ is undefined).
                 b"clock_scroll_ms" => self.clock_scroll_ms = (fv as i32).clamp(100, 2000),
                 b"light_on" => self.light.on = on,
@@ -184,10 +197,19 @@ impl Settings {
                 }
                 b"voice_indication" => self.voice_indication = on,
                 b"wake_sound" => self.wake_sound = on,
-                b"wake_preroll" => self.wake_preroll = on,
                 b"followup_duration_s" => {
                     if let Some(s) = pulsar_esphome::followup_duration_s(fv) {
                         self.followup_duration_s = s;
+                    }
+                }
+                b"command_start_offset_ms" => {
+                    if let Some(ms) = pulsar_esphome::command_offset_ms(fv) {
+                        self.command_start_offset_ms = ms;
+                    }
+                }
+                b"mic_gain_db" => {
+                    if let Some(db) = pulsar_esphome::mic_gain_db(fv) {
+                        self.mic_gain_db = db;
                     }
                 }
                 b"led_case_color" => self.led_case_color = v,
@@ -216,7 +238,9 @@ impl Settings {
              light_b={}\nlight_effect={}\nwake_word={}\ntz={}\nauto_update={}\nupdate_attempt={}\n\
              zigbee_role={}\nzigbee_flash_failed={:x}\nnearest_answers={}\nmusic_viz={}\n\
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
-             wake_preroll={}\nclock_auto_brightness={}\nfollowup_duration_s={}\nclock_format={}\nwake_sound={}\nclock_colon_blink={}\n",
+             clock_auto_brightness={}\nfollowup_duration_s={}\nclock_format={}\n\
+             command_start_offset_ms={}\nclock_spoken_numbers={}\nmic_gain_db={}\n\
+             wake_sound={}\nclock_colon_blink={}\n",
             f(self.volume),
             f(self.volume_legacy),
             b(self.muted),
@@ -242,10 +266,12 @@ impl Settings {
             b(self.voice_indication),
             self.led_case_color,
             self.clock_music,
-            b(self.wake_preroll),
             b(self.clock_auto_brightness),
             self.followup_duration_s,
             self.clock_format,
+            self.command_start_offset_ms,
+            b(self.clock_spoken_numbers),
+            self.mic_gain_db,
             b(self.wake_sound),
             b(self.clock_colon_blink),
         )

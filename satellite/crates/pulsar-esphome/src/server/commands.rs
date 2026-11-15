@@ -232,12 +232,12 @@ impl Server {
             key::SW_MICROPHONES => SwitchId::Microphones,
             key::SW_CLOCK => SwitchId::Clock,
             key::SW_CLOCK_AUTO_BRI => SwitchId::ClockAutoBrightness,
+            key::SW_CLOCK_SPOKEN_NUMBERS => SwitchId::ClockSpokenNumbers,
             key::SW_AUTO_UPDATE => SwitchId::AutoUpdate,
             key::SW_NEAREST_ANSWERS => SwitchId::NearestAnswers,
             key::SW_VOICE_INDICATION => SwitchId::VoiceIndication,
             key::SW_WAKE_SOUND => SwitchId::WakeSound,
             key::SW_CLOCK_COLON_BLINK => SwitchId::ClockColonBlink,
-            key::SW_WAKE_PREROLL => SwitchId::WakePreroll,
             _ => return,
         };
         self.emit(ApiEvent::Switch(id, state));
@@ -264,6 +264,18 @@ impl Server {
                     return;
                 };
                 (NumberId::FollowupDuration, s as f32)
+            }
+            key::NUMBER_COMMAND_OFFSET => {
+                let Some(ms) = crate::command_offset_ms(v) else {
+                    return;
+                };
+                (NumberId::CommandOffset, ms as f32)
+            }
+            key::NUMBER_MIC_GAIN => {
+                let Some(db) = crate::mic_gain_db(v) else {
+                    return;
+                };
+                (NumberId::MicGain, db as f32)
             }
             _ => return,
         };

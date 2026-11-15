@@ -23,6 +23,54 @@ fn text_frame(s: &str) -> Frame {
     glyph_frame(g, colon)
 }
 
+#[test]
+fn spoken_number_respects_clock_and_dialog_lifecycle() {
+    let mut l = Layers::new();
+    l.enabled = false;
+    l.set_ui_state(UiState::Speaking, NOW);
+    l.set_speech_number("-9", NOW);
+    assert_eq!(l.compose(NOW, wall).0, Frame::default());
+    l.enabled = true;
+    assert_eq!(l.compose(NOW, wall).0, text_frame("-9"));
+    l.flash_number(42, NOW);
+    assert_eq!(
+        l.compose(NOW, wall).0,
+        glyph_frame(font::number_glyphs(42), false)
+    );
+    l.flash_until = 0;
+    l.show_code("1234".into(), NOW);
+    assert_eq!(
+        l.compose(NOW, wall).0,
+        glyph_frame(font::code_glyphs(b"1234", 0, CODE_PAGE_MS), false)
+    );
+    l.code.clear();
+    l.set_ui_state(UiState::TimerRing, NOW);
+    assert_eq!(l.compose(NOW, wall).0, clock_fx::render(Anim::Ringing, 0));
+    l.set_ui_state(UiState::Idle, NOW);
+    assert_eq!(l.compose(NOW, wall).0, text_frame("-9"));
+    l.set_speech_number("", NOW);
+    assert_eq!(l.compose(NOW, wall).0, time_frame());
+}
+
+#[test]
+fn spoken_12h_time_matches_clock_time() {
+    let mut l = Layers::new();
+    l.set_speech_number(" 9:05", NOW);
+    assert_eq!(
+        l.compose(NOW, wall).0,
+        glyph_frame(font::time_glyphs(21, 5, true), true)
+    );
+}
+
+#[test]
+fn long_spoken_number_scrolls() {
+    let mut l = Layers::new();
+    l.set_speech_number("12345", NOW);
+    assert_eq!(l.compose(NOW + 50, wall).1, 350);
+    l.set_speech_number("1234", NOW);
+    assert_eq!(l.compose(NOW + 50, wall).1, 0);
+}
+
 fn bands(x: f32) -> MusicFrame {
     MusicFrame {
         bands: [x; 8],
