@@ -6,13 +6,17 @@
 mod ffi;
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use log::{error, info, warn};
 
 pub use ffi::{Lib, LoadError, Spotter, SpotterConf, Vqe, VqeStep, preload_deps};
 
 pub const VQE_MODELS: &str = "/system/vendor/quasar/vqe_models";
+
+/// Файлы, без которых каталог не считается моделью спотера.
+// см. docs/hardware.md, «Библиотеки Яндекса (C API)»
+pub const MODEL_FILES: [&str; 2] = ["acoustic_model.nnet", "flags.txt"];
 
 // voicetech.AudioInputChannelType (VQE output channel types);
 // см. docs/hardware.md, «Библиотеки Яндекса (C API)».
@@ -242,6 +246,8 @@ pub(crate) struct Slot {
     /// Читать якорь хита (только у спотера wake word).
     anchor: bool,
     sp: Option<Spotter>,
+    /// Каталог загруженной модели; пустой — спотера нет.
+    dir: PathBuf,
     layout: SpotterLayout,
     legacy: SpotterLayout,
     /// Выходы раскладки проверены на первом чанке ([`Slot::resolve`]).
@@ -256,6 +262,7 @@ impl Slot {
             what,
             anchor,
             sp: None,
+            dir: PathBuf::new(),
             layout: SpotterLayout::default(),
             legacy: SpotterLayout::default(),
             checked: false,
@@ -268,6 +275,12 @@ impl Slot {
     /// `legacy_main` — выход VQE для типа 0 в запасной раскладке.
     fn init(&mut self, lib: &Lib, dir: &Path, legacy_main: i32) -> bool {
         self.sp = None;
+        self.dir = PathBuf::new();
+        // см. docs/hardware.md, «Библиотеки Яндекса (C API)»
+        if let Some(f) = MODEL_FILES.iter().find(|f| !dir.join(f).is_file()) {
+            error!("{} spotter: no {f} in {}", self.what, dir.display());
+            return false;
+        }
         let conf = match SpotterConf::read(lib, dir) {
             Ok(conf) => conf,
             Err(e) => {
@@ -305,8 +318,27 @@ impl Slot {
                 dir.display(),
                 self.layout
             );
+            self.dir = dir.to_path_buf();
         }
         ok
+    }
+
+    /// Смена модели; если новая не создалась, заново создаётся прежняя. Второй спотер в RAM на
+    /// время смены не держим: на станциях с ~238 МиБ это не замерено, поэтому прежняя модель
+    /// пересоздаётся только на пути ошибки.
+    fn switch(&mut self, lib: &Lib, dir: &Path, legacy_main: i32) -> bool {
+        let prev = std::mem::take(&mut self.dir);
+        if self.init(lib, dir, legacy_main) {
+            return true;
+        }
+        if !prev.as_os_str().is_empty() && !self.init(lib, &prev, legacy_main) {
+            error!(
+                "{} spotter: previous model {} did not reload",
+                self.what,
+                prev.display()
+            );
+        }
+        false
     }
 
     /// Раскладка по таблице и запасная, `legacy_main` — выход VQE для типа 0 в запасной.
@@ -359,11 +391,12 @@ pub(crate) struct Engine {
 }
 
 impl Engine {
-    /// dlopen, VQE for the model's preset, the wake word spotter (required) and the command spotter
-    /// (optional: a warning without it). Errors are logged; None = no front-end.
+    /// dlopen, VQE по пресету модели, спотер wake word (обязателен; модель — первая загрузившаяся
+    /// из `wake_dirs`) и командный спотер (необязателен: без него предупреждение). Ошибки пишутся в
+    /// лог; None — фронтенда нет.
     pub fn start(
         model: &pulsar_core::model::Model,
-        wake_dir: &Path,
+        wake_dirs: &[PathBuf],
         command_dir: Option<&Path>,
     ) -> Option<Engine> {
         if let Err(e) = preload_deps() {
@@ -434,7 +467,20 @@ impl Engine {
             chunk: chunk_n,
             frame: frame_n,
         };
-        if !eng.wake.init(&lib, wake_dir, VQE_OMNI_WITH_GAIN) {
+        let mut wake_ok = false;
+        for (i, dir) in wake_dirs.iter().enumerate() {
+            wake_ok = eng.wake.init(&lib, dir, VQE_OMNI_WITH_GAIN);
+            if wake_ok {
+                break;
+            }
+            if i + 1 < wake_dirs.len() {
+                warn!(
+                    "wake word model {} did not load; trying the next",
+                    dir.display()
+                );
+            }
+        }
+        if !wake_ok {
             return None;
         }
         if let Some(dir) = command_dir
@@ -445,9 +491,14 @@ impl Engine {
         Some(eng)
     }
 
-    /// Switches the wake word model.
+    /// Смена модели wake word; false — новая не загрузилась, осталась прежняя.
     pub fn set_wake_model(&mut self, dir: &Path) -> bool {
-        self.wake.init(&self.lib, dir, VQE_OMNI_WITH_GAIN)
+        self.wake.switch(&self.lib, dir, VQE_OMNI_WITH_GAIN)
+    }
+
+    /// Каталог активной модели wake word.
+    pub fn wake_dir(&self) -> &Path {
+        &self.wake.dir
     }
 
     /// VQE output samples per chunk.

@@ -45,6 +45,10 @@ Wake word, командный спотер и эхоподавление раб�
   `spotter_submit_raw_data(sp, s16_interleaved, bytes, &err)`. Сколько каналов нужно каждому
   типу, задаёт конфиг модели спотера (`spotter_conf_get_required_channel_count`). Какой выход VQE
   питает каждый тип канала — ниже.
+- Ошибку, которую вернул `spotter_conf_read(dir, &err)` (нет `flags.txt`, битый
+  `acoustic_model.nnet`), `spotter_error_get_message` читает, а `spotter_error_free` на ней роняет
+  процесс (SIGSEGV; замер на Лайт 2, `frontend_probe`,
+  [#69](https://github.com/Morvex885/pulsar/pull/69)).
 - Каналы спотера → выходы VQE (`voicetech.AudioInputChannelType`, имена
   `AUDIO_INPUT_CHANNEL_TYPE_*` в `libyandex_evil.so`) — контракт библиотеки, общий для всех
   моделей. Таблица восстановлена реверсом конвертеров `maind` (`toSpotterChannelType`,

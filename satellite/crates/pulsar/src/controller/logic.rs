@@ -1,9 +1,14 @@
-//! Decisions of the controller that depend only on their inputs (controller.cpp), kept apart for
-//! the host tests.
+//! Решения контроллера, зависящие только от входов (controller.cpp), вынесены отдельно ради
+//! хостовых тестов. Исключение — `wake_word_names`: читает каталог моделей, тест — на временном
+//! каталоге.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt as _;
+use std::path::Path;
+
+use log::warn;
+use pulsar_audio::engine::MODEL_FILES;
 
 use pulsar_core::model::Model;
 use pulsar_esphome::{DeviceIdentity, MediaState, VaEvent};
@@ -578,6 +583,88 @@ impl RunBinding {
 pub fn publish_lux(lux: f32, last: f32, last_ms: i64, now: i64) -> bool {
     let diff = (lux - last).abs();
     last < 0.0 || diff > cxx_max(1.0, last * 0.1) || now - last_ms > 60_000
+}
+
+/// Предел длины id модели активации.
+// см. docs/voice.md, «Арбитраж между станциями»
+pub const WAKE_ID_MAX: usize = 15;
+
+/// id модели (имя её каталога) уходит полем в claim арбитра и строкой в `state.conf`: там
+/// годятся только короткие имена без пробелов и разделителей пути.
+pub fn wake_word_id_ok(id: &str) -> bool {
+    (1..=WAKE_ID_MAX).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+}
+
+/// Модели активации в `models`: какие слова есть, решает прошивка. Модель — каталог со всеми
+/// файлами `MODEL_FILES`; `alisa` первой, остальные по имени. Ошибки чтения пишутся в лог: молча
+/// урезанный список сбросил бы уже выбранное слово.
+pub fn wake_word_names(models: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let rd = match std::fs::read_dir(models) {
+        Ok(rd) => rd,
+        Err(e) => {
+            warn!("cannot list activation models in {}: {e}", models.display());
+            return out;
+        }
+    };
+    for entry in rd {
+        let e = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("activation model unreadable in {}: {e}", models.display());
+                continue;
+            }
+        };
+        let dir = e.path();
+        if !MODEL_FILES.iter().all(|f| dir.join(f).is_file()) {
+            continue;
+        }
+        match e.file_name().to_str() {
+            Some(name) if wake_word_id_ok(name) => out.push(name.to_owned()),
+            _ => warn!(
+                "activation model {:?} skipped: id must be 1-{WAKE_ID_MAX} chars of [a-z0-9_-]",
+                e.file_name()
+            ),
+        }
+    }
+    out.sort_by(|a, b| (a != "alisa", a).cmp(&(b != "alisa", b)));
+    out
+}
+
+/// Сохранённое слово, если модель есть на станции, иначе первая найденная (`alisa`, если есть):
+/// спотер не должен ждать каталог, которого нет.
+pub fn resolve_wake_word(saved: &str, available: &[String]) -> String {
+    if available.iter().any(|n| n == saved) {
+        return saved.to_owned();
+    }
+    if !saved.is_empty() {
+        warn!("wake word {saved:?} is not on this device; falling back");
+    }
+    available
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "alisa".to_owned())
+}
+
+/// Порядок попыток загрузки при старте: активное слово, затем остальные модели.
+pub fn wake_candidates(active: &str, available: &[String]) -> Vec<String> {
+    std::iter::once(active.to_owned())
+        .chain(available.iter().filter(|n| *n != active).cloned())
+        .collect()
+}
+
+/// Подпись варианта в HA; двуязычная, чтобы читалась в интерфейсе на любом языке. Неизвестная
+/// модель показывается своим id.
+pub fn wake_word_phrase(id: &str) -> String {
+    match id {
+        "alisa" => "Алиса / Alisa".into(),
+        "yandex" => "Яндекс / Yandex".into(),
+        "yasmina" => "Ясмина / Yasmina".into(),
+        other => other.to_owned(),
+    }
 }
 
 #[cfg(test)]

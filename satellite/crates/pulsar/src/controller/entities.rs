@@ -1,6 +1,9 @@
 //! HA connection and entities, buttons, the light sensor, Zigbee and updates (controller.cpp
 //! "HA connection", "entities", "updates").
 
+use std::ffi::OsStr;
+use std::path::Path;
+
 use log::{error, info, warn};
 use pulsar_core::now_ms;
 use pulsar_esphome::{
@@ -405,15 +408,51 @@ impl Controller {
         let Some(first) = ids.into_iter().next() else {
             return;
         };
-        if first == self.st.wake_word {
+        // Сравнение с последним запросом: повторный выбор прежнего слова, пока грузится другое,
+        // должен отменить ту смену.
+        if first == *self.wake_requested.as_ref().unwrap_or(&self.st.wake_word) {
             return;
         }
-        self.st.wake_word = first;
-        info!("wake word -> {}", self.st.wake_word);
-        self.mic.set_model(model_dir(&self.st.wake_word));
+        if self.mic.frame() == 0 {
+            // Фронтенд не запущен: события WakeModel не будет, выбор принимается сразу.
+            self.st.wake_word = first;
+            info!("wake word -> {}", self.st.wake_word);
+            self.api
+                .set_active_wake_words(vec![self.st.wake_word.clone()]);
+            self.persist();
+            return;
+        }
+        info!("wake word requested: {first}");
+        self.mic.set_model(model_dir(&first));
+        self.wake_requested = Some(first);
+    }
+
+    /// Итог старта спотера или смены модели. Слово, HA и `state.conf` меняются только на модель,
+    /// которая загрузилась: иначе после перезапуска спотер снова ждал бы негодную модель.
+    pub(super) fn on_wake_model(&mut self, requested: &Path, dir: &Path, ok: bool) {
+        let name = |p: &Path| {
+            p.file_name()
+                .and_then(OsStr::to_str)
+                .unwrap_or("")
+                .to_owned()
+        };
+        let id = name(dir);
+        if !ok {
+            warn!("wake word model did not load; active: {id:?}");
+        }
+        // Событие отвечает на последний запрос только если тот же каталог: более новый запрос
+        // ещё ждёт своего события.
+        if self.wake_requested.as_deref() == Some(name(requested).as_str()) {
+            self.wake_requested = None;
+        }
+        if !id.is_empty() && id != self.st.wake_word {
+            self.st.wake_word = id;
+            info!("wake word -> {}", self.st.wake_word);
+            self.persist();
+        }
+        // И при неудаче: HA уже показывает запрошенное слово, возвращаем ему действующее.
         self.api
             .set_active_wake_words(vec![self.st.wake_word.clone()]);
-        self.persist();
     }
 
     // ---------------- buttons, sensors, Zigbee ----------------

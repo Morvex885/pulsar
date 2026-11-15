@@ -717,3 +717,96 @@ fn followup_silence_is_quiet_only_before_speech() {
     f.on_event(VaEvent::SttVadStart, false);
     assert!(!f.silent("stt-no-text-recognized"));
 }
+
+/// Новый каталог во временном каталоге системы; удаляется при drop.
+struct TmpDir(std::path::PathBuf);
+
+impl TmpDir {
+    fn new() -> Self {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "pulsar-wake-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        Self(p)
+    }
+
+    fn model(&self, name: &str) {
+        let d = self.0.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        for f in MODEL_FILES {
+            std::fs::write(d.join(f), b"").unwrap();
+        }
+    }
+}
+
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn strings(l: &[&str]) -> Vec<String> {
+    l.iter().map(|s| (*s).to_owned()).collect()
+}
+
+#[test]
+fn wake_word_id_format() {
+    for id in ["alisa", "a", "x_1-2", "abcdefghijklmno"] {
+        assert!(wake_word_id_ok(id), "{id}");
+    }
+    for id in [
+        "",
+        "abcdefghijklmnop",
+        "Alisa",
+        "a b",
+        "../alisa",
+        ".x",
+        "ясмина",
+    ] {
+        assert!(!wake_word_id_ok(id), "{id}");
+    }
+}
+
+#[test]
+fn wake_word_names_lists_valid_models_alisa_first() {
+    let t = TmpDir::new();
+    for m in ["yandex", "alisa", "yasmina", "Bad Name"] {
+        t.model(m);
+    }
+    std::fs::create_dir(t.0.join("empty")).unwrap();
+    // Без flags.txt `spotter_conf_read` возвращает ошибку: каталог не модель.
+    std::fs::create_dir(t.0.join("noflags")).unwrap();
+    std::fs::write(t.0.join("noflags/acoustic_model.nnet"), b"").unwrap();
+    std::fs::write(t.0.join("readme"), b"").unwrap();
+    assert_eq!(
+        wake_word_names(&t.0),
+        strings(&["alisa", "yandex", "yasmina"])
+    );
+
+    let t = TmpDir::new();
+    t.model("yasmina");
+    t.model("yandex");
+    assert_eq!(wake_word_names(&t.0), strings(&["yandex", "yasmina"]));
+
+    assert!(wake_word_names(&t.0.join("missing")).is_empty());
+}
+
+#[test]
+fn wake_word_resolution_and_candidates() {
+    let all = strings(&["alisa", "yandex", "yasmina"]);
+    assert_eq!(resolve_wake_word("yandex", &all), "yandex");
+    assert_eq!(resolve_wake_word("gone", &all[1..]), "yandex");
+    assert_eq!(resolve_wake_word("yandex", &[]), "alisa");
+    assert_eq!(
+        wake_candidates("yasmina", &all),
+        strings(&["yasmina", "alisa", "yandex"])
+    );
+    assert_eq!(
+        wake_candidates("gone", &all),
+        strings(&["gone", "alisa", "yandex", "yasmina"])
+    );
+}

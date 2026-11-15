@@ -10,7 +10,7 @@ mod speech_numbers;
 mod voice;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use log::{debug, error, info, warn};
 use pulsar_audio::FrontendEvent;
@@ -167,6 +167,8 @@ pub struct Controller {
     ring_stopped_in_dialog: bool,
     hw_mic_muted: bool,
     error_shown: bool,
+    /// Слово, запрошенное у фронтенда и ещё не подтверждённое событием `WakeModel`.
+    wake_requested: Option<String>,
     // Wake arbitration: the window between our claim and the decision. Microphone audio and a
     // command word heard in it are held until the decision.
     arbitrating: bool,
@@ -258,72 +260,6 @@ fn model_dir(id: &str) -> PathBuf {
     PathBuf::from(format!("{MODELS}{id}"))
 }
 
-/// Activation models are directories under MODELS — the firmware decides which words it carries.
-/// A model counts only when its directory holds `acoustic_model.nnet`.
-fn wake_word_available(id: &str) -> bool {
-    !id.is_empty()
-        && !id.contains('/')
-        && !id.starts_with('.')
-        && model_dir(id).join("acoustic_model.nnet").is_file()
-}
-
-/// Every activation model on this firmware, `alisa` first when present.
-///
-/// Errors are reported, never silently dropped: a half-listed model set would hide a word the user
-/// already selected, and `wake_word` would then be "reset" for no reason.
-fn wake_word_names() -> Vec<String> {
-    let mut out = Vec::new();
-    match std::fs::read_dir(MODELS) {
-        Ok(rd) => {
-            for entry in rd {
-                match entry {
-                    Ok(e) => {
-                        let name = e.file_name().to_string_lossy().into_owned();
-                        if wake_word_available(&name) {
-                            out.push(name);
-                        }
-                    }
-                    Err(e) => warn!("activation model unreadable in {MODELS}: {e}"),
-                }
-            }
-        }
-        Err(e) => warn!("cannot list activation models in {MODELS}: {e}"),
-    }
-    out.sort_by(|a, b| match (a.as_str(), b.as_str()) {
-        ("alisa", "alisa") => std::cmp::Ordering::Equal,
-        ("alisa", _) => std::cmp::Ordering::Less,
-        (_, "alisa") => std::cmp::Ordering::Greater,
-        _ => a.cmp(b),
-    });
-    out
-}
-
-/// The saved word if the firmware has it, otherwise the first model that does exist — `alisa` when
-/// present, else whatever the device ships. A device with only `yandex`/`yasmina` must not be left
-/// asking the spotter for a directory that is not there.
-fn resolve_wake_word(saved: &str, available: &[String]) -> String {
-    if available.iter().any(|n| n == saved) {
-        return saved.to_string();
-    }
-    if !saved.is_empty() {
-        warn!("wake word {saved:?} is not on this device; falling back");
-    }
-    available
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "alisa".to_string())
-}
-
-/// The phrase Home Assistant shows for a model directory (English, as the rest of the API).
-fn wake_word_phrase(id: &str) -> String {
-    match id {
-        "alisa" => "Алиса / Alisa".into(),
-        "yandex" => "Яндекс / Yandex".into(),
-        "yasmina" => "Ясмина / Yasmina".into(),
-        other => other.to_string(),
-    }
-}
-
 /// C++ `uint8_t(x * 255)`.
 fn light_rgb(l: &pulsar_esphome::LightState) -> Rgb {
     Rgb {
@@ -364,8 +300,16 @@ impl Controller {
             VERSION,
             BUILD_TIME,
         );
-        let wake_names = wake_word_names();
-        st.wake_word = resolve_wake_word(&st.wake_word, &wake_names);
+        let mut wake_names = logic::wake_word_names(Path::new(MODELS));
+        if wake_names.is_empty() {
+            // Каталог не прочитан или пуст: список в HA не должен расходиться с активным словом.
+            wake_names.push("alisa".into());
+        }
+        st.wake_word = logic::resolve_wake_word(&st.wake_word, &wake_names);
+        let wake_dirs = logic::wake_candidates(&st.wake_word, &wake_names)
+            .iter()
+            .map(|id| model_dir(id))
+            .collect::<Vec<_>>();
         let case_colors = pulsar_hw::case_colors();
         let dir = logic::state_dir(state_path.as_os_str());
         let strings = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -387,14 +331,11 @@ impl Controller {
         let cfg = ApiConfig {
             port: ports.api,
             wake_words: wake_names
-                .clone()
                 .into_iter()
                 .map(|id| WakeWordInfo {
-                    phrase: wake_word_phrase(&id),
+                    phrase: logic::wake_word_phrase(&id),
                     id,
-                    // Every shipped model is language-independent; declaring both keeps a
-                    // Russian-only client from hiding an English user's options and vice versa.
-                    languages: vec!["ru".into(), "en".into()],
+                    languages: vec!["ru".into()],
                 })
                 .collect(),
             active_wake_words: vec![st.wake_word.clone()],
@@ -514,11 +455,8 @@ impl Controller {
             }
         };
         let hw_mic_muted = input.as_ref().is_some_and(InputHandle::hw_muted);
-        let (mic, mic_rx) = pulsar_audio::spawn(
-            model,
-            model_dir(&st.wake_word),
-            Some(PathBuf::from(COMMAND_MODEL)),
-        );
+        let (mic, mic_rx) =
+            pulsar_audio::spawn(model, wake_dirs, Some(PathBuf::from(COMMAND_MODEL)));
         mic.set_command_offset(st.command_start_offset_ms);
         mic.set_mic_gain(st.mic_gain_db);
 
@@ -651,6 +589,7 @@ impl Controller {
             ring_stopped_in_dialog: false,
             hw_mic_muted,
             error_shown: false,
+            wake_requested: None,
             arbitrating: false,
             arb_claim: None,
             arb_phrase: String::new(),
@@ -877,6 +816,9 @@ impl Controller {
             FrontendEvent::Music(f) => {
                 self.leds.music_frame(f, false);
                 self.clock.music_frame(f, false);
+            }
+            FrontendEvent::WakeModel { requested, dir, ok } => {
+                self.on_wake_model(&requested, &dir, ok);
             }
         }
     }

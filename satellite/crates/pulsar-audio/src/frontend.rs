@@ -72,6 +72,14 @@ pub enum FrontendEvent {
     Audio(Vec<i16>),
     /// One per 32 ms FFT window while music analysis is on.
     Music(MusicFrame),
+    /// Модель wake word, активная после старта или попытки [`FrontendHandle::set_model`].
+    /// `requested` — какую модель пытались загрузить (при старте — первый кандидат), `ok` — она
+    /// загрузилась. `dir` пуст, если модели нет.
+    WakeModel {
+        requested: PathBuf,
+        dir: PathBuf,
+        ok: bool,
+    },
 }
 
 /// Counters for frontend_probe.
@@ -93,14 +101,15 @@ pub struct FrontendHandle {
     inner: Arc<Inner>,
 }
 
-/// Starts the front-end: dlopen, VQE for the model's preset, the wake word spotter from
-/// `wake_model_dir` (e.g. .../spotter_models/activation/alisa) and, if given, the command
-/// spotter (.../spotter_models/command), then the capture and processing threads. On failure
-/// (logged, "microphone front-end failed to start") the handle works but no event ever comes.
-/// A capture device that cannot be opened is retried every 2 s.
+/// Запускает фронтенд: dlopen, VQE по пресету модели, спотер wake word из первого загрузившегося
+/// каталога `wake_model_dirs` (например, .../spotter_models/activation/alisa) и, если задан,
+/// командный спотер (.../spotter_models/command), затем потоки захвата и обработки; загруженная
+/// модель приходит событием [`FrontendEvent::WakeModel`]. При ошибке (в логе «microphone
+/// front-end failed to start») handle работает, но событий нет. Устройство захвата, которое не
+/// открылось, переоткрывается каждые 2 с.
 pub fn spawn(
     model: &'static Model,
-    wake_model_dir: PathBuf,
+    wake_model_dirs: Vec<PathBuf>,
     command_model_dir: Option<PathBuf>,
 ) -> (FrontendHandle, UnboundedReceiver<FrontendEvent>) {
     let (tx, rx) = unbounded_channel();
@@ -112,13 +121,20 @@ pub fn spawn(
         _events: tx.clone(),
     };
     let command_dir = command_model_dir.filter(|d| !d.as_os_str().is_empty());
-    let started = match Engine::start(model, &wake_model_dir, command_dir.as_deref()) {
+    let started = match Engine::start(model, &wake_model_dirs, command_dir.as_deref()) {
         Some(eng) => {
             inner.frame = eng.frame();
-            inner
-                .start_threads(model, eng, tx)
+            let dir = eng.wake_dir().to_path_buf();
+            let requested = wake_model_dirs.first().cloned().unwrap_or_default();
+            let ok = requested == dir;
+            let started = inner
+                .start_threads(model, eng, tx.clone())
                 .inspect_err(|e| error!("audio threads: {e}"))
-                .is_ok()
+                .is_ok();
+            if started {
+                let _ = tx.send(FrontendEvent::WakeModel { requested, dir, ok });
+            }
+            started
         }
         None => false,
     };
@@ -136,7 +152,8 @@ pub fn spawn(
 }
 
 impl FrontendHandle {
-    /// Switches the wake word model (applied by the processing thread before the next chunk).
+    /// Смена модели wake word (поток обработки применяет её перед следующим чанком); итог
+    /// приходит событием [`FrontendEvent::WakeModel`].
     pub fn set_model(&self, dir: PathBuf) {
         *lock(&self.inner.shared.pending_model) = (!dir.as_os_str().is_empty()).then_some(dir);
     }
@@ -802,10 +819,16 @@ fn processing(
 
     while shared.running() {
         let pending = lock(&shared.pending_model).take();
-        if let Some(dir) = pending
-            && !eng.set_wake_model(&dir)
-        {
-            error!("failed to switch wake word model to {}", dir.display());
+        if let Some(requested) = pending {
+            let ok = eng.set_wake_model(&requested);
+            if !ok {
+                error!(
+                    "failed to switch wake word model to {}",
+                    requested.display()
+                );
+            }
+            let dir = eng.wake_dir().to_path_buf();
+            let _ = tx.send(FrontendEvent::WakeModel { requested, dir, ok });
         }
         // Exactly one VQE chunk.
         {
@@ -1204,7 +1227,7 @@ mod tests {
     fn without_the_yandex_library_the_handle_is_degraded() {
         // No /system/vendor/quasar/libs on the build host: dlopen fails.
         let midi = model_from_compatible(b"yandex,cucumber\0").unwrap();
-        let (h, mut rx) = spawn(midi, PathBuf::from("/nonexistent"), None);
+        let (h, mut rx) = spawn(midi, vec![PathBuf::from("/nonexistent")], None);
         h.set_streaming(true);
         h.set_model(PathBuf::from("/nonexistent/2"));
         let h2 = h.clone();
