@@ -25,7 +25,7 @@ use pulsar_core::MusicFrame;
 use pulsar_core::model::{CaptureFormat, Model};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::engine::{Engine, SPOTTER_RATE, VQE_OMNI, VQE_OMNI_WITH_GAIN, db_to_gain, to_s16};
+use crate::engine::{Engine, SPOTTER_RATE, VQE_OMNI, db_to_gain, to_s16};
 use crate::oww;
 use crate::spectrum::SpectrumAnalyzer;
 
