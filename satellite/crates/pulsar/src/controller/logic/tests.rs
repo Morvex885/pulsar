@@ -234,13 +234,16 @@ fn stt_stop_words() {
 
 #[test]
 fn command_gating() {
-    // The window after the wake word: 2.5 s of LISTENING / PROCESSING.
-    assert!(after_wake(Phase::Listening, 12_499, 10_000));
-    assert!(!after_wake(Phase::Listening, 12_500, 10_000));
-    assert!(after_wake(Phase::Processing, 12_499, 10_000));
-    assert!(!after_wake(Phase::Processing, 12_500, 10_000));
-    assert!(!after_wake(Phase::Idle, 10_001, 10_000));
-    assert!(!after_wake(Phase::Speaking, 10_001, 10_000));
+    // Окно wake word: 2,5 с в LISTENING / PROCESSING.
+    assert!(after_wake(Phase::Listening, true, 12_499, 10_000));
+    assert!(!after_wake(Phase::Listening, true, 12_500, 10_000));
+    assert!(after_wake(Phase::Processing, true, 12_499, 10_000));
+    assert!(!after_wake(Phase::Processing, true, 12_500, 10_000));
+    assert!(!after_wake(Phase::Idle, true, 10_001, 10_000));
+    assert!(!after_wake(Phase::Speaking, true, 10_001, 10_000));
+    // Кнопка, продолжение диалога и HA открывают диалог без wake word: окна нет.
+    assert!(!after_wake(Phase::Listening, false, 10_000, 10_000));
+    assert!(!after_wake(Phase::Processing, false, 10_000, 10_000));
 }
 
 #[test]
