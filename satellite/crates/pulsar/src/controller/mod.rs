@@ -299,7 +299,7 @@ impl Controller {
             VERSION,
             BUILD_TIME,
         );
-        let mut wake_names = logic::wake_word_names(Path::new(MODELS));
+        let mut wake_names = logic::wake_word_names(Path::new(MODELS), &st.wake_word);
         if wake_names.is_empty() {
             // Каталог не прочитан или пуст: список в HA не должен расходиться с активным словом.
             wake_names.push("alisa".into());

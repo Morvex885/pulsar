@@ -783,16 +783,38 @@ fn wake_word_names_lists_valid_models_alisa_first() {
     std::fs::write(t.0.join("noflags/acoustic_model.nnet"), b"").unwrap();
     std::fs::write(t.0.join("readme"), b"").unwrap();
     assert_eq!(
-        wake_word_names(&t.0),
+        wake_word_names(&t.0, "yasmina"),
+        strings(&["alisa", "yandex", "yasmina"])
+    );
+    // Сохранённое слово без годной модели или с негодным id в список не попадает.
+    assert_eq!(
+        wake_word_names(&t.0, "noflags"),
+        strings(&["alisa", "yandex", "yasmina"])
+    );
+    assert_eq!(
+        wake_word_names(&t.0, "../alisa"),
         strings(&["alisa", "yandex", "yasmina"])
     );
 
     let t = TmpDir::new();
     t.model("yasmina");
     t.model("yandex");
-    assert_eq!(wake_word_names(&t.0), strings(&["yandex", "yasmina"]));
+    assert_eq!(wake_word_names(&t.0, ""), strings(&["yandex", "yasmina"]));
 
-    assert!(wake_word_names(&t.0.join("missing")).is_empty());
+    assert!(wake_word_names(&t.0.join("missing"), "alisa").is_empty());
+}
+
+#[test]
+fn wake_word_names_keeps_the_saved_model_when_listing_fails() {
+    // Каталог без права чтения: read_dir отказывает, но модель внутри доступна по пути (под root
+    // read_dir проходит, ответ тот же).
+    use std::os::unix::fs::PermissionsExt as _;
+    let t = TmpDir::new();
+    t.model("yasmina");
+    std::fs::set_permissions(&t.0, std::fs::Permissions::from_mode(0o311)).unwrap();
+    let names = wake_word_names(&t.0, "yasmina");
+    std::fs::set_permissions(&t.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(names, strings(&["yasmina"]));
 }
 
 #[test]

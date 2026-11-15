@@ -600,14 +600,24 @@ pub fn wake_word_id_ok(id: &str) -> bool {
 }
 
 /// Модели активации в `models`: какие слова есть, решает прошивка. Модель — каталог со всеми
-/// файлами `MODEL_FILES`; `alisa` первой, остальные по имени. Ошибки чтения пишутся в лог: молча
-/// урезанный список сбросил бы уже выбранное слово.
-pub fn wake_word_names(models: &Path) -> Vec<String> {
+/// файлами `MODEL_FILES`; `alisa` первой, остальные по имени. Ошибки чтения пишутся в лог, а
+/// модель сохранённого слова `saved` проверяется напрямую: урезанный ошибкой список не должен
+/// сбросить уже выбранное слово.
+pub fn wake_word_names(models: &Path, saved: &str) -> Vec<String> {
+    let present = |id: &str| {
+        MODEL_FILES
+            .iter()
+            .all(|f| models.join(id).join(f).is_file())
+    };
     let mut out = Vec::new();
+    if wake_word_id_ok(saved) && present(saved) {
+        out.push(saved.to_owned());
+    }
     let rd = match std::fs::read_dir(models) {
         Ok(rd) => rd,
         Err(e) => {
             warn!("cannot list activation models in {}: {e}", models.display());
+            out.sort_by(|a, b| (a != "alisa", a).cmp(&(b != "alisa", b)));
             return out;
         }
     };
@@ -624,7 +634,11 @@ pub fn wake_word_names(models: &Path) -> Vec<String> {
             continue;
         }
         match e.file_name().to_str() {
-            Some(name) if wake_word_id_ok(name) => out.push(name.to_owned()),
+            Some(name) if wake_word_id_ok(name) => {
+                if name != saved {
+                    out.push(name.to_owned());
+                }
+            }
             _ => warn!(
                 "activation model {:?} skipped: id must be 1-{WAKE_ID_MAX} chars of [a-z0-9_-]",
                 e.file_name()
