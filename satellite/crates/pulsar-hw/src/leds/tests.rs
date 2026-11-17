@@ -291,12 +291,100 @@ fn layer_changes_fade_but_volume_cuts_in() {
 }
 
 #[test]
-fn panel_without_logo_shows_steady_mute() {
-    // У Станции 2 нет логотипа: ровный mute показывает панель и перекрывает лампу.
+fn panel_shows_steady_mute_on_the_logo_only() {
+    // Станция 2: ровный mute — тусклый красный логотип; лампа на панели не перекрывается.
     let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
     c.apply(user(true), 0);
     c.apply(Cmd::Muted(true), 0);
-    assert_eq!(c.active_layer(0), Layer::Mute);
+    c.frame(0);
+    c.frame(1000);
+    assert_eq!(c.active_layer(1000), Layer::User);
+    assert!(
+        c.px[..84 * 3].iter().any(|&v| v > 0),
+        "the lamp still shows"
+    );
+    let red = to_px(crate::led_panel::mute_logo(), c.dim(), None);
+    for i in 84..88 {
+        assert_eq!(&c.px[i * 3..i * 3 + 3], &red, "logo LED {i}");
+    }
+}
+
+#[test]
+fn panel_logo_stays_dark_in_voice_states_and_music() {
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(Cmd::MusicStyle("Spectrum".into()), 0);
+    c.apply(Cmd::MediaPlaying(true), 0);
+    for (t, s) in [
+        (0, UiState::Idle),
+        (2000, UiState::Listening),
+        (4000, UiState::Thinking),
+        (6000, UiState::Speaking),
+    ] {
+        c.apply(Cmd::UiState(s), t);
+        for dt in [0, 400, 900, 1500] {
+            c.frame(t + dt);
+            assert!(c.px[84 * 3..].iter().all(|&v| v == 0), "{s:?} +{dt}");
+        }
+    }
+}
+
+#[test]
+fn panel_logo_stays_dark_in_volume_and_one_shots() {
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(Cmd::Volume(0.7), 0);
+    c.frame(0);
+    assert_eq!(c.active_layer(0), Layer::Volume);
+    assert!(c.px[84 * 3..].iter().all(|&v| v == 0), "volume");
+    c.apply(Cmd::TimerStarted, 5000);
+    c.frame(5000);
+    c.frame(6000);
+    assert_eq!(c.active_layer(6000), Layer::OneShot);
+    assert!(c.px[84 * 3..].iter().all(|&v| v == 0), "timer started");
+}
+
+#[test]
+fn panel_mute_logo_stays_red_over_voice_and_music() {
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(Cmd::MusicStyle("Spectrum".into()), 0);
+    c.apply(Cmd::MediaPlaying(true), 0);
+    c.apply(Cmd::Muted(true), 0);
+    let red = to_px(crate::led_panel::mute_logo(), c.dim(), None);
+    c.frame(0);
+    c.frame(1000);
+    assert_eq!(c.active_layer(1000), Layer::Music);
+    for i in 84..88 {
+        assert_eq!(&c.px[i * 3..i * 3 + 3], &red, "music, logo LED {i}");
+    }
+    c.apply(Cmd::UiState(UiState::Listening), 2000);
+    c.frame(2000);
+    c.frame(2600);
+    assert_eq!(c.active_layer(2600), Layer::Voice);
+    for i in 84..88 {
+        assert_eq!(&c.px[i * 3..i * 3 + 3], &red, "listening, logo LED {i}");
+    }
+}
+
+#[test]
+fn panel_ambient_light_is_corrected() {
+    // Один и тот же замер освещённости приглушает панель меньше, чем кольцо.
+    let mut ring = Compositor::new(24, 6, LedLayout::Ring);
+    let mut panel = Compositor::new(88, 0, LedLayout::Station2Panel);
+    for _ in 0..50 {
+        ring.apply(Cmd::AmbientLux(4.0), 0);
+        panel.apply(Cmd::AmbientLux(4.0), 0);
+    }
+    assert!(
+        panel.dim() > ring.dim() + 0.1,
+        "{} vs {}",
+        panel.dim(),
+        ring.dim()
+    );
+    // Другие модели поправку не получают: короткое кольцо Лайт 2 приглушается как Миди.
+    let mut short = Compositor::new(3, 0, LedLayout::Ring);
+    for _ in 0..50 {
+        short.apply(Cmd::AmbientLux(4.0), 0);
+    }
+    assert_eq!(short.dim(), ring.dim());
 }
 
 #[test]
@@ -346,15 +434,18 @@ fn panel_user_light_effect_uses_the_panel_layout() {
 
 /// The actor on a capture sink.
 fn spawn_capture(n: usize, nlogo: usize) -> (LedsHandle, Captured, JoinHandle<()>) {
+    spawn_capture_layout(n, nlogo, LedLayout::Ring)
+}
+
+fn spawn_capture_layout(
+    n: usize,
+    nlogo: usize,
+    layout: LedLayout,
+) -> (LedsHandle, Captured, JoinHandle<()>) {
     let frames = Rc::new(RefCell::new(Vec::new()));
     let out = Output::new(Sink::Capture(Rc::clone(&frames)), n, nlogo);
     let (tx, rx) = unbounded_channel();
-    let task = tokio::task::spawn_local(run(
-        Compositor::new(n, nlogo, LedLayout::Ring),
-        out,
-        rx,
-        true,
-    ));
+    let task = tokio::task::spawn_local(run(Compositor::new(n, nlogo, layout), out, rx, true));
     (LedsHandle { tx }, frames, task)
 }
 
@@ -445,4 +536,178 @@ async fn exit_clears_and_case_matrix_rewrites() {
             assert_eq!(frames.borrow().last().unwrap().1, [0; 9]);
         })
         .await;
+}
+
+#[test]
+fn panel_animates_at_fifty_frames_per_second() {
+    assert_eq!(
+        Compositor::new(88, 0, LedLayout::Station2Panel).frame_ms(),
+        PANEL_FRAME_MS
+    );
+    assert_eq!(Compositor::new(24, 6, LedLayout::Ring).frame_ms(), FRAME_MS);
+}
+
+#[test]
+fn panel_lamp_still_lights_the_logo() {
+    // Лампа — выбор пользователя, не индикация: сплошной цвет заливает и логотип.
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(user(true), 0);
+    c.frame(0);
+    c.frame(1000);
+    assert_eq!(c.active_layer(1000), Layer::User);
+    let first = c.px[..3].to_vec();
+    assert!(first.iter().any(|&v| v > 0));
+    for i in 84..88 {
+        assert_eq!(&c.px[i * 3..i * 3 + 3], &first[..], "logo LED {i}");
+    }
+}
+
+#[test]
+fn panel_mute_alone_lights_only_the_logo() {
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(Cmd::Muted(false), 0);
+    c.apply(Cmd::Muted(true), 0);
+    c.frame(0);
+    // Конец волны, затем переход между слоями (250 мс).
+    let t = fx::MUTE_SWEEP_MS + 100;
+    c.frame(t);
+    c.frame(t + 300);
+    assert_eq!(c.active_layer(t + 300), Layer::Off);
+    assert!(c.px[..84 * 3].iter().all(|&v| v == 0));
+    let red = to_px(crate::led_panel::mute_logo(), c.dim(), None);
+    for i in 84..88 {
+        assert_eq!(&c.px[i * 3..i * 3 + 3], &red, "logo LED {i}");
+    }
+}
+
+#[test]
+fn panel_mute_under_the_volume_overlay_fades_the_logo() {
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(Cmd::Muted(false), 0);
+    c.apply(Cmd::Volume(0.5), 0);
+    c.frame(0);
+    c.apply(Cmd::Muted(true), 100);
+    c.frame(100);
+    c.frame(225);
+    assert_eq!(c.active_layer(225), Layer::Volume);
+    let red = to_px(crate::led_panel::mute_logo(), c.dim(), None);
+    let mid = c.px[84 * 3];
+    assert!(mid > 0 && mid < red[0], "mid-fade {mid} of {}", red[0]);
+    c.frame(400);
+    assert_eq!(&c.px[84 * 3..85 * 3], &red);
+}
+
+#[test]
+fn panel_mute_change_fades_only_the_logo() {
+    // Под «думает» дуга движется дальше без следа: переход идёт только у логотипа.
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(Cmd::Muted(false), 0);
+    c.apply(Cmd::UiState(UiState::Thinking), 0);
+    c.frame(0);
+    c.frame(400);
+    c.apply(Cmd::Muted(true), 500);
+    c.frame(500);
+    c.frame(600);
+    assert_eq!(c.active_layer(600), Layer::Voice);
+    let mut arc = vec![Col::default(); 88];
+    crate::led_panel::voice(fx::Voice::Thinking, 600, &mut arc);
+    let d = c.dim();
+    for (i, a) in arc.iter().take(84).enumerate() {
+        assert_eq!(
+            &c.px[i * 3..i * 3 + 3],
+            &to_px(*a, d, None),
+            "panel LED {i}"
+        );
+    }
+}
+
+#[test]
+fn panel_logo_fade_is_not_undone_by_a_following_layer_fade() {
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(Cmd::Muted(false), 0);
+    c.apply(Cmd::Volume(0.5), 0);
+    c.frame(0);
+    // Mute под громкостью, громкость кончается через 100 мс после него.
+    c.apply(Cmd::Muted(true), 1400);
+    c.frame(1400);
+    let red = to_px(crate::led_panel::mute_logo(), c.dim(), None);
+    let mut last = 0;
+    for t in (1420..2400).step_by(20) {
+        c.frame(t);
+        let v = c.px[84 * 3];
+        assert!(v + 1 >= last, "logo went back at {t}: {v} < {last}");
+        last = v;
+    }
+    assert_eq!(&c.px[84 * 3..85 * 3], &red);
+}
+
+#[tokio::test(start_paused = true)]
+async fn panel_actor_draws_frames_every_20_ms() {
+    LocalSet::new()
+        .run_until(async {
+            let (leds, frames, task) = spawn_capture_layout(88, 0, LedLayout::Station2Panel);
+            leds.set_ui_state(UiState::Thinking);
+            sleep_ms(500).await;
+            let times: Vec<i64> = frames.borrow().iter().map(|(t, _)| *t).collect();
+            assert!(times.len() > 10, "{times:?}");
+            let steps: Vec<i64> = times.windows(2).map(|w| w[1] - w[0]).collect();
+            // Кадр без изменений не пишется, поэтому шаг — кратный 20 мс, а не 33.
+            assert!(
+                steps.iter().all(|d| d % PANEL_FRAME_MS as i64 == 0),
+                "{steps:?}"
+            );
+            assert_eq!(steps.iter().min(), Some(&(PANEL_FRAME_MS as i64)));
+            drop(leds);
+            task.await.unwrap();
+        })
+        .await;
+}
+
+#[test]
+fn panel_logo_fade_follows_a_running_lamp_transition() {
+    // Mute под громкостью, пока лампа включается долгим переходом: логотип, сняв mute, идёт к
+    // тому, что сейчас показывает переход лампы, и потом совпадает с остальной панелью.
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(Cmd::Muted(true), 0);
+    c.apply(
+        Cmd::UserLight {
+            on: true,
+            color: RED,
+            brightness: 1.0,
+            effect: String::new(),
+            transition_ms: 4000,
+        },
+        0,
+    );
+    c.frame(0);
+    c.apply(Cmd::Volume(0.5), 1000);
+    c.frame(1000);
+    c.apply(Cmd::Muted(false), 1100);
+    let mut t = 1100;
+    while t <= 3000 {
+        c.frame(t);
+        t += 20;
+    }
+    assert_eq!(c.active_layer(3000), Layer::User);
+    for i in 84..88 {
+        assert_eq!(&c.px[i * 3..i * 3 + 3], &c.px[..3], "logo LED {i} vs panel");
+    }
+}
+
+#[test]
+fn panel_mute_with_its_sweep_fades_the_logo_from_what_was_shown() {
+    // Обычный случай: mute меняет и слой (волна). Логотип начинает с того, что горел, а не со
+    // старого фона прошлого перехода.
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(Cmd::Muted(false), 0);
+    c.apply(user(true), 0);
+    c.frame(0);
+    c.frame(1000);
+    let lamp = c.px[84 * 3];
+    assert!(lamp > 0);
+    c.apply(Cmd::Muted(true), 1000);
+    c.frame(1020);
+    let v = c.px[84 * 3];
+    let (v, lamp) = (u16::from(v), u16::from(lamp));
+    assert!(v + 2 >= lamp * 8 / 10, "logo dropped to {v} from {lamp}");
 }
