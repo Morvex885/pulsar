@@ -12,7 +12,7 @@ use pulsar_esphome::{
     ActionId, AnnounceRequest, ButtonId, SensorId, TextSensorId, TimerEvent, TimerInfo, VaEvent,
 };
 use pulsar_lan::arbiter::Claim;
-use pulsar_media::{Channel, PlayState};
+use pulsar_media::{Channel, PlayId, PlayState};
 use pulsar_sendspin::Transport;
 
 use super::logic::{self, COMMAND_AFTER_WAKE_MS, HaTimer, Phase, VoiceCommand};
@@ -21,6 +21,9 @@ use super::{
     Controller, LISTEN_TIMEOUT_MS, PROCESS_TIMEOUT_MS, Pending, SOUNDS, SPEAKER_UNKNOWN,
     TIMER_RING_MAX_MS, Tk,
 };
+
+/// Отзвук сигнала начала реплики в комнате после конца его воспроизведения, мс.
+const SPEAKER_SOUND_TAIL_MS: i64 = 100;
 
 impl Controller {
     fn arbitration_on(&self) -> bool {
@@ -241,11 +244,12 @@ impl Controller {
         self.clear_speech_display();
         self.followup = logic::Followup::default();
         self.update_duck();
+        self.speaker_hold = None;
         match logic::wake_cue(earcon, self.st.wake_sound) {
             logic::WakeCue::Keep => {}
             logic::WakeCue::Sound => {
                 let sound = format!("{SOUNDS}{}", self.model.wake_sound);
-                self.player.play(Channel::Announce, vec![sound]);
+                self.speaker_hold = Some(self.player.play(Channel::Announce, vec![sound]));
             }
             logic::WakeCue::Cut => self.player.stop(Channel::Announce),
         }
@@ -308,7 +312,12 @@ impl Controller {
                     self.timers.set(Tk::FollowupWait, ms);
                 }
             }
-            VaEvent::SttVadStart => self.timers.cancel(Tk::FollowupWait),
+            VaEvent::SttVadStart => {
+                self.timers.cancel(Tk::FollowupWait);
+                if let Some(speaker) = &self.speaker {
+                    speaker.speech_start();
+                }
+            }
             VaEvent::SttVadEnd | VaEvent::SttEnd => {
                 self.speaker_end();
                 if ev == VaEvent::SttEnd
@@ -915,6 +924,20 @@ impl Controller {
             .publish_text_sensor(TextSensorId::Speaker, SPEAKER_UNKNOWN);
     }
 
+    /// Звук идёт в узнавание: сигнал начала реплики отзвучал. Иначе его остаток попадал и в
+    /// образцы, и в узнавание, и почти тихая реплика совпадала с голосом на 0,9 (поле 2026-11-15).
+    pub(super) fn speaker_hears(&self) -> bool {
+        self.speaker_hold.is_none() && now_ms() >= self.speaker_resume_ms
+    }
+
+    /// Сигнал начала реплики отзвучал или прерван.
+    pub(super) fn speaker_sound_done(&mut self, id: PlayId) {
+        if self.speaker_hold == Some(id) {
+            self.speaker_hold = None;
+            self.speaker_resume_ms = now_ms() + SPEAKER_SOUND_TAIL_MS;
+        }
+    }
+
     fn speaker_end(&self) {
         if let Some(speaker) = &self.speaker {
             speaker.end();
@@ -994,17 +1017,20 @@ impl Controller {
         self.mic.set_streaming(true);
         self.timers.set(Tk::EnrollPhrase, PHRASE_MAX_MS);
         let sound = format!("{SOUNDS}{}", self.model.wake_sound);
-        self.player.play(Channel::Announce, vec![sound]);
+        self.speaker_hold = Some(self.player.play(Channel::Announce, vec![sound]));
         self.update_duck();
         self.update_ui();
     }
 
     pub(super) fn enroll_audio(&mut self, pcm: Vec<i16>) {
+        let hears = self.speaker_hears();
         let Some(endpointer) = &mut self.enroll_phrase else {
             return;
         };
         let ended = endpointer.feed(&pcm);
-        if let Some(speaker) = &self.speaker {
+        if let Some(speaker) = &self.speaker
+            && hears
+        {
             speaker.audio(pcm);
         }
         if ended {
