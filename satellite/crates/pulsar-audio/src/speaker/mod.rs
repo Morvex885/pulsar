@@ -44,13 +44,22 @@ const BODY_FRAMES: usize = 20;
 const BODY_DIM: usize = 128;
 // "head-window-frames-size": 300 — 7,2 с речи.
 const MAX_SPEECH_FRAMES: usize = 300;
-// Короче секунды речи отпечаток ненадёжен: говорящий остаётся неизвестным.
-const MIN_SPEECH_FRAMES: usize = 40;
+// Короче 0,6 с речи отпечаток ненадёжен: говорящий остаётся неизвестным. Секунды мало: в короткой
+// команде после начала речи по VAD её 0,5-0,9 с (поле 2026-11-16).
+const MIN_SPEECH_FRAMES: usize = 25;
 // Кадры тише пика на столько дБ не речь: пауза и фон иначе смещают нормализацию.
 const SPEECH_RANGE_DB: f32 = 30.0;
-// Итог по всей реплике не всегда успевает к агенту, поэтому оцениваем заранее. Раньше 2 с в окне
-// почти нет речи: конец активационного слова и сигнал станции.
-const EARLY_FIRST_SAMPLES: usize = 32000;
+// И громче фона хотя бы на столько дБ: так из звука после начала речи уходят фон до неё и пауза до
+// VAD_END. Больше нельзя: на Миди речь всего на 5-16 дБ громче фона, и при 10 дБ от команды
+// в 1,2 с оставалось 0,4 с (поле 2026-11-15). Фон — 10-й процентиль энергии кадров.
+const SPEECH_OVER_NOISE_DB: f32 = 4.0;
+// Энергия кадра цифровой тишины: 10·lg(LOG_FLOOR).
+const SILENCE_DB: f32 = -69.24;
+// Шаг кадра в секундах, для журнала.
+const FRAME_SECS: f32 = FRAME_SHIFT as f32 / SAMPLE_RATE;
+// Итог по всей реплике не всегда успевает к агенту, поэтому оцениваем заранее, но не раньше,
+// чем наберётся столько речи (кусков громче фона, см. [`SpeechTrack`]), и затем с шагом.
+const EARLY_MIN_SPEECH_SAMPLES: usize = 1000 * 16;
 const EARLY_STEP_SAMPLES: usize = 8000;
 // Речи пока мало, поэтому порог выше обычного.
 const EARLY_MIN_SCORE: f32 = 0.75;
@@ -59,9 +68,20 @@ const EARLY_MIN_LEAD: f32 = 0.10;
 const MAX_SAMPLES: usize = 30 * 16000;
 // VAD из HA объявляет конец речи после своей паузы, и текст уходит агенту через 150-250 мс; итог,
 // посчитанный только тогда, опаздывал к агенту на 40-100 мс. Поэтому итог считаем уже на паузе
-// в речи: тише пика на столько дБ и дольше стольких мс. Пауза короче паузы VAD из HA.
-const PAUSE_RANGE_DB: f32 = 20.0;
+// в речи дольше стольких мс; пауза короче паузы VAD из HA.
 const PAUSE_SAMPLES: usize = 300 * 16;
+// Итог на паузе — только после стольких мс речи. Прежде порогом были 2 с от начала реплики, но в
+// них входят пре-ролл и сигнал станции: итог считался по секунде речи на первой запинке
+// («Проверь, …») и выходил «unknown» при 0,51 (поле 2026-11-15).
+const PAUSE_MIN_SPEECH_SAMPLES: usize = 1500 * 16;
+// Кусок громче фона на столько дБ — речь; фон — самый тихий не цифровой кусок реплики.
+const CHUNK_OVER_NOISE_DB: f32 = 6.0;
+// Узнаём по звуку от начала речи по VAD из HA: громкость сама речь от фона не отличает, на Миди
+// речь всего на 5-16 дБ громче фона (поле 2026-11-15). Без начала речи (одно активационное слово)
+// говорящий неизвестен. VAD объявляет начало с опозданием, поэтому берём и столько мс до него.
+const SPEECH_LEAD_SAMPLES: usize = 600 * 16;
+// Если после итога на паузе было столько речи, итог на VAD_END считается заново.
+const RESCORE_SPEECH_SAMPLES: usize = 500 * 16;
 
 /// Логарифмы мел-энергий по кадрам и энергия каждого кадра в дБ.
 #[derive(Debug, PartialEq)]
@@ -204,28 +224,39 @@ pub fn fbank(pcm: &[i16]) -> Features {
     out
 }
 
-/// Кадры речи: не тише [`SPEECH_RANGE_DB`] от 95-го процентиля энергии, не больше
-/// [`MAX_SPEECH_FRAMES`]; из них вычтено среднее (CMN). Без CMN отпечаток зависит от громкости и
-/// канала: замер — docs/voice.md, «Голосовая биометрия». None — речи слишком мало.
-#[must_use]
-pub fn select_speech(f: &Features) -> Option<Vec<[f32; MEL_BINS]>> {
+/// Кадры речи: не тише [`SPEECH_RANGE_DB`] от 95-го процентиля энергии и громче фона на
+/// [`SPEECH_OVER_NOISE_DB`], не больше [`MAX_SPEECH_FRAMES`]; без вычитания среднего.
+fn speech_frames(f: &Features) -> Vec<[f32; MEL_BINS]> {
     if f.frames.is_empty() {
-        return None;
+        return Vec::new();
     }
     let mut sorted = f.energy_db.clone();
     sorted.sort_by(f32::total_cmp);
     let peak = sorted[(sorted.len() - 1) * 95 / 100];
-    let mut speech: Vec<[f32; MEL_BINS]> = f
-        .frames
+    // Фон из цифровой тишины не считается: тогда порог задаёт только пик, как прежде.
+    let noise = sorted[(sorted.len() - 1) / 10];
+    let mut threshold = peak - SPEECH_RANGE_DB;
+    if noise > SILENCE_DB + 1.0 {
+        threshold = threshold.max(noise + SPEECH_OVER_NOISE_DB);
+    }
+    f.frames
         .iter()
         .zip(&f.energy_db)
-        .filter(|(_, e)| **e > peak - SPEECH_RANGE_DB)
+        .filter(|(_, e)| **e > threshold)
         .map(|(frame, _)| *frame)
         .take(MAX_SPEECH_FRAMES)
-        .collect();
-    if speech.len() < MIN_SPEECH_FRAMES {
-        return None;
-    }
+        .collect()
+}
+
+/// Кадры речи (см. [`speech_frames`]) за вычетом среднего (CMN). Без CMN отпечаток зависит от
+/// громкости и канала: замер — docs/voice.md, «Голосовая биометрия». None — речи слишком мало.
+#[must_use]
+pub fn select_speech(f: &Features) -> Option<Vec<[f32; MEL_BINS]>> {
+    let speech = speech_frames(f);
+    (speech.len() >= MIN_SPEECH_FRAMES).then(|| centered(speech))
+}
+
+fn centered(mut speech: Vec<[f32; MEL_BINS]>) -> Vec<[f32; MEL_BINS]> {
     let mut mean = [0.0f32; MEL_BINS];
     for frame in &speech {
         for (m, v) in mean.iter_mut().zip(frame) {
@@ -240,7 +271,7 @@ pub fn select_speech(f: &Features) -> Option<Vec<[f32; MEL_BINS]>> {
             *v -= m;
         }
     }
-    Some(speech)
+    speech
 }
 
 /// Модели прошивки: звук -> голосовой отпечаток единичной длины.
@@ -259,9 +290,18 @@ impl Embedder {
 
     /// Ok(None) — в звуке слишком мало речи.
     pub fn embed(&mut self, pcm: &[i16]) -> Result<Option<Vec<f32>>, String> {
-        let Some(speech) = select_speech(&fbank(pcm)) else {
-            return Ok(None);
-        };
+        self.embed_counted(pcm).map(|(emb, _)| emb)
+    }
+
+    /// Отпечаток и сколько кадров речи в нём (или нашлось, если речи мало).
+    pub fn embed_counted(&mut self, pcm: &[i16]) -> Result<(Option<Vec<f32>>, usize), String> {
+        let f = fbank(pcm);
+        let speech = speech_frames(&f);
+        let count = speech.len();
+        if count < MIN_SPEECH_FRAMES {
+            return Ok((None, count));
+        }
+        let speech = centered(speech);
         let batches = speech.len() / BODY_FRAMES;
         let mut hidden = vec![0.0f32; batches * BODY_FRAMES * BODY_DIM];
         let mut input = vec![0.0f32; BODY_FRAMES * MEL_BINS];
@@ -279,7 +319,7 @@ impl Embedder {
         let mut embedding = vec![0.0f32; EMBEDDING_DIM];
         self.head
             .run(&[1, frames, BODY_DIM as i32], &hidden, &mut embedding)?;
-        Ok(gallery::normalized(embedding))
+        Ok((gallery::normalized(embedding), count))
     }
 }
 
@@ -316,7 +356,7 @@ struct EarlyCheck {
 impl EarlyCheck {
     fn new() -> EarlyCheck {
         EarlyCheck {
-            next: EARLY_FIRST_SAMPLES,
+            next: EARLY_MIN_SPEECH_SAMPLES,
             shown: None,
         }
     }
@@ -345,44 +385,93 @@ impl EarlyCheck {
     }
 }
 
-/// Пауза в речи по громкости: на ней итог считается заранее.
-struct PauseCheck {
-    peak_db: f32,
+/// Речь и паузы реплики по громкости кусков относительно фона: когда считать итог заранее.
+struct SpeechTrack {
+    /// Самый тихий кусок, кроме цифровой тишины, — фон.
+    noise_db: f32,
+    /// Уровень и длина каждого куска: речь до первой паузы пересчитывается, когда фон найден.
+    chunks: Vec<(f32, usize)>,
+    speech_samples: usize,
     quiet_samples: usize,
-    /// Итог по этой паузе уже посчитан; речь после паузы снимает флаг.
-    settled: bool,
+    /// Сколько речи было при последнем итоге на паузе, каким бы он ни был.
+    tried_at: Option<usize>,
+    /// Сколько речи было, когда на паузе узнан голос; `None` — не узнан.
+    settled_at: Option<usize>,
+    /// С какого куска речь по VAD из HA; до него речь и паузы не считаются.
+    start: Option<usize>,
 }
 
-impl PauseCheck {
-    fn new() -> PauseCheck {
-        PauseCheck {
-            peak_db: f32::NEG_INFINITY,
+impl SpeechTrack {
+    fn new() -> SpeechTrack {
+        SpeechTrack {
+            noise_db: f32::INFINITY,
+            chunks: Vec::new(),
+            speech_samples: 0,
             quiet_samples: 0,
-            settled: false,
+            tried_at: None,
+            settled_at: None,
+            start: None,
         }
     }
 
-    /// Следующий кусок звука; true — началась пауза и пора посчитать итог.
+    /// VAD из HA услышал речь: с этого куска считаем речь и паузы.
+    fn start(&mut self) {
+        if self.start.is_none() {
+            self.start = Some(self.chunks.len());
+        }
+    }
+
+    /// Следующий кусок звука; true — пауза после достаточной речи, пора посчитать итог.
     fn feed(&mut self, pcm: &[i16]) -> bool {
         let db = enroll::level_db(pcm);
-        self.peak_db = self.peak_db.max(db);
-        if db >= self.peak_db - PAUSE_RANGE_DB {
+        if pcm.is_empty() {
+            return false;
+        }
+        if self.chunks.len() * 512 < MAX_SAMPLES {
+            self.chunks.push((db, pcm.len()));
+        }
+        if db > SILENCE_DB + 1.0 && db < self.noise_db {
+            self.noise_db = db;
+            let threshold = db + CHUNK_OVER_NOISE_DB;
+            let from = self
+                .start
+                .unwrap_or(self.chunks.len())
+                .min(self.chunks.len());
+            self.speech_samples = self.chunks[from..]
+                .iter()
+                .filter(|(level, _)| *level >= threshold)
+                .map(|(_, len)| len)
+                .sum();
+        }
+        if self.start.is_none() {
+            return false;
+        }
+        if db >= self.noise_db + CHUNK_OVER_NOISE_DB {
+            self.speech_samples += pcm.len();
             self.quiet_samples = 0;
-            self.settled = false;
             return false;
         }
         self.quiet_samples += pcm.len();
-        if self.settled || self.quiet_samples < PAUSE_SAMPLES {
-            return false;
-        }
-        self.settled = true;
-        true
+        self.quiet_samples >= PAUSE_SAMPLES
+            && self.speech_samples >= PAUSE_MIN_SPEECH_SAMPLES
+            && self.tried_at != Some(self.speech_samples)
     }
 
-    /// Паузу не засчитывать: следующий тихий кусок снова её начнёт. Всегда false.
-    fn reopen(&mut self) -> bool {
-        self.settled = false;
-        false
+    /// Итог на этой паузе посчитан; `found` — голос узнан.
+    /// Следующий итог — не раньше новой паузы: фон в паузе бывает ниже прежнего, речь тогда
+    /// пересчитывается, и итог считался бы на каждом куске (4 раза за 0,4 с, поле 2026-11-16).
+    fn scored(&mut self, found: bool) {
+        self.tried_at = Some(self.speech_samples);
+        self.quiet_samples = 0;
+        if found {
+            self.settled_at = Some(self.speech_samples);
+        }
+    }
+
+    /// Итог на VAD_END считать заново: на паузе он не уходил или после него было много речи.
+    fn rescore_at_end(&self) -> bool {
+        self.settled_at
+            .is_none_or(|at| self.speech_samples - at >= RESCORE_SPEECH_SAMPLES)
     }
 }
 
@@ -390,6 +479,8 @@ enum Cmd {
     /// Номер реплики и образец ли она для записи голоса.
     Begin(u64, bool),
     Audio(Vec<i16>),
+    /// VAD из HA услышал речь в реплике с этим номером.
+    SpeechStart(u64),
     End(u64),
     Enroll(String),
     /// Отмена записи; true — по истечении срока.
@@ -423,6 +514,11 @@ impl SpeakerHandle {
 
     pub fn audio(&self, pcm: Vec<i16>) {
         self.send(Cmd::Audio(pcm));
+    }
+
+    /// Начало речи по VAD из HA; повторный вызов ничего не делает.
+    pub fn speech_start(&self) {
+        self.send(Cmd::SpeechStart(self.seq.get()));
     }
 
     /// Повторный вызов ничего не делает: приходят и VAD_END, и STT_END.
@@ -580,16 +676,30 @@ fn forget_voice(store: &Path, gallery: &mut Gallery, name: &str) -> bool {
     true
 }
 
-/// Кто говорит в `pcm`, и строка с оценками для журнала.
+/// Кто говорит в `pcm`, и строка с оценками и длительностью речи для журнала.
 fn identify(embedder: &mut Embedder, gallery: &Gallery, pcm: &[i16]) -> (Option<Match>, String) {
-    match embedder.embed(pcm) {
-        Ok(Some(emb)) => gallery.identify(&emb),
-        Ok(None) => (None, "too little speech".to_owned()),
+    match embedder.embed_counted(pcm) {
+        Ok((Some(emb), frames)) => {
+            let (found, detail) = gallery.identify(&emb);
+            (
+                found,
+                format!("{detail}; speech {:.1} s", speech_secs(frames)),
+            )
+        }
+        Ok((None, frames)) => (
+            None,
+            format!("too little speech ({:.1} s)", speech_secs(frames)),
+        ),
         Err(e) => {
             warn!("speaker: {e}");
             (None, "too little speech".to_owned())
         }
     }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn speech_secs(frames: usize) -> f32 {
+    frames as f32 * FRAME_SECS
 }
 
 fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) {
@@ -610,7 +720,9 @@ fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) 
     let mut active: Option<(u64, bool)> = None;
     let mut pcm: Vec<i16> = Vec::new();
     let mut early = EarlyCheck::new();
-    let mut pause = PauseCheck::new();
+    let mut track = SpeechTrack::new();
+    // С какого отсчёта `pcm` узнаём: начало речи по VAD из HA минус [`SPEECH_LEAD_SAMPLES`].
+    let mut speech_from: Option<usize> = None;
     let mut last = String::new();
     let _ = tx.send(SpeakerEvent::Status(status_text(&gallery, None, &last)));
     let _ = tx.send(view(None, EnrollNote::None, None));
@@ -620,19 +732,28 @@ fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) 
                 active = Some((seq, sample));
                 pcm.clear();
                 early = EarlyCheck::new();
-                pause = PauseCheck::new();
+                track = SpeechTrack::new();
+                speech_from = None;
+            }
+            Cmd::SpeechStart(seq) => {
+                if active == Some((seq, false)) && speech_from.is_none() {
+                    speech_from = Some(pcm.len().saturating_sub(SPEECH_LEAD_SAMPLES));
+                    track.start();
+                }
             }
             Cmd::Audio(chunk) => {
                 if active.is_some() && pcm.len() < MAX_SAMPLES {
                     pcm.extend_from_slice(&chunk);
                 }
-                // Пауза в первые 2 с — после активационного слова: команды в звуке ещё нет.
+                let paused = track.feed(&chunk);
                 if let Some((seq, false)) = active
-                    && pause.feed(&chunk)
-                    && (pcm.len() >= EARLY_FIRST_SAMPLES || pause.reopen())
+                    && let Some(from) = speech_from
+                    && paused
                 {
                     // Итог на паузе: VAD_END из HA приходит, когда текст уже почти у агента.
-                    let (found, detail) = identify(&mut embedder, &gallery, &pcm);
+                    // «unknown» на паузе не окончателен: после неё речь могла продолжиться.
+                    let (found, detail) = identify(&mut embedder, &gallery, &pcm[from..]);
+                    track.scored(found.is_some());
                     last.clone_from(&detail);
                     let _ = tx.send(SpeakerEvent::Identified { seq, found, detail });
                     let _ = tx.send(SpeakerEvent::Status(status_text(
@@ -643,9 +764,10 @@ fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) 
                     continue;
                 }
                 if let Some((seq, false)) = active
-                    && !pause.settled
-                    && early.due(pcm.len())
-                    && let Ok(Some(emb)) = embedder.embed(&pcm)
+                    && let Some(from) = speech_from
+                    && track.settled_at.is_none()
+                    && early.due(track.speech_samples)
+                    && let Ok(Some(emb)) = embedder.embed(&pcm[from..])
                     && let Some(found) = early.update(gallery.identify(&emb).0)
                 {
                     match &found {
@@ -663,13 +785,16 @@ fn worker(store: &Path, rx: &Receiver<Cmd>, tx: &UnboundedSender<SpeakerEvent>) 
                     continue;
                 }
                 active = None;
-                // Итог уже ушёл на паузе, и речи после неё не было.
-                if !sample && pause.settled {
+                // Итог уже ушёл на паузе, и речи после неё было мало.
+                if !sample && !track.rescore_at_end() {
                     pcm.clear();
                     continue;
                 }
                 if !sample {
-                    let (found, detail) = identify(&mut embedder, &gallery, &pcm);
+                    let (found, detail) = match speech_from {
+                        Some(from) => identify(&mut embedder, &gallery, &pcm[from..]),
+                        None => (None, "no speech".to_owned()),
+                    };
                     pcm.clear();
                     last.clone_from(&detail);
                     let _ = tx.send(SpeakerEvent::Identified { seq, found, detail });
@@ -813,10 +938,10 @@ mod tests {
     #[test]
     fn early_check_waits_and_keeps_stepping() {
         let mut e = EarlyCheck::new();
-        assert!(!e.due(EARLY_FIRST_SAMPLES - 1));
-        assert!(e.due(EARLY_FIRST_SAMPLES));
-        assert!(!e.due(EARLY_FIRST_SAMPLES + 1));
-        assert!(e.due(EARLY_FIRST_SAMPLES + EARLY_STEP_SAMPLES));
+        assert!(!e.due(EARLY_MIN_SPEECH_SAMPLES - 1));
+        assert!(e.due(EARLY_MIN_SPEECH_SAMPLES));
+        assert!(!e.due(EARLY_MIN_SPEECH_SAMPLES + 1));
+        assert!(e.due(EARLY_MIN_SPEECH_SAMPLES + EARLY_STEP_SAMPLES));
         assert!(e.due(MAX_SAMPLES));
     }
 
@@ -864,35 +989,114 @@ mod tests {
         assert_eq!(name(e.update(None)), Some(None));
     }
 
-    fn pause_after(p: &mut PauseCheck, amp: i16, max: usize) -> Option<usize> {
-        (0..max).find(|_| p.feed(&[amp; 512]))
+    fn pause_after(t: &mut SpeechTrack, amp: i16, max: usize) -> Option<usize> {
+        (0..max).find(|_| t.feed(&[amp; 512]))
+    }
+
+    /// Реплика, в которой VAD из HA уже услышал речь.
+    fn started() -> SpeechTrack {
+        let mut t = SpeechTrack::new();
+        t.start();
+        t
+    }
+
+    /// Куски по 512 отсчётов (32 мс): столько нужно на `ms` мс.
+    fn chunks(ms: usize) -> usize {
+        (ms * 16).div_ceil(512)
     }
 
     #[test]
-    fn pause_settles_once_and_speech_reopens_it() {
-        let mut p = PauseCheck::new();
-        assert_eq!(pause_after(&mut p, 5000, 50), None);
-        let quiet = pause_after(&mut p, 5, 50).expect("pause");
+    fn a_pause_counts_only_after_enough_speech() {
+        let mut t = started();
+        assert_eq!(pause_after(&mut t, 2, 20), None);
+        // Секунда речи и пауза: мало, как «Проверь, …» на поле.
+        assert_eq!(pause_after(&mut t, 300, chunks(1000)), None);
+        assert_eq!(pause_after(&mut t, 2, 30), None);
+        // Ещё полсекунды речи: теперь пауза — итог.
+        assert_eq!(pause_after(&mut t, 300, chunks(600)), None);
+        let quiet = pause_after(&mut t, 2, 30).expect("pause");
         assert_eq!(quiet + 1, PAUSE_SAMPLES.div_ceil(512));
-        assert!(p.settled);
-        // Тишина дальше итог не пересчитывает.
-        assert_eq!(pause_after(&mut p, 5, 50), None);
-        // Речь после паузы: итог снова считается на следующей паузе.
-        assert_eq!(pause_after(&mut p, 5000, 1), None);
-        assert!(!p.settled);
-        assert!(pause_after(&mut p, 5, 50).is_some());
     }
 
-    /// Тихая речь (после #81) и громкая дают паузу на одном и том же куске.
+    #[test]
+    fn a_found_voice_settles_and_new_speech_rescores_at_the_end() {
+        let mut t = started();
+        pause_after(&mut t, 2, 10);
+        pause_after(&mut t, 300, chunks(1600));
+        assert!(pause_after(&mut t, 2, 30).is_some());
+        t.scored(true);
+        // Тишина дальше итог не пересчитывает, и на VAD_END он тот же.
+        assert_eq!(pause_after(&mut t, 2, 50), None);
+        assert!(!t.rescore_at_end());
+        // Короткое слово после паузы — тоже.
+        pause_after(&mut t, 300, chunks(200));
+        assert!(!t.rescore_at_end());
+        pause_after(&mut t, 300, chunks(400));
+        assert!(t.rescore_at_end());
+    }
+
+    #[test]
+    fn unknown_at_a_pause_is_not_final() {
+        let mut t = started();
+        pause_after(&mut t, 2, 10);
+        pause_after(&mut t, 300, chunks(1600));
+        assert!(pause_after(&mut t, 2, 30).is_some());
+        t.scored(false);
+        // В той же паузе итог не считается на каждом куске.
+        assert_eq!(pause_after(&mut t, 2, 50), None);
+        assert!(t.rescore_at_end());
+        // Речь после паузы: следующая пауза — снова итог.
+        pause_after(&mut t, 300, chunks(100));
+        assert!(pause_after(&mut t, 2, 30).is_some());
+    }
+
+    /// Фон в паузе тише прежнего: тихие куски до неё становятся речью, но итог не считается
+    /// на каждом куске, а только после новой паузы.
+    #[test]
+    fn a_lower_floor_in_the_pause_waits_for_a_new_pause() {
+        let mut t = started();
+        pause_after(&mut t, 4, 5);
+        pause_after(&mut t, 300, chunks(1600));
+        assert!(pause_after(&mut t, 4, 30).is_some());
+        t.scored(true);
+        let next = pause_after(&mut t, 2, 50).expect("new pause");
+        assert_eq!(next + 1, PAUSE_SAMPLES.div_ceil(512));
+    }
+
+    /// Речь сразу после сигнала станции, до первой тишины, тоже речь: фон найден позже.
+    #[test]
+    fn speech_before_the_first_quiet_chunk_counts() {
+        let mut t = started();
+        assert_eq!(pause_after(&mut t, 300, chunks(1600)), None);
+        assert!(pause_after(&mut t, 2, 30).is_some());
+    }
+
+    /// Активационное слово без команды: в пре-ролле речь, дальше фон, VAD из HA речи не слышал.
+    /// Ни речи, ни итога на паузе.
+    #[test]
+    fn nothing_counts_before_the_speech_start() {
+        let mut t = SpeechTrack::new();
+        assert_eq!(pause_after(&mut t, 300, chunks(2000)), None);
+        assert_eq!(pause_after(&mut t, 2, chunks(14000)), None);
+        assert_eq!(t.speech_samples, 0);
+        // Речь после начала по VAD считается, слово до него — нет.
+        t.start();
+        assert_eq!(pause_after(&mut t, 300, chunks(1000)), None);
+        assert_eq!(t.speech_samples, chunks(1000) * 512);
+    }
+
+    /// Тихая речь (после #81) и громкая дают паузу на одном и том же куске; цифровая тишина
+    /// в паузах — тоже пауза.
     #[test]
     fn pause_does_not_depend_on_the_gain() {
         let at = |speech: i16, quiet: i16| {
-            let mut p = PauseCheck::new();
-            assert_eq!(pause_after(&mut p, speech, 30), None);
-            pause_after(&mut p, quiet, 50).expect("pause")
+            let mut t = started();
+            pause_after(&mut t, quiet.max(1), 5);
+            assert_eq!(pause_after(&mut t, speech, chunks(1600)), None);
+            pause_after(&mut t, quiet, 50).expect("pause")
         };
-        assert_eq!(at(5000, 100), at(100, 2));
-        assert_eq!(at(5000, 0), at(8, 0));
+        assert_eq!(at(15000, 100), at(300, 2));
+        assert_eq!(at(300, 0), at(15000, 0));
     }
 
     fn tone(hz: f32, secs: f32, amp: f32) -> Vec<i16> {
@@ -946,6 +1150,38 @@ mod tests {
     }
 
     #[test]
+    fn silence_db_is_the_energy_floor() {
+        assert!((SILENCE_DB - 10.0 * LOG_FLOOR.log10()).abs() < 0.01);
+        assert!((enroll::level_db(&[0; 512]) - SILENCE_DB).abs() < 0.01);
+    }
+
+    /// Шум размаха `amp`, `secs` секунд.
+    fn noise(amp: f32, secs: f32) -> Vec<i16> {
+        let mut seed = 7u32;
+        (0..(secs * SAMPLE_RATE) as usize)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (((seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * amp).round() as i16
+            })
+            .collect()
+    }
+
+    /// Реплика с одним активационным словом при «Microphone gain» 0 (поле 2026-11-15): конец
+    /// слова в пре-ролле и 14 с фона на 23 дБ тише речи. Фон — не речь, отпечатка нет.
+    #[test]
+    fn background_after_a_wake_word_is_not_speech() {
+        let mut pcm = tone(300.0, 0.25, 37.0);
+        pcm.extend(noise(6.2, 14.0));
+        assert!(select_speech(&fbank(&pcm)).is_none());
+        // Та же речь на том же фоне — речь.
+        let mut pcm = noise(6.2, 1.0);
+        pcm.extend(tone(300.0, 2.0, 37.0));
+        pcm.extend(noise(6.2, 1.0));
+        let speech = select_speech(&fbank(&pcm)).unwrap();
+        assert!((70..=90).contains(&speech.len()), "{}", speech.len());
+    }
+
+    #[test]
     fn speech_selection_drops_silence_caps_length_and_centers() {
         let mut pcm = vec![0i16; 16000];
         pcm.extend(tone(300.0, 2.0, 8000.0));
@@ -955,7 +1191,11 @@ mod tests {
         assert!((70..=90).contains(&speech.len()), "{}", speech.len());
         let mean: f32 = speech.iter().map(|f| f[5]).sum::<f32>() / speech.len() as f32;
         assert!(mean.abs() < 1e-3);
-        let long = select_speech(&fbank(&tone(300.0, 20.0, 8000.0))).unwrap();
+        // Реплика без единого тихого кадра нереальна: фоном тогда сочлась бы сама речь. В жизни
+        // до команды есть пауза после сигнала станции, после — пауза до VAD_END.
+        let mut long = vec![0i16; 3 * 16000];
+        long.extend(tone(300.0, 20.0, 8000.0));
+        let long = select_speech(&fbank(&long)).unwrap();
         assert_eq!(long.len(), MAX_SPEECH_FRAMES);
     }
     /// Слоги по 0,3 с через 0,2 с пауз, с шумом размаха `noise_amp`.

@@ -168,6 +168,10 @@ pub struct Controller {
     speaker: Option<pulsar_audio::speaker::SpeakerHandle>,
     /// Результат старой реплики не публикуется.
     speaker_seq: u64,
+    /// Сигнал начала реплики ещё звучит: его остаток после эхоподавления не голос говорящего.
+    speaker_hold: Option<PlayId>,
+    /// После сигнала звук в узнавание идёт с этого момента (хвост сигнала в комнате).
+    speaker_resume_ms: i64,
     /// Активационное слово начинает образец, а не диалог.
     enroll_active: bool,
     voice_name: String,
@@ -592,6 +596,8 @@ impl Controller {
             mic,
             speaker,
             speaker_seq: 0,
+            speaker_hold: None,
+            speaker_resume_ms: 0,
             enroll_active: false,
             voice_name: String::new(),
             enroll_view: None,
@@ -833,6 +839,7 @@ impl Controller {
                 self.publish_media();
             }
             PlayerEvent::Done { id, ok } => {
+                self.speaker_sound_done(id);
                 if let Some(p) = self.pending.remove(&id) {
                     self.play_done(p, ok);
                 }
@@ -863,7 +870,9 @@ impl Controller {
                 if self.enroll_phrase.is_some() {
                     self.enroll_audio(pcm);
                 } else if self.phase == Phase::Listening {
-                    if let Some(speaker) = &self.speaker {
+                    if let Some(speaker) = &self.speaker
+                        && self.speaker_hears()
+                    {
                         speaker.audio(pcm.clone());
                     }
                     self.api.voice_send_audio(pcm);
