@@ -4,17 +4,26 @@
 use std::collections::HashMap;
 
 use log::{debug, info, warn};
+use pulsar_audio::speaker::{
+    ENROLL_EXPIRE_MS, Endpointer, EnrollNote, EnrollSound, EnrollView, PHRASE_MAX_MS, SpeakerEvent,
+};
 use pulsar_core::{ClockShot, UiState, now_ms};
-use pulsar_esphome::{AnnounceRequest, TimerEvent, TimerInfo, VaEvent};
+use pulsar_esphome::{
+    ActionId, AnnounceRequest, ButtonId, SensorId, TextSensorId, TimerEvent, TimerInfo, VaEvent,
+};
 use pulsar_lan::arbiter::Claim;
-use pulsar_media::{Channel, PlayState};
+use pulsar_media::{Channel, PlayId, PlayState};
 use pulsar_sendspin::Transport;
 
 use super::logic::{self, COMMAND_AFTER_WAKE_MS, HaTimer, Phase, VoiceCommand};
 use super::speech_numbers;
 use super::{
-    Controller, LISTEN_TIMEOUT_MS, PROCESS_TIMEOUT_MS, Pending, SOUNDS, TIMER_RING_MAX_MS, Tk,
+    Controller, LISTEN_TIMEOUT_MS, PROCESS_TIMEOUT_MS, Pending, SOUNDS, SPEAKER_UNKNOWN,
+    TIMER_RING_MAX_MS, Tk,
 };
+
+/// Отзвук сигнала начала реплики в комнате после конца его воспроизведения, мс.
+const SPEAKER_SOUND_TAIL_MS: i64 = 100;
 
 impl Controller {
     fn arbitration_on(&self) -> bool {
@@ -123,6 +132,9 @@ impl Controller {
             }
             return self.stop_timer_ring();
         }
+        if self.enroll_active && self.phase != Phase::Listening && self.phase != Phase::Processing {
+            return self.enroll_wake(level_db, preroll);
+        }
         if matches!(self.phase, Phase::Listening | Phase::Processing) || self.arbitrating {
             return;
         }
@@ -212,6 +224,7 @@ impl Controller {
         // The button, a continued conversation or HA's start_conversation win.
         self.cancel_arbitration();
         self.timers.cancel(Tk::FollowupWait);
+        self.enroll_phrase_abort();
         if !self.api.voice_subscribed() {
             warn!("wake ignored: Home Assistant voice assistant not subscribed");
             self.show_ui(UiState::Error);
@@ -231,11 +244,12 @@ impl Controller {
         self.clear_speech_display();
         self.followup = logic::Followup::default();
         self.update_duck();
+        self.speaker_hold = None;
         match logic::wake_cue(earcon, self.st.wake_sound) {
             logic::WakeCue::Keep => {}
             logic::WakeCue::Sound => {
                 let sound = format!("{SOUNDS}{}", self.model.wake_sound);
-                self.player.play(Channel::Announce, vec![sound]);
+                self.speaker_hold = Some(self.player.play(Channel::Announce, vec![sound]));
             }
             logic::WakeCue::Cut => self.player.stop(Channel::Announce),
         }
@@ -244,6 +258,7 @@ impl Controller {
         self.send_tts_report(false);
         // A failed send comes back as VoiceStartFailed / VoiceAudioOverflow of this run.
         self.voice_run = self.api.voice_request_start(phrase);
+        self.speaker_begin(&preroll);
         // HA drops audio queued before the start and queues what follows it on the same
         // connection.
         for chunk in preroll.chunks(512) {
@@ -297,8 +312,14 @@ impl Controller {
                     self.timers.set(Tk::FollowupWait, ms);
                 }
             }
-            VaEvent::SttVadStart => self.timers.cancel(Tk::FollowupWait),
+            VaEvent::SttVadStart => {
+                self.timers.cancel(Tk::FollowupWait);
+                if let Some(speaker) = &self.speaker {
+                    speaker.speech_start();
+                }
+            }
             VaEvent::SttVadEnd | VaEvent::SttEnd => {
+                self.speaker_end();
                 if ev == VaEvent::SttEnd
                     && matches!(self.phase, Phase::Listening | Phase::Processing)
                     && logic::stt_stop(get("text"))
@@ -369,6 +390,7 @@ impl Controller {
                 }
             }
             VaEvent::RunEnd => {
+                self.speaker_end();
                 self.stop_streaming();
                 if !self.tts_played {
                     // Follow-up-реплика без речи (stt-no-text-recognized) кончается тихо; с
@@ -783,7 +805,8 @@ impl Controller {
     /// `held`: the word came during a wake arbitration this station won, right after its wake
     /// word.
     pub(super) fn on_command(&mut self, word: &str, held: bool) {
-        if self.mic_muted() {
+        // Слово из записываемой фразы — не команда.
+        if self.mic_muted() || self.enroll_phrase.is_some() {
             return;
         }
         let Some(c) = logic::command_of(word) else {
@@ -884,5 +907,252 @@ impl Controller {
             // «стоп» = пауза, как в стоке; см. docs/voice.md, «Командный спотер».
             self.clock.play(ClockShot::Pause);
         }
+    }
+}
+
+// ---------------- speaker ----------------
+
+impl Controller {
+    /// Прошлого говорящего сбрасываем сразу, чтобы ответ не достался ему.
+    fn speaker_begin(&mut self, preroll: &[i16]) {
+        let Some(speaker) = &self.speaker else {
+            return;
+        };
+        self.speaker_seq = speaker.begin();
+        speaker.audio(preroll.to_vec());
+        self.api
+            .publish_text_sensor(TextSensorId::Speaker, SPEAKER_UNKNOWN);
+    }
+
+    /// Звук идёт в узнавание: сигнал начала реплики отзвучал. Иначе его остаток попадал и в
+    /// образцы, и в узнавание, и почти тихая реплика совпадала с голосом на 0,9 (поле 2026-11-15).
+    pub(super) fn speaker_hears(&self) -> bool {
+        self.speaker_hold.is_none() && now_ms() >= self.speaker_resume_ms
+    }
+
+    /// Сигнал начала реплики отзвучал или прерван.
+    pub(super) fn speaker_sound_done(&mut self, id: PlayId) {
+        if self.speaker_hold == Some(id) {
+            self.speaker_hold = None;
+            self.speaker_resume_ms = now_ms() + SPEAKER_SOUND_TAIL_MS;
+        }
+    }
+
+    fn speaker_end(&self) {
+        if let Some(speaker) = &self.speaker {
+            speaker.end();
+        }
+    }
+
+    pub(super) fn on_speaker_action(&mut self, id: ActionId, name: String) {
+        let Some(speaker) = &self.speaker else {
+            return;
+        };
+        if !pulsar_audio::speaker::valid_name(&name) {
+            warn!("speaker: bad name '{name}'");
+            return;
+        }
+        info!("speaker: {id:?} '{name}'");
+        if id == ActionId::SpeakerEnroll {
+            speaker.enroll(name);
+            self.enroll_active = true;
+            self.timers.set(Tk::EnrollExpire, ENROLL_EXPIRE_MS);
+        } else {
+            speaker.forget(name);
+        }
+    }
+
+    pub(super) fn on_voice_button(&mut self, id: ButtonId) {
+        if self.speaker.is_none() {
+            return;
+        }
+        if id == ButtonId::VoiceCancel {
+            if let Some(speaker) = &self.speaker {
+                speaker.cancel(false);
+            }
+            return;
+        }
+        if !pulsar_audio::speaker::valid_name(&self.voice_name) {
+            warn!("speaker: bad name '{}'", self.voice_name);
+            return self.enroll_publish(EnrollView {
+                active: self.enroll_view.as_ref().and_then(|v| v.active.clone()),
+                note: EnrollNote::BadName,
+                sound: None,
+            });
+        }
+        let action = if id == ButtonId::VoiceStart {
+            ActionId::SpeakerEnroll
+        } else {
+            ActionId::SpeakerForget
+        };
+        self.on_speaker_action(action, self.voice_name.clone());
+    }
+
+    /// Фраза идёт в образец, а не в конвейер HA: агент не выполняет сказанное. Как при звонке
+    /// таймера, станция занимает очередь, чтобы соседние не начали диалог.
+    fn enroll_wake(&mut self, level_db: f32, preroll: Vec<i16>) {
+        if self.enroll_phrase.is_some() {
+            return;
+        }
+        self.cancel_arbitration();
+        if self.arbitration_on() {
+            self.arbiter
+                .claim(&self.st.wake_word, level_db, true, false);
+        }
+        if self.phase == Phase::Speaking {
+            // Иначе поздний Done ответа завершит диалог и выключит микрофон посреди фразы.
+            self.interrupt_speech();
+            self.finish_interaction();
+        } else if self.announcing {
+            self.interrupt_speech();
+        }
+        let Some(speaker) = &self.speaker else {
+            return;
+        };
+        self.speaker_seq = speaker.begin_sample();
+        let mut endpointer = Endpointer::new();
+        endpointer.feed(&preroll);
+        speaker.audio(preroll);
+        self.enroll_phrase = Some(endpointer);
+        self.mic.set_streaming(true);
+        self.timers.set(Tk::EnrollPhrase, PHRASE_MAX_MS);
+        let sound = format!("{SOUNDS}{}", self.model.wake_sound);
+        self.speaker_hold = Some(self.player.play(Channel::Announce, vec![sound]));
+        self.update_duck();
+        self.update_ui();
+    }
+
+    pub(super) fn enroll_audio(&mut self, pcm: Vec<i16>) {
+        let hears = self.speaker_hears();
+        let Some(endpointer) = &mut self.enroll_phrase else {
+            return;
+        };
+        let ended = endpointer.feed(&pcm);
+        if let Some(speaker) = &self.speaker
+            && hears
+        {
+            speaker.audio(pcm);
+        }
+        if ended {
+            self.enroll_phrase_end();
+        }
+    }
+
+    pub(super) fn enroll_phrase_end(&mut self) {
+        if self.enroll_phrase.is_none() {
+            return;
+        }
+        self.enroll_phrase_abort();
+        self.speaker_end();
+    }
+
+    /// Законченный образец решит рабочий поток, незаконченный отбросится при следующем начале.
+    pub(super) fn enroll_phrase_abort(&mut self) {
+        if self.enroll_phrase.take().is_none() {
+            return;
+        }
+        self.timers.cancel(Tk::EnrollPhrase);
+        self.mic.set_streaming(self.arbitrating);
+        self.update_duck();
+        self.update_ui();
+    }
+
+    /// Сбрасываем и здесь: рабочий поток мог уже завершиться, и ответа от него не будет.
+    pub(super) fn enroll_expired(&mut self) {
+        if let Some(speaker) = &self.speaker {
+            speaker.cancel(true);
+        }
+        self.enroll_active = false;
+        self.enroll_phrase_abort();
+    }
+
+    /// Рабочий поток завершился: записи больше нет, активационное слово снова идёт в диалог.
+    pub(super) fn speaker_lost(&mut self) {
+        self.rx.speaker = None;
+        self.speaker = None;
+        self.enroll_active = false;
+        self.timers.cancel(Tk::EnrollExpire);
+        self.enroll_phrase_abort();
+    }
+
+    fn enroll_publish(&mut self, view: EnrollView) {
+        let wake = if self.st.wake_word == "yandex" {
+            "Яндекс"
+        } else {
+            "Алиса"
+        };
+        let text = pulsar_audio::speaker::prompt(&view, wake);
+        let done = view.active.as_ref().map_or(0, |(_, done)| *done);
+        self.api
+            .publish_text_sensor(TextSensorId::VoicePrompt, &text);
+        #[allow(clippy::cast_precision_loss)]
+        self.api
+            .publish_sensor(SensorId::VoiceProgress, done as f32);
+        self.enroll_view = Some(view);
+    }
+
+    fn enroll_sound(&mut self, sound: EnrollSound) {
+        let one = |name: &str| format!("{SOUNDS}{name}");
+        let paths = match sound {
+            EnrollSound::Accepted => vec![one(self.model.volume_sound)],
+            EnrollSound::Saved => vec![one(self.model.volume_sound), one(self.model.volume_sound)],
+            EnrollSound::Rejected => vec![one(self.model.cancel_sound)],
+        };
+        self.closing_earcon = true;
+        self.earcon_seq += 1;
+        let seq = self.earcon_seq;
+        self.play_announce(paths, Pending::Earcon { seq });
+        self.update_duck();
+    }
+
+    pub(super) fn on_speaker(&mut self, ev: SpeakerEvent) {
+        match ev {
+            SpeakerEvent::Identified { seq, found, detail } => {
+                if seq != self.speaker_seq {
+                    return;
+                }
+                let name = found.as_ref().map_or(SPEAKER_UNKNOWN, |m| m.name.as_str());
+                info!("speaker: {name} ({detail})");
+                self.api.publish_text_sensor(TextSensorId::Speaker, name);
+            }
+            SpeakerEvent::Early { seq, found } => {
+                if seq == self.speaker_seq {
+                    let name = found.as_ref().map_or(SPEAKER_UNKNOWN, |m| m.name.as_str());
+                    self.api.publish_text_sensor(TextSensorId::Speaker, name);
+                }
+            }
+            SpeakerEvent::Status(text) => {
+                self.api
+                    .publish_text_sensor(TextSensorId::SpeakerStatus, &text);
+            }
+            SpeakerEvent::Enroll(view) => {
+                self.enroll_active = view.active.is_some();
+                if self.enroll_active {
+                    // Сам wake word и слишком короткая фраза срок не продлевают: иначе телевизор
+                    // держал бы запись открытой, и станция не отвечала бы на фразы.
+                    if view.sound.is_some() && view.note != EnrollNote::TooShort {
+                        self.timers.set(Tk::EnrollExpire, ENROLL_EXPIRE_MS);
+                    }
+                } else {
+                    self.timers.cancel(Tk::EnrollExpire);
+                    self.enroll_phrase_abort();
+                }
+                if let Some(sound) = view.sound {
+                    self.enroll_sound(sound);
+                }
+                self.enroll_publish(view);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn voice_name_limit_matches_the_gallery() {
+        assert_eq!(
+            pulsar_esphome::VOICE_NAME_MAX_CHARS as usize,
+            pulsar_audio::speaker::MAX_NAME_CHARS
+        );
     }
 }

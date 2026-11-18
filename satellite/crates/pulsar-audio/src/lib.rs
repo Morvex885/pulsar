@@ -8,6 +8,7 @@
 
 pub mod engine;
 mod frontend;
+pub mod speaker;
 mod spectrum;
 
 pub use frontend::{FrontendEvent, FrontendHandle, FrontendStats, spawn};
