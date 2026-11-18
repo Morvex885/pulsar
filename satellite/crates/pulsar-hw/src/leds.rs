@@ -36,10 +36,19 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
 
 use crate::led_fx::{self as fx, Col};
+use crate::led_panel as panel;
 use crate::sys::{Framebuffer, I2c};
 
 /// ~30 fps while animating (stock 20 ms frames resampled by time).
 const FRAME_MS: u64 = 33;
+/// Панель Станции 2: на 30 кадрах/с перетекание яркости между соседними светодиодами видно
+/// рывками.
+/// см. docs/station2.md, «Светодиоды и часы»
+const PANEL_FRAME_MS: u64 = 20;
+/// Поправка датчика освещённости Станции 2: без неё панель и в светлой комнате приглушена, и
+/// плавные переходы идут по нижним ступеням яркости, заметными шагами.
+/// см. docs/station2.md, «Светодиоды и часы»
+const PANEL_LUX_GAIN: f32 = 9.5;
 /// Global cap: never drive LEDs above 80 % PWM.
 const MAX_SCALE: f32 = 0.8;
 const VOLUME_SHOW_MS: i64 = 1500;
@@ -490,7 +499,8 @@ fn frame(comp: &mut Compositor, out: &mut Output, timers: &mut Timers<TimerKey>,
         timers.cancel(TimerKey::Expiry);
         timers.cancel(TimerKey::Retry);
         if !timers.is_set(TimerKey::Frame) {
-            timers.set_repeating(TimerKey::Frame, FRAME_MS, FRAME_MS);
+            let ms = comp.frame_ms();
+            timers.set_repeating(TimerKey::Frame, ms, ms);
         }
         return;
     }
@@ -959,6 +969,13 @@ struct Compositor {
     fade_t0: i64,
     fade_ms: i64,
     dimmer: AmbientDimmer,
+    /// Панель: логотип mute горит поверх любого слоя, поэтому смена mute без смены слоя (под
+    /// громкостью или ассистентом) идёт своим переходом только логотипа — общий переход кадра
+    /// оставил бы след у движущейся дуги и задержал бы громкость.
+    logo_from: [Col; panel::PANEL_LOGO_LEDS],
+    logo_t0: Option<i64>,
+    /// Фон логотипа в прошлом кадре — то, что показал бы общий переход без перехода логотипа.
+    logo_bg: [Col; panel::PANEL_LOGO_LEDS],
     px: Vec<u8>,
 }
 
@@ -1015,6 +1032,9 @@ impl Compositor {
             fade_t0: 0,
             fade_ms: 0,
             dimmer: AmbientDimmer::new(),
+            logo_from: [Col::default(); panel::PANEL_LOGO_LEDS],
+            logo_t0: None,
+            logo_bg: [Col::default(); panel::PANEL_LOGO_LEDS],
             px: vec![0; all * 3],
         }
     }
@@ -1042,6 +1062,13 @@ impl Compositor {
                 let first = !self.mute_known;
                 self.mute_known = true;
                 self.muted = muted;
+                if !first && self.is_panel() {
+                    self.logo_from.copy_from_slice(
+                        &self.shown[panel::PANEL_LEDS..panel::PANEL_LEDS + panel::PANEL_LOGO_LEDS],
+                    );
+                    self.logo_bg.copy_from_slice(&self.logo_from);
+                    self.logo_t0 = Some(now);
+                }
                 if !first && (muted || !self.short_ring) {
                     self.sweep = if muted { Sweep::MuteOn } else { Sweep::MuteOff };
                     self.sweep_t0 = now;
@@ -1068,7 +1095,10 @@ impl Compositor {
                 self.volume = fx::clamp01(v);
                 self.volume_until = now + VOLUME_SHOW_MS;
             }
-            Cmd::AmbientLux(lux) => return self.dimmer.update(lux),
+            Cmd::AmbientLux(lux) => {
+                let gain = if self.is_panel() { PANEL_LUX_GAIN } else { 1.0 };
+                return self.dimmer.update(lux * gain);
+            }
             Cmd::TimerStarted => {
                 self.timer_shot = true;
                 self.timer_t0 = now;
@@ -1195,7 +1225,25 @@ impl Compositor {
     }
 
     fn render_style(&self, s: fx::Style, out: &mut [Col]) {
-        fx::music(s, &self.mus_st, &self.mus_shown, self.phase, out);
+        if self.is_panel() {
+            panel::music(s, &self.mus_st, &self.mus_shown, self.phase, out);
+        } else {
+            fx::music(s, &self.mus_st, &self.mus_shown, self.phase, out);
+        }
+    }
+
+    /// Станция 2: панель рисуется по своей геометрии, логотип — отдельно (`render_panel`).
+    fn is_panel(&self) -> bool {
+        matches!(self.layout, LedLayout::Station2Panel)
+            && self.n >= panel::PANEL_LEDS + panel::PANEL_LOGO_LEDS
+    }
+
+    fn frame_ms(&self) -> u64 {
+        if self.is_panel() {
+            PANEL_FRAME_MS
+        } else {
+            FRAME_MS
+        }
     }
 
     fn render_music(&mut self, now: i64, out: &mut [Col]) {
@@ -1226,6 +1274,9 @@ impl Compositor {
 
     /// Draws `lay` into `target` (ring + logo); returns true if it moves.
     fn render(&mut self, now: i64, dt: f64, lay: Layer, target: &mut [Col]) -> bool {
+        if self.is_panel() {
+            return self.render_panel(now, dt, lay, target);
+        }
         target.fill(Col::default());
         let (ring, logo) = target.split_at_mut(self.n);
         let mut animated = true;
@@ -1286,6 +1337,57 @@ impl Compositor {
         animated
     }
 
+    /// Станция 2: состояния, громкость, разовые сигналы и светомузыка — по геометрии панели
+    /// (`led_panel`), логотип в них тёмный; эффекты лампы и `led_show` — `led_fx::effect` вместе
+    /// с логотипом (это выбор пользователя, а не индикация). Пока выключены микрофоны, логотип
+    /// горит тусклым красным в любом слое (вместо красной заливки панели).
+    fn render_panel(&mut self, now: i64, dt: f64, lay: Layer, target: &mut [Col]) -> bool {
+        target.fill(Col::default());
+        let mut animated = true;
+        match lay {
+            Layer::Volume => {
+                panel::volume(self.volume, target);
+                animated = false;
+            }
+            Layer::Voice => panel::voice(to_voice(self.state), now - self.state_t0, target),
+            Layer::OneShot => {
+                if self.sweep == Sweep::None {
+                    panel::timer_started(now - self.timer_t0, target);
+                } else {
+                    panel::mute_sweep(self.sweep == Sweep::MuteOn, now - self.sweep_t0, target);
+                }
+            }
+            Layer::Show => {
+                animated = fx::effect(
+                    &self.show_effect,
+                    self.show_col,
+                    1.0,
+                    self.phase,
+                    dt,
+                    &mut self.show_fx,
+                    target,
+                );
+            }
+            Layer::User => {
+                animated = fx::effect(
+                    &self.user_effect,
+                    self.user_col,
+                    self.user_bri,
+                    self.phase,
+                    dt,
+                    &mut self.user_fx,
+                    target,
+                );
+            }
+            Layer::Music => self.render_music(now, &mut target[..panel::PANEL_LEDS]),
+            Layer::Mute | Layer::Off | Layer::None => animated = false,
+        }
+        if self.muted {
+            target[panel::PANEL_LEDS..].fill(panel::mute_logo());
+        }
+        animated
+    }
+
     fn active_layer(&self, now: i64) -> Layer {
         if now < self.volume_until {
             Layer::Volume
@@ -1295,7 +1397,7 @@ impl Compositor {
             Layer::OneShot
         } else if self.show_on {
             Layer::Show
-        } else if (self.short_ring || self.nlogo == 0) && self.muted {
+        } else if (self.short_ring || self.nlogo == 0) && self.muted && !self.is_panel() {
             Layer::Mute
         } else if self.user_on && self.user_bri > 0.0 {
             Layer::User
@@ -1385,6 +1487,12 @@ impl Compositor {
         self.layer = lay;
         if let Some(f) = fade {
             self.from.copy_from_slice(&self.shown);
+            if self.logo_t0.is_some() {
+                // Логотип сейчас в своём переходе: новый переход слоя ведёт его фон, а не
+                // промежуточное значение, иначе логотип смешался бы дважды и откатился назад.
+                let logo = panel::PANEL_LEDS..panel::PANEL_LEDS + panel::PANEL_LOGO_LEDS;
+                self.from[logo].copy_from_slice(&self.logo_bg);
+            }
             self.fade_t0 = now;
             self.fade_ms = f;
         }
@@ -1397,6 +1505,22 @@ impl Compositor {
         } else {
             self.fade_ms = 0;
             self.shown.copy_from_slice(&self.target);
+        }
+        // Переход логотипа при смене mute идёт к тому, что сейчас показал бы общий переход
+        // (`shown`), а не к его конечной цели: так логотип не отрывается от идущего перехода
+        // слоя или лампы и по окончании совпадает с ним.
+        if let Some(t0) = self.logo_t0 {
+            if now - t0 < FADE_MS {
+                let f = fx::smoothstep(0.0, 1.0, (now - t0) as f32 / FADE_MS as f32);
+                for (i, a) in self.logo_from.iter().enumerate() {
+                    let k = panel::PANEL_LEDS + i;
+                    self.logo_bg[i] = self.shown[k];
+                    self.shown[k] = fx::lerp(*a, self.shown[k], f);
+                }
+                animated = true;
+            } else {
+                self.logo_t0 = None;
+            }
         }
 
         let d = self.dim();

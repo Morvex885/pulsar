@@ -200,16 +200,17 @@ fn listen_k(t: f32) -> f32 {
 // Stock alice_* violets: Midi strip; Midi logo and Lite 2 ring. Timer green of ring / start.
 const VIOLET: u32 = 0x370fff;
 const VIOLET_SMALL: u32 = 0x6b0fff;
-const TIMER_GREEN: u32 = 0x00dc00;
-const TIMER_START_GREEN: u32 = 0x00e600;
-const MUTE_RED: u32 = 0xd20000;
+pub(crate) const TIMER_GREEN: u32 = 0x00dc00;
+pub(crate) const TIMER_START_GREEN: u32 = 0x00e600;
+pub(crate) const MUTE_RED: u32 = 0xd20000;
+pub(crate) const ERROR_RED: u32 = 0xef0000;
 
 fn fill(out: &mut [Col], c: Col) {
     out.fill(c);
 }
 
 /// Palette hue in degrees (stock "blink" preset sequence), 15 s per entry, 3 s hue crossfade.
-fn palette(t: f64) -> f32 {
+pub(crate) fn palette(t: f64) -> f32 {
     const HUES: [f32; 15] = [
         290.0, 340.0, 20.0, 355.0, 290.0, 250.0, 180.0, 250.0, 290.0, 340.0, 20.0, 48.0, 115.0,
         180.0, 250.0,
@@ -243,6 +244,18 @@ pub enum Voice {
 }
 
 pub const ERROR_MS: i64 = 3540;
+
+/// Ошибка: три вспышки, подъём 80 мс, экспоненциальный спад; после `ERROR_MS` — 0.
+pub(crate) fn error_k(t: i64) -> f32 {
+    let tau = (t % 1180) as f32;
+    if t >= ERROR_MS {
+        0.0
+    } else if tau < 80.0 {
+        tau / 80.0
+    } else {
+        (-(tau - 80.0) / 300.0).exp()
+    }
+}
 
 /// t in ms since the state started.
 pub fn voice(v: Voice, t: i64, out: &mut [Col]) {
@@ -310,18 +323,7 @@ pub fn voice(v: Voice, t: i64, out: &mut [Col]) {
                 );
             }
         }
-        Voice::Error => {
-            // Three pulses: 80 ms rise, exponential fade.
-            let tau = (t % 1180) as f32;
-            let k = if t >= ERROR_MS {
-                0.0
-            } else if tau < 80.0 {
-                tau / 80.0
-            } else {
-                (-(tau - 80.0) / 300.0).exp()
-            };
-            fill(out, stock(0xef0000, k));
-        }
+        Voice::Error => fill(out, stock(ERROR_RED, error_k(t))),
         Voice::TimerRing => {
             let k = breathe(f64::from(ft), 1300.0);
             if !wide(n) {
@@ -535,11 +537,16 @@ impl EffectState {
     }
 }
 
+/// Светодиоды панели Станции 2 без логотипа (`PANEL_XY`, индексы 0..83).
+pub(crate) const PANEL_LEDS: usize = 84;
+/// Светодиоды логотипа Станции 2 (`PANEL_XY`, индексы 84..87).
+pub(crate) const PANEL_LOGO_LEDS: usize = 4;
+
 /// Физическое положение (столбец, ряд) каждого светодиода панели Станции 2: шахматная сетка
 /// 15×13, индексы 0..83 — панель, 84..87 — четыре центральных светодиода логотипа. Карта — из
 /// вики: https://hackalice.me/devices/station-2/#led. Имена восьми 2D-эффектов взяты из
 /// [#29](https://github.com/Morvex885/pulsar/pull/29), их отрисовка — своя.
-const PANEL_XY: [(i8, i8); 88] = [
+pub(crate) const PANEL_XY: [(i8, i8); 88] = [
     (1, 0),
     (3, 0),
     (5, 0),
