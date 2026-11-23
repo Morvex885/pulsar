@@ -238,8 +238,12 @@ impl Server {
             key::SW_VOICE_INDICATION => SwitchId::VoiceIndication,
             key::SW_WAKE_SOUND => SwitchId::WakeSound,
             key::SW_CLOCK_COLON_BLINK => SwitchId::ClockColonBlink,
+            key::SW_BLUETOOTH => SwitchId::Bluetooth,
             _ => return,
         };
+        if id == SwitchId::Bluetooth && !self.cfg.bluetooth {
+            return;
+        }
         self.emit(ApiEvent::Switch(id, state));
     }
 
@@ -374,13 +378,26 @@ impl Server {
                 args.push(a);
             }
         }
-        let want = if k == key::ACTION_LED_SHOW { 3 } else { 2 };
+        let want = match k {
+            key::ACTION_LED_SHOW => 3,
+            key::ACTION_BT => 1,
+            _ => 2,
+        };
         if !matches!(
             k,
-            key::ACTION_CLOCK_TEXT | key::ACTION_CLOCK_FACE | key::ACTION_LED_SHOW
+            key::ACTION_CLOCK_TEXT | key::ACTION_CLOCK_FACE | key::ACTION_LED_SHOW | key::ACTION_BT
         ) || n_args != want
         {
             warn!("api: bad action call key={k} args={n_args}");
+            return;
+        }
+        if k == key::ACTION_BT {
+            if !self.cfg.bluetooth {
+                return;
+            }
+            self.emit(ApiEvent::Bt {
+                action: lossy(args[0].s),
+            });
             return;
         }
         if k == key::ACTION_LED_SHOW {

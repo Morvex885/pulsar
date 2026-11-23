@@ -2,6 +2,7 @@
 //! "HA connection", "entities", "updates").
 
 use log::{error, info, warn};
+use pulsar_bt::{BtAction, BtEvent};
 use pulsar_core::now_ms;
 use pulsar_esphome::{
     ActionId, ApiEvent, BinarySensorId, ButtonId, EventId, LightState, NumberId, SelectId,
@@ -47,6 +48,7 @@ impl Controller {
                 color,
                 seconds,
             } => self.on_led_show(effect, &color, seconds),
+            ApiEvent::Bt { action } => self.on_bt_action(&action),
             ApiEvent::Time { epoch, posix_tz } => self.on_time(epoch, &posix_tz),
             ApiEvent::Restart => self.on_restart(),
             ApiEvent::VoiceStartFailed { run } => self.on_voice_start_failed(run),
@@ -102,6 +104,11 @@ impl Controller {
             );
             // Not through the "zigbee: …" dedup of Changed: its cache stays as it is.
             api.publish_text_sensor(TextSensorId::Zigbee, &z.status());
+        }
+        if let Some(bt) = &self.bt {
+            api.publish_switch(SwitchId::Bluetooth, bt.discoverable());
+            // Не через дедуп Changed, как у Zigbee: публикуем ровно то, что видит handle.
+            api.publish_text_sensor(TextSensorId::Bluetooth, &bt.status());
         }
         api.publish_light(&self.st.light);
         if self.last_lux_published >= 0.0 {
@@ -191,6 +198,14 @@ impl Controller {
                 self.st.voice_indication = state;
                 self.leds.set_voice_indication(state);
                 self.clock.set_voice_indication(state);
+            }
+            SwitchId::Bluetooth => {
+                // Фактическое состояние (и статус) придут с BtEvent::Changed после отклика
+                // dbus; в state.conf не пишется — режим живёт в bluetoothd.
+                if let Some(bt) = &self.bt {
+                    bt.set_discoverable(state);
+                }
+                return;
             }
         }
         self.api.publish_switch(id, state);
@@ -529,6 +544,45 @@ impl Controller {
                 // failed write stays pending (logged).
                 let _ = self.persist_now();
             }
+        }
+    }
+
+    /// Строка статуса и видимость: публикуем при каждом реальном изменении (актор pulsar-bt
+    /// шлёт Changed только тогда).
+    pub(super) fn on_bt(&mut self, ev: BtEvent) {
+        match ev {
+            BtEvent::Changed => {}
+        }
+        let Some(bt) = &self.bt else {
+            return;
+        };
+        let status = bt.status();
+        let discoverable = bt.discoverable();
+        if status == self.bt_status && discoverable == self.bt_discoverable {
+            return;
+        }
+        info!("bluetooth: {status}");
+        self.api.publish_switch(SwitchId::Bluetooth, discoverable);
+        self.api
+            .publish_text_sensor(TextSensorId::Bluetooth, &status);
+        self.bt_status = status;
+        self.bt_discoverable = discoverable;
+    }
+
+    /// Аргумент "action" действия `bt`: on|off — тот же режим, что switch; остальное — AVRCP
+    /// подключённому источнику.
+    fn on_bt_action(&mut self, action: &str) {
+        let Some(bt) = &self.bt else {
+            warn!("bluetooth: action '{action}' without an adapter");
+            return;
+        };
+        match action {
+            "on" => bt.set_discoverable(true),
+            "off" => bt.set_discoverable(false),
+            _ => match BtAction::parse(action) {
+                Some(a) => bt.avr(a),
+                None => warn!("bluetooth: unknown action '{action}'"),
+            },
         }
     }
 

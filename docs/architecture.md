@@ -4,7 +4,8 @@
 модель исполнения для всех крейтов, плавающая точка, линковка sendspin-cpp, формат `state.conf`
 для отката на `.prev`, порты. Здесь нет поведения отдельных сервисов и железа: поведение кода — в
 коде, обоснования — в комментариях у кода; модели и библиотеки прошивки — [hardware.md](hardware.md),
-голос и арбитраж — [voice.md](voice.md), Zigbee — [zigbee.md](zigbee.md), сборка, установка и
+голос и арбитраж — [voice.md](voice.md), Zigbee — [zigbee.md](zigbee.md), Bluetooth-колонка —
+[bluetooth.md](bluetooth.md), сборка, установка и
 релизы — [development.md](development.md).
 
 ## Workspace
@@ -26,6 +27,7 @@
 | `pulsar-hw` | кольцо LED / логотип и кнопки |
 | `pulsar-clock` | часы, их стоковые анимации, шрифт, датчик освещённости |
 | `pulsar-zigbee` | радио Zigbee Миди: роли и прошивка радио; внутренний API — в `//!` `src/lib.rs` |
+| `pulsar-bt` | Bluetooth-режим колонки поверх штатного BlueZ (`dbus-send`); контракт статуса — [bluetooth.md](bluetooth.md) |
 | `pulsar-update` | бэкенд сущности обновления «Firmware» в HA |
 
 `third_party/` — только сборка sendspin-cpp.

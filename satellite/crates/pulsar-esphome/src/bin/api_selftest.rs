@@ -184,6 +184,7 @@ impl Echo {
                 color,
                 seconds,
             } => println!("HOOK led_show '{effect}' '{color}' {seconds}"),
+            ApiEvent::Bt { action } => println!("HOOK bt '{action}'"),
             ApiEvent::Time { epoch, posix_tz } => {
                 println!("HOOK time epoch={epoch} tz='{posix_tz}'")
             }
@@ -303,6 +304,7 @@ async fn run(port: u16, name: String, run_s: i64, key_path: Option<PathBuf>) -> 
         clock_music_styles: strings(&["Off", "Levels"]),
         clock_formats: strings(&["24h", "12h"]),
         zigbee_modes: strings(&["Coordinator", "Router"]),
+        bluetooth: false, // selftest живёт и на хосте, где BT-адаптера нет
         has_clock: true,
         has_lux: true,
         has_hw_mic_mute: true,

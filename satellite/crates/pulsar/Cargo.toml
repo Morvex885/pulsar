@@ -10,6 +10,7 @@ libc = { workspace = true }
 log = { workspace = true }
 pulsar-alsa = { path = "../pulsar-alsa" }
 pulsar-audio = { path = "../pulsar-audio" }
+pulsar-bt = { path = "../pulsar-bt" }
 pulsar-clock = { path = "../pulsar-clock" }
 pulsar-core = { path = "../pulsar-core" }
 pulsar-esphome = { path = "../pulsar-esphome" }

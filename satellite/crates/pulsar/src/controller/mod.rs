@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use log::{debug, error, info, warn};
 use pulsar_audio::FrontendEvent;
+use pulsar_bt::{BtEvent, BtHandle};
 use pulsar_core::model::Model;
 use pulsar_core::{ClockShot, Timers, UiState, now_ms};
 use pulsar_esphome::{ApiConfig, ApiEvent, ApiHandle, WakeWordInfo};
@@ -115,6 +116,7 @@ struct Rx {
     lux: Option<UnboundedReceiver<f32>>,
     sendspin: Option<UnboundedReceiver<SendspinEvent>>,
     zigbee: Option<UnboundedReceiver<ZigbeeEvent>>,
+    bt: Option<UnboundedReceiver<BtEvent>>,
     updater: Option<UnboundedReceiver<UpdateEvent>>,
 }
 
@@ -133,6 +135,7 @@ pub struct Controller {
     // the chunk in progress), inside the teardown watchdog that main arms before the drop.
     sendspin: Option<SendspinHandle>,
     zigbee: Option<ZigbeeHandle>,
+    bt: Option<BtHandle>,
     updater: UpdaterHandle,
     arbiter: ArbiterHandle,
     /// Held only: the input actor runs while its handle exists.
@@ -232,6 +235,9 @@ pub struct Controller {
     install_version: String,
     /// Last Zigbee status line published.
     zigbee_status: String,
+    /// Last Bluetooth status line published, and the visibility it reported.
+    bt_status: String,
+    bt_discoverable: bool,
     sendspin_pairing_prompt: bool,
 }
 
@@ -317,6 +323,9 @@ impl Controller {
                 None
             }
         };
+        // Bluetooth-режим колонки: адаптер ищется в sysfs (см. docs/bluetooth.md) — на моделях
+        // без BT-чипа узла нет, и сущностей тоже нет.
+        let bluetooth = pulsar_bt::adapter_present();
         let cfg = ApiConfig {
             port: ports.api,
             wake_words: vec![
@@ -346,6 +355,7 @@ impl Controller {
                     .map(|r| r.label.to_owned())
                     .collect()
             },
+            bluetooth,
             has_clock: model.has_clock || pulsar_clock::panel_present(model),
             has_lux: model.has_lux || lux_rx.is_some(),
             has_hw_mic_mute: !model.mute_input.is_empty() || model.mute_gpio != 0,
@@ -545,10 +555,17 @@ impl Controller {
             }
             (Some(h), Some(rx))
         };
+        let (bt, bt_rx) = if bluetooth {
+            let (h, rx) = pulsar_bt::spawn();
+            (Some(h), Some(rx))
+        } else {
+            (None, None)
+        };
 
         let mut c = Controller {
             sendspin,
             zigbee,
+            bt,
             updater,
             arbiter,
             _input: input,
@@ -568,6 +585,7 @@ impl Controller {
                 lux: lux_rx,
                 sendspin: sendspin_rx,
                 zigbee: zigbee_rx,
+                bt: bt_rx,
                 updater: Some(updater_rx),
             },
             term,
@@ -628,6 +646,8 @@ impl Controller {
             install_id: None,
             install_version: String::new(),
             zigbee_status: String::new(),
+            bt_status: String::new(),
+            bt_discoverable: false,
             sendspin_pairing_prompt: false,
         };
         // The rest of the C++ start(), in its order: every call below only queues commands to
@@ -704,6 +724,10 @@ impl Controller {
                 ev = recv(&mut self.rx.zigbee) => match ev {
                     Some(ev) => self.on_zigbee(ev),
                     None => self.rx.zigbee = None,
+                },
+                ev = recv(&mut self.rx.bt) => match ev {
+                    Some(ev) => self.on_bt(ev),
+                    None => self.rx.bt = None,
                 },
                 ev = recv(&mut self.rx.updater) => match ev {
                     Some(ev) => self.on_updater(ev),
