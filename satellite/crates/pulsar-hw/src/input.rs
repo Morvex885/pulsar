@@ -8,6 +8,7 @@
 //! опрос каждые 100 мс. Мини: клавиатура "adc_keypad" только с кнопкой отключения микрофонов без
 //! фиксации. Лайт: сенсорные кнопки "sar0_pad0", кнопка отключения микрофонов без фиксации —
 //! отдельное устройство "gpio-keys-filter" (`Model::mute_key_input`, только KEY_MUTE, без EV_SW).
+//! Без устройства с именем из Model сенсорные кнопки ищутся по кодам (`pick_keys_dev`).
 //! У остальных коды кнопок и переключателя общие:
 //!
 //! сенсорные кнопки (ёмкостные, только EV_KEY; KEY bitmap Миди "40 0 0 0 0 0 0 0 c000000000000 0"):
@@ -114,9 +115,8 @@ impl InputHandle {
 pub fn spawn_input(
     model: &'static Model,
 ) -> Result<(InputHandle, UnboundedReceiver<InputEvent>), String> {
-    let keys = (!model.keys_input.is_empty())
-        .then(|| open_dev(model.keys_input, false))
-        .flatten();
+    let mut keys_miss = String::new();
+    let keys = open_keys(model, false, &mut keys_miss);
     let mute_name = mute_dev_name(model);
     let mute = (!mute_name.is_empty())
         .then(|| open_dev(mute_name, false))
@@ -158,6 +158,7 @@ pub fn spawn_input(
     let devs = Devices {
         model,
         keys,
+        keys_miss,
         mute,
         mute_gpio,
     };
@@ -186,41 +187,144 @@ fn mute_dev_is_switch(model: &Model) -> bool {
     !model.mute_input.is_empty()
 }
 
-/// /dev/input/eventN of the device with the given name in a /proc/bus/input/devices listing.
-fn find_event_dev_in(devices: &str, name: &str) -> Option<String> {
-    let want = format!("N: Name=\"{name}\"");
-    let mut matched = false;
+/// Устройство ввода из /proc/bus/input/devices.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InputDev {
+    name: String,
+    /// /dev/input/eventN.
+    path: String,
+    /// `I: Bus=`, BUS_* из linux/input.h.
+    bus: u16,
+}
+
+// Шины подключаемых и программных устройств: USB- и BT-клавиатуры, пульты и uinput тоже бывают с
+// KEY_VOICECOMMAND и громкостью, но кнопками станции не бывают.
+const BUS_USB: u16 = 0x03;
+const BUS_BLUETOOTH: u16 = 0x05;
+const BUS_VIRTUAL: u16 = 0x06;
+
+/// Устройства с обработчиком event в листинге /proc/bus/input/devices, в порядке листинга.
+fn event_devs_in(devices: &str) -> Vec<InputDev> {
+    let mut out = Vec::new();
+    let (mut name, mut bus) = (None, 0);
     for line in devices.split('\n') {
-        if line.starts_with("N: Name=") {
-            matched = line == want;
-        } else if matched && let Some(handlers) = line.strip_prefix("H: Handlers=") {
-            if let Some(ev) = handlers.split_whitespace().find(|t| t.starts_with("event")) {
-                return Some(format!("/dev/input/{ev}"));
+        if let Some(i) = line.strip_prefix("I: Bus=") {
+            let hex = i.split_whitespace().next().unwrap_or_default();
+            bus = u16::from_str_radix(hex, 16).unwrap_or(0);
+        } else if let Some(n) = line.strip_prefix("N: Name=") {
+            name = n.strip_prefix('"').and_then(|n| n.strip_suffix('"'));
+        } else if let Some(handlers) = line.strip_prefix("H: Handlers=") {
+            if let Some(n) = name.take()
+                && let Some(ev) = handlers.split_whitespace().find(|t| t.starts_with("event"))
+            {
+                out.push(InputDev {
+                    name: n.to_owned(),
+                    path: format!("/dev/input/{ev}"),
+                    bus,
+                });
             }
         } else if line.is_empty() {
-            matched = false;
+            (name, bus) = (None, 0);
         }
     }
-    None
+    out
+}
+
+/// /dev/input/eventN of the device with the given name in a /proc/bus/input/devices listing.
+fn find_event_dev_in(devices: &str, name: &str) -> Option<String> {
+    event_devs_in(devices)
+        .into_iter()
+        .find(|d| d.name == name)
+        .map(|d| d.path)
+}
+
+/// Устройство сенсорных кнопок: `Model::keys_input` по имени, а если его нет — первое, у которого
+/// есть все коды кнопок (`has_keys`). Не берутся устройство слота «mute» (его читает свой слот) и
+/// подключаемые или программные; см. docs/lite.md, «Кнопки и микрофоны».
+fn pick_keys_dev<'a>(
+    devs: &'a [InputDev],
+    model: &Model,
+    mut has_keys: impl FnMut(&InputDev) -> bool,
+) -> Option<&'a InputDev> {
+    if model.keys_input.is_empty() {
+        return None;
+    }
+    if let Some(d) = devs.iter().find(|d| d.name == model.keys_input) {
+        return Some(d);
+    }
+    if model.action_key == 0 {
+        return None;
+    }
+    let mute_name = mute_dev_name(model);
+    devs.iter().find(|d| {
+        (mute_name.is_empty() || d.name != mute_name)
+            && !matches!(d.bus, BUS_USB | BUS_BLUETOOTH | BUS_VIRTUAL)
+            && has_keys(d)
+    })
+}
+
+fn read_input_devices() -> String {
+    pulsar_core::sysfs::read_file("/proc/bus/input/devices").unwrap_or_default()
 }
 
 fn open_dev(name: &str, quiet: bool) -> Option<AsyncFd<Evdev>> {
-    let devices = pulsar_core::sysfs::read_file("/proc/bus/input/devices").unwrap_or_default();
-    let Some(path) = find_event_dev_in(&devices, name) else {
+    let Some(path) = find_event_dev_in(&read_input_devices(), name) else {
         if !quiet {
             error!("input: device \"{name}\" not found");
         }
         return None;
     };
-    let dev = match Evdev::open(&path) {
-        Ok(d) => d,
+    open_evdev(&path, quiet).and_then(|dev| register_dev(dev, name, &path))
+}
+
+/// Открывает устройство `pick_keys_dev`. `miss` — листинг /proc/bus/input/devices прошлого поиска,
+/// не нашедшего устройства: пока листинг тот же, перебор не повторяется (переоткрытие идёт каждые
+/// 3 с, а первый open и последний close evdev будят драйвер устройства).
+fn open_keys(model: &Model, quiet: bool, miss: &mut String) -> Option<AsyncFd<Evdev>> {
+    if model.keys_input.is_empty() {
+        return None;
+    }
+    let devices = read_input_devices();
+    if !miss.is_empty() && devices == *miss {
+        return None;
+    }
+    let devs = event_devs_in(&devices);
+    let codes = [model.action_key, KEY_VOLUMEUP, KEY_VOLUMEDOWN];
+    let found = pick_keys_dev(&devs, model, |d| {
+        Evdev::open(&d.path)
+            .and_then(|dev| dev.key_caps())
+            .is_ok_and(|caps| codes.iter().all(|&c| test_bit(&caps, c)))
+    });
+    let Some(d) = found else {
+        if !quiet {
+            error!("input: device \"{}\" not found", model.keys_input);
+        }
+        *miss = devices;
+        return None;
+    };
+    miss.clear();
+    if d.name != model.keys_input {
+        info!(
+            "input: no \"{}\", buttons found by their key codes",
+            model.keys_input
+        );
+    }
+    open_evdev(&d.path, quiet).and_then(|dev| register_dev(dev, &d.name, &d.path))
+}
+
+fn open_evdev(path: &str, quiet: bool) -> Option<Evdev> {
+    match Evdev::open(path) {
+        Ok(d) => Some(d),
         Err(e) => {
             if !quiet {
                 error!("input: open {path}: {}", crate::errstr(&e));
             }
-            return None;
+            None
         }
-    };
+    }
+}
+
+fn register_dev(dev: Evdev, name: &str, path: &str) -> Option<AsyncFd<Evdev>> {
     match dev.into_async() {
         Ok(fd) => {
             info!("input: \"{name}\" -> {path}");
@@ -611,6 +715,8 @@ impl Machine {
 struct Devices {
     model: &'static Model,
     keys: Option<AsyncFd<Evdev>>,
+    /// Листинг устройств ввода, в котором `open_keys` кнопок не нашёл.
+    keys_miss: String,
     mute: Option<AsyncFd<Evdev>>,
     /// Value file of `Model::mute_gpio`.
     mute_gpio: Option<File>,
@@ -638,7 +744,7 @@ impl Devices {
     /// Devices that were missing at start or vanished (ENODEV) are looked up again.
     fn reopen_missing(&mut self, m: &mut Machine) {
         if self.keys.is_none() {
-            self.keys = open_dev(self.model.keys_input, true);
+            self.keys = open_keys(self.model, true, &mut self.keys_miss);
             m.keys_dropped = false;
         }
         let mute_name = mute_dev_name(self.model);

@@ -411,6 +411,77 @@ fn event_device_by_name() {
 }
 
 #[test]
+fn event_devices_with_their_bus_in_listing_order() {
+    // По выводу из обсуждения PR #84 (Лайт с cy8cmbr3108), плюс блок без обработчика.
+    let devices = "I: Bus=0019 Vendor=0001 Product=0001 Version=0000\n\
+                   N: Name=\"gpio-keys-filter\"\n\
+                   H: Handlers=kbd event0 \n\
+                   B: KEY=20000 0 0 0\n\
+                   \n\
+                   N: Name=\"cy8cmbr3108\"\n\
+                   H: Handlers=kbd event1 \n\
+                   \n\
+                   I: Bus=0003 Vendor=046d Product=c52b Version=0111\n\
+                   N: Name=\"no-handler\"\n\
+                   \n\
+                   H: Handlers=event9\n";
+    let devs: Vec<_> = event_devs_in(devices)
+        .into_iter()
+        .map(|d| (d.name, d.path, d.bus))
+        .collect();
+    assert_eq!(
+        devs,
+        [
+            ("gpio-keys-filter".into(), "/dev/input/event0".into(), 0x19),
+            // Шина сбрасывается на пустой строке: у блока без `I:` она 0.
+            ("cy8cmbr3108".into(), "/dev/input/event1".into(), 0),
+        ]
+    );
+}
+
+fn dev(name: &str, event: u8, bus: u16) -> InputDev {
+    InputDev {
+        name: name.into(),
+        path: format!("/dev/input/event{event}"),
+        bus,
+    }
+}
+
+#[test]
+fn keys_device_by_name_first_then_by_key_codes() {
+    use pulsar_core::model::{model_from_compatible, model_from_dt_id};
+    let lite = model_from_compatible(b"yandex,station-micro\0").unwrap();
+    let all_keys = |_: &InputDev| true;
+    let pick = |devs: &[InputDev], has: &dyn Fn(&InputDev) -> bool| {
+        pick_keys_dev(devs, lite, has).map(|d| d.name.clone())
+    };
+
+    // Есть устройство с именем из модели — оно, даже если раньше в листинге другое с кодами.
+    let named = [dev("cy8cmbr3108", 1, 0x18), dev("sar0_pad0", 2, 0)];
+    assert_eq!(pick(&named, &all_keys).as_deref(), Some("sar0_pad0"));
+
+    // Нет — первое с кодами кнопок, кроме слота «mute» и подключаемых/программных шин.
+    let other = [
+        dev("gpio-keys-filter", 0, 0x19),
+        dev("usb-keyboard", 3, BUS_USB),
+        dev("bt-remote", 4, BUS_BLUETOOTH),
+        dev("uinput", 5, BUS_VIRTUAL),
+        dev("no-codes", 6, 0x18),
+        dev("cy8cmbr3108", 1, 0x18),
+    ];
+    let has = |d: &InputDev| d.name != "no-codes";
+    assert_eq!(pick(&other, &has).as_deref(), Some("cy8cmbr3108"));
+    // Слот «mute» и подключаемые/программные не берутся, даже если коды у них есть.
+    assert_eq!(pick(&other[..4], &all_keys), None);
+    assert_eq!(pick(&other, &|_: &InputDev| false), None);
+
+    // Без кнопки действия (Мини) перебора нет.
+    let mini = model_from_dt_id(b"axg_s420_v03").unwrap();
+    assert_eq!(mini.action_key, 0);
+    assert_eq!(pick_keys_dev(&other, mini, all_keys), None);
+}
+
+#[test]
 fn mute_gpio_is_an_active_low_input() {
     let dir = std::env::temp_dir().join(format!("pulsar-hw-gpio-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

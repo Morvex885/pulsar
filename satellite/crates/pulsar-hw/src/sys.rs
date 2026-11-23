@@ -241,6 +241,11 @@ impl Evdev {
     pub fn switch_state(&self) -> io::Result<SwBits> {
         self.eviocg(0x1b)
     }
+
+    /// EVIOCGBIT(EV_KEY): коды клавиш, которые устройство умеет отдавать.
+    pub fn key_caps(&self) -> io::Result<KeyBits> {
+        self.eviocg(0x21)
+    }
 }
 
 #[cfg(test)]
@@ -249,8 +254,9 @@ mod tests {
 
     #[test]
     fn evdev_ioctl_numbers_match_the_kernel_macros() {
-        // EVIOCGKEY(96) and EVIOCGSW(8) as computed by the C preprocessor.
+        // EVIOCGKEY(96), EVIOCGSW(8) и EVIOCGBIT(EV_KEY, 96), как их считает препроцессор C.
         assert_eq!(evioc_read(0x18, 96) as u64, 0x8060_4518);
         assert_eq!(evioc_read(0x1b, 8) as u64, 0x8008_451b);
+        assert_eq!(evioc_read(0x21, 96) as u64, 0x8060_4521);
     }
 }
