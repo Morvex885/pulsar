@@ -3,9 +3,9 @@
 // `zig c++ -std=c++20 -O2`. save_*.conf — `save` значений ниже; load_*.out — `load` из load_*.in,
 // затем `save`. С тех пор правились руками: `clock_auto_brightness` (после `clock_music`);
 // `followup_duration_s` (10); `clock_format` (12h в load_odd.in, bogus → 24h в load_edge.in);
-// `command_start_offset_ms` (0); `clock_spoken_numbers` (0); `mic_gain_db` (0, последним).
-// `wake_preroll` (бывший переключатель) больше не пишется и не читается; в load_odd.in остался как
-// неизвестный ключ.
+// `command_start_offset_ms` (0); `clock_spoken_numbers` (0); `mic_gain_db` (0);
+// `wake_sound` (1); `clock_colon_blink` (1, последним). `wake_preroll` (бывший переключатель)
+// больше не пишется и не читается; в load_odd.in остался как неизвестный ключ.
 
 use super::*;
 
@@ -430,4 +430,32 @@ fn mic_gain_defaults_to_stock_roundtrips_and_clamps() {
         st.parse(format!("mic_gain_db={value}\n").as_bytes());
         assert_eq!(st.mic_gain_db, expected, "{value}");
     }
+}
+
+#[test]
+fn wake_sound_defaults_on_and_persists_disabled() {
+    let mut s = Settings::default();
+    s.parse(b"volume2=0.2\n");
+    assert!(s.wake_sound, "old files keep the wake sound enabled");
+    s.parse(b"wake_sound=0\n");
+    assert!(!s.wake_sound);
+    let mut restored = Settings::default();
+    restored.parse(s.serialize().as_bytes());
+    assert!(!restored.wake_sound);
+    restored.parse(b"wake_sound=1\n");
+    assert!(restored.wake_sound);
+}
+
+#[test]
+fn clock_colon_blink_defaults_on_and_persists_disabled() {
+    let mut s = Settings::default();
+    s.parse(b"volume2=0.2\n");
+    assert!(s.clock_colon_blink, "old files keep colon blinking enabled");
+    s.parse(b"clock_colon_blink=0\n");
+    assert!(!s.clock_colon_blink);
+    let mut restored = Settings::default();
+    restored.parse(s.serialize().as_bytes());
+    assert!(!restored.clock_colon_blink);
+    restored.parse(b"clock_colon_blink=1\n");
+    assert!(restored.clock_colon_blink);
 }

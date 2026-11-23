@@ -163,8 +163,6 @@ pub struct Controller {
     listen_started_ms: i64,
     /// Текущий диалог открыт wake word (не кнопкой, не продолжением диалога и не HA).
     wake_dialog: bool,
-    /// Звонок выключили посреди этого диалога «стоп» спотера или wake word, а диалог пошёл дальше.
-    ring_stopped_in_dialog: bool,
     hw_mic_muted: bool,
     error_shown: bool,
     // Wake arbitration: the window between our claim and the decision. Microphone audio and a
@@ -372,6 +370,7 @@ impl Controller {
         clock.set_enabled(st.clock_on);
         clock.set_brightness(st.clock_brightness);
         clock.set_auto_brightness(st.clock_auto_brightness);
+        clock.set_colon_blink(st.clock_colon_blink);
         clock.set_scroll_ms(st.clock_scroll_ms);
         clock.set_voice_indication(st.voice_indication);
         clock.set_music_style(st.clock_music.clone());
@@ -583,7 +582,6 @@ impl Controller {
             phase: Phase::Idle,
             listen_started_ms: 0,
             wake_dialog: false,
-            ring_stopped_in_dialog: false,
             hw_mic_muted,
             error_shown: false,
             arbitrating: false,

@@ -719,15 +719,17 @@ async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
                 }
                 keys.push(field(&m, 2).unwrap().u32());
             }
-            // 17 сущностей и сервис led_show; нет часов, Lux, аппаратного MUTE, цвета корпуса и
+            // 18 сущностей и сервис led_show; нет часов, Lux, аппаратного MUTE, цвета корпуса и
             // Button.
-            assert_eq!(keys.len(), 18, "keys: {keys:?}");
+            assert_eq!(keys.len(), 19, "keys: {keys:?}");
             assert!(keys.contains(&key::NUMBER_FOLLOWUP_DURATION));
             assert!(keys.contains(&key::NUMBER_COMMAND_OFFSET));
             assert!(keys.contains(&key::NUMBER_MIC_GAIN));
             assert!(keys.contains(&key::ACTION_LED_SHOW));
+            assert!(keys.contains(&key::SW_WAKE_SOUND));
             let absent = [
                 key::SW_CLOCK,
+                key::SW_CLOCK_COLON_BLINK,
                 key::SW_CLOCK_AUTO_BRI,
                 key::SW_CLOCK_SPOKEN_NUMBERS,
                 key::NUMBER_CLOCK_BRI,
@@ -1144,6 +1146,72 @@ async fn mic_gain_is_universal_config_clamped_and_replayed() {
                     .find(|(_, m)| state_key(m) == Some(key::NUMBER_MIC_GAIN))
                     .unwrap();
                 assert_eq!(field(m, 2).unwrap().flt(), 34.0);
+            })
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn wake_sound_and_colon_blink_switches_are_config_and_replay_both_states() {
+    for (sw, k, oid, name) in [
+        (
+            SwitchId::WakeSound,
+            key::SW_WAKE_SOUND,
+            "wake_sound",
+            "Wake sound",
+        ),
+        (
+            SwitchId::ClockColonBlink,
+            key::SW_CLOCK_COLON_BLINK,
+            "clock_colon_blink",
+            "Clock colon blink",
+        ),
+    ] {
+        local()
+            .run_until(async {
+                let (id, cfg) = selftest("now");
+                let (h, mut rx, port) = start_with(id, cfg);
+                let mut p = Peer::connect(port).await;
+                p.hello("HA").await;
+                event(&mut rx).await;
+                p.send(msg::LIST_ENTITIES_REQ, &Writer::new()).await;
+                let mut found = false;
+                let mut keys = std::collections::HashSet::new();
+                loop {
+                    let (t, m) = p.recv().await.unwrap();
+                    if t == msg::LIST_DONE {
+                        break;
+                    }
+                    assert!(
+                        keys.insert(field(&m, 2).unwrap().u32()),
+                        "duplicate entity key"
+                    );
+                    if t == msg::LIST_SWITCH && field(&m, 2).unwrap().u32() == k {
+                        found = true;
+                        assert_eq!(field(&m, 1).unwrap().str(), oid);
+                        assert_eq!(field(&m, 3).unwrap().str(), name);
+                        assert_eq!(field(&m, 8).unwrap().u32(), 1);
+                    }
+                }
+                assert!(found, "{name}");
+                p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+                p.sync().await;
+                for on in [false, true] {
+                    p.send(msg::SWITCH_CMD, &kv(k, |w| w.boolean(2, on, true)))
+                        .await;
+                    assert_eq!(drain(&mut p, &mut rx).await, [ApiEvent::Switch(sw, on)]);
+                    h.publish_switch(sw, on);
+                    let pushed = p.sync().await;
+                    p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+                    let replayed = p.sync().await;
+                    for states in [pushed, replayed] {
+                        let (_, m) = states
+                            .iter()
+                            .find(|(t, m)| *t == msg::SWITCH_STATE && state_key(m) == Some(k))
+                            .unwrap();
+                        assert_eq!(field(m, 2).is_some_and(|f| f.u32() != 0), on);
+                    }
+                }
             })
             .await;
     }
