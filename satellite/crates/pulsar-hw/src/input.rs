@@ -279,7 +279,9 @@ fn open_dev(name: &str, quiet: bool) -> Option<AsyncFd<Evdev>> {
 
 /// Открывает устройство `pick_keys_dev`. `miss` — листинг /proc/bus/input/devices прошлого поиска,
 /// не нашедшего устройства: пока листинг тот же, перебор не повторяется (переоткрытие идёт каждые
-/// 3 с, а первый open и последний close evdev будят драйвер устройства).
+/// `REOPEN_MS`, а первый open и последний close evdev будят драйвер устройства). Если проверка
+/// кандидата не удалась (open или EVIOCGBIT вернули ошибку), листинг не запоминается: ответ «кодов
+/// нет» недостоверен, и следующий тик таймера переберёт устройства снова.
 fn open_keys(model: &Model, quiet: bool, miss: &mut String) -> Option<AsyncFd<Evdev>> {
     if model.keys_input.is_empty() {
         return None;
@@ -290,16 +292,26 @@ fn open_keys(model: &Model, quiet: bool, miss: &mut String) -> Option<AsyncFd<Ev
     }
     let devs = event_devs_in(&devices);
     let codes = [model.action_key, KEY_VOLUMEUP, KEY_VOLUMEDOWN];
+    let probe_failed = Cell::new(false);
     let found = pick_keys_dev(&devs, model, |d| {
-        Evdev::open(&d.path)
-            .and_then(|dev| dev.key_caps())
-            .is_ok_and(|caps| codes.iter().all(|&c| test_bit(&caps, c)))
+        match Evdev::open(&d.path).and_then(|dev| dev.key_caps()) {
+            Ok(caps) => codes.iter().all(|&c| test_bit(&caps, c)),
+            Err(e) => {
+                debug!("input: probe {}: {}", d.path, crate::errstr(&e));
+                probe_failed.set(true);
+                false
+            }
+        }
     });
     let Some(d) = found else {
         if !quiet {
             error!("input: device \"{}\" not found", model.keys_input);
         }
-        *miss = devices;
+        if probe_failed.get() {
+            miss.clear();
+        } else {
+            *miss = devices;
+        }
         return None;
     };
     miss.clear();
