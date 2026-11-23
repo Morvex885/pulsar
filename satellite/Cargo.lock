@@ -275,6 +275,7 @@ dependencies = [
  "log",
  "pulsar-alsa",
  "pulsar-audio",
+ "pulsar-bt",
  "pulsar-clock",
  "pulsar-core",
  "pulsar-esphome",
@@ -305,6 +306,15 @@ dependencies = [
  "libloading",
  "log",
  "pulsar-alsa",
+ "pulsar-core",
+ "tokio",
+]
+
+[[package]]
+name = "pulsar-bt"
+version = "0.0.0"
+dependencies = [
+ "log",
  "pulsar-core",
  "tokio",
 ]

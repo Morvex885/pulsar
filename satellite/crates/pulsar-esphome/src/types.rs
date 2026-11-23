@@ -57,6 +57,9 @@ pub struct ApiConfig {
     pub clock_formats: Vec<String>,
     /// Select «Zigbee role» options; empty: no Zigbee entities (no radio).
     pub zigbee_modes: Vec<String>,
+    /// false: нет switch «Bluetooth speaker», text_sensor «Bluetooth» и действия `bt`
+    /// (адаптера BT в прошивке нет — pulsar_bt::adapter_present).
+    pub bluetooth: bool,
     /// false: нет сущностей Clock display / Clock brightness / Clock auto brightness / Clock spoken
     /// numbers / Clock text speed / Clock text / Clock face / Clock music / Clock format, нет
     /// действий clock_show_text / clock_show_face, их состояния не отправляются.
@@ -92,6 +95,7 @@ impl Default for ApiConfig {
             clock_music_styles: Vec::new(),
             clock_formats: Vec::new(),
             zigbee_modes: Vec::new(),
+            bluetooth: false,
             has_clock: true,
             has_lux: true,
             has_hw_mic_mute: true,
@@ -275,6 +279,8 @@ pub enum SwitchId {
     ClockSpokenNumbers = 8,
     WakeSound = 9,
     ClockColonBlink = 10,
+    /// Режим Bluetooth-колонки: org.bluez.Adapter1.Discoverable (`ApiConfig::bluetooth`).
+    Bluetooth = 11,
 }
 
 #[repr(u32)]
@@ -368,6 +374,7 @@ pub enum ButtonId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextSensorId {
     Zigbee = 1,
+    Bluetooth = 2,
 }
 
 /// User-defined actions; arguments (text | face, seconds).
@@ -458,6 +465,11 @@ pub enum ApiEvent {
         effect: String,
         color: String,
         seconds: i32,
+    },
+    /// Действие `bt`: строка аргумента "action" (смысл разбирает контроллер); приходит только
+    /// при `ApiConfig::bluetooth`.
+    Bt {
+        action: String,
     },
     /// Time from HA (GetTimeResponse); `posix_tz` is a POSIX TZ string (e.g. "MSK-3"), may be
     /// empty.

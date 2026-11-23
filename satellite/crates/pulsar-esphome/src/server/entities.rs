@@ -56,6 +56,9 @@ pub(super) mod key {
     pub const NUMBER_MIC_GAIN: u32 = 38;
     pub const SW_WAKE_SOUND: u32 = 39;
     pub const SW_CLOCK_COLON_BLINK: u32 = 40;
+    pub const SW_BLUETOOTH: u32 = 41;
+    pub const TEXT_BLUETOOTH: u32 = 42;
+    pub const ACTION_BT: u32 = 43;
 }
 
 /// aioesphomeapi VoiceAssistantFeature: voice assistant, API audio, timers, announce, start
@@ -135,6 +138,7 @@ pub(super) struct Cache {
     sw_nearest_answers: BoolState,
     sw_voice_indication: BoolState,
     sw_wake_sound: BoolState,
+    sw_bluetooth: BoolState,
     bs_hw_mute: BoolState,
     update: UpdateState,
     update_has: bool,
@@ -149,6 +153,7 @@ pub(super) struct Cache {
     clock_face: StrState,
     zigbee_mode: StrState,
     zigbee_status: StrState,
+    bt_status: StrState,
     music_viz: StrState,
     case_color: StrState,
     clock_music: StrState,
@@ -174,6 +179,7 @@ impl Cache {
             sw_nearest_answers: BoolState::default(),
             sw_voice_indication: BoolState::default(),
             sw_wake_sound: BoolState::default(),
+            sw_bluetooth: BoolState::default(),
             bs_hw_mute: BoolState::default(),
             update: UpdateState::default(),
             update_has: false,
@@ -188,6 +194,7 @@ impl Cache {
             clock_face: StrState::default(),
             zigbee_mode: StrState::default(),
             zigbee_status: StrState::default(),
+            bt_status: StrState::default(),
             music_viz: StrState::default(),
             case_color: StrState::default(),
             clock_music: StrState::default(),
@@ -279,6 +286,7 @@ impl Server {
             | SwitchId::NearestAnswers
             | SwitchId::VoiceIndication
             | SwitchId::WakeSound => true,
+            SwitchId::Bluetooth => self.cfg.bluetooth,
         }
     }
 
@@ -384,6 +392,15 @@ impl Server {
             "mdi:volume-high",
             cfg,
         ));
+        if self.cfg.bluetooth {
+            out.push(switch(
+                "bluetooth",
+                key::SW_BLUETOOTH,
+                "Bluetooth speaker",
+                "mdi:bluetooth",
+                None,
+            ));
+        }
         let number = |oid, key, name, icon, (min, max, step): (f32, f32, f32), unit| {
             let mut w = Writer::new();
             entity_head(&mut w, oid, key, name);
@@ -583,6 +600,14 @@ impl Server {
             "mdi:ip-network",
         ));
         out.push(text("version", key::TEXT_VERSION, "Version", "mdi:new-box"));
+        if self.cfg.bluetooth {
+            out.push(text(
+                "bluetooth",
+                key::TEXT_BLUETOOTH,
+                "Bluetooth",
+                "mdi:bluetooth",
+            ));
+        }
         if self.cfg.has_clock {
             out.push(number(
                 "clock_text_speed",
@@ -670,6 +695,14 @@ impl Server {
                 ("seconds", SERVICE_ARG_INT),
             ],
         ));
+        if self.cfg.bluetooth {
+            // on|off|play|pause|stop|next|prev — разбирает контроллер (pulsar-bt).
+            out.push(action(
+                "bt",
+                key::ACTION_BT,
+                &[("action", SERVICE_ARG_STRING)],
+            ));
+        }
         out.push((msg::LIST_DONE, Writer::new()));
         for (t, w) in &out {
             self.send_msg(id, *t, w);
@@ -799,7 +832,7 @@ impl Server {
         let to = Some(id);
         let (has_clock, has_lux) = (self.cfg.has_clock, self.cfg.has_lux);
         let c = &self.cache;
-        let (mic, clock, auto_bri, spoken, auto, nearest, voice, wake_sound, hw) = (
+        let (mic, clock, auto_bri, spoken, auto, nearest, voice, wake_sound, bt, hw) = (
             c.sw_microphones,
             c.sw_clock,
             c.sw_clock_auto_bri,
@@ -808,6 +841,7 @@ impl Server {
             c.sw_nearest_answers,
             c.sw_voice_indication,
             c.sw_wake_sound,
+            c.sw_bluetooth,
             c.bs_hw_mute,
         );
         let colon_blink = c.sw_clock_colon_blink;
@@ -835,6 +869,9 @@ impl Server {
         self.send_bool(msg::SWITCH_STATE, key::SW_NEAREST_ANSWERS, nearest, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_VOICE_INDICATION, voice, to);
         self.send_bool(msg::SWITCH_STATE, key::SW_WAKE_SOUND, wake_sound, to);
+        if self.cfg.bluetooth {
+            self.send_bool(msg::SWITCH_STATE, key::SW_BLUETOOTH, bt, to);
+        }
         self.send_update(to);
         if self.cfg.has_hw_mic_mute {
             self.send_bool(msg::BINARY_SENSOR_STATE, key::BS_HW_MIC_MUTE, hw, to);
@@ -929,6 +966,14 @@ impl Server {
                 to,
             );
         }
+        if self.cfg.bluetooth {
+            self.send_cached_str(
+                msg::TEXT_SENSOR_STATE,
+                key::TEXT_BLUETOOTH,
+                |c| &c.bt_status,
+                to,
+            );
+        }
     }
 
     /// Reads RSSI and the IP into the cache (once at start, then on the 60 s timer only: a
@@ -1007,6 +1052,7 @@ impl Server {
                         (&mut c.sw_voice_indication, key::SW_VOICE_INDICATION)
                     }
                     SwitchId::WakeSound => (&mut c.sw_wake_sound, key::SW_WAKE_SOUND),
+                    SwitchId::Bluetooth => (&mut c.sw_bluetooth, key::SW_BLUETOOTH),
                 };
                 *s = BoolState { has: true, v };
                 let s = *s;
@@ -1119,6 +1165,14 @@ impl Server {
                         self.send_str(msg::TEXT_SENSOR_STATE, key::TEXT_ZIGBEE, &v, true, None);
                     }
                     self.cache.zigbee_status = StrState { has: true, v };
+                }
+            }
+            Publish::TextSensor(TextSensorId::Bluetooth, v) => {
+                if self.cfg.bluetooth {
+                    if on {
+                        self.send_str(msg::TEXT_SENSOR_STATE, key::TEXT_BLUETOOTH, &v, true, None);
+                    }
+                    self.cache.bt_status = StrState { has: true, v };
                 }
             }
             Publish::Light(st) => {
