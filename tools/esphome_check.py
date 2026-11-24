@@ -901,6 +901,8 @@ async def main():
     if args.command == "wake-word":
         if not args.wake_id:
             p.error("wake-word needs --wake-id")
+        if not 1 <= args.port <= 65535:
+            p.error("wake-word needs a port between 1 and 65535")
         if args.port == LIVE_API_PORT:
             p.error(f"wake-word cannot use the live API port {LIVE_API_PORT}; use a test instance (16053)")
     if not 1 <= args.followup_s <= 10:
