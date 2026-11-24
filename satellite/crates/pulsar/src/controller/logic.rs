@@ -631,7 +631,10 @@ pub fn wake_word_names(models: &Path, saved: &str) -> Vec<String> {
             }
         };
         let dir = e.path();
-        if !MODEL_FILES.iter().all(|f| dir.join(f).is_file()) {
+        if let Some(f) = MODEL_FILES.iter().find(|f| !dir.join(f).is_file()) {
+            if dir.is_dir() {
+                warn!("activation model {} skipped: missing {f}", dir.display());
+            }
             continue;
         }
         match e.file_name().to_str() {

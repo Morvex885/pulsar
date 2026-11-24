@@ -302,8 +302,9 @@ impl Controller {
             // Каталог не прочитан или пуст: список в HA не должен расходиться с активным словом.
             wake_names.push("alisa".into());
         }
-        st.wake_word = logic::resolve_wake_word(&st.wake_word, &wake_names);
-        let wake_dirs = logic::wake_candidates(&st.wake_word, &wake_names)
+        // Стартовый запасной ID заменит сохранённый только после подтверждения загрузки.
+        let initial_wake_word = logic::resolve_wake_word(&st.wake_word, &wake_names);
+        let wake_dirs = logic::wake_candidates(&initial_wake_word, &wake_names)
             .iter()
             .map(|id| model_dir(id))
             .collect::<Vec<_>>();
@@ -335,7 +336,7 @@ impl Controller {
                     languages: vec!["ru".into()],
                 })
                 .collect(),
-            active_wake_words: vec![st.wake_word.clone()],
+            active_wake_words: vec![initial_wake_word],
             light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
             clock_faces: with_none(strings(pulsar_clock::face_names())),
             music_styles: strings(pulsar_hw::music_styles()),

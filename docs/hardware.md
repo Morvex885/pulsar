@@ -37,10 +37,11 @@ Wake word, командный спотер и эхоподавление раб�
   [-1, 1], с чередованием по кадрам. Размер входного чанка (`GetInputChunkSize`) и выходного кадра
   (`GetProcessingFrame`) задаёт пресет; значения по моделям — в разделе «Звук» docs моделей
   ([«Модели»](#модели)).
-- `YandexVqeC_GetOutputChannelData(vqe, type, idx, &ptr, &n)` всегда возвращает «нет ошибки».
-  Если выхода такого типа нет, функция отдаёт `n == 0`.
-- `YandexVqeC_Config_GetOutputChannelCount` принимает `(cfg, type, int *out)`. Остальные геттеры
-  `Config_Get*` возвращают значение напрямую.
+- `YandexVqeC_GetOutputChannelData(vqe, type, idx, &ptr, &n)` при отсутствии выхода отдаёт
+  `n == 0` либо ошибку (на Лайт 2 с пресетом `plum`: проверка `id < getOutputChannelCount`).
+- `YandexVqeC_Config_GetOutputChannelCount(cfg, type, &out)` пишет количество выходов в `int`
+  по указателю и возвращает указатель на ошибку или `NULL`. Остальные геттеры `Config_Get*`
+  возвращают значение напрямую.
 - Спотер: `spotter_create_multichannel(conf, rate, n, types, false, &err)` и
   `spotter_submit_raw_data(sp, s16_interleaved, bytes, &err)`. Сколько каналов нужно каждому
   типу, задаёт конфиг модели спотера (`spotter_conf_get_required_channel_count`). Какой выход VQE
