@@ -653,7 +653,7 @@ pub fn wake_word_names(models: &Path, saved: &str) -> Vec<String> {
 /// Смена модели wake word: последний запрос к фронтенду и есть ли загруженная модель.
 #[derive(Debug, Default)]
 pub struct WakeSwitch {
-    pending: Option<(ModelId, String)>,
+    pending: Option<(ModelId, String, u64)>,
     /// По последнему событию фронтенда модели нет: не загрузилась ни новая, ни прежняя.
     empty: bool,
 }
@@ -663,21 +663,32 @@ impl WakeSwitch {
     /// выбор активного слова отменяет ожидающую смену или перезагружает модель, если её нет.
     pub fn wants(&self, id: &str, active: &str) -> bool {
         match &self.pending {
-            Some((_, p)) => p != id,
+            Some((_, p, _)) => p != id,
             None => self.empty || id != active,
         }
     }
 
-    pub fn requested(&mut self, req: ModelId, id: String) {
-        self.pending = Some((req, id));
+    pub fn requested(&mut self, req: ModelId, id: String, request: u64) {
+        self.pending = Some((req, id, request));
+    }
+
+    /// Повтор того же слова меняет номер подтверждения, не запуская новую загрузку.
+    pub fn retarget(&mut self, request: u64) -> bool {
+        let Some((_, _, pending)) = &mut self.pending else {
+            return false;
+        };
+        *pending = request;
+        true
     }
 
     /// Событие `WakeModel`: ответ на устаревший запрос не снимает более новый.
-    pub fn answered(&mut self, req: ModelId, loaded: bool) {
-        if self.pending.as_ref().is_some_and(|(r, _)| *r == req) {
-            self.pending = None;
-        }
+    pub fn answered(&mut self, req: ModelId, loaded: bool) -> Option<u64> {
         self.empty = !loaded;
+        if self.pending.as_ref().is_some_and(|(r, _, _)| *r == req) {
+            self.pending.take().map(|(_, _, request)| request)
+        } else {
+            None
+        }
     }
 }
 

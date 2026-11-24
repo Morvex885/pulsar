@@ -491,7 +491,7 @@ impl Engine {
         Some(eng)
     }
 
-    /// Смена модели wake word; false — новая не загрузилась, осталась прежняя.
+    /// `false` — запрошенная модель не загрузилась; фактический результат в `wake_dir()`.
     pub fn set_wake_model(&mut self, dir: &Path) -> bool {
         self.wake.switch(&self.lib, dir, VQE_OMNI_WITH_GAIN)
     }

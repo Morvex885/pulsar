@@ -34,7 +34,7 @@ impl Controller {
             ApiEvent::VoiceEvent { event, data } => self.on_voice_event(event, &data),
             ApiEvent::Announce(req) => self.on_announce(req),
             ApiEvent::Timer(t) => self.on_timer_event(t),
-            ApiEvent::ActiveWakeWords(ids) => self.on_active_wake_words(ids),
+            ApiEvent::ActiveWakeWords { request, id } => self.on_active_wake_words(request, id),
             ApiEvent::MediaCommand(cmd) => self.on_media_command(cmd),
             ApiEvent::Switch(id, on) => self.on_switch(id, on),
             ApiEvent::Button(id) => self.on_button(id),
@@ -405,29 +405,27 @@ impl Controller {
         self.update_music();
     }
 
-    fn on_active_wake_words(&mut self, ids: Vec<String>) {
-        let Some(first) = ids.into_iter().next() else {
-            return;
-        };
-        if !self.wake_switch.wants(&first, &self.st.wake_word) {
+    fn on_active_wake_words(&mut self, request: u64, id: String) {
+        if !self.wake_switch.wants(&id, &self.st.wake_word) {
+            if !self.wake_switch.retarget(request) {
+                self.api.set_active_wake_words(Some(request), vec![id]);
+            }
             return;
         }
         if self.mic.frame() == 0 {
             // Фронтенд не запущен: события WakeModel не будет, выбор принимается сразу.
-            self.st.wake_word = first;
+            self.st.wake_word = id.clone();
             info!("wake word -> {}", self.st.wake_word);
-            self.api
-                .set_active_wake_words(vec![self.st.wake_word.clone()]);
+            self.api.set_active_wake_words(Some(request), vec![id]);
             self.persist();
             return;
         }
-        info!("wake word requested: {first}");
-        let req = self.mic.set_model(model_dir(&first));
-        self.wake_switch.requested(req, first);
+        info!("wake word requested: {id}");
+        let req = self.mic.set_model(model_dir(&id));
+        self.wake_switch.requested(req, id, request);
     }
 
-    /// Итог старта спотера или смены модели. Слово, HA и `state.conf` меняются только на модель,
-    /// которая загрузилась: иначе после перезапуска спотер снова ждал бы негодную модель.
+    /// Не сохраняем пустой выбор: после перезапуска спотер снова попробует прежнюю модель.
     pub(super) fn on_wake_model(&mut self, req: ModelId, dir: &Path, ok: bool) {
         let id = dir
             .file_name()
@@ -437,15 +435,14 @@ impl Controller {
         if !ok {
             warn!("wake word model did not load; active: {id:?}");
         }
-        self.wake_switch.answered(req, !id.is_empty());
+        let request = self.wake_switch.answered(req, !id.is_empty());
         if !id.is_empty() && id != self.st.wake_word {
-            self.st.wake_word = id;
+            self.st.wake_word.clone_from(&id);
             info!("wake word -> {}", self.st.wake_word);
             self.persist();
         }
-        // И при неудаче: HA уже показывает запрошенное слово, возвращаем ему действующее.
         self.api
-            .set_active_wake_words(vec![self.st.wake_word.clone()]);
+            .set_active_wake_words(request, if id.is_empty() { Vec::new() } else { vec![id] });
     }
 
     // ---------------- buttons, sensors, Zigbee ----------------

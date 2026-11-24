@@ -842,29 +842,31 @@ fn wake_switch_follows_the_last_request() {
     let mut w = WakeSwitch::default();
     assert!(!w.wants("alisa", "alisa"));
     assert!(w.wants("yasmina", "alisa"));
-    w.requested(ModelId(1), "yasmina".into());
+    w.requested(ModelId(1), "yasmina".into(), 10);
     assert!(!w.wants("yasmina", "alisa"));
     // Выбор активного слова во время смены отменяет её.
     assert!(w.wants("alisa", "alisa"));
-    w.requested(ModelId(2), "alisa".into());
-    w.requested(ModelId(3), "yasmina".into());
+    w.requested(ModelId(2), "alisa".into(), 11);
+    assert!(!w.wants("alisa", "alisa"));
+    assert!(w.retarget(12));
     // Ответ на вытесненный запрос не снимает последний.
-    w.answered(ModelId(1), true);
-    assert!(!w.wants("yasmina", "yasmina"));
-    assert!(w.wants("alisa", "yasmina"));
-    w.answered(ModelId(3), true);
-    assert!(!w.wants("yasmina", "yasmina"));
+    assert_eq!(w.answered(ModelId(0), true), None);
+    assert_eq!(w.answered(ModelId(1), true), None);
+    assert!(!w.wants("alisa", "yasmina"));
+    assert_eq!(w.answered(ModelId(2), true), Some(12));
+    assert!(!w.wants("alisa", "alisa"));
+    assert!(!w.retarget(13));
 }
 
 #[test]
 fn wake_switch_reloads_when_no_model_is_loaded() {
     use pulsar_audio::ModelId;
     let mut w = WakeSwitch::default();
-    w.requested(ModelId(1), "yasmina".into());
+    w.requested(ModelId(1), "yasmina".into(), 10);
     // Не загрузилась ни новая, ни прежняя модель: повтор прежнего слова снова грузит её.
-    w.answered(ModelId(1), false);
+    assert_eq!(w.answered(ModelId(1), false), Some(10));
     assert!(w.wants("alisa", "alisa"));
-    w.requested(ModelId(2), "alisa".into());
-    w.answered(ModelId(2), true);
+    w.requested(ModelId(2), "alisa".into(), 11);
+    assert_eq!(w.answered(ModelId(2), true), Some(11));
     assert!(!w.wants("alisa", "alisa"));
 }

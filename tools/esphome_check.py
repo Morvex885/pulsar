@@ -15,8 +15,9 @@ Commands:
   announce    --media-url URL [--text T] [--start-conversation]: waits for AnnounceFinished.
   timer       --event started|updated|cancelled|finished --seconds N [--id ID] [--name NAME].
   set-key     --key BASE64 (empty: clear): NoiseEncryptionSetKeyRequest.
-  wake-word   --wake-id ID: selects the active wake word, then waits up to 5 s for the device to
-              report it active (the daemon confirms only once the model has loaded).
+  wake-word   --wake-id ID: select the active wake word and check the first API readback.
+              Use a test instance (16053), not the live API port.
+              This checks the API response, not whether the spotter detects speech.
 
 Scenarios against the daemon (a test instance: PULSAR_PORT_OFFSET, service stopped):
   scenario-voice     announcement (--media-url) with start_conversation; the daemon then starts a
@@ -301,25 +302,19 @@ async def cmd_set_key(client, args):
     ok = await client.noise_encryption_set_key(args.key.encode())
     print(f"set-key: success={ok}")
 
+
 async def cmd_wake_word(client, args):
     await client.set_voice_assistant_configuration([args.wake_id])
-    active = []
-    deadline = time.monotonic() + 5.0
-    while (left := deadline - time.monotonic()) > 0:
-        await asyncio.sleep(min(0.5, left))
-        left = deadline - time.monotonic()
-        if left <= 0:
-            break
-        try:
-            cfg = await client.get_voice_assistant_configuration(left)
-        except TimeoutAPIError:
-            break
-        active = list(cfg.active_wake_words)
-        if active == [args.wake_id]:
-            break
+    try:
+        cfg = await client.get_voice_assistant_configuration(5.0)
+    except TimeoutAPIError:
+        FAILURES.append(f"wake word {args.wake_id}: no configuration response")
+        return
+    active = list(cfg.active_wake_words)
     print(f"voice config: active={','.join(active)}")
     if active != [args.wake_id]:
         FAILURES.append(f"wake word {args.wake_id}: active {active}")
+
 
 class Watch:
     """Every state the device sends, per key, with a counter to wait for a new one."""
@@ -903,8 +898,11 @@ async def main():
     args = p.parse_args()
     if not 0.0 <= args.media_volume <= 0.2:
         p.error("--media-volume must be between 0 and 0.2")
-    if args.command == "wake-word" and not args.wake_id:
-        p.error("wake-word needs --wake-id")
+    if args.command == "wake-word":
+        if not args.wake_id:
+            p.error("wake-word needs --wake-id")
+        if args.port == LIVE_API_PORT:
+            p.error(f"wake-word cannot use the live API port {LIVE_API_PORT}; use a test instance (16053)")
     if not 1 <= args.followup_s <= 10:
         p.error("--followup-s must be between 1 and 10")
     if args.command == "scenario-persist" and args.install and args.port == LIVE_API_PORT and not args.allow_live_port:
