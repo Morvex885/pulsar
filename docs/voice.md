@@ -7,6 +7,10 @@ pulsar, и протокол арбитража wake word между станци
 
 ## Голосовой ассистент HA (ESPHome)
 
+- После `VoiceAssistantSetConfiguration` Home Assistant читает конфигурацию одним
+  `VoiceAssistantConfigurationRequest` без ожидания отдельного подтверждения. Активное слово для
+  селектора берётся из ответа; таймаут чтения — 5 с
+  ([HA 2026.11.1](https://github.com/home-assistant/core/blob/2026.11.1/homeassistant/components/esphome/assist_satellite.py#L222-L268)).
 - В событиях pipeline нет id run. Если наш новый `voice_request_start` заменяет идущий run
   (barge-in), HA сначала шлёт оставшиеся события заменённого run, включая его RUN_END, и только
   потом RUN_START нового. RUN_END до RUN_START, когда никакой run не заменялся, значит, что HA
@@ -76,7 +80,8 @@ maind играет звук громкости (sound 45, SimpleVolumeTonePlayer
   `pulsar-wake/1 <name> <wake> <busy> <level>` в UDP broadcast на `255.255.255.255:6054`, три копии
   с интервалом 40 мс (broadcast в Wi-Fi уходит без ACK и повторов).
   - `<name>` — имя устройства ESPHome (например, `yandex-midi-xxxxxx`);
-  - `<wake>` — id модели wake word (`alisa`, `yandex`);
+  - `<wake>` — id модели wake word: имя её каталога, 1–15 байт `[a-z0-9_-]` (`alisa`, `yandex`,
+    `yasmina`);
   - `<busy>` — `1`, если станция занята (говорит, играет объявление, звонит таймер), иначе `0`;
   - `<level>` — [уровень wake](#уровень-wake) в формате `%.1f`.
 

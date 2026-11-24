@@ -15,6 +15,9 @@ Commands:
   announce    --media-url URL [--text T] [--start-conversation]: waits for AnnounceFinished.
   timer       --event started|updated|cancelled|finished --seconds N [--id ID] [--name NAME].
   set-key     --key BASE64 (empty: clear): NoiseEncryptionSetKeyRequest.
+  wake-word   --wake-id ID: select the active wake word and check the first API readback.
+              Use a test instance (16053), not the live API port.
+              This checks the API response, not whether the spotter detects speech.
 
 Scenarios against the daemon (a test instance: PULSAR_PORT_OFFSET, service stopped):
   scenario-voice     announcement (--media-url) with start_conversation; the daemon then starts a
@@ -84,6 +87,7 @@ from aioesphomeapi import (
     VoiceAssistantEventType,
     VoiceAssistantTimerEventType,
 )
+from aioesphomeapi.core import TimeoutAPIError
 
 MASKED_DEVICE_INFO = {"project_version", "compilation_time", "mac_address"}
 # object_id -> masked fields of its state
@@ -297,6 +301,20 @@ async def cmd_timer(client, args):
 async def cmd_set_key(client, args):
     ok = await client.noise_encryption_set_key(args.key.encode())
     print(f"set-key: success={ok}")
+
+
+async def cmd_wake_word(client, args):
+    await client.set_voice_assistant_configuration([args.wake_id])
+    try:
+        cfg = await client.get_voice_assistant_configuration(5.0)
+    except TimeoutAPIError:
+        FAILURES.append(f"wake word {args.wake_id}: no configuration response")
+        return
+    active = list(cfg.active_wake_words)
+    print(f"voice config: active={','.join(active)}")
+    if active != [args.wake_id]:
+        FAILURES.append(f"wake word {args.wake_id}: active {active}")
+
 
 class Watch:
     """Every state the device sends, per key, with a counter to wait for a new one."""
@@ -826,6 +844,7 @@ COMMANDS = {
     "announce": cmd_announce,
     "timer": cmd_timer,
     "set-key": cmd_set_key,
+    "wake-word": cmd_wake_word,
     "scenario-voice": cmd_scenario_voice,
     "scenario-timer": cmd_scenario_timer,
     "scenario-media": cmd_scenario_media,
@@ -854,6 +873,7 @@ async def main():
     p.add_argument("--event", default="started", choices=["started", "updated", "cancelled", "finished"])
     p.add_argument("--seconds", type=int, help="default 10; scenario-timer 70, scenario-voice 30")
     p.add_argument("--id", default="t1")
+    p.add_argument("--wake-id", help="wake-word: model id (e.g. alisa)")
     p.add_argument("--name", default="test")
     p.add_argument("--key", default="")
     p.add_argument("--zigbee-join", action="store_true", help="commands: press Zigbee join (router role joins)")
@@ -878,6 +898,13 @@ async def main():
     args = p.parse_args()
     if not 0.0 <= args.media_volume <= 0.2:
         p.error("--media-volume must be between 0 and 0.2")
+    if args.command == "wake-word":
+        if not args.wake_id:
+            p.error("wake-word needs --wake-id")
+        if not 1 <= args.port <= 65535:
+            p.error("wake-word needs a port between 1 and 65535")
+        if args.port == LIVE_API_PORT:
+            p.error(f"wake-word cannot use the live API port {LIVE_API_PORT}; use a test instance (16053)")
     if not 1 <= args.followup_s <= 10:
         p.error("--followup-s must be between 1 and 10")
     if args.command == "scenario-persist" and args.install and args.port == LIVE_API_PORT and not args.allow_live_port:

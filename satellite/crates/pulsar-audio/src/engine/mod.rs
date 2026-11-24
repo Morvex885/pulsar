@@ -6,13 +6,17 @@
 mod ffi;
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use log::{error, info, warn};
 
 pub use ffi::{Lib, LoadError, Spotter, SpotterConf, Vqe, VqeStep, preload_deps};
 
 pub const VQE_MODELS: &str = "/system/vendor/quasar/vqe_models";
+
+/// Файлы, без которых каталог не считается моделью спотера.
+// см. docs/hardware.md, «Библиотеки Яндекса (C API)»
+pub const MODEL_FILES: [&str; 2] = ["acoustic_model.nnet", "flags.txt"];
 
 // voicetech.AudioInputChannelType (VQE output channel types);
 // см. docs/hardware.md, «Библиотеки Яндекса (C API)».
@@ -242,10 +246,10 @@ pub(crate) struct Slot {
     /// Читать якорь хита (только у спотера wake word).
     anchor: bool,
     sp: Option<Spotter>,
+    /// Каталог загруженной модели; пустой — спотера нет.
+    dir: PathBuf,
     layout: SpotterLayout,
     legacy: SpotterLayout,
-    /// Выходы раскладки проверены на первом чанке ([`Slot::resolve`]).
-    checked: bool,
     buf: Vec<i16>,
     last_hit_ms: i64,
 }
@@ -256,9 +260,9 @@ impl Slot {
             what,
             anchor,
             sp: None,
+            dir: PathBuf::new(),
             layout: SpotterLayout::default(),
             legacy: SpotterLayout::default(),
-            checked: false,
             buf: Vec::new(),
             last_hit_ms: 0,
         }
@@ -266,8 +270,14 @@ impl Slot {
 
     /// (Re)creates the spotter from the model in `dir`; the previous one is destroyed first.
     /// `legacy_main` — выход VQE для типа 0 в запасной раскладке.
-    fn init(&mut self, lib: &Lib, dir: &Path, legacy_main: i32) -> bool {
+    fn init(&mut self, lib: &Lib, dir: &Path, legacy_main: i32, outputs: u32) -> bool {
         self.sp = None;
+        self.dir = PathBuf::new();
+        // см. docs/hardware.md, «Библиотеки Яндекса (C API)»
+        if let Some(f) = MODEL_FILES.iter().find(|f| !dir.join(f).is_file()) {
+            error!("{} spotter: no {f} in {}", self.what, dir.display());
+            return false;
+        }
         let conf = match SpotterConf::read(lib, dir) {
             Ok(conf) => conf,
             Err(e) => {
@@ -285,6 +295,9 @@ impl Slot {
             });
         }
         self.set_layouts(&counts, legacy_main);
+        if !self.resolve(|ty| outputs & (1 << ty) != 0) {
+            return false;
+        }
         let (rate, err) = conf.native_rate();
         if let Some(e) = err {
             error!("spotter_conf_native_sample_rate: {e}");
@@ -305,8 +318,27 @@ impl Slot {
                 dir.display(),
                 self.layout
             );
+            self.dir = dir.to_path_buf();
         }
         ok
+    }
+
+    /// Смена модели; если новая не создалась, заново создаётся прежняя. Второй спотер в RAM на
+    /// время смены не держим: на станциях с ~238 МиБ это не замерено, поэтому прежняя модель
+    /// пересоздаётся только на пути ошибки.
+    fn switch(&mut self, lib: &Lib, dir: &Path, legacy_main: i32, outputs: u32) -> bool {
+        let prev = std::mem::take(&mut self.dir);
+        if self.init(lib, dir, legacy_main, outputs) {
+            return true;
+        }
+        if !prev.as_os_str().is_empty() && !self.init(lib, &prev, legacy_main, outputs) {
+            error!(
+                "{} spotter: previous model {} did not reload",
+                self.what,
+                prev.display()
+            );
+        }
+        false
     }
 
     /// Раскладка по таблице и запасная, `legacy_main` — выход VQE для типа 0 в запасной.
@@ -315,12 +347,17 @@ impl Slot {
         let mut legacy = LEGACY_SPOTTER_TO_VQE;
         legacy[0] = legacy_main;
         self.legacy = spotter_layout(counts, &legacy);
-        self.checked = false;
     }
 
-    /// Выходы раскладки проверяются на первом чанке: без выхода в пресете спотер молча получал бы
-    /// пустые буферы (GetOutputChannelData отдаёт n == 0).
+    /// Выбирает раскладку до создания спотера: без нужных выходов он не получит данные.
     fn resolve(&mut self, present: impl Fn(i32) -> bool) -> bool {
+        if self.layout.vqe.is_empty() {
+            error!(
+                "{} spotter: model requires no supported input channels",
+                self.what
+            );
+            return false;
+        }
         let Some(&ty) = self.layout.vqe.iter().find(|&&ty| !present(ty)) else {
             return true;
         };
@@ -352,6 +389,7 @@ pub(crate) struct Engine {
     cmd: Slot,
     vqe: Vqe,
     lib: Lib,
+    outputs: u32,
     /// Capture frames per VQE chunk.
     pub chunk: usize,
     /// VQE output samples per chunk.
@@ -359,11 +397,12 @@ pub(crate) struct Engine {
 }
 
 impl Engine {
-    /// dlopen, VQE for the model's preset, the wake word spotter (required) and the command spotter
-    /// (optional: a warning without it). Errors are logged; None = no front-end.
+    /// dlopen, VQE по пресету модели, спотер wake word (обязателен; модель — первая загрузившаяся
+    /// из `wake_dirs`) и командный спотер (необязателен: без него предупреждение). Ошибки пишутся в
+    /// лог; None — фронтенда нет.
     pub fn start(
         model: &pulsar_core::model::Model,
-        wake_dir: &Path,
+        wake_dirs: &[PathBuf],
         command_dir: Option<&Path>,
     ) -> Option<Engine> {
         if let Err(e) = preload_deps() {
@@ -382,7 +421,7 @@ impl Engine {
         };
         let preset = model.vqe_preset;
         let (nmic, nspk) = (model.mic_channels.len(), model.spk_channels.len());
-        let vqe = match Vqe::new(&lib, preset, Path::new(VQE_MODELS), nmic, nspk) {
+        let mut vqe = match Vqe::new(&lib, preset, Path::new(VQE_MODELS), nmic, nspk) {
             Ok(vqe) => vqe,
             Err((step, e)) => {
                 let what = match step {
@@ -402,6 +441,10 @@ impl Engine {
             return None;
         };
         info!("VQE '{preset}': {chunk} input frames -> {frame} output samples per chunk");
+        let outputs = vqe
+            .output_mask()
+            .inspect_err(|e| error!("VQE output channels: {e}"))
+            .ok()?;
         // Якорь читается после событий 2/5, и без результата хита библиотека делает abort: при
         // другой нумерации событий в сборке лучше остаться без пре-ролла, чем падать.
         // см. docs/hardware.md, «Библиотеки Яндекса (C API)»
@@ -431,23 +474,43 @@ impl Engine {
             cmd: Slot::new("command", false),
             vqe,
             lib,
+            outputs,
             chunk: chunk_n,
             frame: frame_n,
         };
-        if !eng.wake.init(&lib, wake_dir, VQE_OMNI_WITH_GAIN) {
+        let mut wake_ok = false;
+        for (i, dir) in wake_dirs.iter().enumerate() {
+            wake_ok = eng.wake.init(&lib, dir, VQE_OMNI_WITH_GAIN, outputs);
+            if wake_ok {
+                break;
+            }
+            if i + 1 < wake_dirs.len() {
+                warn!(
+                    "wake word model {} did not load; trying the next",
+                    dir.display()
+                );
+            }
+        }
+        if !wake_ok {
             return None;
         }
         if let Some(dir) = command_dir
-            && !eng.cmd.init(&lib, dir, VQE_OMNI)
+            && !eng.cmd.init(&lib, dir, VQE_OMNI, outputs)
         {
             warn!("command spotter unavailable; voice commands without the wake word are disabled");
         }
         Some(eng)
     }
 
-    /// Switches the wake word model.
+    /// `false` — запрошенная модель не загрузилась; фактический результат в `wake_dir()`.
     pub fn set_wake_model(&mut self, dir: &Path) -> bool {
-        self.wake.init(&self.lib, dir, VQE_OMNI_WITH_GAIN)
+        self.wake
+            .switch(&self.lib, dir, VQE_OMNI_WITH_GAIN, self.outputs)
+    }
+
+    /// Каталог активной модели wake word.
+    pub fn wake_dir(&self) -> &Path {
+        &self.wake.dir
     }
 
     /// VQE output samples per chunk.
@@ -486,30 +549,10 @@ impl Engine {
 }
 
 fn feed(vqe: &Vqe, frame: usize, s: &mut Slot) -> Vec<Hit> {
-    if s.sp.is_some() && !s.checked {
-        // Ошибка библиотеки — не отсутствие выхода: проверка повторяется на следующем чанке.
-        if let Some(e) = s
-            .layout
-            .vqe
-            .iter()
-            .chain(&s.legacy.vqe)
-            .find_map(|&ty| vqe.output(ty).err())
-        {
-            error!("VQE output: {e}");
-            return Vec::new();
-        }
-        s.checked = true;
-        if !s.resolve(|ty| vqe.output(ty).is_ok_and(|d| !d.is_empty())) {
-            s.sp = None;
-        }
-    }
     let nch = s.layout.vqe.len();
     let Some(sp) = s.sp.as_mut() else {
         return Vec::new();
     };
-    if nch == 0 {
-        return Vec::new();
-    }
     let mut src: [&[f32]; MAX_SPOTTER_CHANNELS] = [&[]; MAX_SPOTTER_CHANNELS];
     let mut n = frame;
     for (k, &ty) in s.layout.vqe.iter().enumerate() {
@@ -593,6 +636,7 @@ mod tests {
             s.set_layouts(counts, legacy_main);
             s
         };
+        assert!(!slot(&[0; SPOTTER_TYPES], VQE_OMNI_WITH_GAIN).resolve(|_| true));
         let wake = [1, 0, 0, 1, 1, 0];
         let mut s = slot(&wake, VQE_OMNI_WITH_GAIN);
         assert!(s.resolve(|_| true));

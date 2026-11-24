@@ -108,9 +108,10 @@ impl ApiHandle {
         self.send(Cmd::VoiceAnswerFinished(success));
     }
 
-    /// The wake word ids reported as active to HA from now on.
-    pub fn set_active_wake_words(&self, ids: Vec<String>) {
-        self.send(Cmd::SetActiveWakeWords(ids));
+    /// Публикует фактические слова активации. `request` подтверждает конкретный запрос HA;
+    /// `None` обновляет кэш, но не завершает ожидающий запрос.
+    pub fn set_active_wake_words(&self, request: Option<u64>, ids: Vec<String>) {
+        self.send(Cmd::SetActiveWakeWords { request, ids });
     }
 
     // State publishing: the server keeps the last value of each entity (replayed to a client
