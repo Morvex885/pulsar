@@ -616,6 +616,27 @@ async fn expect_wake_config_before_pong(p: &mut Peer, ids: &[&str]) {
 }
 
 #[tokio::test]
+async fn empty_wake_selection_keeps_the_active_model() {
+    local()
+        .run_until(async {
+            let (id, cfg) = selftest("now");
+            let (_h, mut rx, port) = start_with(id, cfg);
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            event(&mut rx).await;
+
+            p.send(msg::VA_SET_CONFIG, &Writer::new()).await;
+            p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            expect_wake_config_before_pong(&mut p, &["alisa"]).await;
+            assert!(matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn wake_config_read_waits_for_actual_selection() {
     local()
         .run_until(async {

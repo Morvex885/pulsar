@@ -829,6 +829,14 @@ fn wake_word_names_keeps_the_saved_model_when_listing_fails() {
 }
 
 #[test]
+fn wake_word_english_labels() {
+    assert_eq!(wake_word_phrase("alisa"), "Alisa");
+    assert_eq!(wake_word_phrase("yandex"), "Yandex");
+    assert_eq!(wake_word_phrase("yasmina"), "Yasmina");
+    assert_eq!(wake_word_phrase("other_word"), "other_word");
+}
+
+#[test]
 fn wake_word_resolution_and_candidates() {
     let all = strings(&["alisa", "yandex", "yasmina"]);
     assert_eq!(resolve_wake_word("yandex", &all), "yandex");
