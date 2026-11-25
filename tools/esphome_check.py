@@ -63,7 +63,8 @@ Scenarios against the daemon (a test instance: PULSAR_PORT_OFFSET, service stopp
                                  ERROR stt-no-text-recognized;
                        off       duration 0: no follow-up start at all;
                        set-zero  duration set to 0 at t0+1: stop within 1.5 s.
-                     Whether the close was quiet is read in the daemon log ("follow-up: ...").
+                     The daemon log ("follow-up: ...") confirms why the run ended; check the
+                     closing sound by listening, not from the log.
                      --speech-text and --spoken-numbers as in scenario-voice (first run's answer).
 The LED ring and clock states (LISTENING, THINKING, SPEAKING, TIMER_RING, the timer) are read on
 the station meanwhile (sysfs); the --*-s pauses leave time for that.

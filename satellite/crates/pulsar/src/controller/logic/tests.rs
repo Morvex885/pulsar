@@ -366,10 +366,39 @@ fn ducking() {
 
 #[test]
 fn wake_cue_table() {
-    assert_eq!(wake_cue(false, true), WakeCue::Keep);
+    assert_eq!(wake_cue(false, true), WakeCue::Sound);
     assert_eq!(wake_cue(false, false), WakeCue::Keep);
     assert_eq!(wake_cue(true, true), WakeCue::Sound);
     assert_eq!(wake_cue(true, false), WakeCue::Cut);
+}
+
+#[test]
+fn no_reply_cue_respects_setting_and_current_audio() {
+    assert!(want_no_reply_cue(
+        Phase::Listening,
+        true,
+        false,
+        false,
+        false
+    ));
+    assert!(want_no_reply_cue(
+        Phase::Processing,
+        true,
+        false,
+        false,
+        false
+    ));
+    for (phase, wake_sound, announcing, ringing, closing) in [
+        (Phase::Processing, false, false, false, false),
+        (Phase::Processing, true, true, false, false),
+        (Phase::Processing, true, false, true, false),
+        (Phase::Processing, true, false, false, true),
+        (Phase::Speaking, true, false, false, false),
+    ] {
+        assert!(!want_no_reply_cue(
+            phase, wake_sound, announcing, ringing, closing,
+        ));
+    }
 }
 
 #[test]
@@ -719,7 +748,7 @@ fn followup_window_needs_ha_speech_events() {
 }
 
 #[test]
-fn followup_silence_is_quiet_only_before_speech() {
+fn followup_silence_skips_error_indication_only_before_speech() {
     assert!(!Followup::default().silent("stt-no-text-recognized"));
     let mut f = Followup::default().next_turn();
     f.on_event(VaEvent::RunStart, false);
@@ -727,6 +756,40 @@ fn followup_silence_is_quiet_only_before_speech() {
     assert!(!f.silent("stt-stream-failed"));
     f.on_event(VaEvent::SttVadStart, false);
     assert!(!f.silent("stt-no-text-recognized"));
+}
+
+#[test]
+fn no_reply_requires_empty_stt_result_in_this_run() {
+    for followup in [false, true] {
+        for vad in [false, true] {
+            let mut f = Followup::default();
+            if followup {
+                f = f.next_turn();
+            }
+            run(&mut f, &[VaEvent::RunStart, VaEvent::SttStart]);
+            if vad {
+                f.on_event(VaEvent::SttVadStart, false);
+            }
+            let mut without_error = f;
+            without_error.on_event(VaEvent::RunEnd, false);
+            assert!(!without_error.ended_without_text());
+
+            f.on_event(VaEvent::Error, false);
+            f.record_error("stt-no-text-recognized");
+            f.on_event(VaEvent::RunEnd, false);
+            assert!(f.ended_without_text());
+            assert!(!f.next_turn().ended_without_text());
+
+            let mut next_run = f;
+            next_run.on_event(VaEvent::RunStart, false);
+            assert!(!next_run.ended_without_text());
+
+            f.on_event(VaEvent::Error, false);
+            f.record_error("stt-stream-failed");
+            f.on_event(VaEvent::RunEnd, false);
+            assert!(!f.ended_without_text());
+        }
+    }
 }
 
 /// Новый каталог во временном каталоге системы; удаляется при drop.
