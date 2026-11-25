@@ -136,7 +136,7 @@ pub struct Controller {
     updater: UpdaterHandle,
     arbiter: ArbiterHandle,
     /// Held only: the input actor runs while its handle exists.
-    _input: Option<InputHandle>,
+    _input: InputHandle,
     clock: pulsar_clock::ClockHandle,
     leds: LedsHandle,
     mixer: Mixer,
@@ -445,14 +445,8 @@ impl Controller {
         let (updater, updater_rx) =
             pulsar_update::spawn(pulsar_update::UPDATE_REPO.into(), VERSION.into());
 
-        let (input, input_rx) = match pulsar_hw::spawn_input(model) {
-            Ok((h, rx)) => (Some(h), Some(rx)),
-            Err(e) => {
-                warn!("{e}");
-                (None, None)
-            }
-        };
-        let hw_mic_muted = input.as_ref().is_some_and(InputHandle::hw_muted);
+        let (input, input_rx) = pulsar_hw::spawn_input(model);
+        let hw_mic_muted = input.hw_muted();
         let (mic, mic_rx) =
             pulsar_audio::spawn(model, wake_dirs, Some(PathBuf::from(COMMAND_MODEL)));
         mic.set_command_offset(st.command_start_offset_ms);
@@ -566,7 +560,7 @@ impl Controller {
                 frontend: Some(mic_rx),
                 player: Some(player_rx),
                 arbiter: Some(arbiter_rx),
-                input: input_rx,
+                input: Some(input_rx),
                 lux: lux_rx,
                 sendspin: sendspin_rx,
                 zigbee: zigbee_rx,

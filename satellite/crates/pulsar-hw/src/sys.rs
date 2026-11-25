@@ -201,6 +201,11 @@ impl Evdev {
             .map(Self)
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_test_file(file: File) -> Self {
+        Self(file)
+    }
+
     /// Registers the device with the runtime's reactor for reading.
     pub fn into_async(self) -> io::Result<AsyncFd<Evdev>> {
         // SAFETY: the AsyncFd owns the file and never replaces it, so its descriptor stays open
@@ -221,9 +226,7 @@ impl Evdev {
 
     fn eviocg<const N: usize>(&self, nr: u32) -> io::Result<[u8; N]> {
         let mut bits = [0u8; N];
-        // SAFETY: `self` is an evdev node (Evdev is only created by open()), for which this
-        // request copies at most `N` bytes, the length encoded in it, into `bits`, which is
-        // writable for `N` bytes.
+        // SAFETY: запрос кодирует длину N, а bits доступен для записи на N байт.
         let r = unsafe { libc::ioctl(self.as_raw_fd(), evioc_read(nr, N), bits.as_mut_ptr()) };
         if r < 0 {
             Err(io::Error::last_os_error())
@@ -241,11 +244,6 @@ impl Evdev {
     pub fn switch_state(&self) -> io::Result<SwBits> {
         self.eviocg(0x1b)
     }
-
-    /// EVIOCGBIT(EV_KEY): коды клавиш, которые устройство умеет отдавать.
-    pub fn key_caps(&self) -> io::Result<KeyBits> {
-        self.eviocg(0x21)
-    }
 }
 
 #[cfg(test)]
@@ -254,9 +252,8 @@ mod tests {
 
     #[test]
     fn evdev_ioctl_numbers_match_the_kernel_macros() {
-        // EVIOCGKEY(96), EVIOCGSW(8) и EVIOCGBIT(EV_KEY, 96), как их считает препроцессор C.
+        // EVIOCGKEY(96) и EVIOCGSW(8), как их считает препроцессор C.
         assert_eq!(evioc_read(0x18, 96) as u64, 0x8060_4518);
         assert_eq!(evioc_read(0x1b, 8) as u64, 0x8008_451b);
-        assert_eq!(evioc_read(0x21, 96) as u64, 0x8060_4521);
     }
 }

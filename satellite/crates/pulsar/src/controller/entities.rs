@@ -449,14 +449,14 @@ impl Controller {
 
     pub(super) fn on_input(&mut self, ev: InputEvent) {
         match ev {
-            InputEvent::Mute(m) => {
+            InputEvent::Mute(m) | InputEvent::MuteSync(m) => {
                 if m {
                     self.cancel_arbitration();
                 }
                 self.hw_mic_muted = m;
                 info!("hardware mic mute: {}", u8::from(m));
                 self.api.publish_binary_sensor(BinarySensorId::HwMicMute, m);
-                let sw_muted = logic::sw_mute_after_button(self.st.mic_muted, m);
+                let sw_muted = logic::sw_mute_after_hw_event(self.st.mic_muted, ev);
                 if sw_muted != self.st.mic_muted {
                     info!("mute button lifted the mute from Home Assistant");
                     self.st.mic_muted = sw_muted;

@@ -6,9 +6,8 @@
 //! Мини 2: сенсорные кнопки "sar0_pad0", устройства-переключателя нет: фиксируемая линия
 //! отключения микрофонов — GPIO (`Model::mute_gpio`, низкий уровень = микрофоны выключены),
 //! опрос каждые 100 мс. Мини: клавиатура "adc_keypad" только с кнопкой отключения микрофонов без
-//! фиксации. Лайт: сенсорные кнопки "sar0_pad0", кнопка отключения микрофонов без фиксации —
-//! отдельное устройство "gpio-keys-filter" (`Model::mute_key_input`, только KEY_MUTE, без EV_SW).
-//! Без устройства с именем из Model сенсорные кнопки ищутся по кодам (`pick_keys_dev`).
+//! фиксации. Лайт: сенсорные кнопки "sar0_pad0" или "cy8cmbr3108", кнопка отключения микрофонов
+//! без фиксации — отдельное устройство "gpio-keys-filter" (`Model::mute_key_input`, только KEY_MUTE).
 //! У остальных коды кнопок и переключателя общие:
 //!
 //! сенсорные кнопки (ёмкостные, только EV_KEY; KEY bitmap Миди "40 0 0 0 0 0 0 0 c000000000000 0"):
@@ -87,6 +86,8 @@ pub enum InputEvent {
     Button(Button, Press),
     /// Hardware mic mute switch changed (true = muted).
     Mute(bool),
+    /// Изменение блокировки при потере или синхронизации положения переключателя.
+    MuteSync(bool),
     /// Momentary mute button that does not latch the microphone itself (the Mini's KEY_MUTE):
     /// the controller toggles its software mute.
     MuteToggle,
@@ -96,80 +97,52 @@ pub enum InputEvent {
 #[derive(Clone)]
 pub struct InputHandle {
     muted: Rc<Cell<bool>>,
+    available: Rc<Cell<bool>>,
     _alive: UnboundedSender<()>,
 }
 
 impl InputHandle {
-    /// Состояние переключателя микрофонов: читается при старте (без события `Mute`), затем актор
-    /// обновляет его перед каждым `Mute` и при переоткрытии. Без переключателя (Мини, Лайт —
-    /// кнопка без фиксации) всегда false.
+    /// При неизвестном положении аппаратного переключателя микрофоны заблокированы.
+    /// Без аппаратного переключателя всегда false.
     pub fn hw_muted(&self) -> bool {
         self.muted.get()
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.available.get()
     }
 }
 
 /// Открывает сенсорные кнопки (`Model::keys_input`) и источник отключения микрофонов:
 /// переключатель (`Model::mute_input` или GPIO `Model::mute_gpio`) либо отдельное устройство
-/// кнопки без фиксации (`Model::mute_key_input`); Err, если не открылось ничего. Пропавшие
-/// устройства ищутся заново каждые 3 с.
-pub fn spawn_input(
+/// кнопки без фиксации (`Model::mute_key_input`). Недоступные устройства ищутся каждые 3 с,
+/// даже если при запуске не открылось ни одного.
+pub fn spawn_input(model: &'static Model) -> (InputHandle, UnboundedReceiver<InputEvent>) {
+    spawn_input_with(model, read_input_devices, Evdev::open)
+}
+
+fn spawn_input_with(
     model: &'static Model,
-) -> Result<(InputHandle, UnboundedReceiver<InputEvent>), String> {
-    let mut keys_miss = String::new();
-    let keys = open_keys(model, false, &mut keys_miss);
-    let mute_name = mute_dev_name(model);
-    let mute = (!mute_name.is_empty())
-        .then(|| open_dev(mute_name, false))
-        .flatten();
-    let mute_gpio = if model.mute_gpio == 0 {
-        None
-    } else {
-        open_mute_gpio(GPIO_DIR, model.mute_gpio, false)
-    };
-    if keys.is_none() && mute.is_none() && mute_gpio.is_none() {
-        return Err("input devices unavailable".to_owned());
-    }
+    list: impl Fn() -> String + 'static,
+    open: impl Fn(&str) -> io::Result<Evdev> + 'static,
+) -> (InputHandle, UnboundedReceiver<InputEvent>) {
     let muted = Rc::new(Cell::new(false));
+    let available = Rc::new(Cell::new(false));
     let (tx, rx) = unbounded_channel();
-    let mut m = Machine::new(Rc::clone(&muted), tx, model.action_key, model.mute_key);
-    m.mute_is_switch = mute_dev_is_switch(model);
-    // The state the controller starts from: no event for it.
-    if m.mute_is_switch
-        && let Some(fd) = &mute
-    {
-        m.read_mute_state(fd.get_ref().switch_state(), false);
-    }
-    if let Some(f) = &mute_gpio
-        && let Ok(v) = gpio_muted(f)
-    {
-        m.set_muted(v, false);
-    }
-    if (m.mute_is_switch && mute.is_some()) || mute_gpio.is_some() {
-        info!(
-            "input: initial hardware mute {}",
-            if muted.get() { "on" } else { "off" }
-        );
-    }
+    let mut m = Machine::new(Rc::clone(&muted), tx, model);
+    let mut devs = Devices::empty(model, Rc::clone(&available));
+    devs.open_missing(&mut m, &list, &open, true);
     m.arm_repeating(Tick::Reopen, REOPEN_MS, REOPEN_MS);
-    if mute_gpio.is_some() {
-        m.arm_repeating(Tick::MuteGpio, GPIO_POLL_MS, GPIO_POLL_MS);
-    }
     let (alive_tx, alive_rx) = unbounded_channel();
-    let devs = Devices {
-        model,
-        keys,
-        keys_miss,
-        mute,
-        mute_gpio,
-    };
-    pulsar_core::actors::spawn_actor("input", run(m, devs, alive_rx));
-    Ok((
+    pulsar_core::actors::spawn_actor("input", run(m, devs, alive_rx, list, open));
+    (
         InputHandle {
             muted,
+            available,
             _alive: alive_tx,
         },
         rx,
-    ))
+    )
 }
 
 /// Устройство в слоте «mute»: переключатель микрофонов (`Model::mute_input`) или, если его нет,
@@ -187,79 +160,33 @@ fn mute_dev_is_switch(model: &Model) -> bool {
     !model.mute_input.is_empty()
 }
 
-/// Устройство ввода из /proc/bus/input/devices.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct InputDev {
-    name: String,
-    /// /dev/input/eventN.
-    path: String,
-    /// `I: Bus=`, BUS_* из linux/input.h.
-    bus: u16,
+/// Имя и обработчик должны быть в одном блоке /proc/bus/input/devices.
+fn event_handlers(devices: &str) -> impl Iterator<Item = (&str, &str)> {
+    devices.split("\n\n").filter_map(|block| {
+        let name = block
+            .lines()
+            .find_map(|line| line.strip_prefix("N: Name=\"")?.strip_suffix('"'))?;
+        let handler = block
+            .lines()
+            .find_map(|line| line.strip_prefix("H: Handlers="))?
+            .split_whitespace()
+            .find(|t| {
+                t.strip_prefix("event")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            })?;
+        Some((name, handler))
+    })
 }
 
-// Шины подключаемых и программных устройств: USB- и BT-клавиатуры, пульты и uinput тоже бывают с
-// KEY_VOICECOMMAND и громкостью, но кнопками станции не бывают.
-const BUS_USB: u16 = 0x03;
-const BUS_BLUETOOTH: u16 = 0x05;
-const BUS_VIRTUAL: u16 = 0x06;
-
-/// Устройства с обработчиком event в листинге /proc/bus/input/devices, в порядке листинга.
-fn event_devs_in(devices: &str) -> Vec<InputDev> {
-    let mut out = Vec::new();
-    let (mut name, mut bus) = (None, 0);
-    for line in devices.split('\n') {
-        if let Some(i) = line.strip_prefix("I: Bus=") {
-            let hex = i.split_whitespace().next().unwrap_or_default();
-            bus = u16::from_str_radix(hex, 16).unwrap_or(0);
-        } else if let Some(n) = line.strip_prefix("N: Name=") {
-            name = n.strip_prefix('"').and_then(|n| n.strip_suffix('"'));
-        } else if let Some(handlers) = line.strip_prefix("H: Handlers=") {
-            if let Some(n) = name.take()
-                && let Some(ev) = handlers.split_whitespace().find(|t| t.starts_with("event"))
-            {
-                out.push(InputDev {
-                    name: n.to_owned(),
-                    path: format!("/dev/input/{ev}"),
-                    bus,
-                });
-            }
-        } else if line.is_empty() {
-            (name, bus) = (None, 0);
-        }
-    }
-    out
-}
-
-/// /dev/input/eventN of the device with the given name in a /proc/bus/input/devices listing.
-fn find_event_dev_in(devices: &str, name: &str) -> Option<String> {
-    event_devs_in(devices)
-        .into_iter()
-        .find(|d| d.name == name)
-        .map(|d| d.path)
-}
-
-/// Устройство сенсорных кнопок: `Model::keys_input` по имени, а если его нет — первое, у которого
-/// есть все коды кнопок (`has_keys`). Не берутся устройство слота «mute» (его читает свой слот) и
-/// подключаемые или программные; см. docs/lite.md, «Кнопки и микрофоны».
-fn pick_keys_dev<'a>(
-    devs: &'a [InputDev],
-    model: &Model,
-    mut has_keys: impl FnMut(&InputDev) -> bool,
-) -> Option<&'a InputDev> {
-    if model.keys_input.is_empty() {
-        return None;
-    }
-    if let Some(d) = devs.iter().find(|d| d.name == model.keys_input) {
-        return Some(d);
-    }
-    if model.action_key == 0 {
-        return None;
-    }
-    let mute_name = mute_dev_name(model);
-    devs.iter().find(|d| {
-        (mute_name.is_empty() || d.name != mute_name)
-            && !matches!(d.bus, BUS_USB | BUS_BLUETOOTH | BUS_VIRTUAL)
-            && has_keys(d)
+fn try_named<T>(
+    devices: &str,
+    names: &[&str],
+    mut open: impl FnMut(&str, &str) -> Option<T>,
+) -> Option<T> {
+    names.iter().filter(|n| !n.is_empty()).find_map(|&name| {
+        event_handlers(devices)
+            .filter(|(n, _)| *n == name)
+            .find_map(|(_, handler)| open(name, handler))
     })
 }
 
@@ -267,73 +194,28 @@ fn read_input_devices() -> String {
     pulsar_core::sysfs::read_file("/proc/bus/input/devices").unwrap_or_default()
 }
 
-fn open_dev(name: &str, quiet: bool) -> Option<AsyncFd<Evdev>> {
-    let Some(path) = find_event_dev_in(&read_input_devices(), name) else {
-        if !quiet {
-            error!("input: device \"{name}\" not found");
-        }
-        return None;
-    };
-    open_evdev(&path, quiet).and_then(|dev| register_dev(dev, name, &path))
-}
-
-/// Открывает устройство `pick_keys_dev`. `miss` — листинг /proc/bus/input/devices прошлого поиска,
-/// не нашедшего устройства: пока листинг тот же, перебор не повторяется (переоткрытие идёт каждые
-/// `REOPEN_MS`, а первый open и последний close evdev будят драйвер устройства). Если проверка
-/// кандидата не удалась (open или EVIOCGBIT вернули ошибку), листинг не запоминается: ответ «кодов
-/// нет» недостоверен, и следующий тик таймера переберёт устройства снова.
-fn open_keys(model: &Model, quiet: bool, miss: &mut String) -> Option<AsyncFd<Evdev>> {
-    if model.keys_input.is_empty() {
-        return None;
-    }
-    let devices = read_input_devices();
-    if !miss.is_empty() && devices == *miss {
-        return None;
-    }
-    let devs = event_devs_in(&devices);
-    let codes = [model.action_key, KEY_VOLUMEUP, KEY_VOLUMEDOWN];
-    let probe_failed = Cell::new(false);
-    let found = pick_keys_dev(&devs, model, |d| {
-        match Evdev::open(&d.path).and_then(|dev| dev.key_caps()) {
-            Ok(caps) => codes.iter().all(|&c| test_bit(&caps, c)),
+fn open_dev(
+    devices: &str,
+    names: &[&str],
+    quiet: bool,
+    open: impl Fn(&str) -> io::Result<Evdev>,
+) -> Option<AsyncFd<Evdev>> {
+    let fd = try_named(devices, names, |name, handler| {
+        let path = format!("/dev/input/{handler}");
+        match open(&path) {
+            Ok(dev) => register_dev(dev, name, &path),
             Err(e) => {
-                debug!("input: probe {}: {}", d.path, crate::errstr(&e));
-                probe_failed.set(true);
-                false
+                if !quiet {
+                    error!("input: open {path}: {}", crate::errstr(&e));
+                }
+                None
             }
         }
     });
-    let Some(d) = found else {
-        if !quiet {
-            error!("input: device \"{}\" not found", model.keys_input);
-        }
-        if probe_failed.get() {
-            miss.clear();
-        } else {
-            *miss = devices;
-        }
-        return None;
-    };
-    miss.clear();
-    if d.name != model.keys_input {
-        info!(
-            "input: no \"{}\", buttons found by their key codes",
-            model.keys_input
-        );
+    if fd.is_none() && !quiet && names.iter().any(|n| !n.is_empty()) {
+        error!("input: no usable device among {names:?}");
     }
-    open_evdev(&d.path, quiet).and_then(|dev| register_dev(dev, &d.name, &d.path))
-}
-
-fn open_evdev(path: &str, quiet: bool) -> Option<Evdev> {
-    match Evdev::open(path) {
-        Ok(d) => Some(d),
-        Err(e) => {
-            if !quiet {
-                error!("input: open {path}: {}", crate::errstr(&e));
-            }
-            None
-        }
-    }
+    fd
 }
 
 fn register_dev(dev: Evdev, name: &str, path: &str) -> Option<AsyncFd<Evdev>> {
@@ -353,7 +235,7 @@ fn register_dev(dev: Evdev, name: &str, path: &str) -> Option<AsyncFd<Evdev>> {
 /// global GPIO number only names this pin on the kernel it was read from (on the Midi, 475 is
 /// Wi-Fi SDIO), so the line is never configured: no `direction`, no `edge` write, and it is used
 /// only when it already is an input.
-fn open_mute_gpio(dir: &str, gpio: u32, quiet: bool) -> Option<File> {
+fn open_mute_gpio(dir: &str, gpio: u32, quiet: bool) -> Option<(File, bool)> {
     let line = format!("{dir}/gpio{gpio}");
     if !Path::new(&line).exists() {
         pulsar_core::sysfs::write_file(&format!("{dir}/export"), &gpio.to_string());
@@ -368,11 +250,11 @@ fn open_mute_gpio(dir: &str, gpio: u32, quiet: bool) -> Option<File> {
     }
     let path = format!("{line}/value");
     // A value file that opens but cannot be read is no switch either.
-    let opened = File::open(&path).and_then(|f| gpio_muted(&f).map(|_| f));
+    let opened = File::open(&path).and_then(|f| gpio_muted(&f).map(|muted| (f, muted)));
     match opened {
-        Ok(f) => {
+        Ok(value) => {
             info!("input: mute switch on gpio{gpio}");
-            Some(f)
+            Some(value)
         }
         Err(e) => {
             if !quiet {
@@ -389,7 +271,11 @@ fn gpio_muted(f: &File) -> io::Result<bool> {
     if f.read_at(&mut b, 0)? == 0 {
         return Err(io::ErrorKind::UnexpectedEof.into());
     }
-    Ok(b[0] == b'0')
+    match b[0] {
+        b'0' => Ok(true),
+        b'1' => Ok(false),
+        _ => Err(io::ErrorKind::InvalidData.into()),
+    }
 }
 
 fn test_bit(bits: &[u8], n: u16) -> bool {
@@ -425,9 +311,12 @@ struct Machine {
     action_key: u16,
     /// Momentary mic mute button of this model (`Model::mute_key`); 0: none.
     mute_key: u16,
+    mute_key_dev: Dev,
     /// Устройство в слоте «mute» — переключатель (EV_SW, состояние через EVIOCGSW); false —
     /// кнопка без фиксации (`Model::mute_key_input`), у неё только нажатия `mute_key`.
     mute_is_switch: bool,
+    /// Неизвестно до чтения положения и после потери аппаратного переключателя.
+    mute_position: Option<bool>,
     /// Press time; None = not pressed.
     action_down: Option<i64>,
     last_action_ms: Option<i64>,
@@ -451,20 +340,22 @@ fn volume_button(code: u16) -> Button {
 }
 
 impl Machine {
-    fn new(
-        muted: Rc<Cell<bool>>,
-        tx: UnboundedSender<InputEvent>,
-        action_key: u16,
-        mute_key: u16,
-    ) -> Self {
+    fn new(muted: Rc<Cell<bool>>, tx: UnboundedSender<InputEvent>, model: &Model) -> Self {
+        muted.set(mute_dev_is_switch(model) || model.mute_gpio != 0);
         Self {
             timers: Timers::new(),
             epoch: Instant::now(),
             muted,
             tx,
-            action_key,
-            mute_key,
-            mute_is_switch: true,
+            action_key: model.action_key,
+            mute_key: model.mute_key,
+            mute_key_dev: if model.mute_key_input.is_empty() {
+                Dev::Keys
+            } else {
+                Dev::Mute
+            },
+            mute_is_switch: mute_dev_is_switch(model),
+            mute_position: None,
             action_down: None,
             last_action_ms: None,
             action_long_sent: false,
@@ -531,14 +422,6 @@ impl Machine {
 
     fn on_key(&mut self, code: u16, value: i32) {
         let now = self.now();
-        if self.mute_key != 0 && code == self.mute_key {
-            // value 1 is the press; 2 is autorepeat and 0 the release.
-            if value == 1 {
-                info!("input: mute button");
-                let _ = self.tx.send(InputEvent::MuteToggle);
-            }
-            return;
-        }
         if self.action_key != 0 && code == self.action_key {
             if value == 1 && self.action_down.is_none() {
                 self.action_down = Some(now);
@@ -624,23 +507,27 @@ impl Machine {
         }
     }
 
-    /// `notify`: send `Mute` on a change (false only for the state read at spawn).
-    fn set_muted(&mut self, m: bool, notify: bool) {
-        if m == self.muted.get() {
+    fn set_mute_position(&mut self, position: Option<bool>, notify: bool) {
+        let previous = std::mem::replace(&mut self.mute_position, position);
+        let muted = position.unwrap_or(true);
+        if self.muted.replace(muted) == muted {
             return;
         }
-        self.muted.set(m);
-        info!("input: hardware mute {}", if m { "on" } else { "off" });
+        info!("input: hardware mute {}", if muted { "on" } else { "off" });
         if notify {
-            let _ = self.tx.send(InputEvent::Mute(m));
+            let event = if previous.is_some() && position.is_some() {
+                InputEvent::Mute(muted)
+            } else {
+                InputEvent::MuteSync(muted)
+            };
+            let _ = self.tx.send(event);
         }
     }
 
-    fn read_mute_state(&mut self, bits: io::Result<SwBits>, notify: bool) {
-        match bits {
-            Ok(b) => self.set_muted(test_bit(&b, SW_MUTE_DEVICE), notify),
-            Err(e) => warn!("input: EVIOCGSW: {}", crate::errstr(&e)),
-        }
+    fn read_mute_state(&mut self, bits: io::Result<SwBits>, notify: bool) -> io::Result<()> {
+        let bits = bits.inspect_err(|e| warn!("input: EVIOCGSW: {}", crate::errstr(e)))?;
+        self.set_mute_position(Some(test_bit(&bits, SW_MUTE_DEVICE)), notify);
+        Ok(())
     }
 
     /// Key state after lost events: synthesize the releases we missed (presses are not
@@ -673,7 +560,7 @@ impl Machine {
         events: &[RawInputEvent],
         key_state: &mut dyn FnMut() -> io::Result<KeyBits>,
         switch_state: &mut dyn FnMut() -> io::Result<SwBits>,
-    ) {
+    ) -> io::Result<()> {
         for e in events {
             let dropped = match dev {
                 Dev::Keys => self.keys_dropped,
@@ -683,12 +570,15 @@ impl Machine {
                 if e.code == SYN_DROPPED {
                     warn!("input: events dropped on fd {fd}, resyncing");
                     self.set_dropped(dev, true);
+                    if dev == Dev::Mute && self.mute_is_switch {
+                        self.set_mute_position(None, true);
+                    }
                 } else if e.code == SYN_REPORT && dropped {
                     self.set_dropped(dev, false);
                     match dev {
                         Dev::Keys => self.resync_keys(key_state()),
                         Dev::Mute if self.mute_is_switch => {
-                            self.read_mute_state(switch_state(), true);
+                            self.read_mute_state(switch_state(), true)?;
                         }
                         // Кнопка без фиксации: пропущенное нажатие не восстановить.
                         Dev::Mute => {}
@@ -699,21 +589,22 @@ impl Machine {
             if dropped {
                 continue;
             }
-            if e.type_ == EV_KEY && dev == Dev::Keys {
-                self.on_key(e.code, e.value);
-            } else if e.type_ == EV_KEY
-                && dev == Dev::Mute
-                && !self.mute_is_switch
-                && self.mute_key != 0
-                && e.code == self.mute_key
-            {
-                // KEY_MUTE переключателя игнорируется (источник правды — EV_SW), а у отдельной
-                // кнопки без фиксации это и есть нажатие.
-                self.on_key(e.code, e.value);
-            } else if e.type_ == EV_SW && e.code == SW_MUTE_DEVICE && self.mute_is_switch {
-                self.set_muted(e.value != 0, true);
+            match e.type_ {
+                EV_KEY if self.mute_key != 0 && e.code == self.mute_key => {
+                    // 2 — автоповтор, 0 — отпускание; ни то ни другое не меняет mute.
+                    if dev == self.mute_key_dev && e.value == 1 {
+                        info!("input: mute button");
+                        let _ = self.tx.send(InputEvent::MuteToggle);
+                    }
+                }
+                EV_KEY if dev == Dev::Keys => self.on_key(e.code, e.value),
+                EV_SW if dev == Dev::Mute && self.mute_is_switch && e.code == SW_MUTE_DEVICE => {
+                    self.set_mute_position(Some(e.value != 0), true);
+                }
+                _ => {}
             }
         }
+        Ok(())
     }
 
     fn set_dropped(&mut self, dev: Dev, v: bool) {
@@ -726,15 +617,29 @@ impl Machine {
 
 struct Devices {
     model: &'static Model,
+    available: Rc<Cell<bool>>,
     keys: Option<AsyncFd<Evdev>>,
-    /// Листинг устройств ввода, в котором `open_keys` кнопок не нашёл.
-    keys_miss: String,
     mute: Option<AsyncFd<Evdev>>,
     /// Value file of `Model::mute_gpio`.
     mute_gpio: Option<File>,
 }
 
 impl Devices {
+    fn empty(model: &'static Model, available: Rc<Cell<bool>>) -> Self {
+        Self {
+            model,
+            available,
+            keys: None,
+            mute: None,
+            mute_gpio: None,
+        }
+    }
+
+    fn update_availability(&self) {
+        self.available
+            .set(self.keys.is_some() || self.mute.is_some() || self.mute_gpio.is_some());
+    }
+
     fn get(&self, dev: Dev) -> Option<&AsyncFd<Evdev>> {
         match dev {
             Dev::Keys => self.keys.as_ref(),
@@ -749,32 +654,58 @@ impl Devices {
                 m.release_all();
                 self.keys = None;
             }
-            Dev::Mute => self.mute = None,
+            Dev::Mute => {
+                self.mute = None;
+                if m.mute_is_switch {
+                    m.set_mute_position(None, true);
+                }
+            }
         }
+        self.update_availability();
     }
 
-    /// Devices that were missing at start or vanished (ENODEV) are looked up again.
-    fn reopen_missing(&mut self, m: &mut Machine) {
-        if self.keys.is_none() {
-            self.keys = open_keys(self.model, true, &mut self.keys_miss);
-            m.keys_dropped = false;
-        }
+    fn open_missing(
+        &mut self,
+        m: &mut Machine,
+        list: impl Fn() -> String,
+        open: impl Fn(&str) -> io::Result<Evdev>,
+        initial: bool,
+    ) {
         let mute_name = mute_dev_name(self.model);
-        if self.mute.is_none() && !mute_name.is_empty() {
-            self.mute = open_dev(mute_name, true);
+        let need_keys = self.keys.is_none() && !self.model.keys_input.is_empty();
+        let need_mute = self.mute.is_none() && !mute_name.is_empty();
+        if need_keys || need_mute {
+            let devices = list();
+            if need_keys {
+                self.keys = open_dev(&devices, self.model.keys_input, !initial, &open);
+                m.keys_dropped = false;
+            }
+            if need_mute {
+                self.mute = open_dev(&devices, &[mute_name], !initial, &open);
+            }
+        }
+        if need_mute {
             m.mute_dropped = false;
             if m.mute_is_switch
                 && let Some(fd) = &self.mute
+                && m.read_mute_state(fd.get_ref().switch_state(), !initial)
+                    .is_err()
             {
-                m.read_mute_state(fd.get_ref().switch_state(), true);
+                self.close(Dev::Mute, m);
             }
         }
-        if self.mute_gpio.is_none() && self.model.mute_gpio != 0 {
-            self.mute_gpio = open_mute_gpio(GPIO_DIR, self.model.mute_gpio, true);
-            if self.mute_gpio.is_some() {
-                m.arm_repeating(Tick::MuteGpio, GPIO_POLL_MS, GPIO_POLL_MS);
-                self.poll_mute_gpio(m);
-            }
+        self.open_gpio(m, GPIO_DIR, initial);
+        self.update_availability();
+    }
+
+    fn open_gpio(&mut self, m: &mut Machine, dir: &str, initial: bool) {
+        if self.mute_gpio.is_none()
+            && self.model.mute_gpio != 0
+            && let Some((file, muted)) = open_mute_gpio(dir, self.model.mute_gpio, !initial)
+        {
+            self.mute_gpio = Some(file);
+            m.set_mute_position(Some(muted), !initial);
+            m.arm_repeating(Tick::MuteGpio, GPIO_POLL_MS, GPIO_POLL_MS);
         }
     }
 
@@ -784,7 +715,7 @@ impl Devices {
     fn poll_mute_gpio(&mut self, m: &mut Machine) {
         let Some(f) = &self.mute_gpio else { return };
         match gpio_muted(f) {
-            Ok(v) => m.set_muted(v, true),
+            Ok(v) => m.set_mute_position(Some(v), true),
             Err(e) => {
                 error!(
                     "input: read gpio{}: {}",
@@ -792,6 +723,8 @@ impl Devices {
                     crate::errstr(&e)
                 );
                 self.mute_gpio = None;
+                m.set_mute_position(None, true);
+                self.update_availability();
                 m.disarm(Tick::MuteGpio);
             }
         }
@@ -807,13 +740,19 @@ async fn readable(fd: Option<&AsyncFd<Evdev>>) -> io::Result<()> {
     }
 }
 
-async fn run(mut m: Machine, mut devs: Devices, mut alive: UnboundedReceiver<()>) {
+async fn run(
+    mut m: Machine,
+    mut devs: Devices,
+    mut alive: UnboundedReceiver<()>,
+    list: impl Fn() -> String,
+    open: impl Fn(&str) -> io::Result<Evdev>,
+) {
     let mut buf = [sys::EMPTY_EVENT; 16];
     loop {
         tokio::select! {
             biased;
             t = m.timers.next() => match t {
-                Tick::Reopen => devs.reopen_missing(&mut m),
+                Tick::Reopen => devs.open_missing(&mut m, &list, &open, false),
                 Tick::MuteGpio => devs.poll_mute_gpio(&mut m),
                 t => m.on_tick(t, |m| {
                     drain(m, &mut devs, Dev::Keys, &mut buf, Read::Now);
@@ -853,7 +792,6 @@ enum Read {
 
 /// Reads everything `dev` has (until EAGAIN); a read error closes it for the reopen timer.
 fn drain(m: &mut Machine, devs: &mut Devices, dev: Dev, buf: &mut [RawInputEvent], how: Read) {
-    let no_dev = || io::Error::from(io::ErrorKind::NotFound);
     loop {
         let Some(fd) = devs.get(dev) else { return };
         let r = match how {
@@ -862,16 +800,23 @@ fn drain(m: &mut Machine, devs: &mut Devices, dev: Dev, buf: &mut [RawInputEvent
             Read::Now => fd.get_ref().read_events(buf),
         };
         match r {
-            Ok(0) => return,
+            Ok(0) => {
+                devs.close(dev, m);
+                return;
+            }
             Ok(n) => {
-                let (keys, mute) = (devs.keys.as_ref(), devs.mute.as_ref());
-                m.process(
+                if m.process(
                     dev,
                     fd.as_raw_fd(),
                     &buf[..n],
-                    &mut || keys.map_or_else(|| Err(no_dev()), |k| k.get_ref().key_state()),
-                    &mut || mute.map_or_else(|| Err(no_dev()), |k| k.get_ref().switch_state()),
-                );
+                    &mut || fd.get_ref().key_state(),
+                    &mut || fd.get_ref().switch_state(),
+                )
+                .is_err()
+                {
+                    devs.close(dev, m);
+                    return;
+                }
             }
             Err(e)
                 if matches!(

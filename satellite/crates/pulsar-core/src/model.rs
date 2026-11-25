@@ -63,8 +63,9 @@ pub struct Model {
     /// info.
     pub has_clock: bool,
 
-    /// evdev device names; `mute_input` "" = no switch device.
-    pub keys_input: &'static str,
+    /// Имена evdev в порядке предпочтения для ревизий с разными контроллерами кнопок.
+    pub keys_input: &'static [&'static str],
+    /// Имя аппаратного переключателя evdev; пусто, если такого устройства нет.
     pub mute_input: &'static str,
     /// Mic mute on a sysfs GPIO instead of an evdev switch: global GPIO number, 0 = none; active
     /// low, exported if needed but never configured (used only when already an input).
@@ -243,7 +244,7 @@ static MIDI: Model = Model {
     clock_center: "",
     clock_chip_current: true,
     has_clock: true,
-    keys_input: "awinic_sar",
+    keys_input: &["awinic_sar"],
     mute_input: "mute",
     mute_gpio: 0,
     action_key: 582,
@@ -306,7 +307,7 @@ static LITE2: Model = Model {
     clock_center: "DM",
     clock_chip_current: false,
     has_clock: true,
-    keys_input: "aw9610x",
+    keys_input: &["aw9610x"],
     mute_input: "gpio-keys",
     mute_gpio: 0,
     action_key: 582,
@@ -336,7 +337,7 @@ static PRUNE: Model = Model {
     codename: "prune",
     clock_dir: "",
     has_clock: false,
-    keys_input: "aw933xx",
+    keys_input: &["aw933xx"],
     has_lux: false,
     ..LITE2
 };
@@ -386,7 +387,7 @@ static LITE: Model = Model {
     clock_center: "",
     clock_chip_current: false,
     has_clock: false,
-    keys_input: "sar0_pad0",
+    keys_input: &["sar0_pad0", "cy8cmbr3108"],
     mute_input: "",
     mute_gpio: 0,
     action_key: 582,
@@ -447,7 +448,7 @@ static MINI2: Model = Model {
     clock_center: "",
     clock_chip_current: false,
     has_clock: false,
-    keys_input: "sar0_pad0",
+    keys_input: &["sar0_pad0"],
     mute_input: "",
     // GPIOZ_3: см. docs/mini2.md, «Кнопки и микрофоны».
     mute_gpio: 414,
@@ -510,7 +511,7 @@ static MINI: Model = Model {
     clock_center: "",
     clock_chip_current: false,
     has_clock: false,
-    keys_input: "adc_keypad",
+    keys_input: &["adc_keypad"],
     mute_input: "",
     mute_gpio: 0,
     // The retail Mini has no TALK pad and no volume keys: adc_keypad sends only KEY_MUTE.
@@ -586,7 +587,7 @@ static MINI3: Model = Model {
     clock_chip_current: false,
     // Sold with and without the LED clock (AW21036): segments are looked up at start.
     has_clock: false,
-    keys_input: "aw933xx",
+    keys_input: &["aw933xx"],
     mute_input: "gpio-keys",
     mute_gpio: 0,
     action_key: 582,
@@ -656,7 +657,7 @@ static MINI3PRO: Model = Model {
     clock_center: "DM",
     clock_chip_current: false,
     has_clock: true,
-    keys_input: "aw933xx",
+    keys_input: &["aw933xx"],
     mute_input: "mute",
     mute_gpio: 0,
     action_key: 582,
@@ -717,7 +718,7 @@ static STATION2: Model = Model {
     clock_center: "",
     clock_chip_current: false,
     has_clock: false,
-    keys_input: "midi_touch",
+    keys_input: &["midi_touch"],
     mute_input: "gpio-keys",
     mute_gpio: 0,
     action_key: 582,
@@ -874,7 +875,7 @@ mod tests {
         // devicetree станции из #57.
         let m = model_from_compatible(b"yandex,prune-evt2\0yandex,prune\0amlogic, axg\0").unwrap();
         assert_eq!(m.codename, "prune");
-        assert_eq!(m.keys_input, "aw933xx");
+        assert_eq!(m.keys_input, ["aw933xx"]);
         assert!(!m.has_clock && !m.has_lux);
         assert_eq!(m.clock_dir, "");
         // Звуковой тракт и светодиоды — как у plum.

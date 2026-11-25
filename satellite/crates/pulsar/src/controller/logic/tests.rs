@@ -637,11 +637,17 @@ fn microphones_mutes() {
             "on={on} sw={sw} hw={hw}"
         );
     }
-    // Muted from HA only: the first press adds the button's mute, the second lifts both.
-    assert!(sw_mute_after_button(true, true));
-    assert!(!sw_mute_after_button(true, false));
-    // The button never sets the software mute.
-    assert!(!sw_mute_after_button(false, true));
+}
+
+#[test]
+fn recovering_hardware_mute_preserves_ha_mute() {
+    let lost = sw_mute_after_hw_event(true, InputEvent::MuteSync(true));
+    let recovered = sw_mute_after_hw_event(lost, InputEvent::MuteSync(false));
+    assert!(recovered);
+    let blocked = sw_mute_after_hw_event(recovered, InputEvent::Mute(true));
+    assert!(blocked);
+    assert!(!sw_mute_after_hw_event(blocked, InputEvent::Mute(false)));
+    assert!(!sw_mute_after_hw_event(false, InputEvent::Mute(true)));
 }
 
 #[test]

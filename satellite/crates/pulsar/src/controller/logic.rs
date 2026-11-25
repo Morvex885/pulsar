@@ -13,7 +13,7 @@ use pulsar_audio::engine::MODEL_FILES;
 
 use pulsar_core::model::Model;
 use pulsar_esphome::{DeviceIdentity, MediaState, VaEvent};
-use pulsar_hw::Rgb;
+use pulsar_hw::{InputEvent, Rgb};
 use pulsar_media::PlayState;
 
 /// After the wake word a stock command ("Алиса, громче") is handled locally if it is heard
@@ -392,10 +392,9 @@ pub fn sw_mute_after_switch(on: bool, sw_muted: bool, hw_muted: bool) -> bool {
     if on && hw_muted { sw_muted } else { !on }
 }
 
-/// The software mute after the mute button switched to `hw_muted`: lifting the button's mute
-/// also lifts the mute from HA, so the button alone always brings the microphones back.
-pub fn sw_mute_after_button(sw_muted: bool, hw_muted: bool) -> bool {
-    sw_muted && hw_muted
+/// Только физическое снятие блокировки отменяет mute из HA; переоткрытие устройства — нет.
+pub fn sw_mute_after_hw_event(sw_muted: bool, event: InputEvent) -> bool {
+    sw_muted && !matches!(event, InputEvent::Mute(false))
 }
 
 /// Restarting cuts off whatever plays: automatic installs wait for silence.
