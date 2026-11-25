@@ -172,20 +172,21 @@ fn fb_mode(model: &Model, s: &LedStrip) -> bool {
     ok && trigger.contains(&format!("[{}]", s.trigger))
 }
 
-fn fb_bytes_per_pixel(s: &LedStrip) -> usize {
+fn fb_bytes_per_pixel(s: &LedStrip) -> Option<usize> {
     let dev = s.fb_dev.rsplit('/').next().unwrap_or(s.fb_dev);
-    let bpp = std::fs::read_to_string(format!("/sys/class/graphics/{dev}/bits_per_pixel"))
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(24);
-    if bpp == 32 { 4 } else { 3 }
+    let bpp = std::fs::read_to_string(format!("/sys/class/graphics/{dev}/bits_per_pixel")).ok()?;
+    match bpp.trim() {
+        "24" => Some(3),
+        "32" => Some(4),
+        _ => None,
+    }
 }
 
 /// Фреймбуфер ленты как RGB по светодиодам; None, если его не прочитать. Пиксель 24 bpp —
 /// B, G, R; 32 bpp (панель Станции 2) — R, G, B, W, белый байт не читается.
 fn strip_fb(s: &LedStrip) -> Option<Vec<[u8; 3]>> {
     let n = usize::try_from(s.count).ok()?;
-    let bytes_per_px = fb_bytes_per_pixel(s);
+    let bytes_per_px = fb_bytes_per_pixel(s)?;
     let mut raw = vec![0u8; n * bytes_per_px];
     std::fs::File::open(s.fb_dev)
         .ok()?
@@ -273,6 +274,13 @@ fn fb_rate(model: &Model) {
     if !fb_mode(model, ring) {
         return;
     }
+    let Some(bytes_per_px) = fb_bytes_per_pixel(ring) else {
+        say(&format!(
+            "{}: unknown pixel format, skipping write benchmark",
+            ring.fb_dev
+        ));
+        return;
+    };
     let Ok(fb) = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -280,7 +288,7 @@ fn fb_rate(model: &Model) {
     else {
         return;
     };
-    let zero = vec![0; ring.count as usize * fb_bytes_per_pixel(ring)];
+    let zero = vec![0; ring.count as usize * bytes_per_px];
     let t0 = Instant::now();
     for _ in 0..100 {
         match fb.write_at(&zero, 0) {
