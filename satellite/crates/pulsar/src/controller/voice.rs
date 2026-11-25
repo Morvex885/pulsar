@@ -231,8 +231,10 @@ impl Controller {
         self.clear_speech_display();
         self.followup = logic::Followup::default();
         self.update_duck();
-        // Автоматическое приглашение не должно обрывать другое объявление.
-        let wake_sound = self.st.wake_sound && (explicit || !self.announcing);
+        // Автоматическое приглашение не должно обрывать объявление или сигнал завершения:
+        // ошибка старого run может прийти раньше уже поставленного в очередь Done объявления.
+        let wake_sound =
+            self.st.wake_sound && (explicit || !self.announcing && !self.closing_earcon);
         match logic::wake_cue(explicit, wake_sound) {
             logic::WakeCue::Keep => {}
             logic::WakeCue::Sound => {
