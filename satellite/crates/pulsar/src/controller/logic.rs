@@ -717,13 +717,13 @@ pub fn wake_candidates(active: &str, available: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Подпись и псевдоним из релизов; для неизвестной модели подписью остаётся её ID.
-pub fn wake_word_labels(id: &str) -> (&str, Option<&'static str>) {
+/// Для неизвестной модели подписью остаётся её ID.
+pub fn wake_word_phrase(id: &str) -> String {
     match id {
-        "alisa" => ("Alisa", Some("Алиса")),
-        "yandex" => ("Yandex", Some("Яндекс")),
-        "yasmina" => ("Yasmina", None),
-        other => (other, None),
+        "alisa" => "Alisa".into(),
+        "yandex" => "Yandex".into(),
+        "yasmina" => "Yasmina".into(),
+        other => other.to_owned(),
     }
 }
 

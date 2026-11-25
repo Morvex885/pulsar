@@ -49,10 +49,6 @@ impl Writer {
         Self::default()
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.buf.clear();
-    }
-
     pub fn data(&self) -> &[u8] {
         &self.buf
     }

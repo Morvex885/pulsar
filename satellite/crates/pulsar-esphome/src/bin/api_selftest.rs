@@ -289,7 +289,6 @@ async fn run(port: u16, name: String, run_s: i64, key_path: Option<PathBuf>) -> 
     let ww = |id: &str, phrase: &str| WakeWordInfo {
         id: id.into(),
         phrase: phrase.into(),
-        legacy_phrase: None,
         languages: vec!["ru".into()],
     };
     let strings = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect();
