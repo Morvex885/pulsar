@@ -344,7 +344,7 @@ pub fn want_duck(
 /// Что вход в LISTENING делает с каналом ANNOUNCE.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WakeCue {
-    /// Канал не трогать: продолжение разговора и разговор, начатый из HA.
+    /// Не трогать канал при автоматическом старте с выключенным звуком.
     Keep,
     /// Звук активации; его play() обрывает то, что ещё звучит.
     Sound,
@@ -353,12 +353,23 @@ pub enum WakeCue {
     Cut,
 }
 
-pub fn wake_cue(earcon: bool, wake_sound: bool) -> WakeCue {
-    match (earcon, wake_sound) {
-        (false, _) => WakeCue::Keep,
-        (true, true) => WakeCue::Sound,
+pub fn wake_cue(explicit: bool, wake_sound: bool) -> WakeCue {
+    match (explicit, wake_sound) {
+        (_, true) => WakeCue::Sound,
         (true, false) => WakeCue::Cut,
+        (false, false) => WakeCue::Keep,
     }
+}
+
+/// Сигнал отсутствия ответа не должен обрывать объявление, ответ, звонок или другой earcon.
+pub fn want_no_reply_cue(
+    phase: Phase,
+    wake_sound: bool,
+    announcing: bool,
+    timer_ringing: bool,
+    closing_earcon: bool,
+) -> bool {
+    wake_sound && phase != Phase::Speaking && !announcing && !timer_ringing && !closing_earcon
 }
 
 /// A local volume change clicks on ANNOUNCE, which also carries the answer, announcements, the
@@ -470,6 +481,8 @@ pub struct Followup {
     requested: bool,
     /// В run была ошибка.
     failed: bool,
+    /// Последняя ошибка run — STT не вернул текст, даже если VAD обнаружил речь.
+    no_text: bool,
     /// В этом run пришёл STT_VAD_START.
     vad_seen: bool,
     /// Идёт follow-up-реплика, речь ещё не началась.
@@ -488,6 +501,7 @@ impl Followup {
             VaEvent::RunStart => {
                 self.requested = false;
                 self.failed = false;
+                self.no_text = false;
                 self.vad_seen = false;
             }
             VaEvent::IntentEnd => self.requested = continue_conversation && !self.failed,
@@ -523,9 +537,17 @@ impl Followup {
             .then(|| u64::from(seconds) * 1000 + FOLLOWUP_VAD_GRACE_MS)
     }
 
-    /// Ошибка — это молчание в follow-up-реплике: диалог закрывается тихо.
+    /// Молчание до начала речи в follow-up не включает индикацию ошибки.
     pub fn silent(&self, code: &str) -> bool {
         self.awaiting_speech && code == "stt-no-text-recognized"
+    }
+
+    pub fn record_error(&mut self, code: &str) {
+        self.no_text = code == "stt-no-text-recognized";
+    }
+
+    pub fn ended_without_text(&self) -> bool {
+        self.no_text
     }
 
     pub fn awaiting_speech(&self) -> bool {
