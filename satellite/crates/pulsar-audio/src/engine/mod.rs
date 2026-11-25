@@ -326,33 +326,35 @@ impl Slot {
     /// Смена модели; если новая не создалась, заново создаётся прежняя. Второй спотер в RAM на
     /// время смены не держим: на станциях с ~238 МиБ это не замерено, поэтому прежняя модель
     /// пересоздаётся только на пути ошибки.
-    fn switch(&mut self, lib: &Lib, dir: &Path, legacy_main: i32, outputs: u32) -> bool {
+    fn switch(&mut self, dir: &Path, mut load: impl FnMut(&mut Self, &Path) -> bool) -> bool {
         let prev = std::mem::take(&mut self.dir);
-        if self.init(lib, dir, legacy_main, outputs) {
+        if load(self, dir) {
             return true;
         }
-        if !prev.as_os_str().is_empty() && !self.init(lib, &prev, legacy_main, outputs) {
+        if !self.restore(prev, load) && !self.dir.as_os_str().is_empty() {
             error!(
                 "{} spotter: previous model {} did not reload",
                 self.what,
-                prev.display()
+                self.dir.display()
             );
-            self.sp = None;
-            self.dir = prev;
         }
         false
     }
 
-    fn restart(&mut self, lib: &Lib, legacy_main: i32, outputs: u32) {
+    fn restore(&mut self, dir: PathBuf, load: impl FnOnce(&mut Self, &Path) -> bool) -> bool {
+        if !dir.as_os_str().is_empty() && load(self, &dir) {
+            return true;
+        }
+        // Оставить путь для следующего восстановления, но не кормить частично созданную модель.
+        self.sp = None;
+        self.dir = dir;
+        false
+    }
+
+    fn restart(&mut self, load: impl FnOnce(&mut Self, &Path) -> bool) {
         self.last_hit_ms = 0;
         let dir = std::mem::take(&mut self.dir);
-        if dir.as_os_str().is_empty() {
-            self.sp = None;
-        } else if !self.init(lib, &dir, legacy_main, outputs) {
-            // Оставить путь для следующего восстановления, но не кормить частично созданную модель.
-            self.sp = None;
-            self.dir = dir;
-        }
+        self.restore(dir, load);
     }
 
     /// Раскладка по таблице и запасная, `legacy_main` — выход VQE для типа 0 в запасной.
@@ -521,16 +523,18 @@ impl Engine {
         if self.wake_dir() == dir {
             return true;
         }
-        self.wake
-            .switch(&self.lib, dir, VQE_OMNI_WITH_GAIN, self.outputs)
+        self.wake.switch(dir, |s, dir| {
+            s.init(&self.lib, dir, VQE_OMNI_WITH_GAIN, self.outputs)
+        })
     }
 
     /// Каталог модели при смене её доступности; пустой каталог означает потерю спотера.
     pub(crate) fn restart_spotters(&mut self) -> Option<PathBuf> {
         let had_wake = !self.wake_dir().as_os_str().is_empty();
         self.wake
-            .restart(&self.lib, VQE_OMNI_WITH_GAIN, self.outputs);
-        self.cmd.restart(&self.lib, VQE_OMNI, self.outputs);
+            .restart(|s, dir| s.init(&self.lib, dir, VQE_OMNI_WITH_GAIN, self.outputs));
+        self.cmd
+            .restart(|s, dir| s.init(&self.lib, dir, VQE_OMNI, self.outputs));
         let dir = self.wake_dir();
         let has_wake = !dir.as_os_str().is_empty();
         (had_wake != has_wake).then(|| dir.to_path_buf())
@@ -621,6 +625,29 @@ fn feed(vqe: &Vqe, frame: usize, s: &mut Slot) -> Vec<Hit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unmute_retries_previous_model_after_switch_and_fallback_fail() {
+        let previous = Path::new("/models/alisa");
+        let requested = Path::new("/models/yandex");
+        let mut slot = Slot::new("wake word", true);
+        slot.dir = previous.to_path_buf();
+        let mut failed_loads = [requested, previous].into_iter();
+        assert!(!slot.switch(requested, |slot, path| {
+            assert_eq!(Some(path), failed_loads.next());
+            slot.dir.clear();
+            false
+        }));
+        assert_eq!(failed_loads.next(), None);
+        let mut retried = false;
+        slot.restart(|slot, path| {
+            retried = true;
+            assert_eq!(path, previous);
+            slot.dir = path.to_path_buf();
+            true
+        });
+        assert!(retried);
+    }
 
     #[test]
     fn layout_from_channel_counts() {

@@ -406,9 +406,6 @@ impl Controller {
     }
 
     fn on_active_wake_words(&mut self, request: u64, id: String) {
-        if self.wake_switch.retarget(&id, request) {
-            return;
-        }
         if self.mic.frame() == 0 {
             // Фронтенд не запущен: события WakeModel не будет, выбор принимается сразу.
             self.st.wake_word = id.clone();
@@ -419,7 +416,7 @@ impl Controller {
         }
         info!("wake word requested: {id}");
         let req = self.mic.set_model(model_dir(&id));
-        self.wake_switch.requested(req, id, request);
+        self.wake_switch.requested(req, request);
     }
 
     /// Не сохраняем пустой выбор: после перезапуска спотер снова попробует прежнюю модель.

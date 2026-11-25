@@ -655,34 +655,18 @@ pub fn wake_word_names(models: &Path, saved: &str) -> Vec<String> {
 /// Последний запрос смены wake word к фронтенду, который владеет состоянием спотера.
 #[derive(Debug, Default)]
 pub struct WakeSwitch {
-    pending: Option<(ModelId, String, u64)>,
+    pending: Option<(ModelId, u64)>,
 }
 
 impl WakeSwitch {
-    pub fn requested(&mut self, req: ModelId, id: String, request: u64) {
-        self.pending = Some((req, id, request));
-    }
-
-    /// Повтор того же слова меняет номер подтверждения, не запуская новую загрузку.
-    pub fn retarget(&mut self, id: &str, request: u64) -> bool {
-        let Some((_, pending_id, pending)) = &mut self.pending else {
-            return false;
-        };
-        if pending_id != id {
-            return false;
-        }
-        *pending = request;
-        true
+    pub fn requested(&mut self, req: ModelId, request: u64) {
+        self.pending = Some((req, request));
     }
 
     /// Независимое изменение доступности модели не подтверждает ожидающий запрос HA.
     pub fn answered(&mut self, req: Option<ModelId>) -> Option<u64> {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|(r, _, _)| Some(*r) == req)
-        {
-            self.pending.take().map(|(_, _, request)| request)
+        if self.pending.as_ref().is_some_and(|(r, _)| Some(*r) == req) {
+            self.pending.take().map(|(_, request)| request)
         } else {
             None
         }

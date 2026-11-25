@@ -17,8 +17,8 @@
 - В `libyandex_evil.so` есть `spotter_get_unhandled_nbytes` (`strings` по библиотеке станции).
 - Захват: PCM `default` прошивки (`/etc/asound.conf`: `asym` → `multi_capture`) — склейка двух
   устройств: 4 микрофона из `hw:0,1` (каналы 0, 2, 4, 6 из 8) и обратная связь динамика из
-  `hw:0,0` (2 канала). Итого 6 каналов @ 48 кГц, S16: микрофоны — каналы 0–3, референс — 4–5. Так
-  же устроен `audiod.audioDevice` в `quasar.cfg` (`micChannels 4`, `spkChannels 2`, `inRate 48000`).
+  `hw:0,0` (2 канала). Итого 6 каналов @ 48 кГц, S16: микрофоны — каналы 0–3, референс — 4–5.
+  Штатная конфигурация — [вики, «VQE и full-duplex»](https://hackalice.me/devices/station-lite/#vqe).
 - Референс — захват TDM-B усилителя, микшер для него не нужен: контрол `Loopback Enable` выключен
   и при работающем `maind`.
 - `frontend_probe` 20 с: 31,25 чанка VQE/с, 0 потерянных кадров, FIFO ≤ 24 мс.

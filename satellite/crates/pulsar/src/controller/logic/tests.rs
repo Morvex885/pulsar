@@ -845,24 +845,12 @@ fn wake_word_resolution_and_candidates() {
 }
 
 #[test]
-fn wake_switch_follows_the_last_request() {
-    use pulsar_audio::ModelId;
+fn wake_switch_ignores_queued_reply_when_ha_repeats_the_request() {
     let mut w = WakeSwitch::default();
-    w.requested(ModelId(1), "yasmina".into(), 10);
-    // Выбор другого слова заменяет ожидающий запрос, даже если это прежнее активное слово.
-    assert!(!w.retarget("alisa", 11));
-    w.requested(ModelId(2), "alisa".into(), 11);
-    assert!(w.retarget("alisa", 12));
+    w.requested(ModelId(1), 10);
+    // Ответ первого SET и потеря модели уже в очереди; HA повторяет SET того же слова.
+    w.requested(ModelId(2), 11);
     assert_eq!(w.answered(Some(ModelId(1))), None);
-    assert_eq!(w.answered(Some(ModelId(2))), Some(12));
-    assert!(!w.retarget("alisa", 13));
-}
-
-#[test]
-fn wake_switch_tracks_spotter_restart_without_consuming_ha_request() {
-    let mut w = WakeSwitch::default();
-    w.requested(ModelId(1), "yandex".into(), 10);
     assert_eq!(w.answered(None), None);
-    assert!(w.retarget("yandex", 11));
-    assert_eq!(w.answered(Some(ModelId(1))), Some(11));
+    assert_eq!(w.answered(Some(ModelId(2))), Some(11));
 }
