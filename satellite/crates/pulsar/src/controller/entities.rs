@@ -406,10 +406,7 @@ impl Controller {
     }
 
     fn on_active_wake_words(&mut self, request: u64, id: String) {
-        if !self.wake_switch.wants(&id, &self.st.wake_word) {
-            if !self.wake_switch.retarget(request) {
-                self.api.set_active_wake_words(Some(request), vec![id]);
-            }
+        if self.wake_switch.retarget(&id, request) {
             return;
         }
         if self.mic.frame() == 0 {
@@ -435,7 +432,7 @@ impl Controller {
         if !ok {
             warn!("wake word model did not load; active: {id:?}");
         }
-        let request = self.wake_switch.answered(req, !id.is_empty());
+        let request = self.wake_switch.answered(req);
         if !id.is_empty() && id != self.st.wake_word {
             self.st.wake_word.clone_from(&id);
             info!("wake word -> {}", self.st.wake_word);

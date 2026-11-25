@@ -848,46 +848,21 @@ fn wake_word_resolution_and_candidates() {
 fn wake_switch_follows_the_last_request() {
     use pulsar_audio::ModelId;
     let mut w = WakeSwitch::default();
-    assert!(!w.wants("alisa", "alisa"));
-    assert!(w.wants("yasmina", "alisa"));
     w.requested(ModelId(1), "yasmina".into(), 10);
-    assert!(!w.wants("yasmina", "alisa"));
-    // Выбор активного слова во время смены отменяет её.
-    assert!(w.wants("alisa", "alisa"));
+    // Выбор другого слова заменяет ожидающий запрос, даже если это прежнее активное слово.
+    assert!(!w.retarget("alisa", 11));
     w.requested(ModelId(2), "alisa".into(), 11);
-    assert!(!w.wants("alisa", "alisa"));
-    assert!(w.retarget(12));
-    // Ответ на вытесненный запрос не снимает последний.
-    assert_eq!(w.answered(None, true), None);
-    assert_eq!(w.answered(Some(ModelId(1)), true), None);
-    assert!(!w.wants("alisa", "yasmina"));
-    assert_eq!(w.answered(Some(ModelId(2)), true), Some(12));
-    assert!(!w.wants("alisa", "alisa"));
-    assert!(!w.retarget(13));
-}
-
-#[test]
-fn wake_switch_reloads_when_no_model_is_loaded() {
-    use pulsar_audio::ModelId;
-    let mut w = WakeSwitch::default();
-    w.requested(ModelId(1), "yasmina".into(), 10);
-    // Не загрузилась ни новая, ни прежняя модель: повтор прежнего слова снова грузит её.
-    assert_eq!(w.answered(Some(ModelId(1)), false), Some(10));
-    assert!(w.wants("alisa", "alisa"));
-    w.requested(ModelId(2), "alisa".into(), 11);
-    assert_eq!(w.answered(Some(ModelId(2)), true), Some(11));
-    assert!(!w.wants("alisa", "alisa"));
+    assert!(w.retarget("alisa", 12));
+    assert_eq!(w.answered(Some(ModelId(1))), None);
+    assert_eq!(w.answered(Some(ModelId(2))), Some(12));
+    assert!(!w.retarget("alisa", 13));
 }
 
 #[test]
 fn wake_switch_tracks_spotter_restart_without_consuming_ha_request() {
     let mut w = WakeSwitch::default();
-    assert_eq!(w.answered(None, false), None);
-    assert!(w.wants("alisa", "alisa"));
-
     w.requested(ModelId(1), "yandex".into(), 10);
-    assert_eq!(w.answered(None, true), None);
-    assert!(!w.wants("yandex", "alisa"));
-    assert_eq!(w.answered(Some(ModelId(1)), true), Some(10));
-    assert!(!w.wants("yandex", "yandex"));
+    assert_eq!(w.answered(None), None);
+    assert!(w.retarget("yandex", 11));
+    assert_eq!(w.answered(Some(ModelId(1))), Some(11));
 }

@@ -337,6 +337,8 @@ impl Slot {
                 self.what,
                 prev.display()
             );
+            self.sp = None;
+            self.dir = prev;
         }
         false
     }
@@ -516,18 +518,22 @@ impl Engine {
 
     /// `false` — запрошенная модель не загрузилась; фактический результат в `wake_dir()`.
     pub fn set_wake_model(&mut self, dir: &Path) -> bool {
+        if self.wake_dir() == dir {
+            return true;
+        }
         self.wake
             .switch(&self.lib, dir, VQE_OMNI_WITH_GAIN, self.outputs)
     }
 
-    /// Возвращает true, если доступность активной модели изменилась.
-    pub(crate) fn restart_spotters(&mut self) -> bool {
+    /// Каталог модели при смене её доступности; пустой каталог означает потерю спотера.
+    pub(crate) fn restart_spotters(&mut self) -> Option<PathBuf> {
         let had_wake = !self.wake_dir().as_os_str().is_empty();
         self.wake
             .restart(&self.lib, VQE_OMNI_WITH_GAIN, self.outputs);
         self.cmd.restart(&self.lib, VQE_OMNI, self.outputs);
-        let has_wake = !self.wake_dir().as_os_str().is_empty();
-        had_wake != has_wake
+        let dir = self.wake_dir();
+        let has_wake = !dir.as_os_str().is_empty();
+        (had_wake != has_wake).then(|| dir.to_path_buf())
     }
 
     /// Каталог активной модели wake word.

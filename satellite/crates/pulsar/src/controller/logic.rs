@@ -652,40 +652,31 @@ pub fn wake_word_names(models: &Path, saved: &str) -> Vec<String> {
     out
 }
 
-/// Смена модели wake word: последний запрос к фронтенду и есть ли загруженная модель.
+/// Последний запрос смены wake word к фронтенду, который владеет состоянием спотера.
 #[derive(Debug, Default)]
 pub struct WakeSwitch {
     pending: Option<(ModelId, String, u64)>,
-    /// По последнему событию фронтенда модели нет: не загрузилась ни новая, ни прежняя.
-    empty: bool,
 }
 
 impl WakeSwitch {
-    /// Нужен ли запрос слова `id` при активном `active`: повтор ожидающего запроса не нужен,
-    /// выбор активного слова отменяет ожидающую смену или перезагружает модель, если её нет.
-    pub fn wants(&self, id: &str, active: &str) -> bool {
-        match &self.pending {
-            Some((_, p, _)) => p != id,
-            None => self.empty || id != active,
-        }
-    }
-
     pub fn requested(&mut self, req: ModelId, id: String, request: u64) {
         self.pending = Some((req, id, request));
     }
 
     /// Повтор того же слова меняет номер подтверждения, не запуская новую загрузку.
-    pub fn retarget(&mut self, request: u64) -> bool {
-        let Some((_, _, pending)) = &mut self.pending else {
+    pub fn retarget(&mut self, id: &str, request: u64) -> bool {
+        let Some((_, pending_id, pending)) = &mut self.pending else {
             return false;
         };
+        if pending_id != id {
+            return false;
+        }
         *pending = request;
         true
     }
 
     /// Независимое изменение доступности модели не подтверждает ожидающий запрос HA.
-    pub fn answered(&mut self, req: Option<ModelId>, loaded: bool) -> Option<u64> {
-        self.empty = !loaded;
+    pub fn answered(&mut self, req: Option<ModelId>) -> Option<u64> {
         if self
             .pending
             .as_ref()

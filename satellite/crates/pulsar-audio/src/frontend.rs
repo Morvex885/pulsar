@@ -886,6 +886,26 @@ impl<T: std::fmt::Display> std::fmt::Display for Opt<T> {
     }
 }
 
+fn update_spotter_epoch(
+    previous: &mut Option<VoiceEpoch>,
+    current: VoiceEpoch,
+    tx: &UnboundedSender<FrontendEvent>,
+    restart: impl FnOnce() -> Option<PathBuf>,
+) {
+    // Иначе первое подтверждение после mute может закончить фразу из старой эпохи.
+    if previous
+        .replace(current)
+        .is_some_and(|epoch| epoch != current)
+        && let Some(dir) = restart()
+    {
+        let _ = tx.send(FrontendEvent::WakeModel {
+            id: None,
+            ok: !dir.as_os_str().is_empty(),
+            dir,
+        });
+    }
+}
+
 fn processing(
     model: &'static Model,
     mut eng: Engine,
@@ -961,19 +981,8 @@ fn processing(
             level_hist.pos = 0;
             level_hist.used = 0;
         }
-        // Иначе первое подтверждение после mute может закончить фразу из старой эпохи.
-        if voice_on
-            && spotter_epoch
-                .replace(epoch)
-                .is_some_and(|previous| previous != epoch)
-            && eng.restart_spotters()
-        {
-            let dir = eng.wake_dir().to_path_buf();
-            let _ = tx.send(FrontendEvent::WakeModel {
-                id: None,
-                ok: !dir.as_os_str().is_empty(),
-                dir,
-            });
+        if voice_on {
+            update_spotter_epoch(&mut spotter_epoch, epoch, tx, || eng.restart_spotters());
         }
         if !voice_on {
             mics.fill(0.0);
@@ -1065,6 +1074,30 @@ mod tests {
     use super::*;
     use pulsar_alsa::HwResult;
     use pulsar_core::model::model_from_compatible;
+
+    #[test]
+    fn spotter_restart_reports_loss_and_recovery_without_request_id() {
+        let (tx, mut rx) = unbounded_channel();
+        let mut previous = None;
+        update_spotter_epoch(&mut previous, VoiceEpoch(0), &tx, || {
+            panic!("initial epoch already has a fresh spotter")
+        });
+        update_spotter_epoch(&mut previous, VoiceEpoch(2), &tx, || Some(PathBuf::new()));
+        update_spotter_epoch(&mut previous, VoiceEpoch(2), &tx, || {
+            panic!("same epoch must not restart the spotter")
+        });
+        let model = PathBuf::from("alisa");
+        update_spotter_epoch(&mut previous, VoiceEpoch(4), &tx, || Some(model.clone()));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            FrontendEvent::WakeModel { id: None, dir, ok: false } if dir.as_os_str().is_empty()
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            FrontendEvent::WakeModel { id: None, dir, ok: true } if dir == model
+        ));
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn unmute_rejects_queued_voice_and_does_not_replay_captured_pcm() {
