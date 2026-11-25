@@ -426,7 +426,7 @@ impl Controller {
     }
 
     /// Не сохраняем пустой выбор: после перезапуска спотер снова попробует прежнюю модель.
-    pub(super) fn on_wake_model(&mut self, req: ModelId, dir: &Path, ok: bool) {
+    pub(super) fn on_wake_model(&mut self, req: Option<ModelId>, dir: &Path, ok: bool) {
         let id = dir
             .file_name()
             .and_then(OsStr::to_str)

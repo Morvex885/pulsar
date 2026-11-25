@@ -77,12 +77,11 @@ pub enum FrontendEvent {
     },
     /// One per 32 ms FFT window while music analysis is on.
     Music(MusicFrame),
-    /// Модель wake word, активная после старта (`id` 0) или запроса
-    /// [`FrontendHandle::set_model`] с этим `id`. `ok` — запрошенная модель (при старте — первый
-    /// кандидат) загрузилась. `dir` пуст, если модели нет. На запрос, вытесненный следующим до
-    /// применения, события нет.
+    /// Фактически активная модель wake word. `id` указан только в ответ на `set_model`;
+    /// `ok` означает успех запроса, старта или пересоздания после mute. `dir` пуст, если
+    /// спотера нет. На запрос, вытесненный до применения, события нет.
     WakeModel {
-        id: ModelId,
+        id: Option<ModelId>,
         dir: PathBuf,
         ok: bool,
     },
@@ -98,7 +97,7 @@ impl VoiceEpoch {
     }
 }
 
-/// Запрос смены модели wake word ([`FrontendHandle::set_model`]); 0 — модель старта.
+/// Запрос смены модели wake word ([`FrontendHandle::set_model`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModelId(pub u64);
 
@@ -152,11 +151,7 @@ pub fn spawn(
                 .inspect_err(|e| error!("audio threads: {e}"))
                 .is_ok();
             if started {
-                let _ = tx.send(FrontendEvent::WakeModel {
-                    id: ModelId(0),
-                    dir,
-                    ok,
-                });
+                let _ = tx.send(FrontendEvent::WakeModel { id: None, dir, ok });
             }
             started
         }
@@ -928,7 +923,11 @@ fn processing(
                 );
             }
             let dir = eng.wake_dir().to_path_buf();
-            let _ = tx.send(FrontendEvent::WakeModel { id, dir, ok });
+            let _ = tx.send(FrontendEvent::WakeModel {
+                id: Some(id),
+                dir,
+                ok,
+            });
         }
         // Exactly one VQE chunk.
         let epoch = {
@@ -962,13 +961,19 @@ fn processing(
             level_hist.pos = 0;
             level_hist.used = 0;
         }
+        // Иначе первое подтверждение после mute может закончить фразу из старой эпохи.
         if voice_on
             && spotter_epoch
                 .replace(epoch)
                 .is_some_and(|previous| previous != epoch)
+            && eng.restart_spotters()
         {
-            // Иначе первое подтверждение после mute может закончить фразу из старой эпохи.
-            eng.restart_spotters();
+            let dir = eng.wake_dir().to_path_buf();
+            let _ = tx.send(FrontendEvent::WakeModel {
+                id: None,
+                ok: !dir.as_os_str().is_empty(),
+                dir,
+            });
         }
         if !voice_on {
             mics.fill(0.0);

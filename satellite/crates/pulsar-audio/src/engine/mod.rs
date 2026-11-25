@@ -520,10 +520,14 @@ impl Engine {
             .switch(&self.lib, dir, VQE_OMNI_WITH_GAIN, self.outputs)
     }
 
-    pub(crate) fn restart_spotters(&mut self) {
+    /// Возвращает true, если доступность активной модели изменилась.
+    pub(crate) fn restart_spotters(&mut self) -> bool {
+        let had_wake = !self.wake_dir().as_os_str().is_empty();
         self.wake
             .restart(&self.lib, VQE_OMNI_WITH_GAIN, self.outputs);
         self.cmd.restart(&self.lib, VQE_OMNI, self.outputs);
+        let has_wake = !self.wake_dir().as_os_str().is_empty();
+        had_wake != has_wake
     }
 
     /// Каталог активной модели wake word.

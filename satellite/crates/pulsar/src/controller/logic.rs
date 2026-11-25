@@ -683,10 +683,14 @@ impl WakeSwitch {
         true
     }
 
-    /// Событие `WakeModel`: ответ на устаревший запрос не снимает более новый.
-    pub fn answered(&mut self, req: ModelId, loaded: bool) -> Option<u64> {
+    /// Независимое изменение доступности модели не подтверждает ожидающий запрос HA.
+    pub fn answered(&mut self, req: Option<ModelId>, loaded: bool) -> Option<u64> {
         self.empty = !loaded;
-        if self.pending.as_ref().is_some_and(|(r, _, _)| *r == req) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(r, _, _)| Some(*r) == req)
+        {
             self.pending.take().map(|(_, _, request)| request)
         } else {
             None
