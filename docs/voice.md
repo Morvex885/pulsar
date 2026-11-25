@@ -11,6 +11,11 @@ pulsar, и протокол арбитража wake word между станци
   `VoiceAssistantConfigurationRequest` без ожидания отдельного подтверждения. Активное слово для
   селектора берётся из ответа; таймаут чтения — 5 с
   ([HA 2026.11.1](https://github.com/home-assistant/core/blob/2026.11.1/homeassistant/components/esphome/assist_satellite.py#L222-L268)).
+- Селектор ESPHome хранит подпись, а не ID. Если подпись исчезла из перечня, HA сбрасывает
+  выбор. Для уже пустого первого слота HA берёт первую подпись единственного активного ID в
+  порядке каталога ([HA 2026.11.1](https://github.com/home-assistant/core/blob/2026.11.1/homeassistant/components/esphome/select.py#L207-L250)).
+  В HA 2025.1.4 селектор показывает последнюю подпись активного ID независимо от выбранной
+  строки ([HA 2025.1.4](https://github.com/home-assistant/core/blob/2025.1.4/homeassistant/components/esphome/select.py#L149-L163)).
 - В событиях pipeline нет id run. Если наш новый `voice_request_start` заменяет идущий run
   (barge-in), HA сначала шлёт оставшиеся события заменённого run, включая его RUN_END, и только
   потом RUN_START нового. RUN_END до RUN_START, когда никакой run не заменялся, значит, что HA

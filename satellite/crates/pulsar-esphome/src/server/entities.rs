@@ -678,14 +678,19 @@ impl Server {
 
     pub(super) fn send_va_config(&mut self, id: u64) {
         let mut w = Writer::new();
+        let mut s = Writer::new();
         for ww in &self.cfg.wake_words {
-            let mut s = Writer::new();
-            s.str(1, &ww.id, false);
-            s.str(2, &ww.phrase, false);
-            for l in &ww.languages {
-                s.str(3, l, true);
+            // Порядок подписей важен для выбора по умолчанию; см. docs/voice.md,
+            // «Голосовой ассистент HA (ESPHome)».
+            for phrase in std::iter::once(ww.phrase.as_str()).chain(ww.legacy_phrase) {
+                s.clear();
+                s.str(1, &ww.id, false);
+                s.str(2, phrase, false);
+                for l in &ww.languages {
+                    s.str(3, l, true);
+                }
+                w.msg(1, &s);
             }
-            w.msg(1, &s);
         }
         for a in &self.cfg.active_wake_words {
             w.str(2, a, true);

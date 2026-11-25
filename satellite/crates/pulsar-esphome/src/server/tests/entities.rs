@@ -14,6 +14,7 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
     let ww = |id: &str, phrase: &str| WakeWordInfo {
         id: id.into(),
         phrase: phrase.into(),
+        legacy_phrase: None,
         languages: s(&["ru"]),
     };
     let id = DeviceIdentity {
@@ -613,6 +614,56 @@ async fn expect_wake_config_before_pong(p: &mut Peer, ids: &[&str]) {
         panic!("expected one config response before pong, got {replies:?}");
     };
     assert_active_wake_words(config, ids);
+}
+
+#[tokio::test]
+async fn wake_catalog_keeps_released_labels_for_the_same_model() {
+    local()
+        .run_until(async {
+            let (id, mut cfg) = selftest("now");
+            cfg.wake_words[0].phrase = "Alisa".into();
+            cfg.wake_words[0].legacy_phrase = Some("Алиса");
+            cfg.wake_words[1].phrase = "Yandex".into();
+            cfg.wake_words[1].legacy_phrase = Some("Яндекс");
+            let (h, mut rx, port) = start_with(id, cfg);
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            assert!(matches!(
+                event(&mut rx).await,
+                ApiEvent::ClientConnected { .. }
+            ));
+            p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            let config = p.expect(msg::VA_CONFIG_RESP).await;
+            let options: Vec<_> = fields(&config)
+                .into_iter()
+                .filter(|f| f.num == 1)
+                .map(|f| {
+                    let text = |n| std::str::from_utf8(field(f.data, n).unwrap().data).unwrap();
+                    (text(1), text(2), text(3))
+                })
+                .collect();
+            assert_eq!(
+                options,
+                [
+                    ("alisa", "Alisa", "ru"),
+                    ("alisa", "Алиса", "ru"),
+                    ("yandex", "Yandex", "ru"),
+                    ("yandex", "Яндекс", "ru"),
+                ]
+            );
+            assert_active_wake_words(&config, &["alisa"]);
+            assert_eq!(field(&config, 3).unwrap().v, 1);
+
+            // HA отправляет ID, соответствующий выбранной подписи, а не саму подпись.
+            let (yandex, _, _) = options
+                .iter()
+                .find(|(_, name, _)| *name == "Яндекс")
+                .unwrap();
+            p.send(msg::VA_SET_CONFIG, &wake_selection(yandex)).await;
+            wake_request(&mut rx, "yandex").await;
+            drop(h);
+        })
+        .await;
 }
 
 #[tokio::test]

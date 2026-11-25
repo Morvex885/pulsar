@@ -29,8 +29,10 @@ pub struct DeviceIdentity {
 pub struct WakeWordInfo {
     /// E.g. "alisa".
     pub id: String,
-    /// E.g. "Алиса".
+    /// Основная подпись, например «Alisa».
     pub phrase: String,
+    /// Подпись из прошлых релизов для того же ID; HA сохраняет выбор по строке.
+    pub legacy_phrase: Option<&'static str>,
     /// E.g. ["ru"].
     pub languages: Vec<String>,
 }

@@ -330,10 +330,14 @@ impl Controller {
             port: ports.api,
             wake_words: wake_names
                 .into_iter()
-                .map(|id| WakeWordInfo {
-                    phrase: logic::wake_word_phrase(&id),
-                    id,
-                    languages: vec!["ru".into()],
+                .map(|id| {
+                    let (phrase, legacy_phrase) = logic::wake_word_labels(&id);
+                    WakeWordInfo {
+                        phrase: phrase.to_owned(),
+                        legacy_phrase,
+                        id,
+                        languages: vec!["ru".into()],
+                    }
                 })
                 .collect(),
             active_wake_words: vec![initial_wake_word],
