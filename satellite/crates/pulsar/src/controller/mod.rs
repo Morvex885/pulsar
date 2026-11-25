@@ -747,6 +747,7 @@ impl Controller {
             Tk::Watchdog => self.abort_dialog("no progress from Home Assistant, giving up"),
             Tk::FollowupWait => {
                 info!("follow-up: no speech started, conversation ends");
+                self.play_no_reply_cue();
                 self.end_silent_followup();
             }
             Tk::TimerTick => self.show_timers(),
