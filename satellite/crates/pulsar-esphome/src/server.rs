@@ -185,12 +185,18 @@ pub(crate) struct Shared {
 }
 
 pub(crate) enum Cmd {
-    VoiceRequestStart { run: u64, phrase: String },
+    VoiceRequestStart {
+        run: u64,
+        phrase: String,
+    },
     VoiceRequestStop,
     VoiceSendAudio(Vec<i16>),
     VoiceAnnounceFinished(bool),
     VoiceAnswerFinished(bool),
-    SetActiveWakeWords(Vec<String>),
+    SetActiveWakeWords {
+        request: Option<u64>,
+        ids: Vec<String>,
+    },
     Publish(Publish),
 }
 
@@ -238,6 +244,8 @@ pub(crate) fn spawn(id: DeviceIdentity, mut cfg: ApiConfig) -> Result<Spawned, S
         key,
         voice_seq: 0,
         run: 0,
+        wake_request_seq: 0,
+        pending_wake_request: None,
         audio_overflowed: false,
         tx_scratch: Vec::new(),
         rx_scratch: Vec::new(),
@@ -387,6 +395,7 @@ enum Timer {
     KeyReload,
     AcceptResume,
     Diag,
+    WakeConfig,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -456,6 +465,7 @@ struct Client {
     /// Waiting for the socket to take more of `wbuf`.
     want_out: bool,
     hello: bool,
+    wake_config_reads: u8,
     /// Subscribed to entity states.
     states: bool,
     /// Input left in `rbuf` by a batch that yielded (BATCH_YIELD).
@@ -582,6 +592,8 @@ struct Server {
     voice_seq: u64,
     /// Run id of the last voice_request_start: the run the voice events belong to.
     run: u64,
+    wake_request_seq: u64,
+    pending_wake_request: Option<u64>,
     /// Mic audio stopped for this run (backlog).
     audio_overflowed: bool,
     /// Plaintext of the Noise frame being encrypted.
@@ -626,6 +638,7 @@ impl Server {
                 Wake::Timer(Timer::KeyReload) => self.reload_key(),
                 Wake::Timer(Timer::AcceptResume) => self.accept_paused = false,
                 Wake::Timer(Timer::Diag) => self.refresh_diagnostics(true),
+                Wake::Timer(Timer::WakeConfig) => self.finish_wake_config(),
                 Wake::Cmd(cmd) => self.command(cmd),
                 Wake::Closed => break,
                 Wake::Logs => self.drain_logs(),
@@ -752,6 +765,7 @@ impl Server {
             woff: 0,
             want_out: false,
             hello: false,
+            wake_config_reads: 0,
             states: false,
             pending_input: false,
             peer_closed: false,
@@ -1420,7 +1434,13 @@ impl Server {
             Cmd::VoiceAnnounceFinished(success) | Cmd::VoiceAnswerFinished(success) => {
                 self.voice_announce_finished(success);
             }
-            Cmd::SetActiveWakeWords(ids) => self.cfg.active_wake_words = ids,
+            Cmd::SetActiveWakeWords { request, ids } => {
+                self.cfg.active_wake_words = ids;
+                if request.is_some() && request == self.pending_wake_request {
+                    self.timers.cancel(Timer::WakeConfig);
+                    self.finish_wake_config();
+                }
+            }
             Cmd::Publish(p) => self.publish(p),
         }
     }

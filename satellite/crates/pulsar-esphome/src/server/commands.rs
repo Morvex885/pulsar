@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use log::{debug, info, warn};
 
 use super::entities::{CLOCK_TEXT_MAX, LED_SPEED_MAX, LED_SPEED_MIN, clamp01, key};
-use super::{Server, msg};
+use super::{Server, Timer, msg};
 use crate::proto::{Reader, WireType, zigzag32};
 use crate::types::{
     ActionId, AnnounceRequest, ApiEvent, ButtonId, LightState, MediaCommand, MediaCommandRequest,
@@ -17,6 +17,10 @@ use crate::types::{
 /// are cut to a minute (frames run for the whole fade).
 const DEFAULT_TRANSITION_MS: u32 = 1000;
 const MAX_TRANSITION_MS: u32 = 60_000;
+
+// См. docs/voice.md, «Голосовой ассистент HA (ESPHome)»: ответ должен успеть до таймаута HA.
+const WAKE_CONFIG_TIMEOUT_MS: u64 = 3_000;
+const MAX_WAKE_CONFIG_READS: u8 = 16;
 
 fn lossy(b: &[u8]) -> String {
     String::from_utf8_lossy(b).into_owned()
@@ -141,7 +145,7 @@ impl Server {
                 info!("api: announce '{}' media={}", a.text, a.media_id);
                 self.emit(ApiEvent::Announce(a));
             }
-            msg::VA_CONFIG_REQ => self.send_va_config(id),
+            msg::VA_CONFIG_REQ => self.on_va_config(id),
             msg::VA_SET_CONFIG => self.on_va_set_config(r),
             // HA -> device TTS audio over the API; SPEAKER is not advertised.
             msg::VA_AUDIO => {}
@@ -560,8 +564,31 @@ impl Server {
         }
     }
 
+    fn on_va_config(&mut self, id: u64) {
+        if self.pending_wake_request.is_none() {
+            self.send_va_config(id);
+        } else if let Some(c) = self.client(id) {
+            if c.wake_config_reads < MAX_WAKE_CONFIG_READS {
+                c.wake_config_reads += 1;
+            } else {
+                self.close_client(id, "too many pending wake config reads");
+            }
+        }
+    }
+
+    pub(super) fn finish_wake_config(&mut self) {
+        self.pending_wake_request = None;
+        self.for_each_client(|s, id| {
+            if let Some(c) = s.client(id) {
+                for _ in 0..std::mem::take(&mut c.wake_config_reads) {
+                    s.send_va_config(id);
+                }
+            }
+        });
+    }
+
     fn on_va_set_config(&mut self, r: &mut Reader<'_>) {
-        let mut ids: Vec<String> = Vec::new();
+        let mut id = None;
         let (mut ignored, mut first_ignored) = (0usize, String::new());
         while let Some(f) = r.next() {
             if f.num != 1 || f.wt != WireType::Len {
@@ -570,8 +597,8 @@ impl Server {
             let ww = f.str();
             let known = self.cfg.wake_words.iter().any(|w| w.id == ww);
             // max_active_wake_words = 1
-            if known && ids.is_empty() {
-                ids.push(ww);
+            if known && id.is_none() {
+                id = Some(ww);
             } else {
                 if ignored == 0 {
                     first_ignored = ww;
@@ -583,13 +610,18 @@ impl Server {
         if ignored > 0 {
             warn!("api: ignoring {ignored} wake word(s), first '{first_ignored}'");
         }
-        // The spotter always runs one model: an empty / unknown selection leaves the current
-        // word active, and the controller reports a switch back through set_active_wake_words.
-        if ids.is_empty() {
+        // Пустой или неизвестный выбор не отменяет уже начатую смену.
+        let Some(id) = id else {
             warn!("api: no known wake word in the new configuration, keeping the current one");
             return;
+        };
+        self.wake_request_seq = self.wake_request_seq.wrapping_add(1);
+        let request = self.wake_request_seq;
+        // Повторные SET не могут отодвигать ответы на GET бесконечно.
+        if self.pending_wake_request.replace(request).is_none() {
+            self.timers.set(Timer::WakeConfig, WAKE_CONFIG_TIMEOUT_MS);
         }
-        self.emit(ApiEvent::ActiveWakeWords(ids));
+        self.emit(ApiEvent::ActiveWakeWords { request, id });
     }
 }
 

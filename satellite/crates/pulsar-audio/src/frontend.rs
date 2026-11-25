@@ -72,7 +72,20 @@ pub enum FrontendEvent {
     Audio(Vec<i16>),
     /// One per 32 ms FFT window while music analysis is on.
     Music(MusicFrame),
+    /// Модель wake word, активная после старта (`id` 0) или запроса
+    /// [`FrontendHandle::set_model`] с этим `id`. `ok` — запрошенная модель (при старте — первый
+    /// кандидат) загрузилась. `dir` пуст, если модели нет. На запрос, вытесненный следующим до
+    /// применения, события нет.
+    WakeModel {
+        id: ModelId,
+        dir: PathBuf,
+        ok: bool,
+    },
 }
+
+/// Запрос смены модели wake word ([`FrontendHandle::set_model`]); 0 — модель старта.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelId(pub u64);
 
 /// Counters for frontend_probe.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -93,14 +106,15 @@ pub struct FrontendHandle {
     inner: Arc<Inner>,
 }
 
-/// Starts the front-end: dlopen, VQE for the model's preset, the wake word spotter from
-/// `wake_model_dir` (e.g. .../spotter_models/activation/alisa) and, if given, the command
-/// spotter (.../spotter_models/command), then the capture and processing threads. On failure
-/// (logged, "microphone front-end failed to start") the handle works but no event ever comes.
-/// A capture device that cannot be opened is retried every 2 s.
+/// Запускает фронтенд: dlopen, VQE по пресету модели, спотер wake word из первого загрузившегося
+/// каталога `wake_model_dirs` (например, .../spotter_models/activation/alisa) и, если задан,
+/// командный спотер (.../spotter_models/command), затем потоки захвата и обработки; загруженная
+/// модель приходит событием [`FrontendEvent::WakeModel`]. При ошибке (в логе «microphone
+/// front-end failed to start») handle работает, но событий нет. Устройство захвата, которое не
+/// открылось, переоткрывается каждые 2 с.
 pub fn spawn(
     model: &'static Model,
-    wake_model_dir: PathBuf,
+    wake_model_dirs: Vec<PathBuf>,
     command_model_dir: Option<PathBuf>,
 ) -> (FrontendHandle, UnboundedReceiver<FrontendEvent>) {
     let (tx, rx) = unbounded_channel();
@@ -112,13 +126,23 @@ pub fn spawn(
         _events: tx.clone(),
     };
     let command_dir = command_model_dir.filter(|d| !d.as_os_str().is_empty());
-    let started = match Engine::start(model, &wake_model_dir, command_dir.as_deref()) {
+    let started = match Engine::start(model, &wake_model_dirs, command_dir.as_deref()) {
         Some(eng) => {
             inner.frame = eng.frame();
-            inner
-                .start_threads(model, eng, tx)
+            let dir = eng.wake_dir().to_path_buf();
+            let ok = wake_model_dirs.first() == Some(&dir);
+            let started = inner
+                .start_threads(model, eng, tx.clone())
                 .inspect_err(|e| error!("audio threads: {e}"))
-                .is_ok()
+                .is_ok();
+            if started {
+                let _ = tx.send(FrontendEvent::WakeModel {
+                    id: ModelId(0),
+                    dir,
+                    ok,
+                });
+            }
+            started
         }
         None => false,
     };
@@ -136,9 +160,14 @@ pub fn spawn(
 }
 
 impl FrontendHandle {
-    /// Switches the wake word model (applied by the processing thread before the next chunk).
-    pub fn set_model(&self, dir: PathBuf) {
-        *lock(&self.inner.shared.pending_model) = (!dir.as_os_str().is_empty()).then_some(dir);
+    /// Смена модели wake word (поток обработки применяет её перед следующим чанком); итог
+    /// приходит событием [`FrontendEvent::WakeModel`] с возвращённым id. Новый запрос до
+    /// применения вытесняет прежний; пустой путь отменяет ожидающий запрос, события нет.
+    pub fn set_model(&self, dir: PathBuf) -> ModelId {
+        let s = &self.inner.shared;
+        let id = ModelId(s.next_model.fetch_add(1, Relaxed));
+        *lock(&s.pending_model) = (!dir.as_os_str().is_empty()).then_some((id, dir));
+        id
     }
 
     /// Wake word detection on/off (e.g. software mute). On by default.
@@ -228,7 +257,8 @@ struct Shared {
     command_offset_ms: AtomicI32,
     mic_gain_db: AtomicU32,
     music: AtomicBool,
-    pending_model: Mutex<Option<PathBuf>>,
+    pending_model: Mutex<Option<(ModelId, PathBuf)>>,
+    next_model: AtomicU64,
     tap_on: AtomicBool,
     tap: Mutex<Option<UnboundedSender<Vec<i16>>>>,
     captured_frames: AtomicU64,
@@ -251,6 +281,7 @@ impl Shared {
             mic_gain_db: AtomicU32::new(0),
             music: AtomicBool::new(false),
             pending_model: Mutex::new(None),
+            next_model: AtomicU64::new(1),
             tap_on: AtomicBool::new(false),
             tap: Mutex::new(None),
             captured_frames: AtomicU64::new(0),
@@ -802,10 +833,16 @@ fn processing(
 
     while shared.running() {
         let pending = lock(&shared.pending_model).take();
-        if let Some(dir) = pending
-            && !eng.set_wake_model(&dir)
-        {
-            error!("failed to switch wake word model to {}", dir.display());
+        if let Some((id, requested)) = pending {
+            let ok = eng.set_wake_model(&requested);
+            if !ok {
+                error!(
+                    "failed to switch wake word model to {}",
+                    requested.display()
+                );
+            }
+            let dir = eng.wake_dir().to_path_buf();
+            let _ = tx.send(FrontendEvent::WakeModel { id, dir, ok });
         }
         // Exactly one VQE chunk.
         {
@@ -1206,7 +1243,7 @@ mod tests {
     fn without_the_yandex_library_the_handle_is_degraded() {
         // No /system/vendor/quasar/libs on the build host: dlopen fails.
         let midi = model_from_compatible(b"yandex,cucumber\0").unwrap();
-        let (h, mut rx) = spawn(midi, PathBuf::from("/nonexistent"), None);
+        let (h, mut rx) = spawn(midi, vec![PathBuf::from("/nonexistent")], None);
         h.set_streaming(true);
         h.set_model(PathBuf::from("/nonexistent/2"));
         let h2 = h.clone();

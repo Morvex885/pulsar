@@ -114,9 +114,9 @@ impl Echo {
                 t.seconds_left,
                 b(t.is_active)
             ),
-            ApiEvent::ActiveWakeWords(ids) => {
-                println!("HOOK active_wake_words {}", ids.join(" "));
-                self.api.set_active_wake_words(ids);
+            ApiEvent::ActiveWakeWords { request, id } => {
+                println!("HOOK active_wake_words {id}");
+                self.api.set_active_wake_words(Some(request), vec![id]);
             }
             ApiEvent::MediaCommand(c) => {
                 // An unknown command value from the wire arrives as None (has_cmd=0 here); the

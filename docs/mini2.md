@@ -19,7 +19,10 @@
 - Громкость: контрол `Master` на `default`; `set_volume.sh` — это `amixer set 'Master' <percent>%`,
   т. е. кривая линейна в процентах.
 - VQE: пресет `yandexmini_2`: 4 микрофона, 2 референса, 48 кГц; чанк не записан.
-- Спотеры: тот же архив `spotter_models/`, что у Лайт 2; не замерялись.
+- Спотеры: тот же архив `spotter_models/`, что у Лайт 2; не замерялись. В `activation/` — `alisa`,
+  `yandex` и `yasmina` (данные автора [#69](https://github.com/Morvex885/pulsar/pull/69)); у
+  `yasmina` нет `multiflags.txt` и `lda.mat` (спотер пишет `Could not read configfile`), но она
+  загружается; качество не замерено.
 - alsa-lib 1.2.1.2, неверсионированная —
   [hardware.md, «alsa-lib: версионированная и неверсионированная»](hardware.md#alsa-lib-версионированная-и-неверсионированная).
 - В GStreamer прошивки 0.369 нет декодера MP3; стоковые earcons — в `.opus`
