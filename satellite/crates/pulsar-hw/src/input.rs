@@ -578,7 +578,8 @@ impl Machine {
                     match dev {
                         Dev::Keys => self.resync_keys(key_state()),
                         Dev::Mute if self.mute_is_switch => {
-                            self.read_mute_state(switch_state(), true)?;
+                            // Снимок EVIOCGSW новее всех событий из уже прочитанного буфера.
+                            return self.read_mute_state(switch_state(), true);
                         }
                         // Кнопка без фиксации: пропущенное нажатие не восстановить.
                         Dev::Mute => {}

@@ -396,6 +396,34 @@ async fn mute_switch_and_its_resync() {
     assert_eq!(r.events(), [InputEvent::MuteSync(false)]);
 }
 
+#[tokio::test(start_paused = true)]
+async fn switch_resync_does_not_replay_events_older_than_ioctl() {
+    let mut r = Rig::new();
+    r.m.read_mute_state(Ok([0; 8]), false).unwrap();
+    let mut on = [0; 8];
+    on[1] = 0x40;
+    r.sw = Ok(on);
+    r.feed(
+        Dev::Mute,
+        &[
+            ev(EV_SYN, SYN_DROPPED, 0),
+            ev(EV_SYN, SYN_REPORT, 0),
+            ev(EV_SW, SW_MUTE_DEVICE, 0),
+            ev(EV_SYN, SYN_REPORT, 0),
+            ev(EV_SW, SW_MUTE_DEVICE, 1),
+            ev(EV_SYN, SYN_REPORT, 0),
+        ],
+    );
+    assert!(r.m.muted.get());
+    assert_eq!(r.events(), [InputEvent::MuteSync(true)]);
+
+    r.feed(
+        Dev::Mute,
+        &[ev(EV_SW, SW_MUTE_DEVICE, 0), ev(EV_SYN, SYN_REPORT, 0)],
+    );
+    assert_eq!(r.events(), [InputEvent::Mute(false)]);
+}
+
 #[test]
 fn event_device_by_name() {
     let devices = "I: Bus=0019 Vendor=0001 Product=0001 Version=0100\n\
