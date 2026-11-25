@@ -172,16 +172,20 @@ fn fb_mode(model: &Model, s: &LedStrip) -> bool {
     ok && trigger.contains(&format!("[{}]", s.trigger))
 }
 
-/// Фреймбуфер ленты как RGB по светодиодам; None, если его не прочитать. Пиксель 24 bpp —
-/// B, G, R; 32 bpp (панель Станции 2) — R, G, B, W, белый байт не читается.
-fn strip_fb(s: &LedStrip) -> Option<Vec<[u8; 3]>> {
-    let n = usize::try_from(s.count).ok()?;
+fn fb_bytes_per_pixel(s: &LedStrip) -> usize {
     let dev = s.fb_dev.rsplit('/').next().unwrap_or(s.fb_dev);
     let bpp = std::fs::read_to_string(format!("/sys/class/graphics/{dev}/bits_per_pixel"))
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(24);
-    let bytes_per_px = if bpp == 32 { 4 } else { 3 };
+    if bpp == 32 { 4 } else { 3 }
+}
+
+/// Фреймбуфер ленты как RGB по светодиодам; None, если его не прочитать. Пиксель 24 bpp —
+/// B, G, R; 32 bpp (панель Станции 2) — R, G, B, W, белый байт не читается.
+fn strip_fb(s: &LedStrip) -> Option<Vec<[u8; 3]>> {
+    let n = usize::try_from(s.count).ok()?;
+    let bytes_per_px = fb_bytes_per_pixel(s);
     let mut raw = vec![0u8; n * bytes_per_px];
     std::fs::File::open(s.fb_dev)
         .ok()?
@@ -264,22 +268,40 @@ fn check_strip(model: &Model, s: &LedStrip, what: &str, fb: [u8; 3]) -> bool {
     ok
 }
 
-/// Raw framebuffer write rate (ring, 72 bytes).
-fn fb_rate() {
+fn fb_rate(model: &Model) {
+    let ring = &model.ring;
+    if !fb_mode(model, ring) {
+        return;
+    }
     let Ok(fb) = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open("/dev/fb0")
+        .open(ring.fb_dev)
     else {
         return;
     };
-    let zero = [0u8; 72];
+    let zero = vec![0; ring.count as usize * fb_bytes_per_pixel(ring)];
     let t0 = Instant::now();
     for _ in 0..100 {
-        let _ = fb.write_at(&zero, 0);
+        match fb.write_at(&zero, 0) {
+            Ok(n) if n == zero.len() => {}
+            Ok(n) => {
+                say(&format!(
+                    "{}: short frame write ({n}/{})",
+                    ring.fb_dev,
+                    zero.len()
+                ));
+                return;
+            }
+            Err(e) => {
+                say(&format!("{}: frame write failed: {e}", ring.fb_dev));
+                return;
+            }
+        }
     }
     say(&format!(
-        "fb0: 100 frame writes in {} ms",
+        "{}: 100 frame writes in {} ms",
+        ring.fb_dev,
         t0.elapsed().as_millis()
     ));
 }
@@ -539,7 +561,7 @@ async fn leds_off_after_exit(model: &Model) -> bool {
 }
 
 async fn leds(model: &'static Model, state_ms: u64) -> bool {
-    fb_rate();
+    fb_rate(model);
     let leds = pulsar_hw::spawn_leds(model);
     let music = Rc::new(Cell::new(false));
     let done = Rc::new(Cell::new(false));
@@ -1018,7 +1040,7 @@ async fn light(seconds: u64) -> bool {
 
 async fn all(model: &'static Model, input_s: u64, state_ms: u64) -> bool {
     let saved = save_current(model);
-    fb_rate();
+    fb_rate(model);
     let leds = pulsar_hw::spawn_leds(model);
     let clock = pulsar_clock::spawn(model);
     let (input, input_rx) = pulsar_hw::spawn_input(model);

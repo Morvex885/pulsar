@@ -408,10 +408,12 @@ impl Controller {
     fn on_active_wake_words(&mut self, request: u64, id: String) {
         if self.mic.frame() == 0 {
             // Фронтенд не запущен: события WakeModel не будет, выбор принимается сразу.
-            self.st.wake_word = id.clone();
-            info!("wake word -> {}", self.st.wake_word);
+            if self.st.wake_word != id {
+                self.st.wake_word.clone_from(&id);
+                info!("wake word -> {}", self.st.wake_word);
+                self.persist();
+            }
             self.api.set_active_wake_words(Some(request), vec![id]);
-            self.persist();
             return;
         }
         info!("wake word requested: {id}");
