@@ -124,7 +124,7 @@ pub fn spawn_input(model: &'static Model) -> (InputHandle, UnboundedReceiver<Inp
 fn spawn_input_with(
     model: &'static Model,
     list: impl Fn() -> String + 'static,
-    open: impl Fn(&str) -> io::Result<Evdev> + 'static,
+    open: impl Fn(&str, &str) -> io::Result<Evdev> + 'static,
 ) -> (InputHandle, UnboundedReceiver<InputEvent>) {
     let muted = Rc::new(Cell::new(false));
     let available = Rc::new(Cell::new(false));
@@ -198,11 +198,11 @@ fn open_dev(
     devices: &str,
     names: &[&str],
     quiet: bool,
-    open: impl Fn(&str) -> io::Result<Evdev>,
+    open: impl Fn(&str, &str) -> io::Result<Evdev>,
 ) -> Option<AsyncFd<Evdev>> {
     let fd = try_named(devices, names, |name, handler| {
         let path = format!("/dev/input/{handler}");
-        match open(&path) {
+        match open(&path, name) {
             Ok(dev) => register_dev(dev, name, &path),
             Err(e) => {
                 if !quiet {
@@ -669,7 +669,7 @@ impl Devices {
         &mut self,
         m: &mut Machine,
         list: impl Fn() -> String,
-        open: impl Fn(&str) -> io::Result<Evdev>,
+        open: impl Fn(&str, &str) -> io::Result<Evdev>,
         initial: bool,
     ) {
         let mute_name = mute_dev_name(self.model);
@@ -746,7 +746,7 @@ async fn run(
     mut devs: Devices,
     mut alive: UnboundedReceiver<()>,
     list: impl Fn() -> String,
-    open: impl Fn(&str) -> io::Result<Evdev>,
+    open: impl Fn(&str, &str) -> io::Result<Evdev>,
 ) {
     let mut buf = [sys::EMPTY_EVENT; 16];
     loop {

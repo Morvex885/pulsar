@@ -670,6 +670,10 @@ impl Controller {
                     info!("signal {}, exiting", libc::SIGINT);
                     break ExitReason::Signal;
                 }
+                ev = recv(&mut self.rx.input) => match ev {
+                    Some(ev) => self.on_input(ev),
+                    None => self.rx.input = None,
+                },
                 ev = recv(&mut self.rx.api) => match ev {
                     Some(ev) => self.on_api(ev),
                     None => self.rx.api = None,
@@ -689,10 +693,6 @@ impl Controller {
                         }
                     }
                     None => self.rx.arbiter = None,
-                },
-                ev = recv(&mut self.rx.input) => match ev {
-                    Some(ev) => self.on_input(ev),
-                    None => self.rx.input = None,
                 },
                 ev = recv(&mut self.rx.sendspin) => match ev {
                     Some(ev) => self.on_sendspin(ev),
@@ -797,6 +797,9 @@ impl Controller {
             }
             FrontendEvent::Command { word } => self.on_command(&word, false),
             FrontendEvent::Audio(pcm) => {
+                if self.mic_muted() {
+                    return;
+                }
                 if self.phase == Phase::Listening {
                     self.api.voice_send_audio(pcm);
                 } else if self.arbitrating {
@@ -835,7 +838,8 @@ impl Controller {
     }
 
     fn mic_muted(&self) -> bool {
-        self.st.mic_muted || self.hw_mic_muted
+        // Ввод уже мог заблокировать микрофоны, пока его событие ещё ждёт обработки.
+        self.st.mic_muted || self.hw_mic_muted || self._input.hw_muted()
     }
 
     fn sendspin_streaming(&self) -> bool {

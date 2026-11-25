@@ -209,6 +209,9 @@ impl Controller {
 
     /// The only way into LISTENING (the watchdog bounds it).
     pub(super) fn start_pipeline(&mut self, phrase: &str, earcon: bool, preroll: Vec<i16>) {
+        if self.mic_muted() {
+            return;
+        }
         // The button, a continued conversation or HA's start_conversation win.
         self.cancel_arbitration();
         self.timers.cancel(Tk::FollowupWait);

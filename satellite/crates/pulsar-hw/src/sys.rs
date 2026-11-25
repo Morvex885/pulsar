@@ -192,13 +192,19 @@ impl AsRawFd for Evdev {
 }
 
 impl Evdev {
-    /// Opens `path`, an event node the caller found in /proc/bus/input/devices.
-    pub fn open(path: &str) -> io::Result<Self> {
-        std::fs::OpenOptions::new()
+    pub fn open(path: &str, expected_name: &str) -> io::Result<Self> {
+        let dev = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
             .open(path)
-            .map(Self)
+            .map(Self)?;
+        // eventN мог сменить владельца после чтения /proc/bus/input/devices.
+        let name = dev.eviocg::<256>(0x06)?; // EVIOCGNAME
+        let expected = expected_name.as_bytes();
+        if name.get(..expected.len()) != Some(expected) || name.get(expected.len()) != Some(&0) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(dev)
     }
 
     #[cfg(test)]

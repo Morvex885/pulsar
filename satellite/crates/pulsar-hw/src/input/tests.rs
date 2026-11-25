@@ -500,7 +500,8 @@ async fn late_lite_mute_key_survives_empty_start() {
                         }
                     }
                 },
-                move |path| {
+                move |path, name| {
+                    assert_eq!(name, "gpio-keys-filter");
                     assert_eq!(path, "/dev/input/event1");
                     fd.take().ok_or_else(|| io::ErrorKind::NotFound.into())
                 },
@@ -523,6 +524,28 @@ async fn late_lite_mute_key_survives_empty_start() {
             assert_eq!(events.try_recv(), Err(TryRecvError::Empty));
         })
         .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn losing_switch_fd_blocks_microphones_without_syn_dropped() {
+    let mut r = Rig::new();
+    let mut devs = Devices::empty(midi(), Rc::new(Cell::new(false)));
+    let (fd, writer) = socket_evdev();
+    devs.mute = Some(fd.into_async().unwrap());
+    devs.update_availability();
+    r.m.read_mute_state(Ok([0; 8]), false).unwrap();
+
+    drop(writer);
+    drain(
+        &mut r.m,
+        &mut devs,
+        Dev::Mute,
+        &mut [sys::EMPTY_EVENT; 16],
+        Read::Now,
+    );
+    assert!(!devs.available.get());
+    assert!(r.m.muted.get());
+    assert_eq!(r.events(), [InputEvent::MuteSync(true)]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -553,7 +576,7 @@ async fn failed_switch_resync_drops_fd_and_retries() {
         devs.open_missing(
             &mut r.m,
             || "N: Name=\"mute\"\nH: Handlers=event1\n".into(),
-            |_| Ok(fd.take().expect("missing switch is opened again")),
+            |_, _| Ok(fd.take().expect("missing switch is opened again")),
             false,
         );
         assert!(fd.take().is_none());

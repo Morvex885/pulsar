@@ -641,13 +641,15 @@ fn microphones_mutes() {
 
 #[test]
 fn recovering_hardware_mute_preserves_ha_mute() {
-    let lost = sw_mute_after_hw_event(true, InputEvent::MuteSync(true));
-    let recovered = sw_mute_after_hw_event(lost, InputEvent::MuteSync(false));
-    assert!(recovered);
-    let blocked = sw_mute_after_hw_event(recovered, InputEvent::Mute(true));
-    assert!(blocked);
-    assert!(!sw_mute_after_hw_event(blocked, InputEvent::Mute(false)));
-    assert!(!sw_mute_after_hw_event(false, InputEvent::Mute(true)));
+    for sw_muted in [false, true] {
+        let lost = sw_mute_after_hw_event(sw_muted, InputEvent::MuteSync(true));
+        assert_eq!(lost, sw_muted);
+        let recovered = sw_mute_after_hw_event(lost, InputEvent::MuteSync(false));
+        assert_eq!(recovered, sw_muted);
+        let blocked = sw_mute_after_hw_event(recovered, InputEvent::Mute(true));
+        assert_eq!(blocked, sw_muted);
+        assert!(!sw_mute_after_hw_event(blocked, InputEvent::Mute(false)));
+    }
 }
 
 #[test]
