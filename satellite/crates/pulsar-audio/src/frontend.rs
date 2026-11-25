@@ -56,6 +56,7 @@ pub enum FrontendEvent {
     /// level_db: wake word level in dBFS on VQE_OMNI (after echo cancellation, before AGC),
     /// rounded to 0.1 dB; -100 = no data.
     Wake {
+        epoch: VoiceEpoch,
         phrase: String,
         level_db: f32,
         /// 16 кГц моно от точки хита спотера (`spotter_get_unhandled_nbytes`, сдвиг
@@ -65,11 +66,15 @@ pub enum FrontendEvent {
         preroll: Vec<i16>,
     },
     Command {
+        epoch: VoiceEpoch,
         word: String,
     },
     /// 16 kHz mono, one VQE chunk (512 samples, 256 on the Mini 3 and Mini), while streaming is on
     /// or a `Wake` is not yet handled.
-    Audio(Vec<i16>),
+    Audio {
+        epoch: VoiceEpoch,
+        pcm: Vec<i16>,
+    },
     /// One per 32 ms FFT window while music analysis is on.
     Music(MusicFrame),
     /// Модель wake word, активная после старта (`id` 0) или запроса
@@ -81,6 +86,16 @@ pub enum FrontendEvent {
         dir: PathBuf,
         ok: bool,
     },
+}
+
+/// Поколение голосового ввода. Нечётные поколения соответствуют отключённым микрофонам.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VoiceEpoch(u32);
+
+impl VoiceEpoch {
+    fn enabled(self) -> bool {
+        self.0 & 1 == 0
+    }
 }
 
 /// Запрос смены модели wake word ([`FrontendHandle::set_model`]); 0 — модель старта.
@@ -170,9 +185,13 @@ impl FrontendHandle {
         id
     }
 
-    /// Wake word detection on/off (e.g. software mute). On by default.
+    /// Блокирует голосовой ввод; события и пре-ролл из предыдущего поколения недействительны.
     pub fn set_detection(&self, on: bool) {
-        self.inner.shared.detect.store(on, Relaxed);
+        self.inner.shared.set_detection(on);
+    }
+
+    pub fn accepts_voice(&self, epoch: VoiceEpoch) -> bool {
+        self.inner.shared.accepts_voice(epoch)
     }
 
     /// Command spotter on/off (commands without the wake word).
@@ -248,7 +267,7 @@ struct Shared {
     // With stop_cv: wakes the capture thread's reopen delay on stop.
     stop_lock: Mutex<()>,
     stop_cv: Condvar,
-    detect: AtomicBool,
+    voice_epoch: AtomicU32,
     commands: AtomicBool,
     stream: AtomicBool,
     /// `Wake` events sent and not yet handled: audio keeps coming meanwhile, so nothing is lost
@@ -273,7 +292,7 @@ impl Shared {
             running: AtomicBool::new(false),
             stop_lock: Mutex::new(()),
             stop_cv: Condvar::new(),
-            detect: AtomicBool::new(true),
+            voice_epoch: AtomicU32::new(0),
             commands: AtomicBool::new(false),
             stream: AtomicBool::new(false),
             wake_pending: AtomicU32::new(0),
@@ -293,6 +312,20 @@ impl Shared {
 
     fn running(&self) -> bool {
         self.running.load(Relaxed)
+    }
+
+    fn set_detection(&self, on: bool) {
+        let _ = self.voice_epoch.fetch_update(Relaxed, Relaxed, |v| {
+            (VoiceEpoch(v).enabled() != on).then(|| v.wrapping_add(1))
+        });
+    }
+
+    fn voice_epoch(&self) -> VoiceEpoch {
+        VoiceEpoch(self.voice_epoch.load(Relaxed))
+    }
+
+    fn accepts_voice(&self, epoch: VoiceEpoch) -> bool {
+        epoch.enabled() && self.voice_epoch() == epoch
     }
 
     /// Sleeps `d` or until stopped.
@@ -379,6 +412,7 @@ impl Drop for Inner {
 /// Interleaved capture frames, oldest first, at most `max` samples.
 pub(crate) struct Fifo {
     buf: VecDeque<i16>,
+    epoch: VoiceEpoch,
     nch: usize,
     chunk: usize,
     max: usize,
@@ -389,10 +423,20 @@ impl Fifo {
     pub(crate) fn new(nch: usize, chunk_frames: usize, max_frames: usize) -> Self {
         Fifo {
             buf: VecDeque::new(),
+            epoch: VoiceEpoch::default(),
             nch,
             chunk: chunk_frames * nch,
             max: max_frames * nch,
         }
+    }
+
+    fn push_captured(&mut self, samples: &[i16], epoch: VoiceEpoch) -> Option<usize> {
+        if self.epoch != epoch {
+            // Целый чанк VQE должен принадлежать одному поколению микрофонного ввода.
+            self.buf.clear();
+            self.epoch = epoch;
+        }
+        self.push(samples)
     }
 
     /// Appends whole frames; past the limit the oldest are dropped: returns how many frames.
@@ -487,17 +531,30 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
     let mut pcm: Option<Pcm> = None;
     let mut hw_period = period;
     let mut buf = CaptureBuf::new(model.capture_format, period * nch);
+    let mut capture_epoch = VoiceEpoch::default();
     while shared.running() {
         let Some(p) = pcm.as_mut() else {
+            let opening_epoch = shared.voice_epoch();
             match open_capture(model, period) {
                 Some((p, per)) => {
                     pcm = Some(p);
                     hw_period = per;
+                    capture_epoch = opening_epoch;
                 }
                 None => shared.pause(REOPEN_DELAY),
             }
             continue;
         };
+        let epoch = shared.voice_epoch();
+        if epoch != capture_epoch && epoch.enabled() {
+            // Буфер ALSA ещё может хранить кадры, записанные до снятия блокировки.
+            if let Err(e) = p.drop_frames().and_then(|()| p.prepare()) {
+                warn!("capture: flush on unmute: {}", pulsar_alsa::strerror(e));
+                pcm = None;
+                continue;
+            }
+        }
+        capture_epoch = epoch;
         let mut r = buf.read(p, hw_period);
         if r == Err(-libc::EAGAIN) {
             match p.wait(READ_WAIT_MS) {
@@ -526,7 +583,7 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
         }
         let dropped = {
             let mut f = lock(&pipe.fifo);
-            let dropped = f.push(block);
+            let dropped = f.push_captured(block, epoch);
             shared.fifo_frames.store(f.frames() as u64, Relaxed);
             dropped
         };
@@ -828,6 +885,7 @@ fn processing(
     let mut music_was_on = false;
     let frame = eng.frame();
     let mut ring = PrerollRing::new(PREROLL_SAMPLES / frame.max(1), frame);
+    let mut voice_epoch = VoiceEpoch::default();
     let mut gain_db = shared.mic_gain_db.load(Relaxed);
     let mut gain = db_to_gain(gain_db);
 
@@ -845,7 +903,7 @@ fn processing(
             let _ = tx.send(FrontendEvent::WakeModel { id, dir, ok });
         }
         // Exactly one VQE chunk.
-        {
+        let epoch = {
             let f = lock(&pipe.fifo);
             let (mut f, _) = pipe
                 .ready
@@ -855,10 +913,13 @@ fn processing(
                 continue;
             }
             shared.fifo_frames.store(f.frames() as u64, Relaxed);
-        }
+            f.epoch
+        };
         shared.chunks.fetch_add(1, Relaxed);
 
-        deinterleave(&input, nch, mic_ch, spk_ch, &mut mics, &mut spk);
+        let voice_on = shared.accepts_voice(epoch);
+        let channels = if voice_on { mic_ch } else { &[] };
+        deinterleave(&input, nch, channels, spk_ch, &mut mics, &mut spk);
         let music_on = shared.music.load(Relaxed) && ana.ok();
         if music_on && !music_was_on {
             ana.reset();
@@ -868,8 +929,21 @@ fn processing(
         if music_on && ana.process(&spk, nspk, &mut mf) {
             let _ = tx.send(FrontendEvent::Music(mf));
         }
+        if epoch != voice_epoch {
+            voice_epoch = epoch;
+            ring.clear();
+            level_hist.values.fill(0.0);
+            level_hist.pos = 0;
+            level_hist.used = 0;
+        }
+        if !voice_on {
+            mics.fill(0.0);
+        }
         if !eng.process(&mics, &spk) {
             ring.clear();
+            continue;
+        }
+        if !voice_on {
             continue;
         }
 
@@ -901,45 +975,47 @@ fn processing(
                 if let Some(slot) = ring.push(d, gain)
                     && (shared.wake_pending.load(Acquire) > 0 || shared.stream.load(Relaxed))
                 {
-                    let _ = tx.send(FrontendEvent::Audio(slot.to_vec()));
+                    let _ = tx.send(FrontendEvent::Audio {
+                        epoch,
+                        pcm: slot.to_vec(),
+                    });
                 }
             }
             None => ring.clear(),
         }
 
-        if shared.detect.load(Relaxed) {
-            let hits = eng.feed_wake();
-            if !hits.is_empty() {
-                let level_db = wake_level_db(&level_hist.values);
-                let speech_end = level_hist.speech_end_ms();
-                let offset_ms = shared.command_offset_ms.load(Relaxed);
-                for hit in hits {
-                    // ring.push выше в этой же итерации: конец кольца = конец поданного спотеру,
-                    // так что ring.tail(after) начинается в точке хита.
-                    let stored = ring.stored();
-                    if let Some(a) = hit.after.filter(|&a| a > stored) {
-                        warn!("wake anchor {a} samples back, the ring holds {stored}; no pre-roll");
-                    }
-                    let n = preroll_samples(hit.after, offset_ms, stored);
-                    let preroll = ring.tail(n);
-                    info!(
-                        "wake anchor: unhandled={} preroll={} ms speech_end={} ms",
-                        Opt(hit.unhandled),
-                        n / SAMPLES_PER_MS,
-                        Opt(speech_end)
-                    );
-                    shared.wake_pending.fetch_add(1, Relaxed);
-                    let _ = tx.send(FrontendEvent::Wake {
-                        phrase: hit.phrase,
-                        level_db,
-                        preroll,
-                    });
+        let hits = eng.feed_wake();
+        if !hits.is_empty() {
+            let level_db = wake_level_db(&level_hist.values);
+            let speech_end = level_hist.speech_end_ms();
+            let offset_ms = shared.command_offset_ms.load(Relaxed);
+            for hit in hits {
+                // ring.push выше в этой же итерации: конец кольца = конец поданного спотеру,
+                // так что ring.tail(after) начинается в точке хита.
+                let stored = ring.stored();
+                if let Some(a) = hit.after.filter(|&a| a > stored) {
+                    warn!("wake anchor {a} samples back, the ring holds {stored}; no pre-roll");
                 }
+                let n = preroll_samples(hit.after, offset_ms, stored);
+                let preroll = ring.tail(n);
+                info!(
+                    "wake anchor: unhandled={} preroll={} ms speech_end={} ms",
+                    Opt(hit.unhandled),
+                    n / SAMPLES_PER_MS,
+                    Opt(speech_end)
+                );
+                shared.wake_pending.fetch_add(1, Relaxed);
+                let _ = tx.send(FrontendEvent::Wake {
+                    epoch,
+                    phrase: hit.phrase,
+                    level_db,
+                    preroll,
+                });
             }
         }
         if shared.commands.load(Relaxed) {
             for word in eng.feed_command() {
-                let _ = tx.send(FrontendEvent::Command { word });
+                let _ = tx.send(FrontendEvent::Command { epoch, word });
             }
         }
     }
@@ -950,6 +1026,31 @@ mod tests {
     use super::*;
     use pulsar_alsa::HwResult;
     use pulsar_core::model::model_from_compatible;
+
+    #[test]
+    fn unmute_rejects_queued_voice_and_does_not_replay_captured_pcm() {
+        let shared = Shared::new();
+        let mut fifo = Fifo::new(1, 2, 8);
+        let prior_wake = shared.voice_epoch();
+        fifo.push_captured(&[10, 11], prior_wake);
+
+        shared.set_detection(false);
+        let muted = shared.voice_epoch();
+        fifo.push_captured(&[20, 21, 22], muted);
+        assert!(!shared.accepts_voice(muted));
+        shared.set_detection(true);
+        assert!(!shared.accepts_voice(prior_wake));
+        assert!(!shared.accepts_voice(muted));
+
+        let resumed = shared.voice_epoch();
+        fifo.push_captured(&[30], resumed);
+        let mut samples = [0; 2];
+        assert!(!fifo.take_chunk(&mut samples));
+        fifo.push_captured(&[31], resumed);
+        assert!(fifo.take_chunk(&mut samples));
+        assert!(shared.accepts_voice(fifo.epoch));
+        assert_eq!(samples, [30, 31]);
+    }
 
     #[test]
     fn s32_capture_keeps_the_top_16_of_24_bits() {

@@ -570,22 +570,32 @@ async fn failed_switch_resync_drops_fd_and_retries() {
     assert!(r.m.muted.get());
     assert_eq!(r.events(), [InputEvent::MuteSync(true)]);
 
-    for _ in 0..2 {
+    for recover in [false, false, true] {
         let (fd, _writer) = socket_evdev();
         let fd = Cell::new(Some(fd));
         devs.open_missing(
             &mut r.m,
             || "N: Name=\"mute\"\nH: Handlers=event1\n".into(),
             |_, _| Ok(fd.take().expect("missing switch is opened again")),
+            |fd| {
+                if recover {
+                    Ok([0; 8])
+                } else {
+                    fd.switch_state()
+                }
+            },
             false,
         );
         assert!(fd.take().is_none());
-        assert!(devs.mute.is_none());
-        assert!(r.m.muted.get());
-        assert!(r.events().is_empty());
+        assert_eq!(devs.available.get(), recover);
+        assert_eq!(devs.mute.is_some(), recover);
+        assert_eq!(r.m.muted.get(), !recover);
+        if recover {
+            assert_eq!(r.events(), [InputEvent::MuteSync(false)]);
+        } else {
+            assert!(r.events().is_empty());
+        }
     }
-    r.m.read_mute_state(Ok([0; 8]), true).unwrap();
-    assert_eq!(r.events(), [InputEvent::MuteSync(false)]);
 }
 
 #[tokio::test(start_paused = true)]

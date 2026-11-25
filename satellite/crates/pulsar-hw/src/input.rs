@@ -131,7 +131,7 @@ fn spawn_input_with(
     let (tx, rx) = unbounded_channel();
     let mut m = Machine::new(Rc::clone(&muted), tx, model);
     let mut devs = Devices::empty(model, Rc::clone(&available));
-    devs.open_missing(&mut m, &list, &open, true);
+    devs.open_missing(&mut m, &list, &open, Evdev::switch_state, true);
     m.arm_repeating(Tick::Reopen, REOPEN_MS, REOPEN_MS);
     let (alive_tx, alive_rx) = unbounded_channel();
     pulsar_core::actors::spawn_actor("input", run(m, devs, alive_rx, list, open));
@@ -670,6 +670,7 @@ impl Devices {
         m: &mut Machine,
         list: impl Fn() -> String,
         open: impl Fn(&str, &str) -> io::Result<Evdev>,
+        switch_state: impl FnOnce(&Evdev) -> io::Result<SwBits>,
         initial: bool,
     ) {
         let mute_name = mute_dev_name(self.model);
@@ -689,7 +690,7 @@ impl Devices {
             m.mute_dropped = false;
             if m.mute_is_switch
                 && let Some(fd) = &self.mute
-                && m.read_mute_state(fd.get_ref().switch_state(), !initial)
+                && m.read_mute_state(switch_state(fd.get_ref()), !initial)
                     .is_err()
             {
                 self.close(Dev::Mute, m);
@@ -753,7 +754,7 @@ async fn run(
         tokio::select! {
             biased;
             t = m.timers.next() => match t {
-                Tick::Reopen => devs.open_missing(&mut m, &list, &open, false),
+                Tick::Reopen => devs.open_missing(&mut m, &list, &open, Evdev::switch_state, false),
                 Tick::MuteGpio => devs.poll_mute_gpio(&mut m),
                 t => m.on_tick(t, |m| {
                     drain(m, &mut devs, Dev::Keys, &mut buf, Read::Now);

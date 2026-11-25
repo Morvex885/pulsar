@@ -275,7 +275,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
                 }
             },
             ev = rx.recv() => match ev {
-                Some(FrontendEvent::Wake { phrase, level_db, preroll }) => {
+                Some(FrontendEvent::Wake { phrase, level_db, preroll, .. }) => {
                     wakes += 1;
                     out!(
                         "t={:6.2}s WAKE '{phrase}' level {level_db:.1} dB preroll {} ms",
@@ -284,11 +284,11 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
                     );
                     h.wake_handled();
                 }
-                Some(FrontendEvent::Command { word }) => {
+                Some(FrontendEvent::Command { word, .. }) => {
                     commands += 1;
                     out!("t={:6.2}s COMMAND '{word}'", secs(start));
                 }
-                Some(FrontendEvent::Audio(pcm)) => {
+                Some(FrontendEvent::Audio { pcm, .. }) => {
                     audio += 1;
                     audio_samples_ok &= pcm.len() == frame;
                     audio_samples += pcm.len();

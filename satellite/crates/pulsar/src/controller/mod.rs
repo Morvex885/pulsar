@@ -787,17 +787,24 @@ impl Controller {
     fn on_frontend(&mut self, ev: FrontendEvent) {
         match ev {
             FrontendEvent::Wake {
+                epoch,
                 phrase,
                 level_db,
                 preroll,
             } => {
-                self.on_wake(&phrase, level_db, preroll);
+                if self.mic.accepts_voice(epoch) {
+                    self.on_wake(&phrase, level_db, preroll);
+                }
                 // After on_wake has switched streaming on where the wake word starts a request.
                 self.mic.wake_handled();
             }
-            FrontendEvent::Command { word } => self.on_command(&word, false),
-            FrontendEvent::Audio(pcm) => {
-                if self.mic_muted() {
+            FrontendEvent::Command { epoch, word } => {
+                if self.mic.accepts_voice(epoch) {
+                    self.on_command(&word, false);
+                }
+            }
+            FrontendEvent::Audio { epoch, pcm } => {
+                if self.mic_muted() || !self.mic.accepts_voice(epoch) {
                     return;
                 }
                 if self.phase == Phase::Listening {
