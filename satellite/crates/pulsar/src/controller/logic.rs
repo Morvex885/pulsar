@@ -717,13 +717,12 @@ pub fn wake_candidates(active: &str, available: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Подпись варианта в HA; двуязычная, чтобы читалась в интерфейсе на любом языке. Неизвестная
-/// модель показывается своим id.
+/// Для неизвестной модели подписью остаётся её ID.
 pub fn wake_word_phrase(id: &str) -> String {
     match id {
-        "alisa" => "Алиса / Alisa".into(),
-        "yandex" => "Яндекс / Yandex".into(),
-        "yasmina" => "Ясмина / Yasmina".into(),
+        "alisa" => "Alisa".into(),
+        "yandex" => "Yandex".into(),
+        "yasmina" => "Yasmina".into(),
         other => other.to_owned(),
     }
 }
