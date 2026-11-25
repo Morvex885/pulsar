@@ -447,8 +447,12 @@ impl Controller {
 
         let (input, input_rx) = pulsar_hw::spawn_input(model);
         let hw_mic_muted = input.hw_muted();
-        let (mic, mic_rx) =
-            pulsar_audio::spawn(model, wake_dirs, Some(PathBuf::from(COMMAND_MODEL)));
+        let (mic, mic_rx) = pulsar_audio::spawn(
+            model,
+            wake_dirs,
+            Some(PathBuf::from(COMMAND_MODEL)),
+            !st.mic_muted && !hw_mic_muted,
+        );
         mic.set_command_offset(st.command_start_offset_ms);
         mic.set_mic_gain(st.mic_gain_db);
 
@@ -785,26 +789,23 @@ impl Controller {
     }
 
     fn on_frontend(&mut self, ev: FrontendEvent) {
+        if self.mic.discard_stale_voice(&ev) {
+            return;
+        }
         match ev {
             FrontendEvent::Wake {
-                epoch,
                 phrase,
                 level_db,
                 preroll,
+                ..
             } => {
-                if self.mic.accepts_voice(epoch) {
-                    self.on_wake(&phrase, level_db, preroll);
-                }
+                self.on_wake(&phrase, level_db, preroll);
                 // After on_wake has switched streaming on where the wake word starts a request.
                 self.mic.wake_handled();
             }
-            FrontendEvent::Command { epoch, word } => {
-                if self.mic.accepts_voice(epoch) {
-                    self.on_command(&word, false);
-                }
-            }
-            FrontendEvent::Audio { epoch, pcm } => {
-                if self.mic_muted() || !self.mic.accepts_voice(epoch) {
+            FrontendEvent::Command { word, .. } => self.on_command(&word, false),
+            FrontendEvent::Audio { pcm, .. } => {
+                if self.mic_muted() {
                     return;
                 }
                 if self.phase == Phase::Listening {

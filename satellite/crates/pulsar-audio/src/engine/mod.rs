@@ -246,7 +246,7 @@ pub(crate) struct Slot {
     /// Читать якорь хита (только у спотера wake word).
     anchor: bool,
     sp: Option<Spotter>,
-    /// Каталог загруженной модели; пустой — спотера нет.
+    /// Каталог последней загруженной модели. Нужен и после неудачного пересоздания.
     dir: PathBuf,
     layout: SpotterLayout,
     legacy: SpotterLayout,
@@ -339,6 +339,18 @@ impl Slot {
             );
         }
         false
+    }
+
+    fn restart(&mut self, lib: &Lib, legacy_main: i32, outputs: u32) {
+        self.last_hit_ms = 0;
+        let dir = std::mem::take(&mut self.dir);
+        if dir.as_os_str().is_empty() {
+            self.sp = None;
+        } else if !self.init(lib, &dir, legacy_main, outputs) {
+            // Оставить путь для следующего восстановления, но не кормить частично созданную модель.
+            self.sp = None;
+            self.dir = dir;
+        }
     }
 
     /// Раскладка по таблице и запасная, `legacy_main` — выход VQE для типа 0 в запасной.
@@ -508,9 +520,19 @@ impl Engine {
             .switch(&self.lib, dir, VQE_OMNI_WITH_GAIN, self.outputs)
     }
 
+    pub(crate) fn restart_spotters(&mut self) {
+        self.wake
+            .restart(&self.lib, VQE_OMNI_WITH_GAIN, self.outputs);
+        self.cmd.restart(&self.lib, VQE_OMNI, self.outputs);
+    }
+
     /// Каталог активной модели wake word.
     pub fn wake_dir(&self) -> &Path {
-        &self.wake.dir
+        if self.wake.sp.is_some() {
+            &self.wake.dir
+        } else {
+            Path::new("")
+        }
     }
 
     /// VQE output samples per chunk.

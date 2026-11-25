@@ -26,9 +26,9 @@
 - Спотеры: `alisa` — каналы `omni(6)` и `main_mic_sync(2)`, `command` — `omni(6)`. `ww_offline` на
   синтетической 6-канальной записи (фраза на всех микрофонах, референс тихий): «алиса» —
   2 подтверждения из 2 (громкая и в ~3 раза тише), ложных нет.
-- Воспроизведение и громкость — как у Мини 2: контрол `Master` (softvol) на `default`,
-  `set_volume.sh` — `amixer set 'Master' <percent>%`. Ключ dmix —
-  [hardware.md, «Зависший dmix lock»](hardware.md#зависший-dmix-lock).
+- Громкость — контрол `Master` (softvol) на PCM `default`; стоковый скрипт описан в
+  [вики](https://hackalice.me/devices/station-lite/#audio). Ключ dmix — [hardware.md,
+  «Зависший dmix lock»](hardware.md#зависший-dmix-lock).
 - Earcons в `.opus`, как у Мини 2.
 
 ## Светодиоды и часы

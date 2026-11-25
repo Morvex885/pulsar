@@ -131,10 +131,11 @@ pub fn spawn(
     model: &'static Model,
     wake_model_dirs: Vec<PathBuf>,
     command_model_dir: Option<PathBuf>,
+    voice_enabled: bool,
 ) -> (FrontendHandle, UnboundedReceiver<FrontendEvent>) {
     let (tx, rx) = unbounded_channel();
     let mut inner = Inner {
-        shared: Arc::new(Shared::new()),
+        shared: Arc::new(Shared::new(voice_enabled)),
         pipe: None,
         threads: Vec::new(),
         frame: 0,
@@ -190,8 +191,9 @@ impl FrontendHandle {
         self.inner.shared.set_detection(on);
     }
 
-    pub fn accepts_voice(&self, epoch: VoiceEpoch) -> bool {
-        self.inner.shared.accepts_voice(epoch)
+    /// Устаревший Wake нужно сбросить вместе с удержанием потока, которое он открыл.
+    pub fn discard_stale_voice(&self, event: &FrontendEvent) -> bool {
+        self.inner.shared.discard_stale_voice(event)
     }
 
     /// Command spotter on/off (commands without the wake word).
@@ -207,11 +209,7 @@ impl FrontendHandle {
     /// The owner handled one [`FrontendEvent::Wake`]: ends the stream hold it started. Call it
     /// after `set_streaming` for that wake word.
     pub fn wake_handled(&self) {
-        let _ = self
-            .inner
-            .shared
-            .wake_pending
-            .try_update(AcqRel, Acquire, |v| v.checked_sub(1));
+        self.inner.shared.wake_handled();
     }
 
     /// Сдвиг начала пре-ролла от точки хита спотера, мс: плюс — позже, минус — раньше. По
@@ -287,12 +285,12 @@ struct Shared {
 }
 
 impl Shared {
-    fn new() -> Self {
+    fn new(voice_enabled: bool) -> Self {
         Shared {
             running: AtomicBool::new(false),
             stop_lock: Mutex::new(()),
             stop_cv: Condvar::new(),
-            voice_epoch: AtomicU32::new(0),
+            voice_epoch: AtomicU32::new(u32::from(!voice_enabled)),
             commands: AtomicBool::new(false),
             stream: AtomicBool::new(false),
             wake_pending: AtomicU32::new(0),
@@ -315,7 +313,7 @@ impl Shared {
     }
 
     fn set_detection(&self, on: bool) {
-        let _ = self.voice_epoch.fetch_update(Relaxed, Relaxed, |v| {
+        let _ = self.voice_epoch.try_update(Relaxed, Relaxed, |v| {
             (VoiceEpoch(v).enabled() != on).then(|| v.wrapping_add(1))
         });
     }
@@ -326,6 +324,25 @@ impl Shared {
 
     fn accepts_voice(&self, epoch: VoiceEpoch) -> bool {
         epoch.enabled() && self.voice_epoch() == epoch
+    }
+
+    fn discard_stale_voice(&self, event: &FrontendEvent) -> bool {
+        match event {
+            FrontendEvent::Wake { epoch, .. } if !self.accepts_voice(*epoch) => {
+                self.wake_handled();
+                true
+            }
+            FrontendEvent::Audio { epoch, .. } | FrontendEvent::Command { epoch, .. } => {
+                !self.accepts_voice(*epoch)
+            }
+            _ => false,
+        }
+    }
+
+    fn wake_handled(&self) {
+        let _ = self
+            .wake_pending
+            .try_update(AcqRel, Acquire, |v| v.checked_sub(1));
     }
 
     /// Sleeps `d` or until stopped.
@@ -765,6 +782,7 @@ impl LevelHistory {
 /// The last VQE chunks as s16, for the pre-roll after a wake word.
 pub(crate) struct PrerollRing {
     buf: Vec<i16>,
+    epoch: VoiceEpoch,
     frame: usize,
     /// Slot the next chunk goes to.
     next: usize,
@@ -775,10 +793,20 @@ impl PrerollRing {
     pub(crate) fn new(chunks: usize, frame: usize) -> Self {
         PrerollRing {
             buf: vec![0; chunks * frame],
+            epoch: VoiceEpoch::default(),
             frame,
             next: 0,
             filled: 0,
         }
+    }
+
+    fn start_epoch(&mut self, epoch: VoiceEpoch) -> bool {
+        if self.epoch == epoch {
+            return false;
+        }
+        self.epoch = epoch;
+        self.clear();
+        true
     }
 
     fn chunks(&self) -> usize {
@@ -885,7 +913,7 @@ fn processing(
     let mut music_was_on = false;
     let frame = eng.frame();
     let mut ring = PrerollRing::new(PREROLL_SAMPLES / frame.max(1), frame);
-    let mut voice_epoch = VoiceEpoch::default();
+    let mut spotter_epoch = None;
     let mut gain_db = shared.mic_gain_db.load(Relaxed);
     let mut gain = db_to_gain(gain_db);
 
@@ -929,12 +957,18 @@ fn processing(
         if music_on && ana.process(&spk, nspk, &mut mf) {
             let _ = tx.send(FrontendEvent::Music(mf));
         }
-        if epoch != voice_epoch {
-            voice_epoch = epoch;
-            ring.clear();
+        if ring.start_epoch(epoch) {
             level_hist.values.fill(0.0);
             level_hist.pos = 0;
             level_hist.used = 0;
+        }
+        if voice_on
+            && spotter_epoch
+                .replace(epoch)
+                .is_some_and(|previous| previous != epoch)
+        {
+            // Иначе первое подтверждение после mute может закончить фразу из старой эпохи.
+            eng.restart_spotters();
         }
         if !voice_on {
             mics.fill(0.0);
@@ -1029,7 +1063,7 @@ mod tests {
 
     #[test]
     fn unmute_rejects_queued_voice_and_does_not_replay_captured_pcm() {
-        let shared = Shared::new();
+        let shared = Shared::new(true);
         let mut fifo = Fifo::new(1, 2, 8);
         let prior_wake = shared.voice_epoch();
         fifo.push_captured(&[10, 11], prior_wake);
@@ -1050,6 +1084,51 @@ mod tests {
         assert!(fifo.take_chunk(&mut samples));
         assert!(shared.accepts_voice(fifo.epoch));
         assert_eq!(samples, [30, 31]);
+    }
+
+    #[test]
+    fn mute_boundary_invalidates_queued_events_and_preroll() {
+        let shared = Shared::new(false);
+        assert!(!shared.accepts_voice(shared.voice_epoch()));
+        shared.set_detection(true);
+        let before_mute = shared.voice_epoch();
+        let mut ring = PrerollRing::new(3, 2);
+        ring.start_epoch(before_mute);
+        ring.push(&[0.5, 0.75], 1.0).unwrap();
+        let wake = FrontendEvent::Wake {
+            epoch: before_mute,
+            phrase: "Алиса".to_owned(),
+            level_db: -20.0,
+            preroll: ring.tail(2),
+        };
+        shared.wake_pending.fetch_add(1, Relaxed);
+        assert!(!shared.discard_stale_voice(&wake));
+
+        shared.set_detection(false);
+        shared.set_detection(true);
+        for event in [
+            wake,
+            FrontendEvent::Command {
+                epoch: before_mute,
+                word: "стоп".to_owned(),
+            },
+            FrontendEvent::Audio {
+                epoch: before_mute,
+                pcm: vec![7, 8],
+            },
+        ] {
+            assert!(shared.discard_stale_voice(&event));
+        }
+        assert_eq!(shared.wake_pending.load(Acquire), 0);
+
+        let resumed = shared.voice_epoch();
+        ring.start_epoch(resumed);
+        let pcm = ring.push(&[-0.5, -0.75], 1.0).unwrap().to_vec();
+        assert_eq!(ring.tail(4), pcm);
+        assert!(!shared.discard_stale_voice(&FrontendEvent::Audio {
+            epoch: resumed,
+            pcm,
+        }));
     }
 
     #[test]
@@ -1344,7 +1423,7 @@ mod tests {
     fn without_the_yandex_library_the_handle_is_degraded() {
         // No /system/vendor/quasar/libs on the build host: dlopen fails.
         let midi = model_from_compatible(b"yandex,cucumber\0").unwrap();
-        let (h, mut rx) = spawn(midi, vec![PathBuf::from("/nonexistent")], None);
+        let (h, mut rx) = spawn(midi, vec![PathBuf::from("/nonexistent")], None, true);
         h.set_streaming(true);
         h.set_model(PathBuf::from("/nonexistent/2"));
         let h2 = h.clone();

@@ -238,6 +238,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
         m,
         a.wake.iter().map(|w| wake_dir(w)).collect(),
         Some(PathBuf::from(COMMAND_MODEL)),
+        true,
     );
     let frame = h.frame();
     h.set_commands(a.commands);
