@@ -2,6 +2,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use pulsar_core::actors;
+use tokio::sync::mpsc;
 use zbus::message::{Sequence, Type};
 use zbus::{
     Connection, Message, MessageStream, ObjectPath, OwnedObjectPath, OwnedVariant, Variant,
@@ -33,6 +35,8 @@ type Objects = HashMap<OwnedObjectPath, Interfaces>;
 struct Registry {
     owner: String,
     baseline: Sequence,
+    snapshot_order: u64,
+    playing_edges: HashMap<String, u64>,
     objects: HashMap<String, Interfaces>,
 }
 
@@ -41,6 +45,7 @@ impl Registry {
         let msg = conn
             .call_method(Some(service), path, Some(OBJECTS), "GetManagedObjects", &())
             .await?;
+        let snapshot_order = pulsar_core::audio_start_order();
         let owner = msg
             .header()
             .sender()
@@ -55,11 +60,13 @@ impl Registry {
         Ok(Self {
             owner,
             baseline: msg.recv_position(),
+            snapshot_order,
+            playing_edges: HashMap::new(),
             objects,
         })
     }
 
-    fn apply(&mut self, msg: &Message) -> zbus::Result<()> {
+    fn apply(&mut self, msg: &Message, order: u64) -> zbus::Result<()> {
         if msg.recv_position() <= self.baseline {
             return Ok(());
         }
@@ -72,10 +79,15 @@ impl Registry {
         match (iface, member) {
             (Some(OBJECTS), Some("InterfacesAdded")) => {
                 let (path, interfaces): (OwnedObjectPath, Interfaces) = msg.body().deserialize()?;
+                let adds_player = interfaces.contains_key(PLAYER);
+                let was_playing = adds_player && self.playing(path.as_str());
                 self.objects
                     .entry(path.as_str().to_owned())
                     .or_default()
                     .extend(interfaces);
+                if adds_player {
+                    self.update_playing_edge(path.as_str(), was_playing, order);
+                }
             }
             (Some(OBJECTS), Some("InterfacesRemoved")) => {
                 let (path, interfaces): (OwnedObjectPath, Vec<String>) =
@@ -83,6 +95,9 @@ impl Registry {
                 if let Some(obj) = self.objects.get_mut(path.as_str()) {
                     for interface in interfaces {
                         obj.remove(&interface);
+                        if interface == PLAYER {
+                            self.playing_edges.remove(path.as_str());
+                        }
                     }
                     if obj.is_empty() {
                         self.objects.remove(path.as_str());
@@ -95,6 +110,7 @@ impl Registry {
                 };
                 let (iface, changed, invalidated): (String, Properties, Vec<String>) =
                     msg.body().deserialize()?;
+                let was_playing = iface == PLAYER && self.playing(path.as_str());
                 if let Some(props) = self
                     .objects
                     .get_mut(path.as_str())
@@ -105,10 +121,31 @@ impl Registry {
                     }
                     props.extend(changed);
                 }
+                if iface == PLAYER {
+                    self.update_playing_edge(path.as_str(), was_playing, order);
+                }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    fn playing(&self, path: &str) -> bool {
+        self.props(path, PLAYER)
+            .and_then(|p| prop::<&str>(p, "Status"))
+            == Some("playing")
+    }
+
+    fn update_playing_edge(&mut self, path: &str, was_playing: bool, order: u64) {
+        match (was_playing, self.playing(path)) {
+            (false, true) => {
+                self.playing_edges.insert(path.to_owned(), order);
+            }
+            (true, false) => {
+                self.playing_edges.remove(path);
+            }
+            _ => {}
+        }
     }
 
     fn props(&self, path: &str, iface: &str) -> Option<&Properties> {
@@ -145,12 +182,36 @@ pub(crate) struct Candidate<'a> {
     pub address: &'a str,
     pub name: &'a str,
     pub player: Option<&'a str>,
-    pub phase: Option<Playback>,
+    pub phase: Option<(Playback, u64)>,
     pub phone_gain: [f32; 2],
 }
 
+async fn collect_signals(
+    mut stream: impl futures_util::Stream<Item = zbus::Result<Message>> + Unpin,
+    tx: mpsc::Sender<(Message, u64)>,
+) {
+    // Сигналы получают порядок независимо от ожидания исходящих D-Bus вызовов.
+    loop {
+        let Some(Ok(msg)) = (tokio::select! {
+            biased;
+            () = tx.closed() => return,
+            msg = stream.next() => msg,
+        }) else {
+            return;
+        };
+        if msg.message_type() == Type::Signal
+            && tx
+                .try_send((msg, pulsar_core::audio_start_order()))
+                .is_err()
+        {
+            // При переполнении переснять состояние вместо отложенной маркировки.
+            break;
+        }
+    }
+}
+
 pub(crate) struct Bus {
-    stream: MessageStream,
+    signals: mpsc::Receiver<(Message, u64)>,
     conn: Connection,
     bluez: Registry,
     alsa: Registry,
@@ -160,7 +221,11 @@ impl Bus {
     pub async fn connect() -> zbus::Result<Self> {
         let mut conn = Connection::system().await?;
         conn.set_max_queued(256.try_into().expect("positive capacity"));
-        let stream = MessageStream::from(&conn);
+        let (tx, signals) = mpsc::channel(256);
+        actors::spawn_actor(
+            "bluetooth D-Bus signals",
+            collect_signals(MessageStream::from(&conn), tx),
+        );
         for service in [BLUEZ, BLUEALSA] {
             for rule in [
                 format!("type='signal',sender='{service}',interface='{OBJECTS}'"),
@@ -185,7 +250,7 @@ impl Bus {
         )?;
         let bus = Self {
             conn,
-            stream,
+            signals,
             bluez,
             alsa,
         };
@@ -211,13 +276,9 @@ impl Bus {
     }
 
     pub async fn next(&mut self) -> zbus::Result<()> {
-        let msg = self
-            .stream
-            .next()
-            .await
-            .ok_or(zbus::Error::InvalidReply)??;
-        if msg.message_type() != Type::Signal {
-            return Ok(());
+        let (msg, order) = self.signals.recv().await.ok_or(zbus::Error::InvalidReply)?;
+        if self.signals.is_closed() {
+            return Err(zbus::Error::InvalidReply);
         }
         let header = msg.header();
         if header.sender().is_some_and(|s| s.as_str() == DBUS)
@@ -239,8 +300,8 @@ impl Bus {
                 ));
             }
         }
-        self.bluez.apply(&msg)?;
-        self.alsa.apply(&msg)
+        self.bluez.apply(&msg, order)?;
+        self.alsa.apply(&msg, order)
     }
 
     pub fn flags(&self) -> Option<[bool; 2]> {
@@ -341,13 +402,19 @@ impl Registry {
                 })
                 .unwrap_or("device");
             let player = self.player(device);
-            let phase = player
-                .and_then(|path| self.props(path, PLAYER))
-                .and_then(|p| match prop::<&str>(p, "Status") {
-                    Some("playing") => Some(Playback::Playing),
-                    Some("paused" | "stopped") => Some(Playback::Paused),
-                    _ => None,
-                });
+            let phase = player.and_then(|path| {
+                let phase = match prop::<&str>(self.props(path, PLAYER)?, "Status") {
+                    Some("playing") => Playback::Playing,
+                    Some("paused" | "stopped") => Playback::Paused,
+                    _ => return None,
+                };
+                let order = self
+                    .playing_edges
+                    .get(path)
+                    .copied()
+                    .unwrap_or(self.snapshot_order);
+                Some((phase, order))
+            });
             Some(Candidate {
                 device,
                 sequence: prop(pcm, "Sequence").unwrap_or(u32::MAX),
@@ -446,6 +513,23 @@ fn phone_gain(pcm: &Properties, transport: impl FnOnce() -> Option<u16>) -> [f32
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn inbound_signal_is_stamped_before_delayed_service_consumption() {
+        let signal = Message::signal("/player", PROPS, "PropertiesChanged")
+            .build(&(
+                PLAYER,
+                Properties::from([("Status".into(), zbus::Str::from("playing").into())]),
+                Vec::<String>::new(),
+            ))
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+        // Актор ещё не опустошил очередь: он ждёт ответа исходящего вызова.
+        collect_signals(futures_util::stream::iter([Ok(signal)]), tx).await;
+        let music_order = pulsar_core::audio_start_order();
+        let (_, signal_order) = rx.recv().await.unwrap();
+        assert!(signal_order < music_order);
+    }
+
     #[test]
     fn manager_recognizes_incoming_a2dp_without_connected_pcms() {
         let strings = |values: Vec<&str>| {
@@ -489,6 +573,8 @@ mod tests {
                 .build(&())
                 .unwrap()
                 .recv_position(),
+            snapshot_order: 1,
+            playing_edges: HashMap::new(),
             objects,
         };
         let path = |s| OwnedVariant::from(ObjectPath::try_from(s).unwrap());
@@ -556,7 +642,7 @@ mod tests {
                 incoming[0].player,
                 incoming[0].phase
             ),
-            (first, "device", Some(player7), Some(Playback::Playing))
+            (first, "device", Some(player7), Some((Playback::Playing, 1)))
         );
         assert_eq!(
             (incoming[1].device, incoming[1].player, incoming[1].phase),

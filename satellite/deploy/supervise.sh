@@ -51,7 +51,7 @@ bt_blocked=$BIN.bt-blocked
 restore_bt() {
   if [ -e "$bt_owner" ] || [ -L "$bt_owner" ]; then
     if ! "$D/ctl.sh" bt-restore >> "$LOG" 2>&1; then
-      say "Bluetooth restore failed; not starting the previous binary or the Yandex stack"
+      say "Bluetooth restore failed; not starting another binary or the Yandex stack"
       return 1
     fi
   fi
@@ -100,7 +100,7 @@ ROT=$!
 trap 'kill $ROT 2>/dev/null; exit 143' TERM INT HUP
 trap 'kill $ROT 2>/dev/null' EXIT
 
-fails=0 swapped=0 backoff=$BACKOFF_MIN
+fails=0 swapped=0 backoff=$BACKOFF_MIN last_inode=
 while [ -f "$D/enabled" ]; do
   rotate
   if [ ! -x "$BIN" ]; then
@@ -112,8 +112,6 @@ while [ -f "$D/enabled" ]; do
     give_back "no usable binary"
   fi
   clear_dmix
-  echo "=== start $(date)" >> "$LOG"
-  t0=$(uptime_s)
   bt_managed=0
   if ! [ "$BIN" -ef "$bt_blocked" ]; then
     rm -f "$bt_blocked"
@@ -123,6 +121,14 @@ while [ -f "$D/enabled" ]; do
     # Появился другой бинарь — он получает собственную попытку отката.
     if [ "$swapped" = 1 ]; then swapped=0 fails=0 backoff=$BACKOFF_MIN; fi
   fi
+  # Reload and executable replacement are handoffs; normal restarts keep stock audio stopped.
+  inode=$(stat -Lc '%d:%i' "$BIN") || { say "could not identify $BIN"; exit 1; }
+  if [ "$inode" != "$last_inode" ]; then
+    restore_bt || exit 1
+    last_inode=$inode
+  fi
+  echo "=== start $(date)" >> "$LOG"
+  t0=$(uptime_s)
   PULSAR_BT_MANAGED=$bt_managed "$BIN" "$D/state.conf" >> "$LOG" 2>&1
   rc=$?
   up=$(($(uptime_s) - t0))

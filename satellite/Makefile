@@ -53,6 +53,18 @@ check:
 	$(CARGO) test --workspace --locked
 	sh deploy/test-bt-ownership.sh
 
+# Изолированные тесты передачи звука Bluetooth ↔ Sendspin с реальным C++ на Linux/x86_64.
+SENDSPIN_CHECK_BUILD := $(CURDIR)/build/sendspin-check
+check-sendspin-ffi:
+	$(if $(ZIG_PATH),,$(error $(ZIG_MISSING)))
+	third_party/fetch.sh
+	CC='$(ZIG_PATH) cc' CXX='$(ZIG_PATH) c++' cmake -S third_party -B '$(SENDSPIN_CHECK_BUILD)' \
+	  -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+	cmake --build '$(SENDSPIN_CHECK_BUILD)'
+	env $(ZIGBUILD_ENV) PULSAR_SS_BUILD='$(SENDSPIN_CHECK_BUILD)' PULSAR_SS_SRC='$(CURDIR)/third_party/src' \
+	  PULSAR_REQUIRE_SS=1 $(CARGO_ZIGBUILD) test --locked -p pulsar-sendspin --lib \
+	  --target x86_64-unknown-linux-gnu.$$(getconf GNU_LIBC_VERSION | cut -d ' ' -f2) bluetooth
+
 clean:
 	rm -rf build target
 
@@ -60,7 +72,7 @@ clean:
 distclean: clean
 	rm -rf third_party/src
 
-.PHONY: all check clean distclean $(ARCHES)
+.PHONY: all check check-sendspin-ffi clean distclean $(ARCHES)
 
 else
 

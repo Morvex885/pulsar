@@ -219,6 +219,13 @@ fn bluetooth_voice_window_is_single_use_and_separate_from_ha_dialog() {
         assert!(!command_wake(other, false, &mut until, now));
         assert!(!command_wake(bt, false, &mut until, now));
     }
+
+    let pause = VoiceCommand::Pause;
+    until = COMMAND_AFTER_WAKE_MS;
+    let wake = command_wake(Some(pause), false, &mut until, now);
+    assert!(command_allowed(pause, wake, false, false, true));
+    assert!(!command_allowed(pause, wake, false, false, false));
+    assert!(!command_wake(bt, false, &mut until, now));
 }
 
 #[test]

@@ -98,9 +98,15 @@ TEST_DIR_OPTIONAL="$TEST_DIR_CHECK
 # Не запускать установленный сервис и не удалять стенд, пока не возвращён тестовый BT.
 TEST_BT_RESTORED="$TEST_DIR_OPTIONAL
   if [ -e '$T/bt-owner' ] || [ -L '$T/bt-owner' ]; then echo 'test Bluetooth not restored: run test-stop' >&2; exit 1; fi"
-PROD_BT_RESTORE="if [ -e '$BT_OWNER' ] || [ -L '$BT_OWNER' ]; then
-  '$D/ctl.sh' reload --stop && '$D/ctl.sh' bt-restore &&
-    [ ! -e '$BT_OWNER' ] && [ ! -L '$BT_OWNER' ] ||
+# Сначала остановить обоих: работающий pulsar ещё может записать снимок и захватить player.
+PROD_BT_CTL="'$D/ctl.sh' bt-restore --supported >/dev/null 2>&1 ||
+  '$D/ctl.sh' bt-restore --check >/dev/null 2>&1"
+PROD_BT_RESTORE="if $PROD_BT_CTL; then
+  '$D/ctl.sh' reload --stop && '$D/ctl.sh' bt-restore ||
+    { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
+elif [ -L '$BT_OWNER' ] || [ -e '$BT_OWNER' ]; then
+  # Legacy ctl cannot recover a legitimate snapshot from a previously installed binary.
+  owner=\$(stat -c '%u' '$BT_OWNER') && uid=\$(id -u) && [ \"\$owner\" != \"\$uid\" ] ||
     { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
 fi"
 case "$cmd" in
@@ -121,12 +127,16 @@ case "$cmd" in
   stop)
     own
     r "[ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
-       killall supervise.sh 2>/dev/null; killall pulsar 2>/dev/null
-       i=0; while [ \$i -lt 10 ] && pidof pulsar >/dev/null; do sleep 1; i=\$((i+1)); done
-       pidof pulsar >/dev/null && killall -9 pulsar
-       i=0; while [ \$i -lt 5 ] && pidof supervise.sh >/dev/null; do sleep 1; i=\$((i+1)); done
-       pidof supervise.sh >/dev/null && killall -9 supervise.sh
-       sleep 1
+       if $PROD_BT_CTL; then
+         '$D/ctl.sh' reload --stop || exit 1
+       else
+         killall supervise.sh 2>/dev/null; killall pulsar 2>/dev/null
+         i=0; while [ \$i -lt 10 ] && pidof pulsar >/dev/null; do sleep 1; i=\$((i+1)); done
+         pidof pulsar >/dev/null && killall -9 pulsar
+         i=0; while [ \$i -lt 5 ] && pidof supervise.sh >/dev/null; do sleep 1; i=\$((i+1)); done
+         pidof supervise.sh >/dev/null && killall -9 supervise.sh
+         sleep 1
+       fi
        $DMIX
        ! pidof pulsar supervise.sh >/dev/null && echo stopped" ;;
   start) own; r "$TEST_BT_RESTORED; $D/ctl.sh reload" ;;

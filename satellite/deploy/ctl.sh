@@ -67,6 +67,12 @@ wait_supervisors_gone() {
   ! pidof supervise.sh >/dev/null 2>&1
 }
 
+stop_service() {
+  stop_supervisors
+  stop_daemon || { echo "pulsar did not exit" >&2; return 1; }
+  wait_supervisors_gone || { echo "supervisor is still running" >&2; return 1; }
+}
+
 bt_error() { echo "bt-restore: $* (снимок сохранён в $bt_owner)" >&2; return 1; }
 
 bt_player_running() {
@@ -74,7 +80,9 @@ bt_player_running() {
   for bt_pid in "$bt_proc"/[0-9]*; do
     { IFS= read -r bt_comm < "$bt_pid/comm"; } 2>/dev/null || continue
     [ "$bt_comm" = bluealsa-aplay ] &&
-      [ "$(readlink "$bt_pid/exe" 2>/dev/null)" = "$bt_player" ] && return 0
+      [ "$(readlink "$bt_pid/exe" 2>/dev/null)" = "$bt_player" ] &&
+      [ "$(awk '$1 == "Uid:" { print $3; exit }' "$bt_pid/status" 2>/dev/null)" = "$bt_uid" ] &&
+      return 0
   done
   return 1
 }
@@ -87,12 +95,14 @@ bt_restore_flag() {
     "variant:boolean:$bt_value" >/dev/null || bt_error "не удалось вернуть $1"
 }
 
-bt_owner_exists() { [ -e "$bt_owner" ] || [ -L "$bt_owner" ]; }
-
 bt_read_owner() {
-  bt_uid=$(id -u) &&
-    [ -f "$bt_owner" ] && [ ! -L "$bt_owner" ] &&
-    [ "$(stat -c '%u:%a:%s' "$bt_owner")" = "$bt_uid:600:6" ] ||
+  bt_flags=
+  [ -L "$bt_owner" ] || [ -e "$bt_owner" ] || return 0
+  bt_uid=$(id -u) && bt_meta=$(stat -c '%u:%a:%s' "$bt_owner") ||
+    { bt_error 'не удалось проверить файл снимка'; return 1; }
+  # Чужой объект в /tmp не мог появиться при нашем захвате. Не читаем и не удаляем его.
+  [ "${bt_meta%%:*}" = "$bt_uid" ] || return 0
+  [ ! -L "$bt_owner" ] && [ -f "$bt_owner" ] && [ "$bt_meta" = "$bt_uid:600:6" ] ||
     { bt_error 'некорректный файл снимка'; return 1; }
   # Точка сохраняет перевод строки при подстановке; читаем не более шести байт.
   bt_flags=$(head -c 6 "$bt_owner" && printf .) || return 1
@@ -114,8 +124,9 @@ bt_stopped() {
 }
 
 bt_hide() {
-  bt_owner_exists || return 0
-  bt_read_owner && bt_stopped || return 1
+  bt_read_owner || return 1
+  [ -n "$bt_flags" ] || return 0
+  bt_stopped || return 1
   bt_ok=0
   bt_restore_flag Discoverable 0 || bt_ok=1
   bt_restore_flag Pairable 0 || bt_ok=1
@@ -123,8 +134,9 @@ bt_hide() {
 }
 
 bt_restore() {
-  bt_owner_exists || return 0
-  bt_read_owner && bt_stopped "${1-}" || return 1
+  bt_read_owner || return 1
+  [ -n "$bt_flags" ] || return 0
+  bt_stopped "${1-}" || return 1
 
   # Пространства путей подменяются только для изолированной проверки протокола.
   bt_proc=${PULSAR_BT_PROC:-/proc}
@@ -155,7 +167,7 @@ rollback() {
     # Пока копия не готова, рабочую службу не останавливаем.
     trap 'rm -f pulsar.rb' EXIT
     rm -f pulsar.rb && cp -p pulsar.prev pulsar.rb && [ -x pulsar.rb ] || exit 1
-    "$D/ctl.sh" reload --stop && bt_restore || exit 1
+    stop_service && bt_restore || exit 1
     # Сохраняем текущий бинарь, не снимая его с рабочего пути до атомарной замены.
     if { [ pulsar -ef pulsar.bad ] || ln -f pulsar pulsar.bad; } &&
       ln -f pulsar.rb pulsar.bt-blocked && [ pulsar.rb -ef pulsar.bt-blocked ] &&
@@ -214,9 +226,7 @@ case "$1" in
     ;;
   reload)
     case "$#:${2-}" in 1:|2:--stop) ;; *) exit 2 ;; esac
-    stop_supervisors
-    stop_daemon || { echo "pulsar did not exit" >&2; exit 1; }
-    wait_supervisors_gone || { echo "supervisor is still running" >&2; exit 1; }
+    stop_service && bt_hide || exit 1
     [ "${2-}" = --stop ] && exit 0
     if [ -f "$D/enabled" ] && [ -x "$D/supervise.sh" ]; then
       start_supervisor || { echo 'supervisor did not start' >&2; exit 1; }
@@ -263,6 +273,7 @@ case "$1" in
       1:) bt_restore ;;
       2:--self) bt_restore --self ;;
       2:--hide) bt_hide ;;
+      2:--supported) : ;;
       2:--check) command -v dbus-send >/dev/null 2>&1 ;;
       *) exit 2 ;;
     esac

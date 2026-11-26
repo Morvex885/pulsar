@@ -35,18 +35,32 @@ impl Stock {
     pub async fn take(&self, flags: [bool; 2]) -> io::Result<()> {
         let marker = Arc::clone(&self.marker);
         let (exe, running) = tokio::task::spawn_blocking(move || {
-            let init = fs::metadata(INIT)?;
-            if !init.is_file() || init.permissions().mode() & 0o111 == 0 {
-                return Err(io::Error::other(
-                    "stock player init script is not executable",
-                ));
-            }
-            let exe = fs::canonicalize(PLAYER)?;
-            let running = Self::running(&exe)?;
+            let (exe, running) = Self::player_status()?;
             Self { marker }.record(flags, running)?;
             Ok::<_, io::Error>((exe, running))
         })
         .await??;
+        Self::stop_if_running(exe, running).await
+    }
+
+    pub async fn keep_stopped(&self) -> io::Result<()> {
+        let (exe, running) = tokio::task::spawn_blocking(Self::player_status).await??;
+        Self::stop_if_running(exe, running).await
+    }
+
+    fn player_status() -> io::Result<(PathBuf, bool)> {
+        let init = fs::metadata(INIT)?;
+        if !init.is_file() || init.permissions().mode() & 0o111 == 0 {
+            return Err(io::Error::other(
+                "stock player init script is not executable",
+            ));
+        }
+        let exe = fs::canonicalize(PLAYER)?;
+        let running = Self::running(&exe)?;
+        Ok((exe, running))
+    }
+
+    async fn stop_if_running(exe: PathBuf, running: bool) -> io::Result<()> {
         if !running {
             return Ok(());
         }
@@ -135,6 +149,7 @@ impl Stock {
     }
 
     fn running(exe: &Path) -> io::Result<bool> {
+        let owner_uid = fs::metadata("/proc/self")?.uid();
         for entry in fs::read_dir("/proc")? {
             let entry = entry?;
             if !entry
@@ -147,6 +162,7 @@ impl Stock {
             }
             let pid = entry.path();
             if fs::read(pid.join("comm")).is_ok_and(|v| v == b"bluealsa-aplay\n")
+                && fs::metadata(&pid).is_ok_and(|meta| meta.uid() == owner_uid)
                 && fs::read_link(pid.join("exe")).is_ok_and(|p| p == exe)
             {
                 return Ok(true);
@@ -157,25 +173,51 @@ impl Stock {
 }
 
 pub(crate) fn plugin_present() -> bool {
+    let confdir = std::env::var_os("ALSA_CONFIG_DIR")
+        .map_or_else(|| PathBuf::from("/usr/share/alsa"), PathBuf::from);
     let config = std::env::var_os("ALSA_CONFIG_PATH")
-        .map_or_else(|| PathBuf::from("/usr/share/alsa/alsa.conf"), PathBuf::from);
-    let Ok(text) = fs::read_to_string(&config) else {
-        return false;
+        .map_or_else(|| confdir.join("alsa.conf"), PathBuf::from);
+    plugin_registered(&config, &confdir, Path::new("/etc/alsa"))
+        && Path::new("/usr/lib/alsa-lib/libasound_module_pcm_bluealsa.so").is_file()
+}
+
+fn plugin_registered(config: &Path, confdir: &Path, etc_alsa: &Path) -> bool {
+    let read_config = |path: &Path| -> io::Result<String> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)?;
+        let mut text = String::new();
+        file.take(128 * 1024).read_to_string(&mut text)?;
+        Ok(text)
     };
     let defined = |s: &str| {
         s.lines()
             .any(|line| line.trim_start().starts_with("pcm.bluealsa"))
     };
-    let dir = config.parent().unwrap_or(Path::new("/usr/share/alsa"));
-    let registered = defined(&text)
-        || (text.contains("conf.d")
-            && [
-                dir.join("conf.d/20-bluealsa.conf"),
-                PathBuf::from("/etc/alsa/conf.d/20-bluealsa.conf"),
-            ]
-            .iter()
-            .any(|path| fs::read_to_string(path).is_ok_and(|s| defined(&s))));
-    registered && Path::new("/usr/lib/alsa-lib/libasound_module_pcm_bluealsa.so").is_file()
+    let registered = |path: &Path, text: &str| {
+        defined(text)
+            || (text.contains("conf.d")
+                && [
+                    path.with_file_name("conf.d").join("20-bluealsa.conf"),
+                    etc_alsa.join("conf.d/20-bluealsa.conf"),
+                ]
+                .iter()
+                .any(|path| read_config(path).is_ok_and(|s| defined(&s))))
+    };
+    let Ok(text) = read_config(config) else {
+        return false;
+    };
+    // Мини: ALSA_CONFIG_PATH указывает на файл pulsar, а штатный conf.d
+    // загружается из стандартной конфигурации через этот include.
+    registered(config, &text)
+        || (text
+            .lines()
+            .any(|line| line.trim() == "<confdir:alsa.conf>")
+            && {
+                let stock = confdir.join("alsa.conf");
+                stock != config && read_config(&stock).is_ok_and(|text| registered(&stock, &text))
+            })
 }
 
 async fn stop_player(
@@ -206,6 +248,27 @@ mod tests {
             std::env::temp_dir().join(format!("pulsar-bt-{name}-{}-{unique}", std::process::id()));
         fs::create_dir(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn mini_config_finds_bluealsa_registration_in_stock_include() {
+        let dir = test_dir("alsa-config");
+        let confdir = dir.join("alsa");
+        let etc_alsa = dir.join("etc-alsa");
+        let config = dir.join("pulsar.conf");
+        fs::create_dir_all(confdir.join("conf.d")).unwrap();
+        fs::write(&config, "<confdir:alsa.conf>\npcm.mini { type plug }\n").unwrap();
+        fs::write(confdir.join("alsa.conf"), "func load\nfiles [ conf.d ]\n").unwrap();
+        assert!(!plugin_registered(&config, &confdir, &etc_alsa));
+        fs::write(
+            confdir.join("conf.d/20-bluealsa.conf"),
+            "pcm.bluealsa { type plug }\n",
+        )
+        .unwrap();
+        assert!(plugin_registered(&config, &confdir, &etc_alsa));
+        fs::write(&config, "# <confdir:alsa.conf>\npcm.mini { type plug }\n").unwrap();
+        assert!(!plugin_registered(&config, &confdir, &etc_alsa));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

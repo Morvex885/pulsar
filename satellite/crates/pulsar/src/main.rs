@@ -52,6 +52,7 @@ fn main() -> ExitCode {
     }
     // The controller persists its settings there.
     let state = arg.map_or_else(|| PathBuf::from(DEFAULT_STATE), PathBuf::from);
+    sys::init_media_env();
 
     pulsar_core::init_logger();
     crash::install();
@@ -60,8 +61,6 @@ fn main() -> ExitCode {
     };
     // Before the runtime, threads and any audio library: ALSA_CONFIG_PATH and libasound.
     pulsar_alsa::init(model);
-
-    pulsar_media::set_ssl_cert_file();
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

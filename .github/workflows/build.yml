@@ -65,8 +65,8 @@ jobs:
           if-no-files-found: error
 
   check:
-    # Host: cargo fmt --check, clippy -D warnings (host + both stations, the latter through
-    # cargo-zigbuild: ring's build script compiles C for the target), tests (without sendspin-cpp).
+    # Host fmt, Clippy (host + both stations), fast tests without sendspin-cpp, then the
+    # local Bluetooth handoff tests with the real Sendspin FFI.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -93,6 +93,12 @@ jobs:
           cargo-zigbuild --version 2>/dev/null | grep -qx 'cargo-zigbuild 0.24.0' ||
             cargo install cargo-zigbuild --locked --force --version 0.24.0
       - run: make -C satellite check
+      - run: sudo apt-get update -q && sudo apt-get install -yq ninja-build
+      - uses: actions/cache@v6
+        with:
+          path: satellite/third_party/src
+          key: third-party-${{ hashFiles('satellite/third_party/fetch.sh') }}
+      - run: make -C satellite check-sendspin-ffi
 
   radio:
     # Zigbee firmware (router, coordinator) for the Midi's radio (Telink B91), installed next to the daemon.

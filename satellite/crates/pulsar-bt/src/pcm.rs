@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use pulsar_alsa::{Format, HwRequest, Pcm, Stream};
 use pulsar_core::model::Model;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 
 const RATE: u32 = 48_000;
 const CHANNELS: usize = 2;
@@ -30,7 +30,14 @@ pub(super) enum Event {
 pub(super) struct Worker {
     shared: Arc<Shared>,
     events: UnboundedSender<Event>,
-    terminated: watch::Receiver<bool>,
+}
+
+pub(super) struct Probe(watch::Receiver<ProbeState>);
+
+enum ProbeState {
+    Pending,
+    Ready,
+    Failed(String),
 }
 
 struct Request {
@@ -125,54 +132,40 @@ impl Shared {
 }
 
 impl Worker {
-    pub(super) async fn spawn(
-        model: &'static Model,
-    ) -> io::Result<(Self, UnboundedReceiver<Event>)> {
-        let shared = Arc::new(Shared::new());
+    pub(super) fn new() -> (Self, UnboundedReceiver<Event>) {
         let (events, rx) = mpsc::unbounded_channel();
-        let (ready_tx, ready_rx) = oneshot::channel();
-        let (terminated_tx, terminated) = watch::channel(false);
-        let thread_shared = Arc::clone(&shared);
-        let thread_events = events.clone();
+        let worker = Self {
+            shared: Arc::new(Shared::new()),
+            events,
+        };
+        (worker, rx)
+    }
+
+    pub(super) fn launch(&self, model: &'static Model) -> io::Result<Probe> {
+        let (status_tx, status) = watch::channel(ProbeState::Pending);
+        let shared = Arc::clone(&self.shared);
+        let events = self.events.clone();
         std::thread::Builder::new()
             .name("bluetooth-pcm".into())
             .spawn(move || {
                 // Тот же выход и формат, что у сеанса. Закрываем PCM до ответа и не пишем звук.
-                let probe = open_output(model).map(drop).map_err(|(op, errno)| {
-                    let kind = io::Error::from_raw_os_error(-errno).kind();
-                    io::Error::new(kind, format!("{op}: {}", pulsar_alsa::strerror(errno)))
-                });
-                let ready = probe.is_ok();
-                if ready_tx.send(probe).is_ok() && ready {
-                    run(model, &thread_shared, &thread_events);
+                match open_output(model).map(drop) {
+                    Ok(()) => {
+                        status_tx.send_replace(ProbeState::Ready);
+                        run(model, &shared, &events);
+                    }
+                    Err((op, errno)) => {
+                        status_tx.send_replace(ProbeState::Failed(format!(
+                            "{op}: {}",
+                            pulsar_alsa::strerror(errno)
+                        )));
+                    }
                 }
-                drop(thread_events);
-                drop(thread_shared);
-                let _ = terminated_tx.send(true);
             })?;
-
-        // Отмена ожидания тоже отзывает worker, даже если ответ уже был отправлен.
-        let worker = Self {
-            shared,
-            events,
-            terminated,
-        };
-        ready_rx
-            .await
-            .map_err(|_| io::Error::other("поток Bluetooth PCM завершился до проверки выхода"))??;
-        Ok((worker, rx))
+        Ok(Probe(status))
     }
 
-    pub(super) async fn shutdown(&self) {
-        self.signal_stop();
-        let _ = self
-            .terminated
-            .clone()
-            .wait_for(|terminated| *terminated)
-            .await;
-    }
-
-    fn signal_stop(&self) {
+    pub(super) fn signal_stop(&self) {
         {
             let mut ctl = self.shared.control.lock().unwrap();
             ctl.admit(false);
@@ -234,6 +227,31 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         self.signal_stop();
+    }
+}
+
+impl Probe {
+    pub(super) fn finished(&self) -> bool {
+        self.0.has_changed().is_err()
+    }
+
+    pub(super) fn ready(&self) -> bool {
+        !self.finished() && matches!(*self.0.borrow(), ProbeState::Ready)
+    }
+
+    pub(super) async fn wait_ready(&mut self) -> io::Result<()> {
+        match self.0.wait_for(|s| !matches!(s, ProbeState::Pending)).await {
+            Ok(state) => match &*state {
+                ProbeState::Ready => Ok(()),
+                ProbeState::Failed(reason) => Err(io::Error::other(reason.clone())),
+                ProbeState::Pending => unreachable!(),
+            },
+            Err(_) => Err(io::Error::other("PCM worker stopped during output probe")),
+        }
+    }
+
+    pub(super) async fn wait_finished(&mut self) {
+        while self.0.changed().await.is_ok() {}
     }
 }
 
@@ -455,6 +473,24 @@ fn apply_gain(input: &[i16], output: &mut [i16], gain: [f32; CHANNELS]) {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn pcm_probe_deadline_does_not_discard_pending_worker() {
+        let (tx, rx) = watch::channel(ProbeState::Pending);
+        let mut probe = Probe(rx);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, probe.wait_ready())
+                .await
+                .is_err()
+        );
+        assert!(!probe.ready());
+        assert!(!probe.finished());
+        tx.send_replace(ProbeState::Ready);
+        assert!(probe.wait_ready().await.is_ok());
+        assert!(probe.ready());
+        drop(tx);
+        assert!(probe.finished());
+    }
+
     #[test]
     fn bluetooth_pcm_accepts_only_explicit_device_addresses() {
         assert_eq!(
@@ -489,7 +525,6 @@ mod tests {
         let worker = Worker {
             shared: Arc::new(Shared::new()),
             events,
-            terminated: watch::channel(true).1,
         };
         let mut sink = Vec::new();
         let mut write = |gain: [f32; CHANNELS]| {

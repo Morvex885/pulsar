@@ -22,6 +22,14 @@ use pulsar_core::Timers;
 use pulsar_media::{Channel, Mixer, PlayId, PlayState, PlayerEvent, spawn};
 use tokio::signal::unix::{SignalKind, signal};
 
+#[allow(unsafe_code)]
+mod sys {
+    pub(super) fn init_media_env() {
+        // SAFETY: main вызывает это до загрузки библиотек, запуска рантайма и потоков.
+        unsafe { pulsar_media::set_ssl_cert_file() };
+    }
+}
+
 const MASTER: &str = "Master Playback Volume";
 /// Mixer scale: the port's cap for test sounds.
 const MAX_TEST_VOLUME: f32 = 0.2;
@@ -243,6 +251,7 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    sys::init_media_env();
     pulsar_core::init_logger();
     pulsar_core::add_own_target(module_path!());
     let t0 = pulsar_core::now_ms();
@@ -252,7 +261,6 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     pulsar_alsa::init(model);
-    pulsar_media::set_ssl_cert_file();
     // Test sounds only with the volume capped: without the control there is no cap.
     let mut mx = Mixer::open(model);
     let software = model.software_volume;

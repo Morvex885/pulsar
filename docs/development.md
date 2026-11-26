@@ -45,6 +45,10 @@
 
 ## CI и релизы
 
+Job `check` отдельно прогоняет тесты переключения Bluetooth ↔ Sendspin с реальным C++
+(`check-sendspin-ffi` в [`Makefile`](../satellite/Makefile)). Для них нужны cmake и Ninja;
+цель использует glibc хоста Linux x86-64, а не версии glibc станций.
+
 Push тега `v*` публикует релиз (job `release` в `.github/workflows/build.yml`). Имена ассетов —
 постоянный контракт; от них зависят:
 

@@ -312,17 +312,18 @@ fn load_api() -> Option<Api> {
     }
 }
 
-/// Points OpenSSL (souphttpsrc's TLS backend, below) at the system CA bundle unless the
-/// environment already names one.
-pub fn set_ssl_cert_file() {
+/// Указывает OpenSSL (TLS для souphttpsrc) системный CA bundle, если путь не задан.
+///
+/// # Safety
+/// Вызывать до запуска любых потоков, которые могут прочитать окружение.
+pub unsafe fn set_ssl_cert_file() {
     // SAFETY: NUL-terminated path.
     if unsafe { libc::access(CA_BUNDLE.as_ptr(), libc::R_OK) } != 0
         || std::env::var_os("SSL_CERT_FILE").is_some()
     {
         return;
     }
-    // SAFETY: этот вызов в main предшествует запуску всех потоков и акторов; С-код не может
-    // одновременно читать окружение через getenv.
+    // SAFETY: вызывающий гарантирует отсутствие одновременных обращений к окружению.
     unsafe {
         std::env::set_var(
             "SSL_CERT_FILE",

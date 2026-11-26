@@ -833,11 +833,8 @@ impl Controller {
     fn bluetooth_transport_source(&self) -> Option<&BtHandle> {
         let bt = self.bt.as_ref()?;
         let state = bt.state();
-        let local_active = matches!(
-            self.player.state(Channel::Music),
-            PlayState::Playing | PlayState::Loading
-        ) || self.sendspin_streaming();
-        (state.connected() && (state.admitted || !local_active)).then_some(bt)
+        let last_started = state.starts != 0 && state.starts == self.audio_start;
+        (state.connected() && (last_started || !self.owns_music())).then_some(bt)
     }
 
     pub(super) fn bluetooth_play_pause_button(&self) {
@@ -862,6 +859,10 @@ impl Controller {
     /// True when something was playing. Reads the player and Sendspin states before the
     /// commands (neither changes them synchronously, as in C++).
     fn music_pause(&self) -> bool {
+        if let Some(bt) = self.bt.as_ref().filter(|bt| bt.playing()) {
+            bt.avr(BtAction::Pause);
+            return true;
+        }
         let mut paused = false;
         if matches!(
             self.player.state(Channel::Music),
@@ -916,14 +917,10 @@ impl Controller {
         let after_wake =
             logic::after_wake(self.phase, self.wake_dialog, now, self.listen_started_ms);
         let voice_wake = held || after_wake;
-        let bluetooth_only = now < self.bt_voice_until_ms && !voice_wake && !self.timer_ringing;
         let wake = logic::command_wake(command, voice_wake, &mut self.bt_voice_until_ms, now);
         let Some(c) = command else {
             return;
         };
-        if bluetooth_only && !matches!(c, VoiceCommand::Bluetooth(_)) {
-            return;
-        }
         if self.timer_ringing && matches!(c, VoiceCommand::Bluetooth(_)) {
             return;
         }

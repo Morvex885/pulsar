@@ -29,6 +29,10 @@ impl Policy {
         }
     }
 
+    pub fn seed_known(&mut self, paired: BTreeSet<String>) {
+        self.known = paired;
+    }
+
     pub fn set_enabled(&mut self, on: bool, now: Instant, paired: Option<BTreeSet<String>>) {
         self.enabled = on;
         if !on {
@@ -100,15 +104,14 @@ impl Policy {
             return;
         }
         self.playback = phase;
-        self.admitted = phase == Some(Playback::Playing);
-        if self.admitted {
-            let start = order.unwrap_or_else(pulsar_core::audio_start_order);
-            // Смена источника статуса AVRCP → PCM не делает старый фронт новым.
-            if start > self.starts {
-                self.starts = start;
-            } else {
-                self.admitted = false;
-            }
+        self.admitted = false;
+        // Смена источника статуса AVRCP → PCM не делает старый фронт новым.
+        if phase == Some(Playback::Playing)
+            && let Some(start) = order
+            && start > self.starts
+        {
+            self.starts = start;
+            self.admitted = true;
         }
     }
 
@@ -174,7 +177,8 @@ mod tests {
         p.observe_playback(generation, Some(Playback::Playing), Some(start));
         assert!(!p.admitted);
         p.observe_playback(generation, Some(Playback::Paused), None);
-        p.observe_playback(generation, Some(Playback::Playing), None);
+        let restart = pulsar_core::audio_start_order();
+        p.observe_playback(generation, Some(Playback::Playing), Some(restart));
         assert!(!p.preempt_before(local_start));
         assert!(p.admitted);
         p.set_enabled(false, Instant::now(), None);

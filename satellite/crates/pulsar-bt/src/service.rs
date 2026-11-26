@@ -7,10 +7,10 @@ use std::time::Duration;
 use log::warn;
 use pulsar_core::{Timers, actors, model::Model};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::time::{Instant, timeout};
+use tokio::time::{Instant, timeout_at};
 
 use crate::bus::{Bus, Candidate};
-use crate::pcm::{Event as PcmEvent, Worker};
+use crate::pcm::{Event as PcmEvent, Probe as PcmProbe, Worker};
 use crate::policy::Policy;
 use crate::stock::{Stock, plugin_present};
 use crate::{BtAction, Playback};
@@ -115,14 +115,8 @@ pub async fn spawn(
     model: &'static Model,
     enabled: bool,
 ) -> Option<(BtHandle, UnboundedReceiver<BtEvent>)> {
-    let (stock, owned, supported) = match tokio::task::spawn_blocking(|| {
-        Ok::<_, std::io::Error>(Stock::load()?.map(|(stock, owned)| {
-            let supported = Path::new("/sys/class/bluetooth/hci0").exists() && plugin_present();
-            (stock, owned, supported)
-        }))
-    })
-    .await
-    {
+    let deadline = Instant::now() + PROBE;
+    let (stock, owned) = match tokio::task::spawn_blocking(Stock::load).await {
         Ok(Ok(station)) => station?,
         Ok(Err(e)) => {
             warn!("bluetooth: cannot verify stock ownership: {e}");
@@ -133,59 +127,56 @@ pub async fn spawn(
             return None;
         }
     };
-    if !supported {
-        recover_stock(stock, owned);
-        return None;
-    }
-    let bus = match timeout(PROBE, Bus::connect()).await {
-        Ok(Ok(bus)) => bus,
-        Ok(Err(e)) => {
-            warn!("bluetooth: capability probe: {}", error_name(&e));
-            recover_stock(stock, owned);
-            return None;
-        }
-        Err(_) => {
-            warn!("bluetooth: capability probe timed out");
-            recover_stock(stock, owned);
-            return None;
-        }
-    };
-    let flags = bus.flags().expect("capability probe checked adapter flags");
-    let (pcm, pcm_rx) = match Worker::spawn(model).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            warn!("bluetooth: cannot start PCM worker: {e}");
-            recover_stock(stock, owned);
-            return None;
-        }
-    };
+    let bus = connect_bus(deadline).await;
+    let (pcm, pcm_rx) = Worker::new();
+    let mut probe = None;
+    let mut verified = false;
     pcm.set_station_gain(0.0);
-    if let Err(e) = stock.take(flags).await {
-        warn!("bluetooth: cannot take stock player: {e}");
-        pcm.shutdown().await;
-        // Init-скрипт мог остановить player прежде, чем вернуть ошибку.
-        recover_stock(stock, true);
-        return None;
+    if bus.is_some() && Instant::now() < deadline {
+        match pcm.launch(model) {
+            Ok(mut launched) => {
+                match timeout_at(deadline, launched.wait_ready()).await {
+                    Ok(Ok(())) => verified = true,
+                    Ok(Err(e)) => warn!("bluetooth: cannot verify PCM output: {e}"),
+                    Err(_) => warn!("bluetooth: PCM output probe timed out"),
+                }
+                // После таймаута сохраняем тот же поток, пока он сам не выйдет.
+                probe = Some(launched);
+            }
+            Err(e) => warn!("bluetooth: cannot start PCM worker: {e}"),
+        }
     }
-    let policy = Policy::restore(enabled, bus.paired());
+    if !owned {
+        let flags = bus.as_ref()?.flags()?;
+        if !verified || !probe.as_ref().is_some_and(PcmProbe::ready) {
+            return None;
+        }
+        if let Err(e) = stock.take(flags).await {
+            warn!("bluetooth: cannot take stock player: {e}");
+            // Init-скрипт мог остановить player прежде, чем вернуть ошибку.
+            actors::spawn_actor("bluetooth stock restore", retry_stock_restore(stock));
+            return None;
+        }
+    }
+    let policy = Policy::restore(enabled, bus.as_ref().map(Bus::paired).unwrap_or_default());
     let (events, ev_rx) = unbounded_channel();
     let (cmds, cmd_rx) = unbounded_channel();
     let shared = Rc::new(Shared {
-        state: RefCell::new(BtState {
-            enabled,
-            status: if enabled { "ready" } else { "off" }.into(),
-            ..BtState::default()
-        }),
+        state: RefCell::new(BtState::default()),
         requested: Cell::new(enabled),
         preempt_before: Cell::new(0),
         pcm,
     });
     let svc = Service {
         shared: shared.clone(),
+        model,
         stock,
+        stock_ready: !owned,
         events,
         policy,
-        bus: Some(bus),
+        seeded_pairs: bus.is_some(),
+        bus,
+        probe,
         reject_at: HashMap::new(),
         pcm_generation: None,
         pcm_error: None,
@@ -197,13 +188,37 @@ pub async fn spawn(
         pcm_ready: false,
         pcm_retry_at: None,
     };
+    svc.publish();
     actors::spawn_actor("bluetooth", svc.run(cmd_rx, pcm_rx));
     Some((BtHandle { shared, cmds }, ev_rx))
 }
 
-fn recover_stock(stock: Stock, outstanding: bool) {
-    if outstanding {
-        actors::spawn_actor("bluetooth stock restore", retry_stock_restore(stock));
+async fn connect_bus(deadline: Instant) -> Option<Bus> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    match timeout_at(deadline, async {
+        if !tokio::task::spawn_blocking(|| {
+            Path::new("/sys/class/bluetooth/hci0").exists() && plugin_present()
+        })
+        .await
+        .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        Bus::connect().await.map(Some)
+    })
+    .await
+    {
+        Ok(Ok(bus)) => bus,
+        Ok(Err(e)) => {
+            warn!("bluetooth: capability probe: {}", error_name(&e));
+            None
+        }
+        Err(_) => {
+            warn!("bluetooth: capability probe timed out");
+            None
+        }
     }
 }
 
@@ -227,37 +242,34 @@ async fn retry_stock_restore(stock: Stock) {
 
 #[derive(Default)]
 struct FrameActivity {
-    active: bool,
-    edge: Option<FrameEdge>,
-}
-
-enum FrameEdge {
-    Idle,
-    Active(u64),
+    active: Option<bool>,
+    start: Option<u64>,
 }
 
 impl FrameActivity {
     fn start(&mut self, order: u64) {
         // Новое открытие PCM не означает новый старт уже идущего потока.
-        if !self.active {
-            self.active = true;
-            self.edge = Some(FrameEdge::Active(order));
+        if self.active != Some(true) {
+            self.active = Some(true);
+            self.start = Some(order);
         }
     }
 
     fn idle(&mut self) {
-        self.active = false;
-        self.edge = Some(FrameEdge::Idle);
+        self.active = Some(false);
+        self.start = None;
     }
 
-    fn observe(&mut self, policy: &mut Policy, avr: Option<Playback>) {
+    fn observe(&mut self, policy: &mut Policy, avr: Option<(Playback, u64)>) {
         // Кадры, уже учтённые через AVRCP, не создают фронт при исчезновении статуса.
-        let edge = self.edge.take();
-        let (phase, order) = match (avr, edge) {
-            (Some(phase), _) => (Some(phase), None),
-            (None, Some(FrameEdge::Active(order))) => (Some(Playback::Playing), Some(order)),
-            (None, Some(FrameEdge::Idle)) => (None, None),
-            (None, None) => return,
+        let start = self.start.take();
+        let (phase, order) = match avr {
+            Some((phase, order)) => (Some(phase), Some(order)),
+            None if self.active == Some(false) => (None, None),
+            None => match start {
+                Some(order) => (Some(Playback::Playing), Some(order)),
+                None => return,
+            },
         };
         policy.observe_playback(policy.generation, phase, order);
     }
@@ -265,10 +277,14 @@ impl FrameActivity {
 
 struct Service {
     shared: Rc<Shared>,
+    model: &'static Model,
     stock: Stock,
+    stock_ready: bool,
     events: UnboundedSender<BtEvent>,
     policy: Policy,
+    seeded_pairs: bool,
     bus: Option<Bus>,
+    probe: Option<PcmProbe>,
     reject_at: HashMap<String, Instant>,
     pcm_generation: Option<u64>,
     pcm_error: Option<&'static str>,
@@ -289,7 +305,6 @@ impl Service {
     ) {
         let mut timers = Timers::new();
         let mut armed = None;
-        let mut worker_failed = false;
         loop {
             if self.reconcile() {
                 self.avr(BtAction::Pause).await;
@@ -305,6 +320,7 @@ impl Service {
             }
             tokio::select! {
                 biased;
+                () = actors::shutdown_requested() => break,
                 () = timers.next() => {
                     armed = None;
                     if self.retry_at <= Instant::now() {
@@ -330,20 +346,13 @@ impl Service {
                 },
                 ev = pcm_rx.recv() => match ev {
                     Some(ev) => self.on_pcm(ev),
-                    None => {
-                        self.policy.release();
-                        self.reset_session();
-                        self.pcm_error = Some("PCM worker stopped");
-                        self.publish();
-                        worker_failed = true;
-                        break;
-                    }
+                    None => break,
                 },
             }
         }
-        self.shared.pcm.shutdown().await;
-        if worker_failed {
-            retry_stock_restore(self.stock).await;
+        self.shared.pcm.signal_stop();
+        if let Some(probe) = &mut self.probe {
+            probe.wait_finished().await;
         }
     }
 
@@ -424,7 +433,9 @@ impl Service {
                 self.reset_session();
             }
         }
-        if let Some(bus) = &self.bus {
+        if self.stock_ready
+            && let Some(bus) = &self.bus
+        {
             if self.shared.requested.get()
                 && let Some(device) = self.policy.choose(
                     bus.candidates()
@@ -437,6 +448,7 @@ impl Service {
             if let Some(c) = selected(bus, &self.policy) {
                 self.frames.observe(&mut self.policy, c.phase);
                 if self.pcm_generation != Some(self.policy.generation)
+                    && self.probe.as_ref().is_some_and(PcmProbe::ready)
                     && self.pcm_error.is_none()
                     && self.shared.requested.get()
                 {
@@ -495,13 +507,41 @@ impl Service {
         let now = Instant::now();
         let open = self.visibility_open();
         self.retry_at = now + RETRY;
+        if !self.stock_ready {
+            match self.stock.keep_stopped().await {
+                Ok(()) => {
+                    self.stock_ready = true;
+                    self.retry_at = Instant::now();
+                }
+                Err(e) => warn!("bluetooth: cannot keep stock player stopped: {e}"),
+            }
+            return;
+        }
         let Some(bus) = &self.bus else {
-            if let Ok(Ok(bus)) = timeout(PROBE, Bus::connect()).await {
+            if let Some(bus) = connect_bus(now + PROBE).await {
+                if !self.seeded_pairs {
+                    self.policy.seed_known(bus.paired());
+                    self.seeded_pairs = true;
+                }
                 self.bus = Some(bus);
                 self.retry_at = Instant::now();
             }
             return;
         };
+        if self.probe.as_ref().is_some_and(PcmProbe::finished) {
+            if self.pcm_generation.take().is_some() {
+                self.shared.pcm.stop();
+                self.pcm_ready = false;
+                self.policy.generation += 1;
+            }
+            self.probe = None;
+        }
+        if self.probe.is_none() {
+            match self.shared.pcm.launch(self.model) {
+                Ok(probe) => self.probe = Some(probe),
+                Err(e) => warn!("bluetooth: cannot start PCM worker: {e}"),
+            }
+        }
         if visibility_needs_write(self.visibility_target, bus.flags(), open) {
             self.visibility_target = Some(open);
             match bus.visibility(open).await {
@@ -538,7 +578,9 @@ impl Service {
 
     fn ready_start(&self) -> Option<u64> {
         self.policy.ready_start(
-            self.pcm_ready && self.shared.requested.get(),
+            self.pcm_ready
+                && self.probe.as_ref().is_some_and(PcmProbe::ready)
+                && self.shared.requested.get(),
             self.shared.preempt_before.get(),
         )
     }
@@ -548,13 +590,22 @@ impl Service {
             .bus
             .as_ref()
             .and_then(|bus| selected(bus, &self.policy));
-        let pairing =
-            self.visibility_open() && self.bus.as_ref().and_then(Bus::flags) == Some([true; 2]);
-        let error = self.pcm_error.or(self.flag_error).or_else(|| {
-            self.bus
-                .is_none()
-                .then_some("Bluetooth service unavailable")
-        });
+        let pairing = self.stock_ready
+            && self.visibility_open()
+            && self.bus.as_ref().and_then(Bus::flags) == Some([true; 2]);
+        let error = self
+            .pcm_error
+            .or(self.flag_error)
+            .or_else(|| (!self.stock_ready).then_some("stock player not verified stopped"))
+            .or_else(|| {
+                self.bus
+                    .is_none()
+                    .then_some("Bluetooth service unavailable")
+            })
+            .or_else(|| {
+                (!self.probe.as_ref().is_some_and(PcmProbe::ready))
+                    .then_some("PCM output unavailable")
+            });
         let status = if let Some(error) = error {
             format!("error: {error}")
         } else if let Some(c) = &c {
@@ -640,23 +691,24 @@ mod tests {
     fn avr_start_keeps_its_order_while_waiting_for_pcm() {
         let mut policy = selected_policy();
         let mut frames = FrameActivity::default();
-        frames.observe(&mut policy, Some(Playback::Playing));
-        let phone_start = policy.starts;
-        assert_eq!(policy.ready_start(false, 0), None);
-        assert_eq!(policy.ready_start(true, 0), Some(phone_start));
+        let phone_start = pulsar_core::audio_start_order();
 
         let music_start = pulsar_core::audio_start_order();
         assert!(phone_start < music_start);
-        // Reconcile может отработать до сообщения, если актор ожидал D-Bus.
+        // Сигнал телефона уже принят, но актор ещё ожидал исходящий D-Bus вызов.
+        frames.observe(&mut policy, Some((Playback::Playing, phone_start)));
+        assert_eq!(policy.ready_start(false, 0), None);
+        assert_eq!(policy.ready_start(true, 0), Some(phone_start));
         assert_eq!(policy.ready_start(true, music_start), None);
         assert!(policy.preempt_before(music_start));
-        frames.observe(&mut policy, Some(Playback::Playing));
+        frames.observe(&mut policy, Some((Playback::Playing, phone_start)));
         assert!(!policy.preempt_before(music_start));
         assert_eq!(policy.ready_start(true, music_start), None);
 
-        frames.observe(&mut policy, Some(Playback::Paused));
-        frames.observe(&mut policy, Some(Playback::Playing));
-        assert!(policy.ready_start(true, music_start).unwrap() > music_start);
+        frames.observe(&mut policy, Some((Playback::Paused, music_start)));
+        let next = pulsar_core::audio_start_order();
+        frames.observe(&mut policy, Some((Playback::Playing, next)));
+        assert_eq!(policy.ready_start(true, music_start), Some(next));
     }
 
     #[test]
@@ -688,11 +740,11 @@ mod tests {
     fn losing_avrcp_status_does_not_reuse_previously_observed_frames() {
         let mut policy = selected_policy();
         let mut frames = FrameActivity::default();
-        frames.observe(&mut policy, Some(Playback::Playing));
-        let phone_start = policy.starts;
+        let phone_start = pulsar_core::audio_start_order();
+        frames.observe(&mut policy, Some((Playback::Playing, phone_start)));
         frames.start(pulsar_core::audio_start_order());
-        frames.observe(&mut policy, Some(Playback::Playing));
-        frames.observe(&mut policy, Some(Playback::Paused));
+        frames.observe(&mut policy, Some((Playback::Playing, phone_start)));
+        frames.observe(&mut policy, Some((Playback::Paused, phone_start)));
         frames.observe(&mut policy, None);
         assert_eq!(policy.starts, phone_start);
         assert_eq!(policy.ready_start(true, 0), None);
@@ -702,6 +754,32 @@ mod tests {
         frames.start(pulsar_core::audio_start_order());
         frames.observe(&mut policy, None);
         assert!(policy.ready_start(true, 0).unwrap() > phone_start);
+    }
+
+    #[test]
+    fn losing_avrcp_status_over_idle_pcm_clears_playing_without_a_new_start() {
+        let mut policy = selected_policy();
+        let mut frames = FrameActivity::default();
+        let phone_start = pulsar_core::audio_start_order();
+        let avr = Some((Playback::Playing, phone_start));
+        frames.observe(&mut policy, avr);
+        frames.start(pulsar_core::audio_start_order());
+        frames.observe(&mut policy, avr);
+        frames.idle();
+        frames.observe(&mut policy, avr);
+        assert_eq!(policy.playback, Some(Playback::Playing));
+        let music_start = pulsar_core::audio_start_order();
+        assert!(policy.preempt_before(music_start));
+
+        frames.observe(&mut policy, None);
+        assert_eq!(policy.playback, None);
+        assert_eq!(policy.starts, phone_start);
+        assert_eq!(policy.ready_start(true, music_start), None);
+
+        let restart = pulsar_core::audio_start_order();
+        frames.start(restart);
+        frames.observe(&mut policy, None);
+        assert_eq!(policy.ready_start(true, music_start), Some(restart));
     }
 
     #[test]
