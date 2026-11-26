@@ -208,7 +208,10 @@ impl Controller {
     // ---------------- pipeline ----------------
 
     /// The only way into LISTENING (the watchdog bounds it).
-    pub(super) fn start_pipeline(&mut self, phrase: &str, earcon: bool, preroll: Vec<i16>) {
+    pub(super) fn start_pipeline(&mut self, phrase: &str, explicit: bool, preroll: Vec<i16>) {
+        if self.mic_muted() {
+            return;
+        }
         // The button, a continued conversation or HA's start_conversation win.
         self.cancel_arbitration();
         self.timers.cancel(Tk::FollowupWait);
@@ -231,7 +234,11 @@ impl Controller {
         self.clear_speech_display();
         self.followup = logic::Followup::default();
         self.update_duck();
-        match logic::wake_cue(earcon, self.st.wake_sound) {
+        // Автоматическое приглашение не должно обрывать объявление или сигнал завершения:
+        // ошибка старого run может прийти раньше уже поставленного в очередь Done объявления.
+        let wake_sound =
+            self.st.wake_sound && (explicit || !self.announcing && !self.closing_earcon);
+        match logic::wake_cue(explicit, wake_sound) {
             logic::WakeCue::Keep => {}
             logic::WakeCue::Sound => {
                 let sound = format!("{SOUNDS}{}", self.model.wake_sound);
@@ -348,21 +355,23 @@ impl Controller {
                 self.play_tts();
             }
             VaEvent::Error => {
+                let error = get("code");
+                self.followup.record_error(error);
                 // HA accepts one wake word phrase per 2 s across satellites: another one answers.
-                if get("code") == "duplicate_wake_up_detected" {
+                if error == "duplicate_wake_up_detected" {
                     info!(
                         "pipeline: another satellite answers this wake word (HA duplicate wake-up)"
                     );
                     self.stop_streaming();
-                } else if self.followup.silent(get("code")) {
+                } else if self.followup.silent(error) {
                     info!("follow-up: nothing said, conversation ends");
                     self.stop_streaming();
                 } else {
-                    warn!("pipeline error: {} {}", get("code"), get("message"));
+                    warn!("pipeline error: {error} {}", get("message"));
                     self.stop_streaming();
                     self.error_shown = true;
                     self.show_ui(UiState::Error);
-                    if get("code") != "stt-no-text-recognized" {
+                    if !self.followup.ended_without_text() {
                         let sound = format!("{SOUNDS}{}", self.model.error_sound);
                         self.play_closing_earcon(sound);
                     }
@@ -371,8 +380,10 @@ impl Controller {
             VaEvent::RunEnd => {
                 self.stop_streaming();
                 if !self.tts_played {
-                    // Follow-up-реплика без речи (stt-no-text-recognized) кончается тихо; с
-                    // ошибкой на кольце — как обычный сбой.
+                    if self.followup.ended_without_text() {
+                        self.play_no_reply_cue();
+                    }
+                    // При молчании в follow-up часы могут дочитать предыдущий ответ.
                     if self.followup.awaiting_speech() && !self.error_shown {
                         self.end_silent_followup();
                     } else {
@@ -558,6 +569,18 @@ impl Controller {
         self.earcon_seq += 1;
         let seq = self.earcon_seq;
         self.play_announce(vec![path], Pending::Earcon { seq });
+    }
+
+    pub(super) fn play_no_reply_cue(&mut self) {
+        if logic::want_no_reply_cue(
+            self.phase,
+            self.st.wake_sound,
+            self.announcing,
+            self.timer_ringing,
+            self.closing_earcon,
+        ) {
+            self.play_closing_earcon(format!("{SOUNDS}{}", self.model.cancel_sound));
+        }
     }
 
     /// Отменяет диалог LISTENING / PROCESSING: короткое нажатие кнопки действия, «стоп» спотера

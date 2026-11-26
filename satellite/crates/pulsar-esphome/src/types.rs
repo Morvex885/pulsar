@@ -427,9 +427,12 @@ pub enum ApiEvent {
     },
     Announce(AnnounceRequest),
     Timer(TimerInfo),
-    /// HA changed the active wake words (ids known, non-empty). The reported active set changes
-    /// only through `ApiHandle::set_active_wake_words`.
-    ActiveWakeWords(Vec<String>),
+    /// HA запросил известное слово активации. Фактический выбор приходит отдельно
+    /// через `ApiHandle::set_active_wake_words`.
+    ActiveWakeWords {
+        request: u64,
+        id: String,
+    },
     MediaCommand(MediaCommandRequest),
     Switch(SwitchId, bool),
     Button(ButtonId),

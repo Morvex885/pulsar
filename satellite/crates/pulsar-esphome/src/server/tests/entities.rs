@@ -554,7 +554,10 @@ async fn commands_are_validated_like_cxx() {
             assert_eq!(
                 drain(c.p, &mut rx).await,
                 [
-                    ApiEvent::ActiveWakeWords(vec!["yandex".into()]),
+                    ApiEvent::ActiveWakeWords {
+                        request: 1,
+                        id: "yandex".into(),
+                    },
                     ApiEvent::Timer(TimerInfo {
                         event: TimerEvent::Finished,
                         id: "t1".into(),
@@ -572,6 +575,196 @@ async fn commands_are_validated_like_cxx() {
                 ]
             );
             drop(h);
+        })
+        .await;
+}
+
+fn wake_selection(id: &str) -> Writer {
+    let mut w = Writer::new();
+    w.str(1, id, false);
+    w
+}
+
+async fn wake_request(rx: &mut UnboundedReceiver<ApiEvent>, expected: &str) -> u64 {
+    let ApiEvent::ActiveWakeWords { request, id } = event(rx).await else {
+        panic!("expected wake word selection");
+    };
+    assert_eq!(id, expected);
+    request
+}
+
+async fn expect_wake_config(p: &mut Peer, ids: &[&str]) {
+    let config = p.expect(msg::VA_CONFIG_RESP).await;
+    assert_active_wake_words(&config, ids);
+}
+
+fn assert_active_wake_words(config: &[u8], ids: &[&str]) {
+    let active: Vec<_> = fields(config)
+        .into_iter()
+        .filter(|f| f.num == 2)
+        .map(|f| f.str())
+        .collect();
+    assert_eq!(active, ids);
+}
+
+async fn expect_wake_config_before_pong(p: &mut Peer, ids: &[&str]) {
+    let replies = p.sync().await;
+    let [(msg::VA_CONFIG_RESP, config)] = replies.as_slice() else {
+        panic!("expected one config response before pong, got {replies:?}");
+    };
+    assert_active_wake_words(config, ids);
+}
+
+#[tokio::test]
+async fn empty_wake_selection_keeps_the_active_model() {
+    local()
+        .run_until(async {
+            let (id, cfg) = selftest("now");
+            let (_h, mut rx, port) = start_with(id, cfg);
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            event(&mut rx).await;
+
+            p.send(msg::VA_SET_CONFIG, &Writer::new()).await;
+            p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            expect_wake_config_before_pong(&mut p, &["alisa"]).await;
+            assert!(matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn wake_config_read_waits_for_actual_selection() {
+    local()
+        .run_until(async {
+            for actual in [&["yandex"][..], &["alisa"][..], &[][..]] {
+                let (id, cfg) = selftest("now");
+                let (h, mut rx, port) = start_with(id, cfg);
+                let mut p = Peer::connect(port).await;
+                p.hello("HA").await;
+                event(&mut rx).await;
+
+                p.send(msg::VA_SET_CONFIG, &wake_selection("yandex")).await;
+                p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+                assert!(p.sync().await.is_empty());
+                let request = wake_request(&mut rx, "yandex").await;
+                h.set_active_wake_words(
+                    Some(request),
+                    actual.iter().map(|id| (*id).into()).collect(),
+                );
+                expect_wake_config_before_pong(&mut p, actual).await;
+            }
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn wake_config_requires_latest_ack_across_clients() {
+    local()
+        .run_until(async {
+            let (id, cfg) = selftest("now");
+            let (h, mut rx, port) = start_with(id, cfg);
+            let mut a = Peer::connect(port).await;
+            a.hello("a").await;
+            event(&mut rx).await;
+            let mut b = Peer::connect(port).await;
+            b.hello("b").await;
+            event(&mut rx).await;
+
+            a.send(msg::VA_SET_CONFIG, &wake_selection("yandex")).await;
+            a.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            assert!(a.sync().await.is_empty());
+            let first = wake_request(&mut rx, "yandex").await;
+            b.send(msg::VA_SET_CONFIG, &wake_selection("alisa")).await;
+            b.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            assert!(b.sync().await.is_empty());
+            let latest = wake_request(&mut rx, "alisa").await;
+            b.send(msg::VA_SET_CONFIG, &wake_selection("unknown")).await;
+            b.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            assert!(b.sync().await.is_empty());
+
+            h.set_active_wake_words(None, vec!["alisa".into()]);
+            h.set_active_wake_words(Some(first), vec!["yandex".into()]);
+            assert!(a.sync().await.is_empty());
+            assert!(b.sync().await.is_empty());
+            a.send(msg::DISCONNECT_REQ, &Writer::new()).await;
+            a.expect(msg::DISCONNECT_RESP).await;
+            assert!(a.recv().await.is_none());
+
+            h.set_active_wake_words(Some(latest), vec!["alisa".into()]);
+            for _ in 0..2 {
+                expect_wake_config(&mut b, &["alisa"]).await;
+            }
+            assert!(b.sync().await.is_empty());
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn wake_config_timeout_keeps_the_first_deadline_and_last_confirmed_state() {
+    // Реальный TCP не должен автоматически двигать виртуальные часы между сообщениями.
+    let (_clock_guard, guard) = std::sync::mpsc::channel::<()>();
+    tokio::task::spawn_blocking(move || {
+        let _ = guard.recv_timeout(Duration::from_secs(5));
+    });
+    local()
+        .run_until(async {
+            let (id, cfg) = selftest("now");
+            let (h, mut rx, port) = start_with(id, cfg);
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            event(&mut rx).await;
+
+            p.send(msg::VA_SET_CONFIG, &wake_selection("yandex")).await;
+            p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            assert!(p.sync().await.is_empty());
+            wake_request(&mut rx, "yandex").await;
+            tokio::time::advance(Duration::from_secs(2)).await;
+            p.send(msg::VA_SET_CONFIG, &wake_selection("yandex")).await;
+            let request = wake_request(&mut rx, "yandex").await;
+            assert!(p.sync().await.is_empty());
+            tokio::time::advance(Duration::from_millis(1_001)).await;
+            expect_wake_config_before_pong(&mut p, &["alisa"]).await;
+            h.set_active_wake_words(Some(request), vec!["yandex".into()]);
+            assert!(p.sync().await.is_empty());
+            p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            expect_wake_config(&mut p, &["yandex"]).await;
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn wake_config_read_overflow_closes_only_requesting_client() {
+    local()
+        .run_until(async {
+            let (id, cfg) = selftest("now");
+            let (h, mut rx, port) = start_with(id, cfg);
+            let mut a = Peer::connect(port).await;
+            a.hello("a").await;
+            event(&mut rx).await;
+            let mut b = Peer::connect(port).await;
+            b.hello("b").await;
+            event(&mut rx).await;
+
+            b.send(msg::VA_SET_CONFIG, &wake_selection("yandex")).await;
+            b.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            assert!(b.sync().await.is_empty());
+            let request = wake_request(&mut rx, "yandex").await;
+            let mut reads = Vec::new();
+            for _ in 0..16 {
+                append_plain(&mut reads, msg::VA_CONFIG_REQ, &[]);
+            }
+            a.write(&reads).await;
+            assert!(a.sync().await.is_empty());
+            a.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            assert!(a.recv().await.is_none());
+
+            h.set_active_wake_words(Some(request), vec!["yandex".into()]);
+            expect_wake_config(&mut b, &["yandex"]).await;
+            assert!(b.sync().await.is_empty());
         })
         .await;
 }

@@ -39,6 +39,7 @@ pub struct Lib {
     cfg_free: unsafe extern "C" fn(P),
     cfg_chunk: unsafe extern "C" fn(P) -> c_int,
     cfg_frame: unsafe extern "C" fn(P) -> c_int,
+    cfg_output_count: Option<unsafe extern "C" fn(P, c_int, *mut c_int) -> P>,
     vqe_create: unsafe extern "C" fn(P, *const c_char, usize, *const c_void, *mut P) -> P,
     vqe_free: unsafe extern "C" fn(P),
     vqe_process: unsafe extern "C" fn(P, *const f32, usize, *const f32, usize) -> P,
@@ -156,6 +157,7 @@ impl Lib {
                 cfg_free: sym(lib, "YandexVqeC_Config_Free")?,
                 cfg_chunk: sym(lib, "YandexVqeC_Config_GetInputChunkSize")?,
                 cfg_frame: sym(lib, "YandexVqeC_Config_GetProcessingFrame")?,
+                cfg_output_count: sym(lib, "YandexVqeC_Config_GetOutputChannelCount").ok(),
                 vqe_create: sym(lib, "YandexVqeC_Create")?,
                 vqe_free: sym(lib, "YandexVqeC_Free")?,
                 vqe_process: sym(lib, "YandexVqeC_Process")?,
@@ -217,6 +219,17 @@ impl Lib {
         // SAFETY: as above.
         unsafe { (self.sp_errfree)(err) };
         Some(msg)
+    }
+
+    /// Текст ошибки `spotter_conf_read` без `spotter_error_free`: освобождение такой ошибки роняет
+    /// процесс, поэтому она остаётся в памяти (одна на неудачную загрузку модели).
+    // см. docs/hardware.md, «Библиотеки Яндекса (C API)»
+    fn sp_conf_error(&self, err: P) -> Option<String> {
+        if err.is_null() {
+            return None;
+        }
+        // SAFETY: `err` — живая spotter_error, выставленная библиотекой; читается только текст.
+        Some(unsafe { text((self.sp_errmsg)(err)) })
     }
 }
 
@@ -328,6 +341,33 @@ impl Vqe {
         self.frame
     }
 
+    /// Число выходов известно из пресета до первого чанка.
+    // см. docs/hardware.md, «Библиотеки Яндекса (C API)»
+    pub(super) fn output_mask(&mut self) -> Result<u32, String> {
+        let mut mask = 0;
+        if let Some(count) = self.lib.cfg_output_count {
+            for ty in 0..=MAX_CHANNEL_TYPE {
+                let mut n = 0;
+                // SAFETY: живой cfg, допустимый тип канала, выходной указатель на c_int.
+                let err = unsafe { count(self.cfg, ty, &mut n) };
+                self.lib.vqe_result(err)?;
+                if n > 0 {
+                    mask |= 1 << ty;
+                }
+            }
+        } else {
+            // Без геттера пресета выходы доступны только после обработки чанка.
+            let silence = vec![0.0; self.mic_samples.max(self.spk_samples)];
+            self.process(&silence[..self.mic_samples], &silence[..self.spk_samples])?;
+            for ty in 0..=MAX_CHANNEL_TYPE {
+                if self.output(ty).is_ok_and(|d| !d.is_empty()) {
+                    mask |= 1 << ty;
+                }
+            }
+        }
+        Ok(mask)
+    }
+
     /// One chunk: `mics` / `spk` frame-interleaved, `chunk()` frames each of the preset's
     /// channels; other lengths are refused without calling the library.
     pub fn process(&mut self, mics: &[f32], spk: &[f32]) -> Result<(), String> {
@@ -403,7 +443,7 @@ impl SpotterConf {
         let mut err = ptr::null_mut();
         // SAFETY: NUL-terminated directory, out-pointer to a local.
         let conf = unsafe { (lib.sp_conf_read)(dir.as_ptr(), &mut err) };
-        if let Some(e) = lib.sp_error(err) {
+        if let Some(e) = lib.sp_conf_error(err) {
             // A config returned together with an error is not trusted (nor freed: the C++
             // daemon did not touch it either).
             return Err(Some(e));

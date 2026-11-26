@@ -1,7 +1,11 @@
 //! HA connection and entities, buttons, the light sensor, Zigbee and updates (controller.cpp
 //! "HA connection", "entities", "updates").
 
+use std::ffi::OsStr;
+use std::path::Path;
+
 use log::{error, info, warn};
+use pulsar_audio::ModelId;
 use pulsar_core::now_ms;
 use pulsar_esphome::{
     ActionId, ApiEvent, BinarySensorId, ButtonId, EventId, LightState, NumberId, SelectId,
@@ -30,7 +34,7 @@ impl Controller {
             ApiEvent::VoiceEvent { event, data } => self.on_voice_event(event, &data),
             ApiEvent::Announce(req) => self.on_announce(req),
             ApiEvent::Timer(t) => self.on_timer_event(t),
-            ApiEvent::ActiveWakeWords(ids) => self.on_active_wake_words(ids),
+            ApiEvent::ActiveWakeWords { request, id } => self.on_active_wake_words(request, id),
             ApiEvent::MediaCommand(cmd) => self.on_media_command(cmd),
             ApiEvent::Switch(id, on) => self.on_switch(id, on),
             ApiEvent::Button(id) => self.on_button(id),
@@ -401,33 +405,54 @@ impl Controller {
         self.update_music();
     }
 
-    fn on_active_wake_words(&mut self, ids: Vec<String>) {
-        let Some(first) = ids.into_iter().next() else {
-            return;
-        };
-        if first == self.st.wake_word {
+    fn on_active_wake_words(&mut self, request: u64, id: String) {
+        if self.mic.frame() == 0 {
+            // Фронтенд не запущен: события WakeModel не будет, выбор принимается сразу.
+            if self.st.wake_word != id {
+                self.st.wake_word.clone_from(&id);
+                info!("wake word -> {}", self.st.wake_word);
+                self.persist();
+            }
+            self.api.set_active_wake_words(Some(request), vec![id]);
             return;
         }
-        self.st.wake_word = first;
-        info!("wake word -> {}", self.st.wake_word);
-        self.mic.set_model(model_dir(&self.st.wake_word));
+        info!("wake word requested: {id}");
+        let req = self.mic.set_model(model_dir(&id));
+        self.wake_switch.requested(req, request);
+    }
+
+    /// Не сохраняем пустой выбор: после перезапуска спотер снова попробует прежнюю модель.
+    pub(super) fn on_wake_model(&mut self, req: Option<ModelId>, dir: &Path, ok: bool) {
+        let id = dir
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("")
+            .to_owned();
+        if !ok {
+            warn!("wake word model did not load; active: {id:?}");
+        }
+        let request = self.wake_switch.answered(req);
+        if !id.is_empty() && id != self.st.wake_word {
+            self.st.wake_word.clone_from(&id);
+            info!("wake word -> {}", self.st.wake_word);
+            self.persist();
+        }
         self.api
-            .set_active_wake_words(vec![self.st.wake_word.clone()]);
-        self.persist();
+            .set_active_wake_words(request, if id.is_empty() { Vec::new() } else { vec![id] });
     }
 
     // ---------------- buttons, sensors, Zigbee ----------------
 
     pub(super) fn on_input(&mut self, ev: InputEvent) {
         match ev {
-            InputEvent::Mute(m) => {
+            InputEvent::Mute(m) | InputEvent::MuteSync(m) => {
                 if m {
                     self.cancel_arbitration();
                 }
                 self.hw_mic_muted = m;
                 info!("hardware mic mute: {}", u8::from(m));
                 self.api.publish_binary_sensor(BinarySensorId::HwMicMute, m);
-                let sw_muted = logic::sw_mute_after_button(self.st.mic_muted, m);
+                let sw_muted = logic::sw_mute_after_hw_event(self.st.mic_muted, ev);
                 if sw_muted != self.st.mic_muted {
                     info!("mute button lifted the mute from Home Assistant");
                     self.st.mic_muted = sw_muted;

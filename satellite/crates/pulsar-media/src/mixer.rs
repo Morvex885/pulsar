@@ -123,6 +123,7 @@ mod tests {
         for c in [
             &b"yandex,cucumber\0"[..],
             b"yandex,plum\0",
+            b"yandex,station-micro\0",
             b"yandex,station-mini2\0",
             b"yandex,bergamot\0",
             b"yandex,station-midi\0",

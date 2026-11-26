@@ -1,11 +1,13 @@
-//! Runs the microphone front-end without the daemon (stop the service first: the capture device
-//! has one user) and prints its events, plus once a second: VQE chunks, audio chunks, music
-//! frames, the captured rate and how far the processing thread is behind (FIFO).
-//! usage: frontend_probe [seconds=30] [--wake alisa|yandex] [--stream] [--music] [--commands]
-//!                       [--record <wav> <seconds>]
-//! Without --commands only the wake word spotter runs (the daemon runs the command spotter too,
-//! unless the microphone is muted). --record writes the first <seconds> of the raw capture (all
-//! channels, S16) as a WAV for ww_offline. No sound is played.
+//! Запускает микрофонный фронтенд без демона (сначала остановить сервис: у устройства захвата
+//! один пользователь) и печатает его события, а раз в секунду — чанки VQE, аудиочанки, музыкальные
+//! кадры, частоту захвата и отставание потока обработки (FIFO).
+//! usage: frontend_probe [seconds=30] [--wake <id|dir>]... [--switch <id|dir> <seconds>] [--stream]
+//!                       [--music] [--commands] [--record <wav> <seconds>]
+//! Без --commands работает только спотер wake word (демон запускает и командный, если микрофон не
+//! выключен). --record пишет первые <seconds> сырого захвата (все каналы, S16) в WAV для
+//! ww_offline. Звук не воспроизводится.
+//! --wake: id модели активации или путь к каталогу (со `/`); несколько — кандидаты по порядку,
+//! как при старте демона. --switch: смена модели через <seconds> (`set_model`).
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -22,7 +24,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 const MODELS: &str = "/system/vendor/quasar/spotter_models/activation/";
 const COMMAND_MODEL: &str = "/system/vendor/quasar/spotter_models/command";
-const USAGE: &str = "usage: frontend_probe [seconds=30] [--wake alisa|yandex] [--stream] [--music] [--commands] [--record <wav> <seconds>]";
+const USAGE: &str = "usage: frontend_probe [seconds=30] [--wake <id|dir>]... [--switch <id|dir> <seconds>] [--stream] [--music] [--commands] [--record <wav> <seconds>]";
 
 macro_rules! out {
     ($($arg:tt)*) => {{
@@ -32,7 +34,8 @@ macro_rules! out {
 
 struct Args {
     seconds: u64,
-    wake: String,
+    wake: Vec<String>,
+    switch: Option<(String, u64)>,
     stream: bool,
     music: bool,
     commands: bool,
@@ -42,7 +45,8 @@ struct Args {
 fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut a = Args {
         seconds: 30,
-        wake: "alisa".into(),
+        wake: Vec::new(),
+        switch: None,
         stream: false,
         music: false,
         commands: false,
@@ -58,10 +62,17 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut seconds_seen = false;
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--wake" => match it.next().as_deref() {
-                Some(w @ ("alisa" | "yandex")) => a.wake = w.into(),
-                other => return Err(format!("bad --wake: {}", other.unwrap_or(""))),
+            "--wake" => match it.next() {
+                Some(w) if !w.is_empty() => a.wake.push(w),
+                _ => return Err("--wake: missing model".into()),
             },
+            "--switch" => {
+                let w = it
+                    .next()
+                    .filter(|w| !w.is_empty())
+                    .ok_or("--switch: missing model")?;
+                a.switch = Some((w, secs(it.next())?));
+            }
             "--stream" => a.stream = true,
             "--music" => a.music = true,
             "--commands" => a.commands = true,
@@ -76,7 +87,19 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             s => return Err(format!("unknown argument: {s}")),
         }
     }
+    if a.wake.is_empty() {
+        a.wake.push("alisa".into());
+    }
     Ok(a)
+}
+
+/// Со `/` — путь к каталогу модели, иначе id в каталоге прошивки.
+fn wake_dir(s: &str) -> PathBuf {
+    if s.contains('/') {
+        PathBuf::from(s)
+    } else {
+        PathBuf::from(format!("{MODELS}{s}"))
+    }
 }
 
 /// 44-byte header of a PCM S16LE WAV.
@@ -197,7 +220,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
         m.model_name,
         m.codename,
         a.seconds,
-        a.wake,
+        a.wake.join(","),
         on(a.stream),
         on(a.music),
         on(a.commands),
@@ -213,8 +236,9 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
     };
     let (h, mut rx) = pulsar_audio::spawn(
         m,
-        PathBuf::from(format!("{MODELS}{}", a.wake)),
+        a.wake.iter().map(|w| wake_dir(w)).collect(),
         Some(PathBuf::from(COMMAND_MODEL)),
+        true,
     );
     let frame = h.frame();
     h.set_commands(a.commands);
@@ -230,6 +254,9 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
     let start = Instant::now();
     let end = tokio::time::sleep(Duration::from_secs(a.seconds));
     tokio::pin!(end);
+    let mut switch = a.switch;
+    let switch_at = tokio::time::sleep(Duration::from_secs(switch.as_ref().map_or(0, |s| s.1)));
+    tokio::pin!(switch_at);
     let mut tick = tokio::time::interval_at(start + Duration::from_secs(1), Duration::from_secs(1));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let (mut audio, mut music, mut beats, mut wakes, mut commands) = (0u64, 0u64, 0u64, 0u64, 0u64);
@@ -241,8 +268,15 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
     loop {
         tokio::select! {
             () = &mut end => break,
+            () = &mut switch_at, if switch.is_some() => {
+                if let Some((w, _)) = switch.take() {
+                    let dir = wake_dir(&w);
+                    out!("t={:6.2}s SWITCH -> {}", secs(start), dir.display());
+                    h.set_model(dir);
+                }
+            },
             ev = rx.recv() => match ev {
-                Some(FrontendEvent::Wake { phrase, level_db, preroll }) => {
+                Some(FrontendEvent::Wake { phrase, level_db, preroll, .. }) => {
                     wakes += 1;
                     out!(
                         "t={:6.2}s WAKE '{phrase}' level {level_db:.1} dB preroll {} ms",
@@ -251,11 +285,11 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
                     );
                     h.wake_handled();
                 }
-                Some(FrontendEvent::Command { word }) => {
+                Some(FrontendEvent::Command { word, .. }) => {
                     commands += 1;
                     out!("t={:6.2}s COMMAND '{word}'", secs(start));
                 }
-                Some(FrontendEvent::Audio(pcm)) => {
+                Some(FrontendEvent::Audio { pcm, .. }) => {
                     audio += 1;
                     audio_samples_ok &= pcm.len() == frame;
                     audio_samples += pcm.len();
@@ -264,6 +298,9 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
                     music += 1;
                     beats += u64::from(f.beat);
                     loudness = f.loudness;
+                }
+                Some(FrontendEvent::WakeModel { dir, ok, .. }) => {
+                    out!("t={:6.2}s WAKE_MODEL {} ok={ok}", secs(start), dir.display());
                 }
                 None => break,
             },
@@ -355,17 +392,30 @@ mod tests {
     fn arguments() {
         let a = args("").unwrap();
         assert_eq!(
-            (a.seconds, a.wake.as_str(), a.stream, a.music, a.commands),
-            (30, "alisa", false, false, false)
+            (a.seconds, a.wake.clone(), a.stream, a.music, a.commands),
+            (30, vec!["alisa".to_owned()], false, false, false)
         );
-        assert!(a.record.is_none());
-        let a = args("20 --stream --music --commands --wake yandex --record /tmp/x.wav 5").unwrap();
+        assert!(a.record.is_none() && a.switch.is_none());
+        let a = args("20 --stream --music --commands --wake /tmp/x --wake yandex --switch alisa 5 --record /tmp/x.wav 5").unwrap();
         assert_eq!(
-            (a.seconds, a.wake.as_str(), a.stream, a.music, a.commands),
-            (20, "yandex", true, true, true)
+            (a.seconds, a.wake.clone(), a.stream, a.music, a.commands),
+            (
+                20,
+                vec!["/tmp/x".to_owned(), "yandex".to_owned()],
+                true,
+                true,
+                true
+            )
         );
+        assert_eq!(a.switch, Some(("alisa".to_owned(), 5)));
         assert_eq!(a.record, Some((PathBuf::from("/tmp/x.wav"), 5)));
-        assert!(args("--wake bob").is_err());
+        assert_eq!(wake_dir("/tmp/x"), PathBuf::from("/tmp/x"));
+        assert_eq!(
+            wake_dir("yasmina"),
+            PathBuf::from(format!("{MODELS}yasmina"))
+        );
+        assert!(args("--wake").is_err());
+        assert!(args("--switch alisa").is_err());
         assert!(args("0").is_err());
         assert!(args("10 20").is_err());
         assert!(args("--record x.wav").is_err());

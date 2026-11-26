@@ -10,7 +10,7 @@ mod speech_numbers;
 mod voice;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use log::{debug, error, info, warn};
 use pulsar_audio::FrontendEvent;
@@ -136,7 +136,7 @@ pub struct Controller {
     updater: UpdaterHandle,
     arbiter: ArbiterHandle,
     /// Held only: the input actor runs while its handle exists.
-    _input: Option<InputHandle>,
+    _input: InputHandle,
     clock: pulsar_clock::ClockHandle,
     leds: LedsHandle,
     mixer: Mixer,
@@ -165,6 +165,7 @@ pub struct Controller {
     wake_dialog: bool,
     hw_mic_muted: bool,
     error_shown: bool,
+    wake_switch: logic::WakeSwitch,
     // Wake arbitration: the window between our claim and the decision. Microphone audio and a
     // command word heard in it are held until the decision.
     arbitrating: bool,
@@ -296,9 +297,17 @@ impl Controller {
             VERSION,
             BUILD_TIME,
         );
-        if st.wake_word != "alisa" && st.wake_word != "yandex" {
-            st.wake_word = "alisa".into();
+        let mut wake_names = logic::wake_word_names(Path::new(MODELS), &st.wake_word);
+        if wake_names.is_empty() {
+            // Каталог не прочитан или пуст: список в HA не должен расходиться с активным словом.
+            wake_names.push("alisa".into());
         }
+        // Стартовый запасной ID заменит сохранённый только после подтверждения загрузки.
+        let initial_wake_word = logic::resolve_wake_word(&st.wake_word, &wake_names);
+        let wake_dirs = logic::wake_candidates(&initial_wake_word, &wake_names)
+            .iter()
+            .map(|id| model_dir(id))
+            .collect::<Vec<_>>();
         let case_colors = pulsar_hw::case_colors();
         let dir = logic::state_dir(state_path.as_os_str());
         let strings = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -319,19 +328,15 @@ impl Controller {
         };
         let cfg = ApiConfig {
             port: ports.api,
-            wake_words: vec![
-                WakeWordInfo {
-                    id: "alisa".into(),
-                    phrase: "Алиса".into(),
+            wake_words: wake_names
+                .into_iter()
+                .map(|id| WakeWordInfo {
+                    phrase: logic::wake_word_phrase(&id),
+                    id,
                     languages: vec!["ru".into()],
-                },
-                WakeWordInfo {
-                    id: "yandex".into(),
-                    phrase: "Яндекс".into(),
-                    languages: vec!["ru".into()],
-                },
-            ],
-            active_wake_words: vec![st.wake_word.clone()],
+                })
+                .collect(),
+            active_wake_words: vec![initial_wake_word],
             light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
             clock_faces: with_none(strings(pulsar_clock::face_names())),
             music_styles: strings(pulsar_hw::music_styles()),
@@ -440,18 +445,13 @@ impl Controller {
         let (updater, updater_rx) =
             pulsar_update::spawn(pulsar_update::UPDATE_REPO.into(), VERSION.into());
 
-        let (input, input_rx) = match pulsar_hw::spawn_input(model) {
-            Ok((h, rx)) => (Some(h), Some(rx)),
-            Err(e) => {
-                warn!("{e}");
-                (None, None)
-            }
-        };
-        let hw_mic_muted = input.as_ref().is_some_and(InputHandle::hw_muted);
+        let (input, input_rx) = pulsar_hw::spawn_input(model);
+        let hw_mic_muted = input.hw_muted();
         let (mic, mic_rx) = pulsar_audio::spawn(
             model,
-            model_dir(&st.wake_word),
+            wake_dirs,
             Some(PathBuf::from(COMMAND_MODEL)),
+            !st.mic_muted && !hw_mic_muted,
         );
         mic.set_command_offset(st.command_start_offset_ms);
         mic.set_mic_gain(st.mic_gain_db);
@@ -564,7 +564,7 @@ impl Controller {
                 frontend: Some(mic_rx),
                 player: Some(player_rx),
                 arbiter: Some(arbiter_rx),
-                input: input_rx,
+                input: Some(input_rx),
                 lux: lux_rx,
                 sendspin: sendspin_rx,
                 zigbee: zigbee_rx,
@@ -584,6 +584,7 @@ impl Controller {
             wake_dialog: false,
             hw_mic_muted,
             error_shown: false,
+            wake_switch: logic::WakeSwitch::default(),
             arbitrating: false,
             arb_claim: None,
             arb_phrase: String::new(),
@@ -673,6 +674,10 @@ impl Controller {
                     info!("signal {}, exiting", libc::SIGINT);
                     break ExitReason::Signal;
                 }
+                ev = recv(&mut self.rx.input) => match ev {
+                    Some(ev) => self.on_input(ev),
+                    None => self.rx.input = None,
+                },
                 ev = recv(&mut self.rx.api) => match ev {
                     Some(ev) => self.on_api(ev),
                     None => self.rx.api = None,
@@ -692,10 +697,6 @@ impl Controller {
                         }
                     }
                     None => self.rx.arbiter = None,
-                },
-                ev = recv(&mut self.rx.input) => match ev {
-                    Some(ev) => self.on_input(ev),
-                    None => self.rx.input = None,
                 },
                 ev = recv(&mut self.rx.sendspin) => match ev {
                     Some(ev) => self.on_sendspin(ev),
@@ -744,6 +745,7 @@ impl Controller {
             Tk::Watchdog => self.abort_dialog("no progress from Home Assistant, giving up"),
             Tk::FollowupWait => {
                 info!("follow-up: no speech started, conversation ends");
+                self.play_no_reply_cue();
                 self.end_silent_followup();
             }
             Tk::TimerTick => self.show_timers(),
@@ -788,18 +790,25 @@ impl Controller {
     }
 
     fn on_frontend(&mut self, ev: FrontendEvent) {
+        if self.mic.discard_stale_voice(&ev) {
+            return;
+        }
         match ev {
             FrontendEvent::Wake {
                 phrase,
                 level_db,
                 preroll,
+                ..
             } => {
                 self.on_wake(&phrase, level_db, preroll);
                 // After on_wake has switched streaming on where the wake word starts a request.
                 self.mic.wake_handled();
             }
-            FrontendEvent::Command { word } => self.on_command(&word, false),
-            FrontendEvent::Audio(pcm) => {
+            FrontendEvent::Command { word, .. } => self.on_command(&word, false),
+            FrontendEvent::Audio { pcm, .. } => {
+                if self.mic_muted() {
+                    return;
+                }
                 if self.phase == Phase::Listening {
                     self.api.voice_send_audio(pcm);
                 } else if self.arbitrating {
@@ -811,6 +820,7 @@ impl Controller {
                 self.leds.music_frame(f, false);
                 self.clock.music_frame(f, false);
             }
+            FrontendEvent::WakeModel { id, dir, ok } => self.on_wake_model(id, &dir, ok),
         }
     }
 
@@ -837,7 +847,8 @@ impl Controller {
     }
 
     fn mic_muted(&self) -> bool {
-        self.st.mic_muted || self.hw_mic_muted
+        // Ввод уже мог заблокировать микрофоны, пока его событие ещё ждёт обработки.
+        self.st.mic_muted || self.hw_mic_muted || self._input.hw_muted()
     }
 
     fn sendspin_streaming(&self) -> bool {

@@ -1,13 +1,19 @@
-//! Decisions of the controller that depend only on their inputs (controller.cpp), kept apart for
-//! the host tests.
+//! Решения контроллера, зависящие только от входов (controller.cpp), вынесены отдельно ради
+//! хостовых тестов. Исключение — `wake_word_names`: читает каталог моделей, тест — на временном
+//! каталоге.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt as _;
+use std::path::Path;
+
+use log::warn;
+use pulsar_audio::ModelId;
+use pulsar_audio::engine::MODEL_FILES;
 
 use pulsar_core::model::Model;
 use pulsar_esphome::{DeviceIdentity, MediaState, VaEvent};
-use pulsar_hw::Rgb;
+use pulsar_hw::{InputEvent, Rgb};
 use pulsar_media::PlayState;
 
 /// After the wake word a stock command ("Алиса, громче") is handled locally if it is heard
@@ -338,7 +344,7 @@ pub fn want_duck(
 /// Что вход в LISTENING делает с каналом ANNOUNCE.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WakeCue {
-    /// Канал не трогать: продолжение разговора и разговор, начатый из HA.
+    /// Не трогать канал при автоматическом старте с выключенным звуком.
     Keep,
     /// Звук активации; его play() обрывает то, что ещё звучит.
     Sound,
@@ -347,12 +353,23 @@ pub enum WakeCue {
     Cut,
 }
 
-pub fn wake_cue(earcon: bool, wake_sound: bool) -> WakeCue {
-    match (earcon, wake_sound) {
-        (false, _) => WakeCue::Keep,
-        (true, true) => WakeCue::Sound,
+pub fn wake_cue(explicit: bool, wake_sound: bool) -> WakeCue {
+    match (explicit, wake_sound) {
+        (_, true) => WakeCue::Sound,
         (true, false) => WakeCue::Cut,
+        (false, false) => WakeCue::Keep,
     }
+}
+
+/// Сигнал отсутствия ответа не должен обрывать объявление, ответ, звонок или другой earcon.
+pub fn want_no_reply_cue(
+    phase: Phase,
+    wake_sound: bool,
+    announcing: bool,
+    timer_ringing: bool,
+    closing_earcon: bool,
+) -> bool {
+    wake_sound && phase != Phase::Speaking && !announcing && !timer_ringing && !closing_earcon
 }
 
 /// A local volume change clicks on ANNOUNCE, which also carries the answer, announcements, the
@@ -386,10 +403,9 @@ pub fn sw_mute_after_switch(on: bool, sw_muted: bool, hw_muted: bool) -> bool {
     if on && hw_muted { sw_muted } else { !on }
 }
 
-/// The software mute after the mute button switched to `hw_muted`: lifting the button's mute
-/// also lifts the mute from HA, so the button alone always brings the microphones back.
-pub fn sw_mute_after_button(sw_muted: bool, hw_muted: bool) -> bool {
-    sw_muted && hw_muted
+/// Только физическое снятие блокировки отменяет mute из HA; переоткрытие устройства — нет.
+pub fn sw_mute_after_hw_event(sw_muted: bool, event: InputEvent) -> bool {
+    sw_muted && !matches!(event, InputEvent::Mute(false))
 }
 
 /// Restarting cuts off whatever plays: automatic installs wait for silence.
@@ -464,6 +480,8 @@ pub struct Followup {
     requested: bool,
     /// В run была ошибка.
     failed: bool,
+    /// Последняя ошибка run — STT не вернул текст, даже если VAD обнаружил речь.
+    no_text: bool,
     /// В этом run пришёл STT_VAD_START.
     vad_seen: bool,
     /// Идёт follow-up-реплика, речь ещё не началась.
@@ -482,6 +500,7 @@ impl Followup {
             VaEvent::RunStart => {
                 self.requested = false;
                 self.failed = false;
+                self.no_text = false;
                 self.vad_seen = false;
             }
             VaEvent::IntentEnd => self.requested = continue_conversation && !self.failed,
@@ -517,9 +536,17 @@ impl Followup {
             .then(|| u64::from(seconds) * 1000 + FOLLOWUP_VAD_GRACE_MS)
     }
 
-    /// Ошибка — это молчание в follow-up-реплике: диалог закрывается тихо.
+    /// Молчание до начала речи в follow-up не включает индикацию ошибки.
     pub fn silent(&self, code: &str) -> bool {
         self.awaiting_speech && code == "stt-no-text-recognized"
+    }
+
+    pub fn record_error(&mut self, code: &str) {
+        self.no_text = code == "stt-no-text-recognized";
+    }
+
+    pub fn ended_without_text(&self) -> bool {
+        self.no_text
     }
 
     pub fn awaiting_speech(&self) -> bool {
@@ -580,6 +607,124 @@ impl RunBinding {
 pub fn publish_lux(lux: f32, last: f32, last_ms: i64, now: i64) -> bool {
     let diff = (lux - last).abs();
     last < 0.0 || diff > cxx_max(1.0, last * 0.1) || now - last_ms > 60_000
+}
+
+/// Предел длины id модели активации.
+// см. docs/voice.md, «Арбитраж между станциями»
+pub const WAKE_ID_MAX: usize = 15;
+
+/// id модели (имя её каталога) уходит полем в claim арбитра и строкой в `state.conf`: там
+/// годятся только короткие имена без пробелов и разделителей пути.
+pub fn wake_word_id_ok(id: &str) -> bool {
+    (1..=WAKE_ID_MAX).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+}
+
+/// Модели активации в `models`: какие слова есть, решает прошивка. Модель — каталог со всеми
+/// файлами `MODEL_FILES`; `alisa` первой, остальные по имени. Ошибки чтения пишутся в лог, а
+/// модель сохранённого слова `saved` проверяется напрямую: урезанный ошибкой список не должен
+/// сбросить уже выбранное слово.
+pub fn wake_word_names(models: &Path, saved: &str) -> Vec<String> {
+    let present = |id: &str| {
+        MODEL_FILES
+            .iter()
+            .all(|f| models.join(id).join(f).is_file())
+    };
+    let mut out = Vec::new();
+    if wake_word_id_ok(saved) && present(saved) {
+        out.push(saved.to_owned());
+    }
+    let rd = match std::fs::read_dir(models) {
+        Ok(rd) => rd,
+        Err(e) => {
+            warn!("cannot list activation models in {}: {e}", models.display());
+            return out;
+        }
+    };
+    for entry in rd {
+        let e = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("activation model unreadable in {}: {e}", models.display());
+                continue;
+            }
+        };
+        let dir = e.path();
+        if let Some(f) = MODEL_FILES.iter().find(|f| !dir.join(f).is_file()) {
+            if dir.is_dir() {
+                warn!("activation model {} skipped: missing {f}", dir.display());
+            }
+            continue;
+        }
+        match e.file_name().to_str() {
+            Some(name) if wake_word_id_ok(name) => {
+                if name != saved {
+                    out.push(name.to_owned());
+                }
+            }
+            _ => warn!(
+                "activation model {:?} skipped: id must be 1-{WAKE_ID_MAX} chars of [a-z0-9_-]",
+                e.file_name()
+            ),
+        }
+    }
+    out.sort_by(|a, b| (a != "alisa", a).cmp(&(b != "alisa", b)));
+    out
+}
+
+/// Последний запрос смены wake word к фронтенду, который владеет состоянием спотера.
+#[derive(Debug, Default)]
+pub struct WakeSwitch {
+    pending: Option<(ModelId, u64)>,
+}
+
+impl WakeSwitch {
+    pub fn requested(&mut self, req: ModelId, request: u64) {
+        self.pending = Some((req, request));
+    }
+
+    /// Независимое изменение доступности модели не подтверждает ожидающий запрос HA.
+    pub fn answered(&mut self, req: Option<ModelId>) -> Option<u64> {
+        if self.pending.as_ref().is_some_and(|(r, _)| Some(*r) == req) {
+            self.pending.take().map(|(_, request)| request)
+        } else {
+            None
+        }
+    }
+}
+
+/// Сохранённое слово, если модель есть на станции, иначе первая найденная (`alisa`, если есть):
+/// спотер не должен ждать каталог, которого нет.
+pub fn resolve_wake_word(saved: &str, available: &[String]) -> String {
+    if available.iter().any(|n| n == saved) {
+        return saved.to_owned();
+    }
+    if !saved.is_empty() {
+        warn!("wake word {saved:?} is not on this device; falling back");
+    }
+    available
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "alisa".to_owned())
+}
+
+/// Порядок попыток загрузки при старте: активное слово, затем остальные модели.
+pub fn wake_candidates(active: &str, available: &[String]) -> Vec<String> {
+    std::iter::once(active.to_owned())
+        .chain(available.iter().filter(|n| *n != active).cloned())
+        .collect()
+}
+
+/// Для неизвестной модели подписью остаётся её ID.
+pub fn wake_word_phrase(id: &str) -> String {
+    match id {
+        "alisa" => "Alisa".into(),
+        "yandex" => "Yandex".into(),
+        "yasmina" => "Yasmina".into(),
+        other => other.to_owned(),
+    }
 }
 
 #[cfg(test)]

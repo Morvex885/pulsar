@@ -366,10 +366,39 @@ fn ducking() {
 
 #[test]
 fn wake_cue_table() {
-    assert_eq!(wake_cue(false, true), WakeCue::Keep);
+    assert_eq!(wake_cue(false, true), WakeCue::Sound);
     assert_eq!(wake_cue(false, false), WakeCue::Keep);
     assert_eq!(wake_cue(true, true), WakeCue::Sound);
     assert_eq!(wake_cue(true, false), WakeCue::Cut);
+}
+
+#[test]
+fn no_reply_cue_respects_setting_and_current_audio() {
+    assert!(want_no_reply_cue(
+        Phase::Listening,
+        true,
+        false,
+        false,
+        false
+    ));
+    assert!(want_no_reply_cue(
+        Phase::Processing,
+        true,
+        false,
+        false,
+        false
+    ));
+    for (phase, wake_sound, announcing, ringing, closing) in [
+        (Phase::Processing, false, false, false, false),
+        (Phase::Processing, true, true, false, false),
+        (Phase::Processing, true, false, true, false),
+        (Phase::Processing, true, false, false, true),
+        (Phase::Speaking, true, false, false, false),
+    ] {
+        assert!(!want_no_reply_cue(
+            phase, wake_sound, announcing, ringing, closing,
+        ));
+    }
 }
 
 #[test]
@@ -637,11 +666,19 @@ fn microphones_mutes() {
             "on={on} sw={sw} hw={hw}"
         );
     }
-    // Muted from HA only: the first press adds the button's mute, the second lifts both.
-    assert!(sw_mute_after_button(true, true));
-    assert!(!sw_mute_after_button(true, false));
-    // The button never sets the software mute.
-    assert!(!sw_mute_after_button(false, true));
+}
+
+#[test]
+fn recovering_hardware_mute_preserves_ha_mute() {
+    for sw_muted in [false, true] {
+        let lost = sw_mute_after_hw_event(sw_muted, InputEvent::MuteSync(true));
+        assert_eq!(lost, sw_muted);
+        let recovered = sw_mute_after_hw_event(lost, InputEvent::MuteSync(false));
+        assert_eq!(recovered, sw_muted);
+        let blocked = sw_mute_after_hw_event(recovered, InputEvent::Mute(true));
+        assert_eq!(blocked, sw_muted);
+        assert!(!sw_mute_after_hw_event(blocked, InputEvent::Mute(false)));
+    }
 }
 
 #[test]
@@ -711,7 +748,7 @@ fn followup_window_needs_ha_speech_events() {
 }
 
 #[test]
-fn followup_silence_is_quiet_only_before_speech() {
+fn followup_silence_skips_error_indication_only_before_speech() {
     assert!(!Followup::default().silent("stt-no-text-recognized"));
     let mut f = Followup::default().next_turn();
     f.on_event(VaEvent::RunStart, false);
@@ -719,4 +756,172 @@ fn followup_silence_is_quiet_only_before_speech() {
     assert!(!f.silent("stt-stream-failed"));
     f.on_event(VaEvent::SttVadStart, false);
     assert!(!f.silent("stt-no-text-recognized"));
+}
+
+#[test]
+fn no_reply_requires_empty_stt_result_in_this_run() {
+    for followup in [false, true] {
+        for vad in [false, true] {
+            let mut f = Followup::default();
+            if followup {
+                f = f.next_turn();
+            }
+            run(&mut f, &[VaEvent::RunStart, VaEvent::SttStart]);
+            if vad {
+                f.on_event(VaEvent::SttVadStart, false);
+            }
+            let mut without_error = f;
+            without_error.on_event(VaEvent::RunEnd, false);
+            assert!(!without_error.ended_without_text());
+
+            f.on_event(VaEvent::Error, false);
+            f.record_error("stt-no-text-recognized");
+            f.on_event(VaEvent::RunEnd, false);
+            assert!(f.ended_without_text());
+            assert!(!f.next_turn().ended_without_text());
+
+            let mut next_run = f;
+            next_run.on_event(VaEvent::RunStart, false);
+            assert!(!next_run.ended_without_text());
+
+            f.on_event(VaEvent::Error, false);
+            f.record_error("stt-stream-failed");
+            f.on_event(VaEvent::RunEnd, false);
+            assert!(!f.ended_without_text());
+        }
+    }
+}
+
+/// Новый каталог во временном каталоге системы; удаляется при drop.
+struct TmpDir(std::path::PathBuf);
+
+impl TmpDir {
+    fn new() -> Self {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "pulsar-wake-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        Self(p)
+    }
+
+    fn model(&self, name: &str) {
+        let d = self.0.join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        for f in MODEL_FILES {
+            std::fs::write(d.join(f), b"").unwrap();
+        }
+    }
+}
+
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn strings(l: &[&str]) -> Vec<String> {
+    l.iter().map(|s| (*s).to_owned()).collect()
+}
+
+#[test]
+fn wake_word_id_format() {
+    for id in ["alisa", "a", "x_1-2", "abcdefghijklmno"] {
+        assert!(wake_word_id_ok(id), "{id}");
+    }
+    for id in [
+        "",
+        "abcdefghijklmnop",
+        "Alisa",
+        "a b",
+        "../alisa",
+        ".x",
+        "ясмина",
+    ] {
+        assert!(!wake_word_id_ok(id), "{id}");
+    }
+}
+
+#[test]
+fn wake_word_names_lists_valid_models_alisa_first() {
+    let t = TmpDir::new();
+    for m in ["yandex", "alisa", "yasmina", "Bad Name"] {
+        t.model(m);
+    }
+    std::fs::create_dir(t.0.join("empty")).unwrap();
+    // Без flags.txt `spotter_conf_read` возвращает ошибку: каталог не модель.
+    std::fs::create_dir(t.0.join("noflags")).unwrap();
+    std::fs::write(t.0.join("noflags/acoustic_model.nnet"), b"").unwrap();
+    std::fs::write(t.0.join("readme"), b"").unwrap();
+    assert_eq!(
+        wake_word_names(&t.0, "yasmina"),
+        strings(&["alisa", "yandex", "yasmina"])
+    );
+    // Сохранённое слово без годной модели или с негодным id в список не попадает.
+    assert_eq!(
+        wake_word_names(&t.0, "noflags"),
+        strings(&["alisa", "yandex", "yasmina"])
+    );
+    assert_eq!(
+        wake_word_names(&t.0, "Bad Name"),
+        strings(&["alisa", "yandex", "yasmina"])
+    );
+
+    let t = TmpDir::new();
+    t.model("yasmina");
+    t.model("yandex");
+    assert_eq!(wake_word_names(&t.0, ""), strings(&["yandex", "yasmina"]));
+
+    assert!(wake_word_names(&t.0.join("missing"), "alisa").is_empty());
+}
+
+#[test]
+fn wake_word_names_keeps_the_saved_model_when_listing_fails() {
+    // Каталог без права чтения: read_dir отказывает, но модель внутри доступна по пути (под root
+    // read_dir проходит, ответ тот же).
+    use std::os::unix::fs::PermissionsExt as _;
+    let t = TmpDir::new();
+    t.model("yasmina");
+    std::fs::set_permissions(&t.0, std::fs::Permissions::from_mode(0o311)).unwrap();
+    let names = wake_word_names(&t.0, "yasmina");
+    std::fs::set_permissions(&t.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(names, strings(&["yasmina"]));
+}
+
+#[test]
+fn wake_word_english_labels() {
+    assert_eq!(wake_word_phrase("alisa"), "Alisa");
+    assert_eq!(wake_word_phrase("yandex"), "Yandex");
+    assert_eq!(wake_word_phrase("yasmina"), "Yasmina");
+    assert_eq!(wake_word_phrase("other_word"), "other_word");
+}
+
+#[test]
+fn wake_word_resolution_and_candidates() {
+    let all = strings(&["alisa", "yandex", "yasmina"]);
+    assert_eq!(resolve_wake_word("yandex", &all), "yandex");
+    assert_eq!(resolve_wake_word("gone", &all[1..]), "yandex");
+    assert_eq!(resolve_wake_word("yandex", &[]), "alisa");
+    assert_eq!(
+        wake_candidates("yasmina", &all),
+        strings(&["yasmina", "alisa", "yandex"])
+    );
+    assert_eq!(
+        wake_candidates("gone", &all),
+        strings(&["gone", "alisa", "yandex", "yasmina"])
+    );
+}
+
+#[test]
+fn wake_switch_ignores_queued_reply_when_ha_repeats_the_request() {
+    let mut w = WakeSwitch::default();
+    w.requested(ModelId(1), 10);
+    // Ответ первого SET и потеря модели уже в очереди; HA повторяет SET того же слова.
+    w.requested(ModelId(2), 11);
+    assert_eq!(w.answered(Some(ModelId(1))), None);
+    assert_eq!(w.answered(None), None);
+    assert_eq!(w.answered(Some(ModelId(2))), Some(11));
 }
