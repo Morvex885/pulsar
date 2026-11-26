@@ -145,6 +145,16 @@ impl Settings {
         }
     }
 
+    pub fn remember_wake_word(&mut self, id: &str) -> bool {
+        if self.has_wake_word && self.wake_word == id {
+            return false;
+        }
+        self.has_wake_word = true;
+        self.wake_word.clear();
+        self.wake_word.push_str(id);
+        true
+    }
+
     /// The C++ `Settings::load` loop: lines split at '\n' only (a '\r' stays in the value), the
     /// key up to the first '='; unknown keys and lines without '=' are skipped.
     ///

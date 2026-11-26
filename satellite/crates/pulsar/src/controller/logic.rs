@@ -16,6 +16,8 @@ use pulsar_esphome::{DeviceIdentity, MediaState, VaEvent};
 use pulsar_hw::{InputEvent, Rgb};
 use pulsar_media::PlayState;
 
+use crate::settings::Settings;
+
 /// After the wake word a stock command ("Алиса, громче") is handled locally if it is heard
 /// within this window; the HA pipeline is then cancelled.
 pub const COMMAND_AFTER_WAKE_MS: i64 = 2500;
@@ -692,13 +694,22 @@ impl WakeSwitch {
         self.pending = Some((req, request));
     }
 
-    /// Независимое изменение доступности модели не подтверждает ожидающий запрос HA.
-    pub fn answered(&mut self, req: Option<ModelId>) -> Option<u64> {
-        if self.pending.as_ref().is_some_and(|(r, _)| Some(*r) == req) {
+    /// Запоминаем фактически применённый выбор, даже если HA уже ждёт другого ответа.
+    pub fn report(
+        &mut self,
+        settings: &mut Settings,
+        req: Option<ModelId>,
+        active: &str,
+        loaded: bool,
+    ) -> (Option<u64>, bool) {
+        let ack = if self.pending.as_ref().is_some_and(|(r, _)| Some(*r) == req) {
             self.pending.take().map(|(_, request)| request)
         } else {
             None
-        }
+        };
+        let remember = !settings.has_wake_word || (req.is_some() && loaded);
+        let changed = remember && !active.is_empty() && settings.remember_wake_word(active);
+        (ack, changed)
     }
 }
 

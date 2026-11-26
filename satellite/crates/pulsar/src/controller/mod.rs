@@ -43,6 +43,13 @@ fn wake_word_info(id: String) -> WakeWordInfo {
     }
 }
 
+fn wake_model_id(dir: &Path) -> String {
+    dir.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
 const DUCK_GAIN: f32 = 0.15;
 const TIMER_RING_MAX_MS: i64 = 15 * 60 * 1000;
 // Longest wait for the next pipeline event before the dialog is given up locally. HA's voice
@@ -454,6 +461,7 @@ impl Controller {
             Some(PathBuf::from(COMMAND_MODEL)),
             !st.mic_muted && !hw_mic_muted,
         );
+        let initial_wake_word = wake_model_id(mic.initial_wake_model());
         mic.set_command_offset(st.command_start_offset_ms);
         mic.set_mic_gain(st.mic_gain_db);
 
@@ -636,6 +644,9 @@ impl Controller {
         };
         // The rest of the C++ start(), in its order: every call below only queues commands to
         // the services, which run once `run` is awaited.
+        // Команды API идут до accept: первый GET должен видеть фактически загруженный спотер.
+        let wake_loaded = !initial_wake_word.is_empty();
+        c.on_wake_model(None, initial_wake_word, wake_loaded);
         c.publish_update();
         c.timers.set_repeating(
             Tk::UpdateCheck,
@@ -823,7 +834,9 @@ impl Controller {
                 self.leds.music_frame(f, false);
                 self.clock.music_frame(f, false);
             }
-            FrontendEvent::WakeModel { id, dir, ok } => self.on_wake_model(id, &dir, ok),
+            FrontendEvent::WakeModel { id, dir, ok } => {
+                self.on_wake_model(id, wake_model_id(&dir), ok);
+            }
         }
     }
 

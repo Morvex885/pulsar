@@ -294,6 +294,7 @@ fn voice_owner_is_the_latest_subscriber_past_hello() {
         id,
         hello,
         voice: false,
+        drained: false,
         voice_wanted,
         last_rx: t,
     };
@@ -320,6 +321,7 @@ fn eviction_rank() {
         id,
         hello,
         voice,
+        drained: false,
         voice_wanted,
         last_rx: t + Duration::from_secs(100 - age),
     };
@@ -341,6 +343,14 @@ fn eviction_rank() {
             .into_iter()
         ),
         (Some(4), 4)
+    );
+    let finishing = Standing {
+        drained: true,
+        ..s(6, true, false, 0, 0)
+    };
+    assert_eq!(
+        eviction_victim([s(3, true, false, 0, 10), finishing].into_iter()),
+        (Some(6), 2)
     );
     // Then subscribers that do not own it; the owner last.
     assert_eq!(

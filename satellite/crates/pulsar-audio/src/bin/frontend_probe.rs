@@ -241,6 +241,13 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
         true,
     );
     let frame = h.frame();
+    let initial_wake = h.initial_wake_model();
+    let wake_started = !initial_wake.as_os_str().is_empty();
+    out!(
+        "t={:6.2}s WAKE_MODEL {} ok={wake_started}",
+        0.0,
+        initial_wake.display()
+    );
     h.set_commands(a.commands);
     h.set_streaming(a.stream);
     h.set_music_analysis(a.music);
@@ -263,7 +270,6 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
     let (mut audio_samples_ok, mut loudness) = (true, 0f32);
     let mut audio_samples = 0usize;
     let mut prev = FrontendStats::default();
-    let mut wake_started = None;
     let mut prev_counts = (0u64, 0u64);
     let mut first: Option<(Instant, FrontendStats, u64, u64)> = None;
     loop {
@@ -301,7 +307,6 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
                     loudness = f.loudness;
                 }
                 Some(FrontendEvent::WakeModel { dir, ok, .. }) => {
-                    wake_started.get_or_insert(!dir.as_os_str().is_empty());
                     out!("t={:6.2}s WAKE_MODEL {} ok={ok}", secs(start), dir.display());
                 }
                 None => break,
@@ -371,7 +376,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
             );
         }
     }
-    Ok(wake_started == Some(true)
+    Ok(wake_started
         && s.chunks > 0
         && audio_samples_ok
         && (!a.stream || audio > 0)

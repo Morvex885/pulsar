@@ -1274,6 +1274,10 @@ async fn eof_batch_drains_voice_in_order_without_broadcasting_to_closed_peer() {
         let (id, cfg) = selftest("now");
         let (mut s, handle) = bind_server(id, cfg).unwrap();
         let mut rx = handle.events;
+        let api = ApiHandle {
+            cmds: handle.cmds,
+            shared: handle.shared,
+        };
         let (owner, mut p) = subscribe(&mut s, handle.port, "owner").await;
         let (other, mut live) = subscribe(&mut s, handle.port, "other").await;
         event(&mut rx).await;
@@ -1308,6 +1312,7 @@ async fn eof_batch_drains_voice_in_order_without_broadcasting_to_closed_peer() {
 
         // Воспроизводим порядок проходов reactor, не полагаясь на порядок готовности TCP.
         s.process(owner, Some(ReadEnd::Eof));
+        assert!(!api.voice_subscribed());
         assert!(s.client(owner).unwrap().pending_input);
         p.expect(msg::PING_RESP).await;
         live.expect(msg::LIGHT_STATE).await;

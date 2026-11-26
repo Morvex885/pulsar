@@ -9,7 +9,7 @@
 //! device buffer when reading and processing shared one thread.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering::AcqRel, Ordering::Acquire,
     Ordering::Relaxed,
@@ -78,7 +78,7 @@ pub enum FrontendEvent {
     /// One per 32 ms FFT window while music analysis is on.
     Music(MusicFrame),
     /// Фактически активная модель wake word. `id` указан только в ответ на `set_model`;
-    /// `ok` означает, что загрузилась запрошенная модель (при старте — первый кандидат).
+    /// `ok` означает успешную смену или восстановление спотера.
     /// `dir` пуст, если спотера нет. На запрос, вытесненный до применения, события нет.
     WakeModel {
         id: Option<ModelId>,
@@ -123,7 +123,7 @@ pub struct FrontendHandle {
 /// Запускает фронтенд: dlopen, VQE по пресету модели, спотер wake word из первого загрузившегося
 /// каталога `wake_model_dirs` (например, .../spotter_models/activation/alisa) и, если задан,
 /// командный спотер (.../spotter_models/command), затем потоки захвата и обработки. Отсутствие
-/// модели активации не мешает ручному запросу; статус приходит в [`FrontendEvent::WakeModel`].
+/// модели активации не мешает ручному запросу. Начальное состояние — `initial_wake_model()`.
 /// При отказе фронтенда handle работает без событий. Захват переоткрывается каждые 2 с.
 pub fn spawn(
     model: &'static Model,
@@ -137,21 +137,16 @@ pub fn spawn(
         pipe: None,
         threads: Vec::new(),
         frame: 0,
+        initial_wake_model: PathBuf::new(),
         _events: tx.clone(),
     };
     let command_dir = command_model_dir.filter(|d| !d.as_os_str().is_empty());
     let started = match Engine::start(model, &wake_model_dirs, command_dir.as_deref()) {
         Some(eng) => {
             inner.frame = eng.frame();
-            let dir = eng.wake_dir().to_path_buf();
-            let ok = wake_model_dirs.first() == Some(&dir);
+            inner.initial_wake_model = eng.wake_dir().to_path_buf();
             inner
-                .start_threads(
-                    model,
-                    eng,
-                    tx.clone(),
-                    FrontendEvent::WakeModel { id: None, dir, ok },
-                )
+                .start_threads(model, eng, tx)
                 .inspect_err(|e| error!("audio threads: {e}"))
                 .is_ok()
         }
@@ -160,6 +155,7 @@ pub fn spawn(
     if !started {
         inner.stop();
         inner.frame = 0;
+        inner.initial_wake_model = PathBuf::new();
         error!("microphone front-end failed to start");
     }
     (
@@ -238,6 +234,11 @@ impl FrontendHandle {
     /// start.
     pub fn frame(&self) -> usize {
         self.inner.frame
+    }
+
+    /// Каталог модели, загруженной синхронно при запуске, или пустой путь без спотера.
+    pub fn initial_wake_model(&self) -> &Path {
+        &self.inner.initial_wake_model
     }
 
     /// Every block read from ALSA, interleaved as captured (`capture_channels` per frame), goes
@@ -362,6 +363,7 @@ struct Inner {
     threads: Vec<JoinHandle<()>>,
     /// Samples per VQE output chunk; 0 without a running engine.
     frame: usize,
+    initial_wake_model: PathBuf,
     // Keeps the event channel open: without a front-end, recv() waits forever instead of
     // returning None.
     _events: UnboundedSender<FrontendEvent>,
@@ -373,7 +375,6 @@ impl Inner {
         model: &'static Model,
         eng: Engine,
         tx: UnboundedSender<FrontendEvent>,
-        initial_model: FrontendEvent,
     ) -> std::io::Result<()> {
         let nch = model.capture_channels as usize;
         let period = eng.chunk;
@@ -395,10 +396,7 @@ impl Inner {
             std::thread::Builder::new()
                 .name("audio-process".into())
                 .stack_size(PROCESSING_STACK)
-                .spawn(move || {
-                    let _ = tx.send(initial_model);
-                    processing(model, eng, &shared, &pipe, &tx);
-                })?,
+                .spawn(move || processing(model, eng, &shared, &pipe, &tx))?,
         );
         Ok(())
     }
@@ -1466,6 +1464,7 @@ mod tests {
         // No /system/vendor/quasar/libs on the build host: dlopen fails.
         let midi = model_from_compatible(b"yandex,cucumber\0").unwrap();
         let (h, mut rx) = spawn(midi, vec![PathBuf::from("/nonexistent")], None, true);
+        assert!(h.initial_wake_model().as_os_str().is_empty());
         h.set_streaming(true);
         h.set_model(PathBuf::from("/nonexistent/2"));
         let h2 = h.clone();

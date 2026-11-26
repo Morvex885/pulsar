@@ -917,12 +917,41 @@ fn initial_wake_word_never_replaces_a_saved_selection() {
 }
 
 #[test]
-fn wake_switch_ignores_queued_reply_when_ha_repeats_the_request() {
+fn wake_switch_keeps_last_loaded_word_when_a_newer_selection_fails() {
     let mut w = WakeSwitch::default();
+    let mut st = Settings::default();
+    st.parse(b"wake_word=alisa\n");
     w.requested(ModelId(1), 10);
-    // Ответ первого SET и потеря модели уже в очереди; HA повторяет SET того же слова.
+    // HA успел запросить другую модель до обработки успешной смены на «Яндекс».
     w.requested(ModelId(2), 11);
-    assert_eq!(w.answered(Some(ModelId(1))), None);
-    assert_eq!(w.answered(None), None);
-    assert_eq!(w.answered(Some(ModelId(2))), Some(11));
+    assert_eq!(
+        w.report(&mut st, Some(ModelId(1)), "yandex", true),
+        (None, true)
+    );
+    assert_eq!(w.report(&mut st, None, "", false), (None, false));
+    assert_eq!(
+        w.report(&mut st, Some(ModelId(2)), "yandex", false),
+        (Some(11), false)
+    );
+
+    let mut restarted = Settings::default();
+    restarted.parse(st.serialize().as_bytes());
+    assert!(restarted.has_wake_word);
+    assert_eq!(restarted.wake_word, "yandex");
+}
+
+#[test]
+fn wake_switch_remembers_first_model_restored_after_a_failed_switch() {
+    let mut w = WakeSwitch::default();
+    let mut st = Settings::default();
+    assert_eq!(w.report(&mut st, None, "", false), (None, false));
+    w.requested(ModelId(1), 10);
+    assert_eq!(
+        w.report(&mut st, Some(ModelId(1)), "yandex", false),
+        (Some(10), true)
+    );
+    let mut restarted = Settings::default();
+    restarted.parse(st.serialize().as_bytes());
+    assert!(restarted.has_wake_word);
+    assert_eq!(restarted.wake_word, "yandex");
 }

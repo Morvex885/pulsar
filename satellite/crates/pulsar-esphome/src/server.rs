@@ -424,6 +424,7 @@ struct Standing {
     id: u64,
     hello: bool,
     voice: bool,
+    drained: bool,
     voice_wanted: u64,
     last_rx: Instant,
 }
@@ -441,18 +442,19 @@ fn voice_choice(clients: impl Iterator<Item = Standing>) -> Option<u64> {
     want.map(|w| w.id)
 }
 
-/// A client completing hello at the cap replaces an established client: preferably one without
-/// interest in the voice pipeline, never its owner, otherwise the one heard from least recently
-/// (a reconnecting HA whose old socket has not timed out yet gets in, and the old one goes).
-/// Returns the candidate and the number of established clients.
+/// При заполнении лимита сначала вытесняем клиента с разобранным вводом после EOF, затем
+/// без подписки на голос, затем подписчика, затем владельца. При равном ранге — самый давний
+/// по последнему входу. Возвращает кандидата и число клиентов с завершённым Hello.
 fn eviction_victim(clients: impl Iterator<Item = Standing>) -> (Option<u64>, usize) {
     let rank = |c: &Standing| {
-        if c.voice {
-            2
-        } else if c.voice_wanted != 0 {
-            1
-        } else {
+        if c.drained {
             0
+        } else if c.voice {
+            3
+        } else if c.voice_wanted != 0 {
+            2
+        } else {
+            1
         }
     };
     let mut victim: Option<Standing> = None;
@@ -512,6 +514,7 @@ impl Client {
             id: self.id,
             hello: self.hello,
             voice: self.voice,
+            drained: matches!(self.read_end, Some(ReadEnd::Eof)) && !self.pending_input,
             voice_wanted: if self.read_end.is_none() {
                 self.voice_wanted
             } else {
@@ -933,8 +936,12 @@ impl Server {
     fn process(&mut self, id: u64, end: Option<ReadEnd>) {
         let Some(c) = self.client(id) else { return };
         let lost_logs = end.is_some() && c.log_level != 0;
+        let lost_voice = end.is_some() && c.voice;
         if end.is_some() {
             c.read_end = end;
+        }
+        if lost_voice {
+            self.shared.voice_subscribed.set(false);
         }
         if lost_logs {
             self.update_log_sink();
