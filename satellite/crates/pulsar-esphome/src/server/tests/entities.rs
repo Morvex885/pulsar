@@ -1270,7 +1270,7 @@ async fn eof_batch_drains_voice_in_order_without_broadcasting_to_closed_peer() {
         (id, p)
     }
 
-    for unsubscribe in [false, true] {
+    for (already_subscribed, unsubscribe) in [(true, false), (true, true), (false, false)] {
         let (id, cfg) = selftest("now");
         let (mut s, handle) = bind_server(id, cfg).unwrap();
         let mut rx = handle.events;
@@ -1285,13 +1285,15 @@ async fn eof_batch_drains_voice_in_order_without_broadcasting_to_closed_peer() {
 
         let mut wants_voice = Writer::new();
         wants_voice.boolean(1, true, false);
-        append_plain(
-            &mut s.client(owner).unwrap().rbuf,
-            msg::SUBSCRIBE_VA_REQ,
-            wants_voice.data(),
-        );
-        s.process(owner, None);
-        assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
+        if already_subscribed {
+            append_plain(
+                &mut s.client(owner).unwrap().rbuf,
+                msg::SUBSCRIBE_VA_REQ,
+                wants_voice.data(),
+            );
+            s.process(owner, None);
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
+        }
 
         let input = &mut s.client(owner).unwrap().rbuf;
         let light = kv(key::LIGHT_RING, |w| {
@@ -1305,6 +1307,8 @@ async fn eof_batch_drains_voice_in_order_without_broadcasting_to_closed_peer() {
         }
         if unsubscribe {
             append_plain(input, msg::SUBSCRIBE_VA_REQ, &[]);
+        } else if !already_subscribed {
+            append_plain(input, msg::SUBSCRIBE_VA_REQ, wants_voice.data());
         }
         let mut ev = Writer::new();
         ev.u32(1, 5, false);
@@ -1322,6 +1326,9 @@ async fn eof_batch_drains_voice_in_order_without_broadcasting_to_closed_peer() {
             s.process(owner, None);
         }
 
+        if !already_subscribed {
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
+        }
         if !unsubscribe {
             assert!(matches!(
                 event(&mut rx).await,

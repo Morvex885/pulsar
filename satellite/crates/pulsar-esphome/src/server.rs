@@ -852,7 +852,7 @@ impl Server {
         let want = voice_choice(self.clients.iter().map(|c| {
             let mut standing = c.standing();
             // FIN не меняет порядок уже принятых событий. Отписка, напротив, действует сразу.
-            if c.voice && (c.pending_input || self.batch == Some(c.id)) {
+            if self.batch == Some(c.id) || (c.voice && c.pending_input) {
                 standing.voice_wanted = c.voice_wanted;
             }
             standing
