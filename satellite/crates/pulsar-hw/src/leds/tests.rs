@@ -7,6 +7,7 @@ use tokio::task::{JoinHandle, LocalSet};
 use super::*;
 
 const RED: Rgb = Rgb { r: 255, g: 0, b: 0 };
+const GREEN: Rgb = Rgb { r: 0, g: 255, b: 0 };
 
 #[test]
 fn to_px_gamma_dim_cap() {
@@ -563,6 +564,20 @@ fn panel_lamp_still_lights_the_logo() {
 }
 
 #[test]
+fn panel_logo_fades_once_during_the_mute_sweep() {
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(Cmd::AmbientLux(0.0), 0);
+    c.apply(Cmd::Muted(false), 0);
+    c.frame(0);
+    c.apply(Cmd::Muted(true), 1000);
+    for (t, expected) in [(1000, [0_u8, 0, 0]), (1125, [1, 0, 0]), (1250, [6, 0, 0])] {
+        c.frame(t);
+        assert_eq!(c.active_layer(t), Layer::OneShot);
+        assert_eq!(c.px[84 * 3..], expected.repeat(4), "{t}");
+    }
+}
+
+#[test]
 fn panel_mute_alone_lights_only_the_logo() {
     let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
     c.apply(Cmd::Muted(false), 0);
@@ -595,6 +610,26 @@ fn panel_mute_under_the_volume_overlay_fades_the_logo() {
     assert!(mid > 0 && mid < red[0], "mid-fade {mid} of {}", red[0]);
     c.frame(400);
     assert_eq!(&c.px[84 * 3..85 * 3], &red);
+}
+
+#[test]
+fn panel_mute_reversal_does_not_jump_under_volume() {
+    let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    c.apply(Cmd::Muted(false), 0);
+    c.apply(Cmd::Volume(0.5), 0);
+    c.frame(0);
+    c.apply(Cmd::Muted(true), 100);
+    c.frame(100);
+    c.frame(225);
+    let before = c.px.clone();
+    assert!(before[84 * 3] > 0);
+    c.apply(Cmd::Muted(false), 225);
+    c.frame(225);
+    assert_eq!(c.px, before);
+    c.frame(475);
+    assert_eq!(c.active_layer(475), Layer::Volume);
+    assert_eq!(c.px[..84 * 3], before[..84 * 3]);
+    assert_eq!(c.px[84 * 3..], [0; 12]);
 }
 
 #[test]
@@ -665,32 +700,43 @@ async fn panel_actor_draws_frames_every_20_ms() {
 
 #[test]
 fn panel_logo_fade_follows_a_running_lamp_transition() {
-    // Mute под громкостью, пока лампа включается долгим переходом: логотип, сняв mute, идёт к
-    // тому, что сейчас показывает переход лампы, и потом совпадает с остальной панелью.
+    // Проверяем наложение на текущий фон: команда mute с волной вытеснила бы сам переход лампы.
     let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
+    let mut control = Compositor::new(88, 0, LedLayout::Station2Panel);
     c.apply(Cmd::Muted(true), 0);
-    c.apply(
-        Cmd::UserLight {
-            on: true,
-            color: RED,
-            brightness: 1.0,
-            effect: String::new(),
-            transition_ms: 4000,
-        },
-        0,
-    );
-    c.frame(0);
-    c.apply(Cmd::Volume(0.5), 1000);
-    c.frame(1000);
-    c.apply(Cmd::Muted(false), 1100);
-    let mut t = 1100;
-    while t <= 3000 {
-        c.frame(t);
-        t += 20;
+    control.apply(Cmd::Muted(false), 0);
+    for comp in [&mut c, &mut control] {
+        comp.apply(
+            Cmd::UserLight {
+                on: true,
+                color: GREEN,
+                brightness: 1.0,
+                effect: String::new(),
+                transition_ms: 4000,
+            },
+            0,
+        );
+        comp.frame(0);
     }
-    assert_eq!(c.active_layer(3000), Layer::User);
-    for i in 84..88 {
-        assert_eq!(&c.px[i * 3..i * 3 + 3], &c.px[..3], "logo LED {i} vs panel");
+    let green = to_col(GREEN);
+    let red = panel::mute_logo();
+    let mut previous_green = 0;
+    for (t, opacity) in [(1000, 1.0), (1125, 0.5), (1250, 0.0), (2000, 0.0)] {
+        if t == 1000 {
+            c.update_mute_state(false, t);
+        }
+        c.frame(t);
+        control.frame(t);
+        assert_eq!(c.px[..84 * 3], control.px[..84 * 3], "{t}");
+        assert!(c.px[1] > previous_green && c.px[1] < to_px(green, c.dim(), None)[1]);
+        previous_green = c.px[1];
+        let progress = fx::smoothstep(0.0, 1.0, t as f32 / 4000.0);
+        let background = green * progress;
+        let expected = to_px(fx::lerp(background, red, opacity), c.dim(), None);
+        assert_eq!(c.px[84 * 3..], expected.repeat(4), "{t}");
+        if opacity == 0.0 {
+            assert_eq!(c.px[84 * 3..], control.px[84 * 3..], "{t}");
+        }
     }
 }
 
@@ -700,14 +746,36 @@ fn panel_mute_with_its_sweep_fades_the_logo_from_what_was_shown() {
     // старого фона прошлого перехода.
     let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
     c.apply(Cmd::Muted(false), 0);
-    c.apply(user(true), 0);
+    c.apply(
+        Cmd::UserLight {
+            on: true,
+            color: GREEN,
+            brightness: 1.0,
+            effect: String::new(),
+            transition_ms: 0,
+        },
+        0,
+    );
     c.frame(0);
     c.frame(1000);
-    let lamp = c.px[84 * 3];
+    let lamp = c.px[84 * 3 + 1];
     assert!(lamp > 0);
+    assert_eq!(&c.px[..3], &[0, lamp, 0]);
     c.apply(Cmd::Muted(true), 1000);
+    c.frame(1000);
     c.frame(1020);
-    let v = c.px[84 * 3];
-    let (v, lamp) = (u16::from(v), u16::from(lamp));
-    assert!(v + 2 >= lamp * 8 / 10, "logo dropped to {v} from {lamp}");
+    let v = c.px[84 * 3 + 1];
+    let (v, start) = (u16::from(v), u16::from(lamp));
+    assert!(v + 2 >= start * 8 / 10, "logo dropped to {v} from {lamp}");
+
+    c.frame(1450);
+    assert_eq!(c.active_layer(1450), Layer::OneShot);
+    assert_eq!(&c.px[..3], &[0, 0, 0]);
+    assert!(c.px[..84 * 3].chunks_exact(3).any(|px| px[0] > 0));
+    c.frame(1600);
+    c.frame(1850);
+    assert_eq!(c.active_layer(1850), Layer::User);
+    assert_eq!(&c.px[..3], &[0, lamp, 0]);
+    let red = to_px(panel::mute_logo(), c.dim(), None);
+    assert_eq!(c.px[84 * 3..], red.repeat(4));
 }
