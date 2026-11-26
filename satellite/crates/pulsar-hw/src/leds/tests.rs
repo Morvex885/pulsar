@@ -662,7 +662,13 @@ async fn panel_actor_finishes_the_logo_fade_without_waiting_for_volume_to_expire
             leds.set_muted(false);
             leds.show_volume(0.5);
             sleep_ms(1).await;
-            let volume = frames.borrow().last().unwrap().1[..84 * 3].to_vec();
+            let volume = {
+                let frames = frames.borrow();
+                let (volume, logo) = frames.last().unwrap().1.split_at(84 * 3);
+                assert!(volume.iter().skip(1).step_by(3).any(|&g| g > 0));
+                assert_eq!(logo, &[0; 12]);
+                volume.to_vec()
+            };
             let red = to_px(panel::mute_logo(), 1.0, None);
             leds.set_muted(true);
             sleep_ms(125).await;
