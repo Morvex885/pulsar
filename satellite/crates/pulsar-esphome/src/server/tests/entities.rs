@@ -1223,6 +1223,11 @@ async fn eof_with_pending_batch_still_answers_everything() {
             event(&mut rx).await;
             p.subscribe_voice(true).await;
             assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
+            let mut other = Peer::connect(port).await;
+            other.hello("other").await;
+            event(&mut rx).await;
+            // После ping первым в обходе сокетов будет владелец голоса.
+            other.sync().await;
             let mut req = Vec::new();
             for _ in 0..300 {
                 append_plain(&mut req, msg::LIST_ENTITIES_REQ, &[]);
@@ -1232,6 +1237,8 @@ async fn eof_with_pending_batch_still_answers_everything() {
             append_plain(&mut req, msg::VA_EVENT_RESP, ev.data());
             p.write(&req).await;
             p.s.shutdown().await.unwrap();
+            other.send(msg::DISCONNECT_REQ, &Writer::new()).await;
+            other.expect(msg::DISCONNECT_RESP).await;
             let mut done = 0;
             while let Some((t, _)) = p.recv().await {
                 if t == msg::LIST_DONE {

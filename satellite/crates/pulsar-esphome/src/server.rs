@@ -837,8 +837,13 @@ impl Server {
     /// Hands the pipeline to `voice_choice`'s client; events see false before true on every
     /// hand-over.
     fn update_voice_owner(&mut self) {
+        let owner = self.voice_owner();
+        // Закрытие другого клиента или новая подписка могут прийти между пачками после FIN.
+        if owner.is_some_and(|c| c.read_end.is_some() && c.pending_input) {
+            return;
+        }
+        let cur = owner.map(|c| c.id);
         let want = voice_choice(self.clients.iter().map(Client::standing));
-        let cur = self.voice_owner().map(|c| c.id);
         if cur == want {
             return;
         }
