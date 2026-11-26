@@ -13,7 +13,26 @@
 #   bt-restore - вернуть флаги адаптера и штатный player после остановки pulsar.
 D=${PULSAR_DIR:-/data/pulsar}
 Q=${PULSAR_Q:-/system/vendor/quasar/q}
-bt_owner=${PULSAR_BT_OWNER:-/tmp/pulsar-bt-owner}
+bt_legacy=/tmp/pulsar-bt-owner
+
+bt_owner_path() {
+  if [ -n "${PULSAR_BT_OWNER:-}" ]; then
+    printf '%s\n' "$PULSAR_BT_OWNER"
+    return
+  fi
+  IFS= read -r bt_boot < /proc/sys/kernel/random/boot_id || return 1
+  case "$bt_boot" in ''|*[!0-9a-f-]*) return 1 ;; esac
+  printf '%s/.pulsar-bt-owner.%s\n' "$D" "$bt_boot"
+}
+
+bt_for_owners() {
+  if [ -z "${PULSAR_BT_OWNER:-}" ]; then
+    bt_owner=$bt_legacy
+    "$@" || return 1
+  fi
+  bt_owner=$(bt_owner_path) || return 0
+  "$@"
+}
 
 # SIGTERM, wait up to 10 s for the process to go, then SIGKILL. Returns 1 if it is still there.
 stop_daemon() {
@@ -98,8 +117,12 @@ bt_restore_flag() {
 bt_read_owner() {
   bt_flags=
   [ -L "$bt_owner" ] || [ -e "$bt_owner" ] || return 0
-  bt_uid=$(id -u) && bt_meta=$(stat -c '%u:%a:%s' "$bt_owner") ||
-    { bt_error 'не удалось проверить файл снимка'; return 1; }
+  bt_uid=$(id -u) || return 1
+  if ! bt_meta=$(stat -c '%u:%a:%s' "$bt_owner" 2>/dev/null); then
+    [ ! -L "$bt_owner" ] && [ ! -e "$bt_owner" ] && return 0
+    bt_error 'не удалось проверить файл снимка'
+    return 1
+  fi
   # Чужой объект в /tmp не мог появиться при нашем захвате. Не читаем и не удаляем его.
   [ "${bt_meta%%:*}" = "$bt_uid" ] || return 0
   [ ! -L "$bt_owner" ] && [ -f "$bt_owner" ] && [ "$bt_meta" = "$bt_uid:600:6" ] ||
@@ -167,7 +190,7 @@ rollback() {
     # Пока копия не готова, рабочую службу не останавливаем.
     trap 'rm -f pulsar.rb' EXIT
     rm -f pulsar.rb && cp -p pulsar.prev pulsar.rb && [ -x pulsar.rb ] || exit 1
-    stop_service && bt_restore || exit 1
+    stop_service && bt_for_owners bt_restore || exit 1
     # Normalize any committed guard from a prior replacement before reusing its staging path.
     if [ pulsar -ef pulsar.bt-blocked.next ]; then
       mv -f pulsar.bt-blocked.next pulsar.bt-blocked || { "$D/ctl.sh" reload; exit 1; }
@@ -220,7 +243,7 @@ case "$1" in
       exit 1
     fi
     wait_supervisors_gone || { echo "supervisor is still running, Yandex stack not started" >&2; exit 1; }
-    bt_restore || exit 1
+    bt_for_owners bt_restore || exit 1
     pidof quasar_launcher2 >/dev/null 2>&1 || "$Q" start >/dev/null 2>&1 || exit 1
     echo "disabled, Yandex stack started"
     ;;
@@ -234,7 +257,7 @@ case "$1" in
     ;;
   reload)
     case "$#:${2-}" in 1:|2:--stop) ;; *) exit 2 ;; esac
-    stop_service && bt_hide || exit 1
+    stop_service && bt_for_owners bt_hide || exit 1
     [ "${2-}" = --stop ] && exit 0
     if [ -f "$D/enabled" ] && [ -x "$D/supervise.sh" ]; then
       start_supervisor || { echo 'supervisor did not start' >&2; exit 1; }
@@ -278,9 +301,10 @@ case "$1" in
     ;;
   bt-restore)
     case "$#:${2-}" in
-      1:) bt_restore ;;
-      2:--self) bt_restore --self ;;
-      2:--hide) bt_hide ;;
+      1:) bt_for_owners bt_restore ;;
+      2:--self) bt_for_owners bt_restore --self ;;
+      2:--hide) bt_for_owners bt_hide ;;
+      2:--owner-path) bt_owner_path ;;
       2:--supported) : ;;
       2:--check) command -v dbus-send >/dev/null 2>&1 ;;
       *) exit 2 ;;

@@ -44,7 +44,7 @@ cat > "$BT_FIXTURE/bin/stat" <<'EOF'
 #!/bin/sh
 # Simulate a different UID without depending on root/chown on the test host.
 if [ "$1" = -c ] &&
-   { { [ "${FOREIGN_OWNER:-0}" = 1 ] && [ "$3" = "$PULSAR_BT_OWNER" ]; } ||
+   { { [ "${FOREIGN_OWNER:-0}" = 1 ] && [ "$3" = "${FOREIGN_MARKER:-$PULSAR_BT_OWNER}" ]; } ||
      { [ "${FOREIGN_TEST_DIR:-0}" = 1 ] && [ "$3" = "$BT_FIXTURE/test" ]; }; }; then
   meta=$("$REAL_STAT" "$@") || exit 1
   case "$meta" in *:*) echo "-1:${meta#*:}" ;; *) echo -1 ;; esac
@@ -711,4 +711,47 @@ sh "$station" lite2 restore
 expect 'legacy:restart
 legacy:restart'
 cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-swap"
+
+# Новый путь не зависит от коллизии в /tmp и не применяет снимок от прошлой загрузки.
+(
+  export PULSAR_DIR=$BT_FIXTURE/production PULSAR_BT_OWNER=
+  mkdir "$PULSAR_DIR"
+  legacy=$BT_FIXTURE/legacy-owner
+  for script in ctl.sh supervise.sh; do
+    sed "s|/tmp/pulsar-bt-owner|$legacy|g" "$here/$script" > "$PULSAR_DIR/$script"
+    chmod +x "$PULSAR_DIR/$script"
+  done
+  owner=$(ctl bt-restore --owner-path)
+  case "$owner" in "$PULSAR_DIR"/.pulsar-bt-owner.*) ;; *) fail "unexpected owner path: $owner" ;; esac
+  stale=$PULSAR_DIR/.pulsar-bt-owner.previous-boot
+  (umask 077; printf '1 0 0\n' > "$legacy"; printf '1 1 0\n' > "$stale")
+  cat > "$PULSAR_DIR/pulsar" <<'EOF'
+#!/bin/sh
+printf 'managed:%s\n' "$PULSAR_BT_MANAGED" >> "$BT_FIXTURE/events"
+printf '%s\n' "$PULSAR_BT_OWNER" > "$PULSAR_DIR/owner-path"
+rm -f "$PULSAR_DIR/enabled"
+EOF
+  chmod +x "$PULSAR_DIR/pulsar"
+  trace
+  touch "$PULSAR_DIR/enabled"
+  sh "$PULSAR_DIR/supervise.sh"
+  expect 'Pairable:true
+Discoverable:false
+managed:1'
+  [ "$(cat "$PULSAR_DIR/owner-path")" = "$owner" ] && [ ! -e "$legacy" ] && [ ! -e "$stale" ] ||
+    fail 'supervisor did not switch to the current boot owner path'
+  (umask 077; printf '1 1 0\n' > "$legacy")
+  trace
+  touch "$PULSAR_DIR/enabled"
+  FOREIGN_OWNER=1 FOREIGN_MARKER="$legacy" sh "$PULSAR_DIR/supervise.sh"
+  expect 'managed:1'
+  [ "$(cat "$legacy")" = '1 1 0' ] || fail 'foreign legacy marker was modified'
+  (umask 077; printf '0 1 0\n' > "$owner"; printf '1 0 1\n' > "$stale")
+  trace
+  FOREIGN_OWNER=1 FOREIGN_MARKER="$legacy" ctl bt-restore
+  expect 'Pairable:false
+Discoverable:true'
+  [ ! -e "$owner" ] && [ -f "$stale" ] ||
+    fail 'restore used a snapshot outside this boot'
+)
 echo 'Bluetooth ownership tests passed'

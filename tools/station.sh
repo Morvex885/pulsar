@@ -107,7 +107,14 @@ TEST_BT_RESTORED="$TEST_DIR_OPTIONAL
 # Сначала остановить обоих: работающий pulsar ещё может записать снимок и захватить player.
 PROD_BT_CTL="'$D/ctl.sh' bt-restore --supported >/dev/null 2>&1 ||
   '$D/ctl.sh' bt-restore --check >/dev/null 2>&1"
-PROD_BT_RESTORE="if $PROD_BT_CTL; then
+PROD_BT_RESTORE="boot=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+if [ -n \"\$boot\" ] &&
+  { [ -e '$D'/.pulsar-bt-owner.\"\$boot\" ] || [ -L '$D'/.pulsar-bt-owner.\"\$boot\" ]; } &&
+  ! '$D/ctl.sh' bt-restore --owner-path >/dev/null 2>&1; then
+  echo 'installed ctl.sh cannot recover the current Bluetooth snapshot' >&2
+  exit 1
+fi
+if $PROD_BT_CTL; then
   '$D/ctl.sh' reload --stop && '$D/ctl.sh' bt-restore ||
     { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
 elif [ -L '$BT_OWNER' ] || [ -e '$BT_OWNER' ]; then

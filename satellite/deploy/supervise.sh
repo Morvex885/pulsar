@@ -45,7 +45,8 @@ say() { echo "=== supervise: $* $(date)" >> "$LOG"; }
 
 # Старая ctl.sh не гарантирует возврат player при disable или откате.
 bt_allowed=${PULSAR_BT_MANAGED:-1}
-bt_owner=${PULSAR_BT_OWNER:-/tmp/pulsar-bt-owner}
+bt_owner=$("$D/ctl.sh" bt-restore --owner-path 2>/dev/null) || bt_owner=
+bt_legacy=/tmp/pulsar-bt-owner
 bt_blocked=$BIN.bt-blocked
 bt_next=$bt_blocked.next
 # /data/pulsar is trusted like ctl.sh itself. Pin the inode for this boot so
@@ -57,16 +58,23 @@ bt_executable=
 bt_blocked_now() { [ "$BIN" -ef "$bt_blocked" ] || [ "$BIN" -ef "$bt_next" ]; }
 
 remember_bt_executable() {
-  [ -n "$bt_executable" ] || return 1
+  [ -n "$bt_executable" ] && [ -n "$bt_owner" ] || return 1
   [ "$BIN" -ef "$bt_executable" ] && return 0
   # An unexpected rename during startup must never rebind another binary's snapshot.
   [ ! -e "$bt_owner" ] && [ ! -L "$bt_owner" ] || return 1
+  if [ -z "${PULSAR_BT_OWNER:-}" ]; then
+    # Новый boot_id не должен применять флаги от предыдущей загрузки.
+    for old in "$D"/.pulsar-bt-owner.*; do
+      [ "$old" = "$bt_owner" ] || rm -f "$old" || return 1
+    done
+  fi
   rm -f "$D"/.pulsar-bt-executable.* && ln "$BIN" "$bt_executable"
 }
 
 restore_bt() {
-  if [ -e "$bt_owner" ] || [ -L "$bt_owner" ]; then
-    if ! "$D/ctl.sh" bt-restore >> "$LOG" 2>&1; then
+  restore_owner=${1:-$bt_owner}
+  if [ -e "$restore_owner" ] || [ -L "$restore_owner" ]; then
+    if ! PULSAR_BT_OWNER=$restore_owner "$D/ctl.sh" bt-restore >> "$LOG" 2>&1; then
       say "Bluetooth restore failed; not starting another binary or the Yandex stack"
       return 1
     fi
@@ -79,7 +87,7 @@ restore_bt() {
 wait_restore_bt() {
   restore_delay=$BACKOFF_MIN
   while [ -f "$D/enabled" ]; do
-    if restore_bt; then
+    if restore_bt "$@"; then
       [ -f "$D/enabled" ]
       return
     fi
@@ -133,6 +141,15 @@ trap 'kill $ROT 2>/dev/null; exit 143' TERM INT HUP
 trap 'kill $ROT 2>/dev/null' EXIT
 
 fails=0 swapped=0 backoff=$BACKOFF_MIN last_inode=
+if [ -z "${PULSAR_BT_OWNER:-}" ] &&
+  [ "$(stat -c '%u' "$bt_legacy" 2>/dev/null)" = "$(id -u)" ]; then
+  # Старый снимок не связан с новым путём и не должен пережить новый захват.
+  wait_restore_bt "$bt_legacy" || exit 0
+fi
+if [ -z "$bt_owner" ] && [ -n "$boot_id" ]; then
+  # Если ctl заменили старой версией, снимок всё равно нельзя оставлять новому плееру.
+  wait_restore_bt "$D/.pulsar-bt-owner.$boot_id" || exit 0
+fi
 while [ -f "$D/enabled" ]; do
   rotate
   if [ ! -x "$BIN" ]; then
@@ -144,7 +161,7 @@ while [ -f "$D/enabled" ]; do
     fi
     give_back "no usable binary"
   fi
-  # Reload and executable replacement are handoffs; normal restarts keep stock audio stopped.
+  # Перезапуск того же бинарника не возвращает player штатному стеку.
   inode=$(stat -Lc '%d:%i' "$BIN") || { say "could not identify $BIN"; exit 1; }
   if [ "$inode" != "$last_inode" ]; then
     if [ "$bt_allowed" != 1 ] || bt_blocked_now || ! [ "$BIN" -ef "$bt_executable" ]; then
@@ -169,7 +186,7 @@ while [ -f "$D/enabled" ]; do
   [ "$inode" = "$(stat -Lc '%d:%i' "$BIN")" ] || continue
   echo "=== start $(date)" >> "$LOG"
   t0=$(uptime_s)
-  PULSAR_BT_MANAGED=$bt_managed "$BIN" "$D/state.conf" >> "$LOG" 2>&1
+  PULSAR_BT_MANAGED=$bt_managed PULSAR_BT_OWNER=$bt_owner "$BIN" "$D/state.conf" >> "$LOG" 2>&1
   rc=$?
   up=$(($(uptime_s) - t0))
   echo "=== exit $rc after ${up}s $(date)" >> "$LOG"

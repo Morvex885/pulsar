@@ -9,8 +9,6 @@ use tokio::process::Command;
 
 const INIT: &str = "/etc/init.d/S53bluealsa-aplay";
 const PLAYER: &str = "/usr/bin/bluealsa-aplay";
-const OWNER: &str = "/tmp/pulsar-bt-owner";
-const CTL: &str = "/data/pulsar/ctl.sh";
 
 pub(crate) struct Stock {
     marker: Arc<Path>,
@@ -21,12 +19,10 @@ impl Stock {
         if std::env::var("PULSAR_BT_MANAGED").as_deref() != Ok("1") {
             return Ok(None);
         }
-        let marker = std::env::var_os("PULSAR_BT_OWNER")
-            .filter(|path| !path.is_empty())
-            .map_or_else(
-                || Arc::from(Path::new(OWNER)),
-                |path| Arc::from(PathBuf::from(path)),
-            );
+        let Some(path) = std::env::var_os("PULSAR_BT_OWNER").filter(|path| !path.is_empty()) else {
+            return Ok(None);
+        };
+        let marker = Arc::from(PathBuf::from(path));
         let stock = Self { marker };
         let owned = stock.snapshot_exists()?;
         Ok(Some((stock, owned)))
@@ -71,11 +67,7 @@ impl Stock {
     }
 
     pub async fn restore(&self) -> io::Result<()> {
-        let ctl = if self.marker.as_ref() == Path::new(OWNER) {
-            PathBuf::from(CTL)
-        } else {
-            self.marker.with_file_name("ctl.sh")
-        };
+        let ctl = self.marker.with_file_name("ctl.sh");
         let mut cmd = Command::new(ctl);
         cmd.args(["bt-restore", "--self"])
             .env("PULSAR_BT_OWNER", &*self.marker)
