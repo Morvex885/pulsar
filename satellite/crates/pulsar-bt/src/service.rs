@@ -243,13 +243,18 @@ async fn retry_stock_restore(stock: Stock) {
     }
 }
 
+enum PcmFallback {
+    AwaitingAvrcp,
+    AvrcpPlaying,
+}
+
 #[derive(Default)]
 struct FrameActivity {
     active: Option<bool>,
     start: Option<u64>,
     // Метка первого PCM-буфера и порядок старта, которому он принадлежит.
     first: Option<(u64, Option<u64>)>,
-    fallback: bool,
+    fallback: Option<PcmFallback>,
     covered_avr: Option<u64>,
     enable_continuation: Option<u64>,
     ignore_snapshot: bool,
@@ -269,7 +274,7 @@ impl FrameActivity {
         self.active = Some(false);
         self.start = None;
         self.first = None;
-        self.fallback = false;
+        self.fallback = None;
         self.enable_continuation = None;
     }
 
@@ -278,7 +283,7 @@ impl FrameActivity {
         // Первый буфер после открытия не отличим от продолжения старого потока.
         self.start = None;
         self.first = None;
-        self.fallback = false;
+        self.fallback = None;
         self.enable_continuation = None;
         self.active = Some(true);
         self
@@ -323,24 +328,33 @@ impl FrameActivity {
     }
 
     fn observe(&mut self, policy: &mut Policy, avr: Option<(Playback, Option<u64>)>) {
-        if self.fallback {
-            // Поздний AVRCP Playing для уже учтённых PCM-кадров не создаёт
-            // новый старт, даже если локальная музыка успела вытеснить звук.
-            if let Some((Playback::Playing, order)) = avr {
-                self.covered_avr = self.covered_avr.max(order);
+        if let Some(fallback) = &self.fallback {
+            match avr {
+                Some((Playback::Playing, order)) => {
+                    // Первый поздний Playing подтверждает уже учтённые PCM-кадры.
+                    self.covered_avr = self.covered_avr.max(order);
+                    self.fallback = Some(PcmFallback::AvrcpPlaying);
+                    return;
+                }
+                Some((Playback::Paused, _)) if matches!(fallback, PcmFallback::AvrcpPlaying) => {
+                    // После подтверждённого Playing эта пауза отделяет следующий
+                    // AVRCP-старт даже без простоя PCM. Исходный Paused не отделяет.
+                    self.fallback = None;
+                }
+                _ => return,
             }
-            return;
         }
         let first = self.start.take();
         let continuation = first.and_then(|_| self.enable_continuation.take());
         let (phase, order) = match (avr, first) {
-            (Some((Playback::Playing, order)), _)
-                if order.is_some() || policy.admitted || continuation.is_none() =>
-            {
-                (Some(Playback::Playing), order)
-            }
+            (Some((Playback::Playing, Some(order))), _) => (Some(Playback::Playing), Some(order)),
             (_, Some(order)) => {
-                self.fallback = true;
+                // Покрытый Playing не заменяет свежий фронт кадров после Idle.
+                self.fallback = Some(if matches!(avr, Some((Playback::Playing, _))) {
+                    PcmFallback::AvrcpPlaying
+                } else {
+                    PcmFallback::AwaitingAvrcp
+                });
                 (Some(Playback::Playing), Some(continuation.unwrap_or(order)))
             }
             (Some((phase, _)), None) => (Some(phase), None),
@@ -371,15 +385,14 @@ impl PreviousEpisode {
         at: u64,
         preempt_before: u64,
     ) -> Option<FrameActivity> {
-        (self.owner == owner && self.frames.fallback && self.starts >= preempt_before).then(|| {
-            FrameActivity {
+        (self.owner == owner && self.frames.fallback.is_some() && self.starts >= preempt_before)
+            .then(|| FrameActivity {
                 // Повторное открытие потока не даёт его первому буферу
                 // вытеснить локальный источник, запущенный после On.
                 enable_continuation: Some(at.max(self.starts)),
                 covered_avr: self.frames.covered_avr,
                 ..FrameActivity::default()
-            }
-        })
+            })
     }
 }
 
@@ -1008,14 +1021,50 @@ mod tests {
         );
         let late_playing = Some((Playback::Playing, Some(30)));
         frames.observe_snapshot(&mut policy, late_playing, 1);
+        assert_eq!(policy.ready_start(true, 20), None);
+
+        // Первые кадры после переоткрытия не доказывают новый старт.
+        frames.worker_lost(true);
+        frames.start(35);
+        frames.observe_snapshot(&mut policy, late_playing, 1);
+        assert_eq!(policy.ready_start(true, 20), None);
+
         frames.idle();
         frames.observe_snapshot(&mut policy, late_playing, 1);
         assert_eq!(policy.ready_start(true, 20), None);
         assert_eq!(policy.starts, 10);
 
-        frames.observe(&mut policy, paused);
+        // После подтверждённого простоя кадры доказывают новый старт,
+        // даже если AVRCP всё ещё показывает тот же Playing.
         frames.start(40);
-        frames.observe(&mut policy, paused);
+        frames.observe_snapshot(&mut policy, late_playing, 1);
+        assert_eq!(policy.ready_start(true, 20), Some(40));
+        assert_eq!(
+            frames.first_frame_decision(Some(40), Some(40), 20),
+            Some((40, true))
+        );
+    }
+
+    #[test]
+    fn fresh_avrcp_play_after_fallback_pause_needs_no_pcm_idle() {
+        let mut policy = selected_policy();
+        let mut frames = FrameActivity::default();
+        let paused = Some((Playback::Paused, None));
+        frames.observe_snapshot(&mut policy, paused, 1);
+        frames.start(10);
+        frames.observe_snapshot(&mut policy, paused, 1);
+        assert!(policy.preempt_before(20));
+
+        let late_playing = Some((Playback::Playing, Some(30)));
+        frames.observe_snapshot(&mut policy, late_playing, 1);
+        frames.observe_snapshot(&mut policy, late_playing, 1);
+        assert_eq!(policy.starts, 10);
+        assert_eq!(policy.ready_start(true, 20), None);
+
+        frames.observe_snapshot(&mut policy, paused, 1);
+        assert_eq!(policy.playback, Some(Playback::Paused));
+        assert_eq!(frames.active, Some(true));
+        frames.observe_snapshot(&mut policy, Some((Playback::Playing, Some(40))), 1);
         assert_eq!(policy.ready_start(true, 20), Some(40));
     }
 

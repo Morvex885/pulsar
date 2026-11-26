@@ -14,6 +14,26 @@
 D=${PULSAR_DIR:-/data/pulsar}
 Q=${PULSAR_Q:-/system/vendor/quasar/q}
 bt_legacy=/tmp/pulsar-bt-owner
+bt_test_dir=/tmp/pulsar-test
+
+bt_test_clear() {
+  bt_test_owner=$bt_test_dir/bt-owner
+  # Как в tools/station.sh: не доверяем снимку вне закрытого каталога нашего UID.
+  if [ -d "$bt_test_dir" ] && [ ! -L "$bt_test_dir" ] &&
+    bt_test_uid=$(id -u) && [ "$(stat -c '%u:%a' "$bt_test_dir" 2>/dev/null)" = "$bt_test_uid:700" ]; then
+    if [ "${1-}" = --own ] && [ "${PULSAR_BT_OWNER:-}" = "$bt_test_owner" ]; then
+      return 0
+    fi
+    [ -e "$bt_test_owner" ] || [ -L "$bt_test_owner" ] || return 0
+    echo 'Bluetooth тестового экземпляра не восстановлен: выполните test-stop' >&2
+    return 1
+  fi
+  if [ "${1-}" = --own ] && [ "${PULSAR_BT_OWNER:-}" = "$bt_test_owner" ]; then
+    echo 'bt-restore: небезопасный каталог тестового снимка' >&2
+    return 1
+  fi
+  return 0
+}
 
 bt_owner_path() {
   if [ -n "${PULSAR_BT_OWNER:-}" ]; then
@@ -26,6 +46,7 @@ bt_owner_path() {
 }
 
 bt_for_owners() {
+  bt_test_clear --own || return 1
   if [ -z "${PULSAR_BT_OWNER:-}" ]; then
     bt_owner=$bt_legacy
     "$@" || return 1
@@ -52,6 +73,7 @@ stop_daemon() {
 # Starts supervise.sh unless one runs; waits until it does. Ignores SIGHUP: when called through
 # `adb shell`, the session ends right after this script and would otherwise kill it before setsid().
 start_supervisor() {
+  bt_test_clear || return 1
   pidof supervise.sh >/dev/null 2>&1 && return 0
   (trap '' HUP; exec setsid "$D/supervise.sh" </dev/null >/dev/null 2>&1) &
   i=0
@@ -108,10 +130,29 @@ bt_player_running() {
   return 1
 }
 
+bt_bluez_owner() {
+  bt_reply=$(dbus-send --system --print-reply --reply-timeout=2000 --dest=org.freedesktop.DBus \
+    /org/freedesktop/DBus org.freedesktop.DBus.GetNameOwner string:org.bluez) || return 1
+  printf '%s\n' "$bt_reply" | awk '
+    $1 == "string" && NF == 2 && $2 ~ /^":[0-9]+(\.[0-9]+)+"$/ {
+      owner = substr($2, 2, length($2) - 2); count++
+    }
+    END { if (count == 1) print owner; else exit 1 }
+  '
+}
+
+bt_pin_bluez() {
+  bt_bluez=$(bt_bluez_owner) || bt_error 'не удалось определить владельца org.bluez'
+}
+
+bt_same_bluez() {
+  [ "$(bt_bluez_owner)" = "$bt_bluez" ] || bt_error 'владелец org.bluez сменился или недоступен'
+}
+
 bt_restore_flag() {
   bt_value=false
   [ "$2" = 0 ] || bt_value=true
-  dbus-send --system --print-reply --reply-timeout=2000 --dest=org.bluez /org/bluez/hci0 \
+  dbus-send --system --print-reply --reply-timeout=2000 "--dest=$bt_bluez" /org/bluez/hci0 \
     org.freedesktop.DBus.Properties.Set string:org.bluez.Adapter1 "string:$1" \
     "variant:boolean:$bt_value" >/dev/null || bt_error "не удалось вернуть $1"
 }
@@ -125,8 +166,11 @@ bt_read_owner() {
     bt_error 'не удалось проверить файл снимка'
     return 1
   fi
-  # Чужой объект в /tmp не мог появиться при нашем захвате. Не читаем и не удаляем его.
-  [ "${bt_meta%%:*}" = "$bt_uid" ] || return 0
+  # Чужой объект по старому пути в /tmp не мог появиться при нашем захвате.
+  if [ "${bt_meta%%:*}" != "$bt_uid" ]; then
+    [ "$bt_owner" != "$bt_test_owner" ] || { bt_error 'чужой файл тестового снимка'; return 1; }
+    return 0
+  fi
   [ ! -L "$bt_owner" ] && [ -f "$bt_owner" ] && [ "$bt_meta" = "$bt_uid:600:6" ] ||
     { bt_error 'некорректный файл снимка'; return 1; }
   # Точка сохраняет перевод строки при подстановке; читаем не более шести байт.
@@ -164,10 +208,12 @@ bt_hide() {
   bt_read_owner || return 1
   [ -n "$bt_flags" ] || return 0
   bt_stopped || return 1
+  # Обе записи должны попасть в один экземпляр BlueZ, даже если имя перехватили.
+  bt_pin_bluez || return 1
   bt_ok=0
   bt_restore_flag Discoverable 0 || bt_ok=1
   bt_restore_flag Pairable 0 || bt_ok=1
-  return "$bt_ok"
+  [ "$bt_ok" = 0 ] && bt_same_bluez
 }
 
 bt_restore() {
@@ -183,9 +229,11 @@ bt_restore() {
       { bt_error 'штатный bluealsa-aplay недоступен'; return 1; }
   fi
   bt_discover=${bt_flags#* }
-  bt_restore_flag Pairable "${bt_flags%% *}" &&
+  bt_pin_bluez &&
+    bt_restore_flag Pairable "${bt_flags%% *}" &&
     bt_restore_flag Discoverable "${bt_discover%% *}" || return 1
   if [ "${bt_flags##* }" = 1 ] && ! bt_player_running; then
+    bt_same_bluez || return 1
     "$bt_init" start || { bt_error 'init-скрипт не запустил bluealsa-aplay'; return 1; }
     bt_wait=0
     while ! bt_player_running; do
@@ -194,6 +242,8 @@ bt_restore() {
       bt_wait=$((bt_wait + 1))
     done
   fi
+  # В том числе если BlueZ сменился, пока поднимался штатный player.
+  bt_same_bluez || return 1
   rm -f "$bt_owner" || bt_error 'не удалось удалить снимок'
 }
 
@@ -204,7 +254,7 @@ rollback() {
     trap 'rm -f pulsar.rb' EXIT
     rm -f pulsar.rb && cp -p pulsar.prev pulsar.rb && [ -x pulsar.rb ] || exit 1
     stop_service && bt_for_owners bt_restore || exit 1
-    # Normalize any committed guard from a prior replacement before reusing its staging path.
+    # Перед повторным использованием временного пути закрепляем действующий запрет захвата.
     if [ pulsar -ef pulsar.bt-blocked.next ]; then
       mv -f pulsar.bt-blocked.next pulsar.bt-blocked || { "$D/ctl.sh" reload; exit 1; }
     fi
@@ -213,7 +263,7 @@ rollback() {
       rm -f pulsar.bt-blocked.next && ln pulsar.rb pulsar.bt-blocked.next &&
       [ pulsar.rb -ef pulsar.bt-blocked.next ] &&
       mv -f pulsar.rb pulsar; then
-      # If promotion fails, the supervisor still honors the staged guard.
+      # Пока запрет не перенесён на постоянный путь, supervisor учтёт временный.
       mv -f pulsar.bt-blocked.next pulsar.bt-blocked
       sync
       "$D/ctl.sh" reload
@@ -239,6 +289,7 @@ valid_key() { # 44 base64 chars (32 bytes + one '='), and 32 bytes when a decode
 
 case "$1" in
   enable)
+    bt_test_clear || exit 1
     if [ ! -x "$D/pulsar" ] || [ ! -x "$D/supervise.sh" ]; then
       echo "$D/pulsar or supervise.sh missing or not executable, nothing changed" >&2
       exit 1
@@ -249,6 +300,7 @@ case "$1" in
     echo "enabled"
     ;;
   disable)
+    bt_test_clear || exit 1
     rm -f "$D/enabled"
     stop_supervisors
     if ! stop_daemon; then
@@ -257,10 +309,12 @@ case "$1" in
     fi
     wait_supervisors_gone || { echo "supervisor is still running, Yandex stack not started" >&2; exit 1; }
     bt_for_owners bt_restore || exit 1
+    bt_test_clear || exit 1
     pidof quasar_launcher2 >/dev/null 2>&1 || "$Q" start >/dev/null 2>&1 || exit 1
     echo "disabled, Yandex stack started"
     ;;
   restart)
+    bt_test_clear || exit 1
     if stop_daemon; then
       restarted
     else
@@ -270,14 +324,15 @@ case "$1" in
     ;;
   reload)
     case "$#:${2-}" in 1:|2:--stop) ;; *) exit 2 ;; esac
+    bt_test_clear || exit 1
     stop_service || exit 1
     if [ "${2-}" = --stop ]; then
       bt_for_owners bt_hide
       exit $?
     fi
     if [ -f "$D/enabled" ] && [ -x "$D/supervise.sh" ]; then
-      # The replacement supervisor can wait for a handoff or restart the managed
-      # daemon to recover BlueZ. A failed hide must not strand an enabled service.
+      # Новый supervisor дождётся возврата владения или перезапустит демон для
+      # восстановления BlueZ. Ошибка закрытия окна не должна оставить сервис выключенным.
       bt_for_owners bt_hide || echo 'Bluetooth hide failed; restarting the supervisor to recover' >&2
       start_supervisor || { echo 'supervisor did not start' >&2; exit 1; }
       echo "supervisor reloaded"
@@ -288,6 +343,7 @@ case "$1" in
     ;;
   rollback)
     [ "$#" -eq 1 ] || exit 2
+    bt_test_clear || exit 1
     rollback
     ;;
   status)
@@ -304,6 +360,7 @@ case "$1" in
         [ -s "$D/api_key" ] && echo "api key: set" || echo "api key: not set (plaintext API)"
         ;;
       clear)
+        bt_test_clear || exit 1
         rm -f "$D/api_key"
         echo "api key removed"
         stop_daemon || { echo "pulsar did not exit" >&2; exit 1; }
@@ -311,6 +368,7 @@ case "$1" in
         ;;
       *)
         valid_key "$2" || { echo "not a base64 encoding of 32 bytes (44 characters), nothing changed" >&2; exit 1; }
+        bt_test_clear || exit 1
         (umask 077; printf '%s' "$2" > "$D/api_key.tmp") && chmod 600 "$D/api_key.tmp" && mv "$D/api_key.tmp" "$D/api_key" \
           || { rm -f "$D/api_key.tmp"; echo "cannot write $D/api_key" >&2; exit 1; }
         echo "api key set"

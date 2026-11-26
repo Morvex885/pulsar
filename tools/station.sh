@@ -265,13 +265,10 @@ test_running() {
   esac
 }
 
-if [ -f "$T/pid" ]; then
-  IFS= read -r p < "$T/pid" || exit 1
-  case "$p" in
-    ''|*[!0-9]*) echo 'invalid test pid file' >&2; exit 1 ;;
-  esac
-  [ "$p" -gt 1 ] || exit 1
-  if test_running; then
+if [ -s "$T/pid" ]; then
+  if ! IFS= read -r p < "$T/pid"; then p=; fi
+  case "$p" in ''|*[!0-9]*) p=0 ;; esac
+  if [ "$p" -gt 1 ] 2>/dev/null && test_running; then
     kill "$p" 2>/dev/null
     i=0
     while [ "$i" -lt 10 ] && test_running; do sleep 1; i=$((i + 1)); done
@@ -280,8 +277,15 @@ if [ -f "$T/pid" ]; then
       i=0
       while [ "$i" -lt 5 ] && test_running; do sleep 1; i=$((i + 1)); done
     fi
-    ! test_running || { echo 'test pulsar still running, Bluetooth not restored' >&2; exit 1; }
   fi
+fi
+# Если запуск оборвался до записи PID, снимок можно применить только после выхода процесса.
+if [ -e "$T/pid" ] || [ -e "$T/bt-owner" ] || [ -L "$T/bt-owner" ]; then
+  for exe in /proc/[0-9]*/exe; do
+    p=${exe%/exe}
+    p=${p##*/}
+    ! test_running || { echo 'test pulsar still running, Bluetooth not restored' >&2; exit 1; }
+  done
   rm -f "$T/pid" || exit 1
 fi
 if [ -e "$T/bt-owner" ] || [ -L "$T/bt-owner" ]; then

@@ -49,8 +49,8 @@ bt_owner=$("$D/ctl.sh" bt-restore --owner-path 2>/dev/null) || bt_owner=
 bt_legacy=/tmp/pulsar-bt-owner
 bt_blocked=$BIN.bt-blocked
 bt_next=$bt_blocked.next
-# /data/pulsar is trusted like ctl.sh itself. The boot-scoped inode pin also
-# serves as the executable on a managed restart; keep its basename for pidof.
+# Каталог /data/pulsar доверенный, как и ctl.sh. Запускаем закреплённый на эту
+# загрузку inode; имя pulsar нужно для pidof.
 boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 bt_runtime= bt_executable=
 case "$boot_id" in
@@ -59,12 +59,24 @@ case "$boot_id" in
 esac
 
 bt_blocked_now() { [ "$BIN" -ef "$bt_blocked" ] || [ "$BIN" -ef "$bt_next" ]; }
+bt_pinned_now() { [ ! -L "$bt_executable" ] && [ "$BIN" -ef "$bt_executable" ]; }
 bt_pending() { [ -e "$bt_owner" ] || [ -L "$bt_owner" ]; }
+
+bt_test_clear() {
+  # Проверяем здесь, даже если установленная ctl.sh ещё не знает о тестовом снимке.
+  bt_test_dir=/tmp/pulsar-test
+  [ -d "$bt_test_dir" ] && [ ! -L "$bt_test_dir" ] &&
+    { [ -e "$bt_test_dir/bt-owner" ] || [ -L "$bt_test_dir/bt-owner" ]; } &&
+    bt_test_uid=$(id -u) &&
+    [ "$(stat -c '%u:%a' "$bt_test_dir" 2>/dev/null)" = "$bt_test_uid:700" ] || return 0
+  say 'Bluetooth тестового экземпляра не восстановлен: выполните test-stop'
+  return 1
+}
 
 remember_bt_executable() {
   [ -n "$bt_executable" ] && [ -n "$bt_owner" ] || return 1
-  [ "$BIN" -ef "$bt_executable" ] && return 0
-  # An unexpected rename during startup must never rebind another binary's snapshot.
+  bt_pinned_now && return 0
+  # При замене бинаря не перепривязываем снимок к чужому inode.
   bt_pending && return 1
   if [ -z "${PULSAR_BT_OWNER:-}" ]; then
     # Новый boot_id не должен применять флаги от предыдущей загрузки.
@@ -98,6 +110,7 @@ restore_bt() {
 wait_restore_bt() {
   restore_delay=$BACKOFF_MIN
   while [ -f "$D/enabled" ]; do
+    bt_test_clear || return 1
     if restore_bt "$@"; then
       [ -f "$D/enabled" ]
       return
@@ -110,17 +123,19 @@ wait_restore_bt() {
 }
 
 install_prev() {
-  # Keep any guard for the current executable until the replacement is committed.
+  # Запрет на захват для текущего бинаря действует до замены рабочего пути.
   if [ "$BIN" -ef "$bt_next" ]; then mv -f "$bt_next" "$bt_blocked" || return 1; fi
   rm -f "$BIN.tmp" "$bt_next" && cp -p "$BIN.prev" "$BIN.tmp" &&
     ln "$BIN.tmp" "$bt_next" && mv -f "$BIN.tmp" "$BIN" ||
     { rm -f "$BIN.tmp" "$bt_next"; return 1; }
 }
 
-give_back() { # Yandex stack again, like ctl.sh disable
+give_back() { # Возврат стека Яндекса, как в ctl.sh disable.
   wait_restore_bt || exit 0
+  bt_test_clear || exit 1
   rm -f "$D/enabled"
   say "$1; disabled, starting the Yandex stack"
+  bt_test_clear || exit 1
   pidof quasar_launcher2 >/dev/null 2>&1 || "$Q" start >/dev/null 2>&1
   exit 1
 }
@@ -152,6 +167,7 @@ trap 'kill $ROT 2>/dev/null; exit 143' TERM INT HUP
 trap 'kill $ROT 2>/dev/null' EXIT
 
 fails=0 swapped=0 backoff=$BACKOFF_MIN last_inode=
+bt_test_clear || exit 1
 if [ -z "${PULSAR_BT_OWNER:-}" ] &&
   [ "$(stat -c '%u' "$bt_legacy" 2>/dev/null)" = "$(id -u)" ]; then
   # Старый снимок не связан с новым путём и не должен пережить новый захват.
@@ -162,6 +178,7 @@ if [ -z "$bt_owner" ] && [ -n "$boot_id" ]; then
   wait_restore_bt "$D/.pulsar-bt-owner.$boot_id" || exit 0
 fi
 while [ -f "$D/enabled" ]; do
+  bt_test_clear || exit 1
   rotate
   if [ ! -x "$BIN" ]; then
     say "$BIN missing or not executable"
@@ -181,17 +198,16 @@ while [ -f "$D/enabled" ]; do
   else
     rm -f "$bt_blocked" "$bt_next"
     if [ "$bt_allowed" = 1 ] && "$D/ctl.sh" bt-restore --check >/dev/null 2>&1; then
-      if [ "$BIN" -ef "$bt_executable" ]; then
+      if bt_pinned_now; then
         bt_managed=1
-        if [ -z "${PULSAR_BT_OWNER:-}" ] && bt_pending; then
-          # A concurrent install can replace BIN even after the final stat.
-          # Execute the proven owner; the next iteration will restore before
-          # starting a different inode. Test/legacy launches stay canonical.
-          launch=$bt_executable installed_binary=$BIN
-        fi
       else
         wait_restore_bt || exit 0
-        remember_bt_executable && bt_managed=1
+        remember_bt_executable && bt_pinned_now && bt_managed=1
+      fi
+      if [ "$bt_managed" = 1 ] && [ -z "${PULSAR_BT_OWNER:-}" ]; then
+        # Рабочий путь могут заменить после последней сверки inode, даже при
+        # первом запуске. Новый бинарь пойдёт только после возврата владения.
+        launch=$bt_executable installed_binary=$BIN
       fi
     else
       wait_restore_bt || exit 0
@@ -200,10 +216,12 @@ while [ -f "$D/enabled" ]; do
     if [ "$swapped" = 1 ]; then swapped=0 fails=0 backoff=$BACKOFF_MIN; fi
   fi
   [ "$inode" = "$(stat -Lc '%d:%i' "$BIN")" ] || continue
-  if [ "$bt_managed" = 1 ] && ! [ "$BIN" -ef "$bt_executable" ]; then continue; fi
+  if [ "$bt_managed" = 1 ] && ! bt_pinned_now; then continue; fi
   last_inode=$inode
-  echo "=== start $(date)" >> "$LOG"
+  start_at=$(date)
   t0=$(uptime_s)
+  bt_test_clear || exit 1
+  echo "=== start $start_at" >> "$LOG"
   PULSAR_BT_MANAGED=$bt_managed PULSAR_BT_OWNER=$bt_owner PULSAR_INSTALLED_BINARY=$installed_binary \
     "$launch" "$D/state.conf" >> "$LOG" 2>&1
   rc=$?

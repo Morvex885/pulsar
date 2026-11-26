@@ -9,6 +9,14 @@ use pulsar_sendspin::SendspinEvent;
 use super::logic::{self, cxx_max, cxx_min};
 use super::{Controller, DUCK_GAIN, Pending, SOUNDS};
 
+fn music_yields_to(
+    pending_order: Option<u64>,
+    incoming_order: u64,
+    is_active: impl FnOnce() -> bool,
+) -> bool {
+    pending_order.map_or_else(is_active, |order| order < incoming_order)
+}
+
 impl Controller {
     pub(super) fn update_duck(&mut self) {
         let want = logic::want_duck(
@@ -60,10 +68,20 @@ impl Controller {
     }
 
     pub(super) fn bluetooth_takes_audio(&mut self) {
-        // Остановить также незавершённый запуск Music: его PLAYING может прийти позже.
-        self.stop_local_music();
+        self.take_audio_from_music(self.audio_start);
         if let Some(ss) = &self.sendspin {
             ss.pause_for_bluetooth(self.audio_start);
+        }
+    }
+
+    fn take_audio_from_music(&mut self, order: u64) {
+        // Stop действует на весь канал, включая уже отправленный, но ещё не начатый Play.
+        if music_yields_to(
+            self.music_start_pending.map(|(_, order)| order),
+            order,
+            || self.player.state(Channel::Music) != PlayState::Idle,
+        ) {
+            self.stop_local_music();
         }
     }
 
@@ -193,7 +211,9 @@ impl Controller {
                 let id = self.player.play(Channel::Announce, vec![url]);
                 self.pending.insert(id, Pending::MediaAnnounce { seq });
             } else {
-                self.music_start_pending = Some(self.player.play(Channel::Music, vec![url]));
+                let order = pulsar_core::audio_start_order();
+                let id = self.player.play(Channel::Music, vec![url]);
+                self.music_start_pending = Some((id, order));
             }
         }
         if let Some(v) = cmd.volume {
@@ -268,13 +288,7 @@ impl Controller {
                         return;
                     }
                     self.bluetooth_yields_audio(order);
-                }
-                // Music Assistant took over the speaker: the HA media channel yields to it.
-                if active
-                    && (self.music_start_pending.is_some()
-                        || self.player.state(Channel::Music) != PlayState::Idle)
-                {
-                    self.stop_local_music();
+                    self.take_audio_from_music(order);
                 }
                 // The HA media channel playing here took the speaker over (yield_to_local): not a
                 // pause in Music Assistant. on_player clears the stamp if its state comes later.
@@ -307,5 +321,20 @@ impl Controller {
                 self.clock.music_frame(f, true);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bluetooth_and_sendspin_takeover_cancel_only_older_pending_music() {
+        // Пока новый Play загружается, состояние может ещё относиться к предыдущему.
+        assert!(!music_yields_to(Some(20), 10, || true));
+        assert!(!music_yields_to(Some(20), 10, || false));
+        assert!(music_yields_to(Some(20), 30, || false));
+        assert!(music_yields_to(None, 30, || true));
+        assert!(!music_yields_to(None, 30, || false));
     }
 }

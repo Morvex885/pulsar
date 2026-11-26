@@ -63,7 +63,7 @@ check-sendspin-ffi:
 	cmake --build '$(SENDSPIN_CHECK_BUILD)'
 	env $(ZIGBUILD_ENV) PULSAR_SS_BUILD='$(SENDSPIN_CHECK_BUILD)' PULSAR_SS_SRC='$(CURDIR)/third_party/src' \
 	  PULSAR_REQUIRE_SS=1 $(CARGO_ZIGBUILD) test --locked -p pulsar-sendspin --lib \
-	  --target x86_64-unknown-linux-gnu.$$(getconf GNU_LIBC_VERSION | cut -d ' ' -f2) bluetooth
+	  --target x86_64-unknown-linux-gnu.$$(getconf GNU_LIBC_VERSION | cut -d ' ' -f2)
 
 clean:
 	rm -rf build target

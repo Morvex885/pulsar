@@ -258,7 +258,8 @@ pub struct Controller {
     bt_starts: u64,
     bt_connection: Option<u64>,
     audio_start: u64,
-    music_start_pending: Option<PlayId>,
+    // Порядок отправки Play нужен для отмены; арбитраж идёт по фактическому старту.
+    music_start_pending: Option<(PlayId, u64)>,
     sendspin_pairing_prompt: bool,
 }
 
@@ -809,7 +810,10 @@ impl Controller {
             }
             PlayerEvent::MusicStarted { id, order } => {
                 self.sendspin_ended_ms = None;
-                if self.music_start_pending == Some(id) {
+                if self
+                    .music_start_pending
+                    .is_some_and(|(pending, _)| pending == id)
+                {
                     self.music_start_pending = None;
                     if order > self.audio_start {
                         self.local_music_takes_audio(order);
@@ -831,7 +835,10 @@ impl Controller {
                 self.publish_media();
             }
             PlayerEvent::Done { id, ok } => {
-                if self.music_start_pending == Some(id) {
+                if self
+                    .music_start_pending
+                    .is_some_and(|(pending, _)| pending == id)
+                {
                     self.music_start_pending = None;
                 }
                 if let Some(p) = self.pending.remove(&id) {
