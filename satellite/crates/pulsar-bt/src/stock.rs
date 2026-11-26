@@ -36,12 +36,32 @@ impl Stock {
         Ok(Some((stock, state)))
     }
 
+    fn lock(&self) -> io::Result<fs::File> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(self.marker.with_file_name(".pulsar-bt-lock"))?;
+        let meta = file.metadata()?;
+        if !meta.is_file()
+            || meta.uid() != fs::metadata("/proc/self")?.uid()
+            || meta.mode() & 0o7777 != 0o600
+        {
+            return Err(io::Error::other("invalid Bluetooth ownership lock"));
+        }
+        file.lock()?;
+        Ok(file)
+    }
+
     pub async fn take(&self, flags: [bool; 2]) -> io::Result<()> {
         let stock = self.clone();
-        let (exe, running) = tokio::task::spawn_blocking(move || {
+        let (_lock, exe, running) = tokio::task::spawn_blocking(move || {
+            let lock = stock.lock()?;
             let (exe, running) = Self::player_status()?;
             stock.record(flags, running)?;
-            Ok::<_, io::Error>((exe, running))
+            Ok::<_, io::Error>((lock, exe, running))
         })
         .await??;
         self.confirm_take(Self::stop_if_running(exe, running)).await
@@ -55,7 +75,16 @@ impl Stock {
     }
 
     pub async fn keep_stopped(&self) -> io::Result<()> {
-        let (exe, running) = tokio::task::spawn_blocking(Self::player_status).await??;
+        let stock = self.clone();
+        let (_lock, exe, running) = tokio::task::spawn_blocking(move || {
+            let lock = stock.lock()?;
+            if stock.ownership()? != Ownership::Owned {
+                return Err(io::Error::other("Bluetooth ownership no longer confirmed"));
+            }
+            let (exe, running) = Self::player_status()?;
+            Ok::<_, io::Error>((lock, exe, running))
+        })
+        .await??;
         Self::stop_if_running(exe, running).await
     }
 
@@ -95,6 +124,7 @@ impl Stock {
         }
         let stock = self.clone();
         tokio::task::spawn_blocking(move || {
+            let _lock = stock.lock()?;
             if stock.snapshot_exists()? {
                 return Err(io::Error::other("stock restore left ownership snapshot"));
             }

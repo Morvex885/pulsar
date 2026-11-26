@@ -607,7 +607,7 @@ impl RawPcm {
         frames: usize,
         frame_bytes: usize,
     ) -> Result<usize, i32> {
-        // SAFETY: i16 has no padding, and the byte view borrows the same initialized storage.
+        // SAFETY: у i16 нет заполнения, срез байтов занимает ту же инициализированную память.
         let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast(), size_of_val(buf)) };
         self.writei(bytes, frames, frame_bytes)
     }

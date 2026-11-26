@@ -211,10 +211,9 @@ impl Controller {
                     if ss_on || matches!(music(), PlayState::Playing | PlayState::Loading) {
                         self.clock.play(ClockShot::Pause);
                     }
-                    // While Sendspin plays, HA's pause/stop leave the Sendspin group (the
-                    // speaker stops).
-                    if ss_on
-                        && music() != PlayState::Playing
+                    // Когда играет Music, пауза относится к нему. Иначе она отменяет
+                    // и ожидающий записи запуск Sendspin, а не только слышимый поток.
+                    if music() != PlayState::Playing
                         && let Some(ss) = &self.sendspin
                     {
                         ss.yield_to_local();
@@ -236,7 +235,7 @@ impl Controller {
                 }
                 MediaCommand::Stop => {
                     self.stop_local_music();
-                    if ss_on && let Some(ss) = &self.sendspin {
+                    if let Some(ss) = &self.sendspin {
                         ss.yield_to_local();
                     }
                 }

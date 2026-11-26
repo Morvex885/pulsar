@@ -44,25 +44,57 @@ T=/tmp/pulsar-test
 D=/data/pulsar
 BT_OWNER=/tmp/pulsar-bt-owner
 r() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$H" "$@"; }
-# up SRC DEST: upload to DEST.part, verify size and sha256 against SRC, then rename to DEST (mode 755).
+# Имя файла передаётся в команду SSH, содержимое — без преобразований через stdin.
+shell_quote() {
+  word=$1
+  printf "'"
+  while case "$word" in *"'"*) true ;; *) false ;; esac; do
+    printf '%s' "${word%%\'*}" "'\\''"
+    word=${word#*\'}
+  done
+  printf "%s'" "$word"
+}
 up() {
-  src=$1 dest=$2
-  size=$(wc -c < "$src" | tr -d ' ')
-  if command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum "$src" | cut -d' ' -f1)
-  else sum=$(shasum -a 256 "$src" | cut -d' ' -f1); fi
-  if ! r "cat > '$dest.part'" < "$src"; then
-    r "rm -f '$dest.part'" || true; echo "upload of $src failed" >&2; exit 1
+  src=$1 dir=$2 name=$3
+  prepare= check=
+  if [ "$dir" = "$T" ]; then
+    prepare="$TEST_LOCK
+      test_lifecycle_lock '$D'
+      $TEST_DIR_CHECK
+      if [ ! -e \"\$dir\" ] && [ ! -L \"\$dir\" ]; then (umask 077; mkdir \"\$dir\") || exit 1; fi
+      test_dir_check \"\$dir\" || exit 1"
+    check='test_dir_check . || exit 1
+      parent=$(cd -P "${dir%/*}" && pwd -P) || exit 1
+      [ "$(pwd -P)" = "$parent/${dir##*/}" ] || exit 1'
   fi
-  got=$(r "s=\$(wc -c < '$dest.part' | tr -d ' '); h=none
-    if command -v sha256sum >/dev/null 2>&1; then h=\$(sha256sum '$dest.part' | cut -d' ' -f1); fi
-    echo \$s \$h") || got=
-  set -- $got
-  if [ "${1:-}" != "$size" ] || { [ "${2:-}" != none ] && [ "${2:-}" != "$sum" ]; }; then
-    r "rm -f '$dest.part'" || true
-    echo "transfer of $src corrupted: local $size bytes sha256 $sum, station ${1:-?} bytes sha256 ${2:-?}" >&2; exit 1
-  fi
-  [ "${2:-}" != none ] || echo "warning: no sha256sum on station, only size verified for $src" >&2
-  r "chmod 755 '$dest.part' && mv '$dest.part' '$dest'"
+  size=$(wc -c < "$src") || return 1
+  if command -v sha256sum >/dev/null 2>&1; then hash=$(sha256sum < "$src") || return 1
+  else hash=$(shasum -a 256 < "$src") || return 1; fi
+  hash=${hash%% *}
+  r "dir='$dir'
+    $prepare
+    cd -P \"\$dir\" || exit 1
+    $check
+    dest=$(shell_quote "./$name")
+    [ ! -d \"\$dest\" ] || exit 1
+    tmp=\$(mktemp ./.upload.XXXXXX) || exit 1
+    trap 'rm -f \"\$tmp\"' EXIT
+    cat > \"\$tmp\" || exit 1
+    got=\$(wc -c < \"\$tmp\") || exit 1
+    if [ \"\$got\" -ne '$size' ]; then
+      echo \"transfer corrupted: expected $size bytes, got \$got\" >&2
+      exit 1
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+      got=\$(sha256sum < \"\$tmp\") || exit 1
+      if [ \"\${got%% *}\" != '$hash' ]; then
+        echo 'transfer corrupted: SHA-256 mismatch' >&2
+        exit 1
+      fi
+    else
+      echo 'warning: no sha256sum on station, only size verified' >&2
+    fi
+    chmod 755 \"\$tmp\" && mv -f \"\$tmp\" \"\$dest\"" < "$src"
 }
 # State-changing commands run only under this tag's own lock.
 own() {
@@ -111,6 +143,11 @@ test_lifecycle_lock() {
   exec 9>> "$1/.station-test.lock" || exit 1
   flock -n 9 || { echo 'test lifecycle lock unavailable: retry after the other command ends' >&2; exit 1; }
 }
+# Обёртка удерживает блокировку до возврата ctl, не передавая её демонам.
+test_lifecycle_child() (
+  "$@" 9>&-
+  exit $?
+)
 EOF
 )
 # Не запускать установленный сервис и не удалять стенд, пока не возвращён тестовый BT.
@@ -121,6 +158,9 @@ TEST_BT_RESTORED="$TEST_DIR_OPTIONAL
     echo 'test Bluetooth not restored: run test-stop' >&2
     exit 1
   fi"
+TEST_HANDOFF="$TEST_LOCK
+  test_lifecycle_lock '$D'
+  $TEST_BT_RESTORED"
 # Сначала остановить обоих: работающий pulsar ещё может записать снимок и захватить player.
 PROD_BT_CTL="'$D/ctl.sh' bt-restore --supported >/dev/null 2>&1 ||
   '$D/ctl.sh' bt-restore --check >/dev/null 2>&1"
@@ -133,18 +173,18 @@ if [ -n \"\$boot\" ] &&
   exit 1
 fi
 if $PROD_BT_CTL; then
-  '$D/ctl.sh' reload --stop && '$D/ctl.sh' bt-restore ||
+  '$D/ctl.sh' reload --stop && test_lifecycle_child '$D/ctl.sh' bt-restore ||
     { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
 else
-  # Legacy ctl cannot recover a legitimate snapshot from a previously installed binary.
+  # Старый ctl не может восстановить снимок от ранее установленного бинаря.
   for marker in '$BT_OWNER' '$BT_OWNER.pending'; do
     [ -e \"\$marker\" ] || [ -L \"\$marker\" ] || continue
     owner=\$(stat -c '%u' \"\$marker\") && uid=\$(id -u) && [ \"\$owner\" != \"\$uid\" ] ||
       { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
   done
 fi"
-# Prepare all file contents before stopping production. Keep the previous rollback slot
-# and the inode guard until both metadata changes and the final executable rename succeed.
+# Готовим файлы до остановки сервиса. Сохраняем прежний слот отката и защиту
+# по inode, пока не обновлены метаданные и не переименован исполняемый файл.
 PROD_REPLACE="stage_replace() {
   stage=\$(mktemp -d .station-replace.XXXXXX) || exit 1
   trap 'rm -rf -- \"\$stage\"' EXIT
@@ -173,7 +213,7 @@ replace_pulsar() {
     if [ -f \"\$stage/prev.old\" ]; then mv -f \"\$stage/prev.old\" pulsar.prev
     else rm -f pulsar.prev; fi || echo 'could not restore the previous rollback binary' >&2
   fi
-  [ ! -f enabled ] || ./ctl.sh restart
+  [ ! -f enabled ] || test_lifecycle_child ./ctl.sh restart
   exit 1
 }"
 case "$cmd" in
@@ -207,14 +247,14 @@ case "$cmd" in
        fi
        $DMIX
        ! pidof pulsar supervise.sh >/dev/null && echo stopped" ;;
-  start) own; r "$TEST_BT_RESTORED; $D/ctl.sh reload" ;;
+  start)
+    own
+    r "$TEST_HANDOFF
+       test_lifecycle_child '$D/ctl.sh' reload" ;;
   push)
     [ $# -ge 1 ] || usage
     own
-    r "$TEST_DIR_CHECK
-       if [ ! -e '$T' ] && [ ! -L '$T' ]; then (umask 077; mkdir '$T') || exit 1; fi
-       test_dir_check '$T'"
-    for f; do b=$(basename "$f"); up "$f" "$T/$b"; done ;;
+    for f; do up "$f" "$T" "${f##*/}"; done ;;
   test-start)
     case "$#:${1-}" in
       0:) bt=0 ;;
@@ -353,8 +393,12 @@ if [ -e "$T/pid" ] || [ "$reserved" = 1 ] || test_bt_pending; then
   rm -f "$T/pid" || exit 1
 fi
 if test_bt_pending; then
-  if ! "$T/ctl.sh" bt-restore --test; then
+  if ! test_lifecycle_child "$T/ctl.sh" bt-restore --test; then
     echo 'test Bluetooth not restored: keep the test files, do not start the installed service' >&2
+    exit 1
+  fi
+  if test_bt_pending; then
+    echo 'test Bluetooth not restored: push the current satellite/deploy/ctl.sh and retry test-stop; do not start the installed service' >&2
     exit 1
   fi
 fi
@@ -369,7 +413,7 @@ EOF
     # The installed binary is kept as pulsar.orig and serves as .prev meanwhile, so a rollback by
     # supervise.sh lands on it; the owner's .prev waits in pulsar.prev.orig.
     # df -P: busybox `df -k` переносит строку при длинном имени устройства.
-    r "$TEST_BT_RESTORED
+    r "$TEST_HANDOFF
        [ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
        [ \$(df -Pk $D | awk 'NR==2 {print \$4}') -gt 30000 ] || { echo 'less than 30 MB free in $D' >&2; exit 1; }
        cd $D || exit 1
@@ -383,19 +427,19 @@ EOF
          if [ -f \"\$stage/prev.old\" ]; then ln \"\$stage/prev.old\" pulsar.prev.orig || exit 1; fi
          mv \"\$stage/orig\" pulsar.orig
        fi"
-    up "$1" "$D/pulsar.new"
-    r "$TEST_BT_RESTORED
+    up "$1" "$D" pulsar.new
+    r "$TEST_HANDOFF
        cd $D && ./pulsar.new --version || exit 1
        $PROD_REPLACE
        stage_replace
        cp -p pulsar.orig \"\$stage/prev\" || exit 1
        $PROD_BT_RESTORE
        replace_pulsar pulsar.new
-       sync && ./ctl.sh restart" ;;
+       sync && test_lifecycle_child ./ctl.sh restart" ;;
   restore)
     own
     # Если после краш-цикла supervise.sh удалил enabled (give_back), станцию возвращает ctl.sh enable.
-    r "$TEST_BT_RESTORED
+    r "$TEST_HANDOFF
        cd $D && [ -f pulsar.orig ] || { echo 'no pulsar.orig' >&2; exit 1; }
        $PROD_REPLACE
        stage_replace
@@ -407,7 +451,7 @@ EOF
        rm -f pulsar.orig pulsar.orig.bt-blocked pulsar.prev.orig ||
          echo 'restored the binary but could not remove swap backups' >&2
        sync
-       if [ -f enabled ]; then ./ctl.sh restart; else ./ctl.sh enable; fi" ;;
+       if [ -f enabled ]; then test_lifecycle_child ./ctl.sh restart; else test_lifecycle_child ./ctl.sh enable; fi" ;;
   cleanup)
     own
     r "$TEST_LOCK

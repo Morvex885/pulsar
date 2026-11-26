@@ -700,8 +700,8 @@ impl Controller {
         {
             use std::os::unix::fs::MetadataExt as _;
 
-            // Managed restarts may execute a hardlink while an installer renames
-            // the installed binary. Never start an update from a superseded inode.
+            // Супервизор может запустить бинарь через жёсткую ссылку, пока установщик
+            // меняет рабочий путь. Со старого inode обновление запускать нельзя.
             let same_inode = std::fs::metadata("/proc/self/exe").and_then(|running| {
                 let installed = std::fs::metadata(&path)?;
                 Ok((installed.dev(), installed.ino()) == (running.dev(), running.ino()))

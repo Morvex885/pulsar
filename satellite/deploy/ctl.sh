@@ -51,7 +51,34 @@ bt_owner_path() {
   printf '%s/.pulsar-bt-owner.%s\n' "$D" "$bt_boot"
 }
 
+# Снимок нельзя прочитать до блокировки: другой возврат мог уже его заменить.
+bt_locked() (
+  bt_lock_dir=$1
+  shift
+  umask 077
+  exec 8>>"$bt_lock_dir/.pulsar-bt-lock" || return 1
+  flock -x 8 || return 1
+  "$@"
+)
+
 bt_for_owners() {
+  if command -v flock >/dev/null 2>&1; then
+    bt_locked "$D" bt_for_owners_locked "$@"
+  else
+    bt_for_owners_locked bt_no_lock
+  fi
+}
+
+bt_no_lock() {
+  # Без flock новый захват запрещён, но станции без снимка не нужен возврат.
+  bt_lock_uid=$(id -u) || return 1
+  if [ "$(stat -c '%u' "$bt_owner" 2>/dev/null)" = "$bt_lock_uid" ] ||
+    [ "$(stat -c '%u' "$bt_owner.pending" 2>/dev/null)" = "$bt_lock_uid" ]; then
+    bt_error 'для возврата владения нужен flock'
+  fi
+}
+
+bt_for_owners_locked() {
   [ "${PULSAR_BT_OWNER:-}" != "$bt_test_owner" ] || return 1
   bt_test_clear || return 1
   if [ -z "${PULSAR_BT_OWNER:-}" ]; then
@@ -267,8 +294,8 @@ bt_restore() {
     bt_restore_flag Discoverable "${bt_discover%% *}" || return 1
   if [ "${bt_flags##* }" = 1 ] && ! bt_player_running; then
     bt_same_bluez || return 1
-    # Не передаём lock тестового стенда штатному демону.
-    "$bt_init" start 9>&- || { bt_error 'init-скрипт не запустил bluealsa-aplay'; return 1; }
+    # Init-скрипт не должен передать блокировки запущенному проигрывателю.
+    "$bt_init" start 8>&- 9>&- || { bt_error 'init-скрипт не запустил bluealsa-aplay'; return 1; }
     bt_wait=0
     while ! bt_player_running; do
       [ "$bt_wait" -lt 3 ] || { bt_error 'процесс bluealsa-aplay не появился'; return 1; }
@@ -425,16 +452,18 @@ case "$1" in
       1:) bt_for_owners bt_restore ;;
       2:--self)
         if [ "${PULSAR_BT_OWNER:-}" = "$bt_test_owner" ]; then
-          bt_test_ctl && bt_restore --self
+          bt_test_ctl && bt_locked "$bt_test_dir" bt_restore --self
         else
           bt_for_owners bt_restore --self
         fi ;;
-      2:--test-check) bt_test_ctl && command -v dbus-send >/dev/null 2>&1 ;;
-      2:--test) bt_test_ctl && bt_restore ;;
+      2:--test-check)
+        bt_test_ctl && command -v dbus-send >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 ;;
+      2:--test) bt_test_ctl && bt_locked "$bt_test_dir" bt_restore ;;
       2:--hide) bt_for_owners bt_hide ;;
       2:--owner-path) bt_owner_path ;;
       2:--supported) : ;;
-      2:--check) command -v dbus-send >/dev/null 2>&1 ;;
+      2:--check)
+        command -v dbus-send >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 ;;
       *) exit 2 ;;
     esac
     ;;

@@ -48,7 +48,7 @@ fi
 EOF
 cat > "$BT_FIXTURE/bin/stat" <<'EOF'
 #!/bin/sh
-# Simulate a different UID without depending on root/chown on the test host.
+# Имитируем другой UID без root и chown на тестовом хосте.
 if [ "$1" = -c ] &&
    { { [ "${FOREIGN_OWNER:-0}" = 1 ] && [ "$3" = "${FOREIGN_MARKER:-$PULSAR_BT_OWNER}" ]; } ||
      { [ "${FOREIGN_TEST_DIR:-0}" = 1 ] && [ "$3" = "$BT_FIXTURE/test" ]; }; }; then
@@ -72,6 +72,15 @@ case "$4" in --dest=:1.41|--dest=:1.42) ;; *) exit 2 ;; esac
 prop=${8#string:}
 value=${9#variant:boolean:}
 printf '%s:%s\n' "$prop" "$value" >> "$BT_FIXTURE/events"
+if [ "${HOLD_RESTORE:-0}" = 1 ] && [ "$prop" = Pairable ]; then
+  : > "$BT_FIXTURE/restore-held"
+  i=0
+  while [ ! -f "$BT_FIXTURE/restore-release" ]; do
+    [ "$i" -lt 100 ] || exit 1
+    "$REAL_SLEEP" 0.05
+    i=$((i + 1))
+  done
+fi
 if [ "${TRACE_DBUS_ROUTES:-0}" = 1 ]; then printf '%s:%s\n' "${4#--dest=}" "$prop" >> "$BT_FIXTURE/dbus-routes"; fi
 if [ "$prop" = "${SHIFT_BLUEZ_AT-}" ]; then echo :1.42 > "$BT_FIXTURE/bluez-owner"; fi
 if [ "$prop" = "${FAIL_FLAG-}" ] && { [ -z "${FAIL_VALUE-}" ] || [ "$value" = "$FAIL_VALUE" ]; }; then
@@ -90,6 +99,9 @@ p=$PULSAR_BT_PROC/101
 case "$1" in
   stop) [ "${FAIL_STOP:-0}" = 0 ] && rm -rf "$p" ;;
   start)
+    if [ "${CHECK_RESTORE_LOCK:-0}" = 1 ]; then
+      [ ! -e "/proc/$$/fd/9" ] && ! flock -n "$PULSAR_DIR/.station-test.lock" true || exit 1
+    fi
     if [ "${FAIL_START_ONCE:-0}" = 1 ] && [ ! -e "$BT_FIXTURE/start-failed" ]; then
       touch "$BT_FIXTURE/start-failed"
       exit 1
@@ -181,6 +193,11 @@ EOF
 cat > "$BT_FIXTURE/bin/setsid" <<'EOF'
 #!/bin/sh
 [ "$*" = "$PULSAR_DIR/supervise.sh" ] || exit 2
+if [ "${CHECK_START_LOCK:-0}" = 1 ]; then
+  if [ -e "/proc/$$/fd/9" ] || flock -n "$PULSAR_DIR/.station-test.lock" true; then
+    exit 1
+  fi
+fi
 echo 'supervisor:start' >> "$BT_FIXTURE/events"
 touch "$BT_FIXTURE/supervisor-running"
 EOF
@@ -189,6 +206,12 @@ cat > "$BT_FIXTURE/bin/mv" <<'EOF'
 if [ "${FAIL_REPLACE:-0}" = 1 ] && [ "$*" = '-f pulsar.rb pulsar' ]; then exit 1; fi
 if [ "${FAIL_STATION_REPLACE:-0}" = 1 ]; then
   case "$*" in '-f pulsar.new pulsar'|'-f .station-replace.'*'/pulsar pulsar') exit 1 ;; esac
+fi
+if [ "${CHECK_PUSH_LOCK:-0}" = 1 ]; then
+  case "$2" in ./.upload.*)
+    [ "$(pwd -P)" = "$BT_FIXTURE/test" ] &&
+      ! flock -n "$PULSAR_DIR/.station-test.lock" true || exit 1 ;;
+  esac
 fi
 exec "$REAL_MV" "$@"
 EOF
@@ -313,6 +336,23 @@ EXTRA_PIDS='504 505' ctl bt-restore
 expect 'Pairable:false
 Discoverable:true'
 [ ! -e "$PULSAR_BT_OWNER" ] || fail 'unrelated processes blocked stock restoration'
+trace
+# Параллельный возврат не должен применить снимок во второй раз.
+marker '0 1 0'
+HOLD_RESTORE=1 ctl bt-restore &
+first=$!
+await_file "$BT_FIXTURE/restore-held"
+if flock -n "$PULSAR_DIR/.pulsar-bt-lock" true; then
+  fail 'adapter restore is not holding the ownership lock'
+fi
+ctl bt-restore &
+second=$!
+: > "$BT_FIXTURE/restore-release"
+wait "$first"
+wait "$second"
+expect 'Pairable:false
+Discoverable:true'
+[ ! -e "$PULSAR_BT_OWNER" ] || fail 'serialized restore left its snapshot'
 trace
 # Пустой маркер без снимка не требует мутаций, подменённый маркер не читаем.
 ln -s "$events" "$PULSAR_BT_OWNER.pending"
@@ -846,6 +886,10 @@ expect_test_lock() {
 expect_test_lock test-stop
 expect_test_lock test-start --bt
 expect_test_lock cleanup
+expect_test_lock start
+expect_test_lock swap "$t/pulsar"
+expect_test_lock restore
+expect_test_lock push "$PULSAR_DIR/ctl.sh"
 [ "$(readlink "$t/bt-reserved")" = dead ] || fail 'a competing command changed the reservation'
 kill -KILL "$stop_shell"
 expect_test_lock test-stop
@@ -859,6 +903,17 @@ while ! flock -n "$PULSAR_DIR/.station-test.lock" true; do
 done
 sh "$station" lite2 test-stop
 [ ! -L "$t/bt-reserved" ] || fail 'repair did not clear the abandoned reservation'
+# Относительное переименование под тем же lock сохраняет имя и байты файла.
+probe="probe's \$data.bin"
+printf 'abc\000xyz\n' > "$BT_FIXTURE/$probe"
+CHECK_PUSH_LOCK=1 sh "$station" lite2 push "$BT_FIXTURE/$probe"
+cmp "$BT_FIXTURE/$probe" "$t/$probe"
+[ -x "$t/$probe" ]
+# Производственный reload удерживает блокировку, но не передаёт её supervisor.
+CHECK_START_LOCK=1 sh "$station" lite2 start
+expect 'supervisor:start'
+rm "$BT_FIXTURE/supervisor-running"
+trace
 # Снимок старого теста защищён и восстанавливается даже без резерва.
 (umask 077; printf '0 0 0\n' > "$t/bt-owner")
 reject ctl bt-restore
@@ -866,6 +921,24 @@ sh "$station" lite2 test-stop
 expect 'Pairable:false
 Discoverable:false'
 [ ! -e "$t/bt-owner" ] || fail 'test-stop did not restore a legacy test marker'
+# Старый ctl может удалить только снимок и сообщить об успехе, оставив .pending.
+mv "$t/ctl.sh" "$BT_FIXTURE/test-ctl-current"
+cat > "$t/ctl.sh" <<'EOF'
+#!/bin/sh
+[ "$*" = 'bt-restore --test' ] && rm -f "$BT_FIXTURE/test/bt-owner"
+EOF
+chmod +x "$t/ctl.sh"
+ln -s dead "$t/bt-reserved"
+(umask 077; printf '0 0 0\n' > "$t/bt-owner"; : > "$t/bt-owner.pending")
+msg=$(sh "$station" lite2 test-stop 2>&1) && fail 'accepted incomplete restore from an old test ctl'
+case "$msg" in *'push the current satellite/deploy/ctl.sh and retry test-stop'*) ;; *) fail "$msg" ;; esac
+[ ! -e "$t/bt-owner" ] && [ -f "$t/bt-owner.pending" ] &&
+  [ "$(readlink "$t/bt-reserved")" = dead ] || fail 'test-stop released an unfinished restore'
+reject sh "$station" lite2 start
+mv "$BT_FIXTURE/test-ctl-current" "$t/ctl.sh"
+sh "$station" lite2 test-stop
+[ ! -e "$t/bt-owner.pending" ] && [ ! -L "$t/bt-reserved" ] ||
+  fail 'current test ctl did not finish the restore'
 marker '0 1 0'
 trace
 sh "$station" lite2 test-start --bt
@@ -893,7 +966,7 @@ reject env FOREIGN_OWNER=1 FOREIGN_MARKER="$t/bt-owner" sh "$station" lite2 test
 [ -f "$t/bt-owner" ] || fail 'test-stop consumed a foreign test snapshot'
 reject sh "$station" lite2 start
 reject sh "$station" lite2 cleanup
-sh "$station" lite2 test-stop
+CHECK_RESTORE_LOCK=1 sh "$station" lite2 test-stop
 [ ! -e "$t/pid" ] || fail 'test-stop left the empty PID file behind'
 expect 'test:1
 init:stop
@@ -947,7 +1020,7 @@ cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-swap"
 cmp "$PULSAR_DIR/pulsar.prev" "$BT_FIXTURE/before-prev"
 [ "$PULSAR_DIR/pulsar" -ef "$PULSAR_DIR/pulsar.bt-blocked" ]
 trace
-sh "$station" lite2 swap "$BT_FIXTURE/swap"
+CHECK_START_LOCK=1 sh "$station" lite2 swap "$BT_FIXTURE/swap"
 expect 'supervisor:start'
 cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/swap"
 touch "$BT_FIXTURE/pulsar-running"
@@ -977,7 +1050,7 @@ cmp "$PULSAR_DIR/pulsar.prev" "$BT_FIXTURE/before-swap"
 ! [ "$PULSAR_DIR/pulsar" -ef "$PULSAR_DIR/pulsar.bt-blocked" ] ||
   fail 'failed restore changed the current Bluetooth guard'
 trace
-sh "$station" lite2 restore
+CHECK_START_LOCK=1 sh "$station" lite2 restore
 expect 'supervisor:start'
 cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-swap"
 cmp "$PULSAR_DIR/pulsar.prev" "$BT_FIXTURE/before-prev"
@@ -1108,7 +1181,8 @@ int main(int argc, char **argv) {
         ? WEXITSTATUS(status) : 2;
 }
 EOF
-  "${CC:-cc}" "$BT_FIXTURE/pinned.c" -o "$BT_FIXTURE/pinned"
+  # CC может содержать команду с аргументами; имена файлов передаём отдельно.
+  (set -f; ${CC:-cc} "$BT_FIXTURE/pinned.c" -o "$BT_FIXTURE/pinned")
   install_fixture "$BT_FIXTURE/pinned"
   ln "$PULSAR_DIR/pulsar" "$BT_FIXTURE/pre-rename"
   cat > "$PULSAR_DIR/state.conf" <<'EOF'

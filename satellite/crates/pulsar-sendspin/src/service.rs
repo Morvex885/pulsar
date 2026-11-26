@@ -88,10 +88,22 @@ impl Ctx {
         // Если sync task уже перестал писать, закрытие PCM всё равно должно выполниться.
         let ctx = self.clone();
         tokio::task::spawn_blocking(move || ctx.sink.finish_request());
-        // Другой источник уже занял выход; не ждём StreamEnd от сервера.
-        if streaming.replace(false) {
-            let _ = self.tx.send(SendspinEvent::Stream(None));
+        // Не ждём StreamEnd от сервера: допуск к выходу уже закрыт.
+        self.stop_reporting(streaming);
+        true
+    }
+
+    fn cancel_local(self: &Arc<Self>, streaming: &Cell<bool>) -> bool {
+        // Явная остановка отменяет и старт без записанных кадров, и удержанный индикатор.
+        self.revoke_before(streaming, pulsar_core::audio_start_order())
+            || self.stop_reporting(streaming)
+    }
+
+    fn stop_reporting(&self, streaming: &Cell<bool>) -> bool {
+        if !streaming.replace(false) {
+            return false;
         }
+        let _ = self.tx.send(SendspinEvent::Stream(None));
         true
     }
 }
@@ -169,13 +181,12 @@ pub struct SendspinHandle {
 
 impl SendspinHandle {
     /// На этом динамике играет аудиопоток Sendspin (конец потока без «stopped» сообщается на 1 с
-    /// позже; см. `hold`). Актор учитывает готовность PCM, колбэки конца и обновления группы,
-    /// а также разрыв, найденный в `poll`: сразу после команды геттер отдаёт прежнее значение.
+    /// позже; см. `hold`). Новый поток учитывается после первой успешной записи кадров в PCM.
     pub fn streaming(&self) -> bool {
         self.streaming.get()
     }
 
-    /// Проверяет, что готовый PCM ещё принадлежит этому запуску, даже если индикатор удержан.
+    /// Проверяет, что записавший кадры PCM ещё принадлежит этому запуску.
     pub fn stream_is_current(&self, order: u64) -> bool {
         self.streaming.get() && self.ctx.sink.output_is_current(order)
     }
@@ -222,14 +233,12 @@ impl SendspinHandle {
         ok
     }
 
-    /// Another local source took over the speaker: leave the Sendspin group (stops our
-    /// playback, the rest of the group keeps playing). `streaming` changes only with the
-    /// stream end that follows.
+    /// Явная команда HA освобождает локальный выход и выводит колонку из группы, не
+    /// останавливая остальные колонки. Отменяет даже ещё не начавшуюся запись.
     pub fn yield_to_local(&self) {
-        if !self.streaming.get() {
-            return;
+        if self.ctx.cancel_local(&self.streaming) {
+            self.leave_group();
         }
-        self.leave_group();
     }
 
     /// Передаёт выход более свежему запуску Music, не ставя остальные плееры группы на паузу.
@@ -545,7 +554,7 @@ impl Actor {
         self.core.dispatch_events();
         let c = self.client.is_connected();
         if c {
-            // Синхронизация открывает PCM в своей задаче; проверяем после колбэков этого тика.
+            // Проверяем результат записи задачи синхронизации после колбэков этого тика.
             self.core.output_ready();
         }
         if c == self.connected {
@@ -694,7 +703,7 @@ mod tests {
             let (mut core, streaming, mut rx) = rig();
             let ctx = core.ctx.clone();
             ctx.event(LibEvent::StreamStart(Some(PARAMS)));
-            assert!(ctx.sink.test_open_output(true));
+            ctx.sink.test_write_result(1, false);
             assert!(ctx.sink.accepts_audio());
             // Другой аудиопоток может стартовать, пока событие Sendspin ещё в очереди.
             let music = pulsar_core::audio_start_order();
@@ -724,7 +733,7 @@ mod tests {
         let (mut core, streaming, mut rx) = rig();
         let ctx = core.ctx.clone();
         ctx.event(LibEvent::StreamStart(Some(PARAMS)));
-        assert!(ctx.sink.test_open_output(true));
+        ctx.sink.test_write_result(1, false);
         dispatch(&mut core);
         let first = recv_start(&mut rx);
 
@@ -740,10 +749,10 @@ mod tests {
         assert!(!ctx.revoke_before(&streaming, music)); // Новый старт ещё в очереди.
         assert!(ctx.sink.accepts_audio());
         dispatch(&mut core);
-        assert!(rx.try_recv().is_err()); // Перезапуск без готового PCM не захватывает выход.
+        assert!(rx.try_recv().is_err()); // Без записанных кадров выход ещё не захвачен.
         assert!(streaming.get()); // Но прежний индикатор пока удерживается.
         assert!(core.timers.is_set(Key::StreamEnd));
-        assert!(ctx.sink.test_open_output(true));
+        ctx.sink.test_write_result(1, false);
         dispatch(&mut core);
         let second = recv_start(&mut rx);
         assert!(second > music);
@@ -758,7 +767,7 @@ mod tests {
         let (mut core, streaming, mut rx) = rig();
         let ctx = core.ctx.clone();
         ctx.event(LibEvent::StreamStart(Some(PARAMS)));
-        assert!(ctx.sink.test_open_output(true));
+        ctx.sink.test_write_result(1, false);
         dispatch(&mut core);
         let first = recv_start(&mut rx);
         assert!(ctx.sink.accepts_audio());
@@ -779,7 +788,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         ctx.event(LibEvent::StreamStart(Some(PARAMS)));
-        assert!(ctx.sink.test_open_output(true));
+        ctx.sink.test_write_result(1, false);
         dispatch(&mut core);
         let second = recv_start(&mut rx);
         assert!(second > first);
@@ -788,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_open_never_starts_playback_and_retry_keeps_callback_order() {
+    fn failed_or_zero_write_does_not_start_playback_and_retry_keeps_callback_order() {
         let (mut core, streaming, mut rx) = rig();
         let ctx = core.ctx.clone();
         ctx.event(LibEvent::StreamStart(Some(PARAMS)));
@@ -797,12 +806,14 @@ mod tests {
         assert!(!streaming.get());
         assert!(rx.try_recv().is_err());
 
-        assert!(!ctx.sink.test_open_output(false));
-        dispatch(&mut core);
-        assert!(!streaming.get());
-        assert!(rx.try_recv().is_err());
+        for lost in [true, false] {
+            ctx.sink.test_write_result(0, lost);
+            dispatch(&mut core);
+            assert!(!streaming.get());
+            assert!(rx.try_recv().is_err());
+        }
 
-        assert!(ctx.sink.test_open_output(true));
+        ctx.sink.test_write_result(1, false);
         dispatch(&mut core);
         let sendspin = recv_start(&mut rx);
         assert!(sendspin < later);
@@ -812,26 +823,51 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    #[tokio::test]
+    async fn explicit_local_cancel_discards_pending_retries_and_unpublished_starts() {
+        for (written, lost) in [(0, true), (0, false), (1, false)] {
+            let (mut core, streaming, mut rx) = rig();
+            let ctx = core.ctx.clone();
+            ctx.event(LibEvent::StreamStart(Some(PARAMS)));
+            ctx.sink.test_write_result(written, lost);
+            assert!(!streaming.get());
+
+            assert!(ctx.cancel_local(&streaming));
+            assert!(!ctx.cancel_local(&streaming));
+            assert_eq!(ctx.audio_write(&[1; 4], 0), (4, 0, 0));
+            dispatch(&mut core);
+            assert!(!ctx.sink.accepts_audio());
+            assert!(!streaming.get());
+            assert!(rx.try_recv().is_err());
+
+            ctx.event(LibEvent::StreamStart(Some(PARAMS)));
+            ctx.sink.test_write_result(1, false);
+            dispatch(&mut core);
+            recv_start(&mut rx);
+            assert!(streaming.get());
+        }
+    }
+
     #[test]
     fn ended_or_reconfigured_output_is_not_published_from_the_actor_queue() {
         let (mut core, streaming, mut rx) = rig();
         let ctx = core.ctx.clone();
         ctx.event(LibEvent::StreamStart(Some(PARAMS)));
-        assert!(ctx.sink.test_open_output(true));
+        ctx.sink.test_write_result(1, false);
         ctx.event(LibEvent::StreamEnd);
         dispatch(&mut core);
         assert!(!streaming.get());
         assert!(rx.try_recv().is_err());
 
         ctx.event(LibEvent::StreamStart(Some(PARAMS)));
-        assert!(ctx.sink.test_open_output(true));
+        ctx.sink.test_write_result(1, false);
         let between = pulsar_core::audio_start_order();
         ctx.event(LibEvent::StreamStart(Some(PARAMS)));
         dispatch(&mut core);
         assert!(!streaming.get());
         assert!(rx.try_recv().is_err());
 
-        assert!(ctx.sink.test_open_output(true));
+        ctx.sink.test_write_result(1, false);
         dispatch(&mut core);
         assert!(recv_start(&mut rx) > between);
     }
@@ -840,7 +876,7 @@ mod tests {
     async fn failed_restart_does_not_cancel_held_end() {
         let (mut core, streaming, mut rx) = rig();
         core.ctx.event(LibEvent::StreamStart(Some(PARAMS)));
-        assert!(core.ctx.sink.test_open_output(true));
+        core.ctx.sink.test_write_result(1, false);
         dispatch(&mut core);
         recv_start(&mut rx);
 
@@ -848,7 +884,7 @@ mod tests {
         dispatch(&mut core);
         assert!(streaming.get());
         core.ctx.event(LibEvent::StreamStart(Some(PARAMS)));
-        assert!(!core.ctx.sink.test_open_output(false));
+        core.ctx.sink.test_write_result(0, true);
         dispatch(&mut core);
         assert!(streaming.get());
         assert!(rx.try_recv().is_err());
@@ -869,7 +905,7 @@ mod tests {
             playing: Some(false),
             name: None,
         });
-        assert!(core.ctx.sink.test_open_output(true));
+        core.ctx.sink.test_write_result(1, false);
         dispatch(&mut core);
         recv_start(&mut rx);
 
