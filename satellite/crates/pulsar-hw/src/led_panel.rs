@@ -10,7 +10,7 @@
 //! рисует компоновщик.
 //! см. docs/station2.md, «Светодиоды и часы»
 //!
-//! Побитового эталона у этой отрисовки нет — `mul_add` не используется.
+//! Панель не добавляет собственных `mul_add`; общие функции сохраняют арифметику кольца.
 //! см. docs/architecture.md, «Плавающая точка (FMA)»
 //!
 //! `out` — светодиоды панели (84 или 88 с логотипом). `t` у состояний и разовых сигналов — мс от
@@ -327,7 +327,9 @@ pub fn music(s: fx::Style, st: &fx::MusicState, inp: &fx::MusicInput, t: f64, ou
             // До дальних углов панели (до контура ~4,7) на полной громкости.
             let reach = loud * 5.1;
             let col = fx::hsv(fx::palette(t) / 360.0, 0.9, v);
-            each(out, |g| col * fx::smoothstep(reach + 0.7, reach - 0.3, g.pulse_dist));
+            each(out, |g| {
+                col * fx::smoothstep(reach + 0.7, reach - 0.3, g.pulse_dist)
+            });
         }
         fx::Style::Disco | fx::Style::Polar => {
             let mut ring = [Col::default(); VIRTUAL_RING];

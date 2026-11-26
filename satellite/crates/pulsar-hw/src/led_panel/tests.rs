@@ -280,28 +280,35 @@ fn disco_and_polar_follow_the_ring_by_angle() {
         loudness: 0.8,
         flash: 0.0,
     };
+    // Соседние точки контура попадают между отсчётами кольца, а точка ореола — между 23 и 0.
+    let offset = (1.25_f32 / 2.0).atan() * 24.0 / TAU;
+    let wrap = (0.625_f32 / 3.0).atan() * 24.0 / TAU;
+    let halo_weight = 1.0 - fx::smoothstep(0.6, 3.6, 1.0);
+    let positions = [
+        ((7, 4), 0.0, 1.0),
+        ((9, 4), offset, 1.0),
+        ((5, 4), 24.0 - offset, 1.0),
+        ((6, 3), 24.0 - wrap, halo_weight),
+    ];
     for s in [fx::Style::Disco, fx::Style::Polar] {
-        let mut ring = [Col::default(); 24];
-        fx::music(s, &st, &inp, 0.0, &mut ring);
-        let mut out = vec![Col::default(); 88];
-        music(s, &st, &inp, 0.0, &mut out);
-        assert!(!lit(&out).is_empty(), "{s:?} drew nothing");
-        // Верхняя середина контура берёт цвет светодиода 0 кольца.
-        let top = contour_leds()
-            .into_iter()
-            .min_by(|&a, &b| {
-                let a = GEOMETRY[a];
-                let b = GEOMETRY[b];
-                (a.dx.abs() + a.dy).total_cmp(&(b.dx.abs() + b.dy))
-            })
-            .unwrap();
-        assert!(GEOMETRY[top].dy < 0.0);
-        let want = lum(ring[0]);
-        assert!(
-            (lum(out[top]) - want).abs() <= 0.5 * want + 0.05,
-            "{s:?}: top {} vs ring[0] {want}",
-            lum(out[top])
-        );
+        for t in [0.0, 0.7, 3.0] {
+            let mut ring = [Col::default(); 24];
+            fx::music(s, &st, &inp, t, &mut ring);
+            let mut out = [Col::default(); PANEL_LEDS];
+            music(s, &st, &inp, t, &mut out);
+            assert!(!lit(&out).is_empty(), "{s:?} drew nothing");
+            for (xy, index, weight) in positions {
+                let pixel = PANEL_XY.iter().position(|&p| p == xy).unwrap();
+                let i = index.floor() as usize;
+                let want = fx::lerp(ring[i], ring[(i + 1) % 24], index.fract()) * weight;
+                let got = out[pixel];
+                let max_error = (got.r - want.r)
+                    .abs()
+                    .max((got.g - want.g).abs())
+                    .max((got.b - want.b).abs());
+                assert!(max_error < 1e-5, "{s:?} {t} {xy:?}: {got:?} vs {want:?}");
+            }
+        }
     }
 }
 
@@ -365,6 +372,23 @@ fn spectrum_bass_and_treble_columns_start_together() {
             .filter(|&i| (GEOMETRY[i].dx.abs().round() as usize).min(7) == band)
             .any(|i| lum(out[i]) > 0.05);
         assert!(any, "band {band} dark");
+    }
+}
+
+#[test]
+fn spectrum_keeps_each_band_in_its_physical_columns() {
+    let st = fx::MusicState::default();
+    for band in 0..8 {
+        let mut inp = fx::MusicInput::default();
+        inp.bands[band] = 0.6;
+        let mut out = [Col::default(); PANEL_LEDS];
+        music(fx::Style::Spectrum, &st, &inp, 0.0, &mut out);
+        let on = lit(&out);
+        assert!(!on.is_empty(), "band {band} dark");
+        for i in on {
+            let (col, _) = PANEL_XY[i];
+            assert_eq!((col - 7).unsigned_abs() as usize, band, "LED {i}");
+        }
     }
 }
 

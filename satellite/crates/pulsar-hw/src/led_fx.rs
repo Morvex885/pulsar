@@ -546,7 +546,7 @@ pub(crate) const PANEL_LOGO_LEDS: usize = 4;
 /// 15×13, индексы 0..83 — панель, 84..87 — четыре центральных светодиода логотипа. Карта — из
 /// вики: https://hackalice.me/devices/station-2/#led. Имена восьми 2D-эффектов взяты из
 /// [#29](https://github.com/Morvex885/pulsar/pull/29), их отрисовка — своя.
-pub(crate) const PANEL_XY: [(i8, i8); 88] = [
+pub(crate) const PANEL_XY: [(i8, i8); PANEL_LEDS + PANEL_LOGO_LEDS] = [
     (1, 0),
     (3, 0),
     (5, 0),

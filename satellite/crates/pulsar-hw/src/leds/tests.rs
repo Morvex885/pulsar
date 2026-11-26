@@ -632,6 +632,37 @@ fn panel_mute_reversal_does_not_jump_under_volume() {
     assert_eq!(c.px[84 * 3..], [0; 12]);
 }
 
+#[tokio::test(start_paused = true)]
+async fn panel_actor_finishes_the_logo_fade_without_waiting_for_volume_to_expire() {
+    LocalSet::new()
+        .run_until(async {
+            let (leds, frames, task) = spawn_capture_layout(88, 0, LedLayout::Station2Panel);
+            leds.set_muted(false);
+            leds.show_volume(0.5);
+            sleep_ms(1).await;
+            let volume = frames.borrow().last().unwrap().1[..84 * 3].to_vec();
+            let red = to_px(panel::mute_logo(), 1.0, None);
+            leds.set_muted(true);
+            sleep_ms(125).await;
+            {
+                let frames = frames.borrow();
+                let px = &frames.last().unwrap().1;
+                assert_eq!(px[..84 * 3], volume);
+                assert!((1..red[0]).contains(&px[84 * 3]));
+            }
+            sleep_ms(175).await;
+            {
+                let frames = frames.borrow();
+                let px = &frames.last().unwrap().1;
+                assert_eq!(px[..84 * 3], volume);
+                assert_eq!(px[84 * 3..], red.repeat(4));
+            }
+            drop(leds);
+            task.await.unwrap();
+        })
+        .await;
+}
+
 #[test]
 fn panel_mute_change_fades_only_the_logo() {
     // Под «думает» дуга движется дальше без следа: переход идёт только у логотипа.
@@ -687,11 +718,8 @@ async fn panel_actor_draws_frames_every_20_ms() {
             assert!(times.len() > 10, "{times:?}");
             let steps: Vec<i64> = times.windows(2).map(|w| w[1] - w[0]).collect();
             // Кадр без изменений не пишется, поэтому шаг — кратный 20 мс, а не 33.
-            assert!(
-                steps.iter().all(|d| d % PANEL_FRAME_MS as i64 == 0),
-                "{steps:?}"
-            );
-            assert_eq!(steps.iter().min(), Some(&(PANEL_FRAME_MS as i64)));
+            assert!(steps.iter().all(|d| d % 20 == 0), "{steps:?}");
+            assert_eq!(steps.iter().min(), Some(&20));
             drop(leds);
             task.await.unwrap();
         })
@@ -771,7 +799,8 @@ fn panel_mute_with_its_sweep_fades_the_logo_from_what_was_shown() {
     c.frame(1450);
     assert_eq!(c.active_layer(1450), Layer::OneShot);
     assert_eq!(&c.px[..3], &[0, 0, 0]);
-    assert!(c.px[..84 * 3].chunks_exact(3).any(|px| px[0] > 0));
+    let (pixels, _) = c.px[..84 * 3].as_chunks::<3>();
+    assert!(pixels.iter().any(|px| px[0] > 0));
     c.frame(1600);
     c.frame(1850);
     assert_eq!(c.active_layer(1850), Layer::User);

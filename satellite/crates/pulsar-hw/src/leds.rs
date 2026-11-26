@@ -24,6 +24,8 @@
 //! Listening / Thinking / Speaking with voice indication on) > one-shots (timer started, mute) >
 //! led_show > mute (Lite 2: steady dim red) > user light > music visualization > off. The Midi
 //! logo shows the voice state, else red while muted, else the ring's average colour.
+//! На панели Станции 2 постоянный красный логотип не участвует в выборе слоя: его непрозрачность
+//! меняется независимо от переходов между фоновыми слоями.
 
 use std::fs::File;
 use std::io;
@@ -45,8 +47,8 @@ const FRAME_MS: u64 = 33;
 /// рывками.
 /// см. docs/station2.md, «Светодиоды и часы»
 const PANEL_FRAME_MS: u64 = 20;
-/// Поправка датчика освещённости Станции 2: без неё панель и в светлой комнате приглушена, и
-/// плавные переходы идут по нижним ступеням яркости, заметными шагами.
+/// Множитель только для автояркости панели, по одному сравнению. Без него переходы даже
+/// в светлой комнате идут заметными шагами на низкой яркости. Показания в HA не меняются.
 /// см. docs/station2.md, «Светодиоды и часы»
 const PANEL_LUX_GAIN: f32 = 9.5;
 /// Global cap: never drive LEDs above 80 % PWM.
