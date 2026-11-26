@@ -18,7 +18,10 @@ REAL_CP=$(command -v cp)
 REAL_SLEEP=$(command -v sleep)
 REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
+REAL_DATE=$(command -v date)
+REAL_PIDOF=$(command -v pidof)
 export BT_FIXTURE REAL_READLINK REAL_SLEEP REAL_MV REAL_STAT REAL_CP
+export REAL_DATE REAL_PIDOF
 export PULSAR_DIR=$BT_FIXTURE/data PULSAR_LOG=$BT_FIXTURE/supervise.log PULSAR_Q=$BT_FIXTURE/bin/quasar
 export PULSAR_BT_OWNER=$BT_FIXTURE/owner PULSAR_BT_PROC=$BT_FIXTURE/proc PULSAR_BT_INIT=$BT_FIXTURE/bin/init
 export PULSAR_TAG=isolated PULSAR_LITE2=station.invalid
@@ -94,8 +97,9 @@ cat > "$BT_FIXTURE/bin/pidof" <<'EOF'
 #!/bin/sh
 case "$*" in
   pulsar)
-    if [ -n "${SELF_PID-}" ]; then echo "$SELF_PID"; exit 0; fi
-    if [ -f "$BT_FIXTURE/pulsar-running" ]; then echo 501; exit 0; fi
+    if [ -n "${SELF_PID-}" ]; then echo "$SELF_PID ${EXTRA_PIDS-}"; exit 0; fi
+    if [ -f "$BT_FIXTURE/pulsar-running" ]; then echo "501 ${EXTRA_PIDS-}"; exit 0; fi
+    if [ -n "${EXTRA_PIDS-}" ]; then echo "$EXTRA_PIDS"; exit 0; fi
     if [ -s "$BT_FIXTURE/test/pid" ]; then
       read -r p < "$BT_FIXTURE/test/pid"
       if [ "$(readlink "/proc/$p/exe" 2>/dev/null)" = "$BT_FIXTURE/test/pulsar" ]; then echo "$p"; exit 0; fi
@@ -128,6 +132,14 @@ cat > "$BT_FIXTURE/bin/sleep" <<'EOF'
 case "$1" in 60|2) exec "$REAL_SLEEP" 0.15 ;; 1|3|6|12|24|30) exec "$REAL_SLEEP" 0.01 ;; esac
 EOF
 printf '#!/bin/sh\nexit 1\n' > "$BT_FIXTURE/bin/ipcs"
+cat > "$BT_FIXTURE/bin/date" <<'EOF'
+#!/bin/sh
+if [ "${SHADOW_AT_START:-0}" = 1 ] && [ -e "$BT_FIXTURE/late-replacement" ]; then
+  "$REAL_MV" "$BT_FIXTURE/late-replacement" "$PULSAR_DIR/pulsar" || exit 1
+  echo 'install:renamed' >> "$BT_FIXTURE/events"
+fi
+exec "$REAL_DATE" "$@"
+EOF
 cat > "$BT_FIXTURE/bin/setsid" <<'EOF'
 #!/bin/sh
 [ "$*" = "$PULSAR_DIR/supervise.sh" ] || exit 2
@@ -194,6 +206,13 @@ install_fixture() {
   mv -f "$PULSAR_DIR/pulsar.new" "$PULSAR_DIR/pulsar"
 }
 
+fake_pulsar() {
+  p=$PULSAR_BT_PROC/$1
+  mkdir -p "$p"
+  printf 'Uid:\t%s\t%s\t%s\t%s\n' "$2" "$2" "$2" "$2" > "$p/status"
+  ln -s "$3" "$p/exe"
+}
+
 # SSH-адрес из окружения имеет приоритет; без него читается только одна строка файла.
 mkdir -p "$XDG_CONFIG_HOME/pulsar/stations"
 station_file=$XDG_CONFIG_HOME/pulsar/stations/lite2
@@ -224,12 +243,31 @@ printf '1 0 10' > "$PULSAR_BT_OWNER"
 reject ctl bt-restore
 expect ''
 marker '0 1 0'
+fake_pulsar 501 "$(id -u)" "$PULSAR_DIR/pulsar (deleted)"
+fake_pulsar 504 "$(($(id -u) + 1))" "$PULSAR_DIR/pulsar"
+fake_pulsar 505 "$(id -u)" "$BT_FIXTURE/unrelated/pulsar"
 touch "$BT_FIXTURE/pulsar-running"
+reject ctl bt-restore
 reject ctl bt-restore --self
 rm "$BT_FIXTURE/pulsar-running"
-sh -c 'SELF_PID=$$ "$1" bt-restore --self; rc=$?; exit "$rc"' fixture "$PULSAR_DIR/ctl.sh"
+expect ''
+EXTRA_PIDS='504 505' sh -c '
+  p=$PULSAR_BT_PROC/$$
+  mkdir "$p" && cp "/proc/$$/status" "$p/status" &&
+    ln -s "$PULSAR_DIR/pulsar" "$p/exe" || exit 1
+  SELF_PID=$$ "$1" bt-restore --self
+  rc=$?
+  rm -rf "$p"
+  exit "$rc"
+' fixture "$PULSAR_DIR/ctl.sh"
 expect 'Pairable:false
 Discoverable:true'
+trace
+marker '0 1 0'
+EXTRA_PIDS='504 505' ctl bt-restore
+expect 'Pairable:false
+Discoverable:true'
+[ ! -e "$PULSAR_BT_OWNER" ] || fail 'unrelated processes blocked stock restoration'
 trace
 
 # Обычный рестарт не применяет снимок. Disable возвращает только исходные флаги/процесс.
@@ -242,6 +280,13 @@ touch "$BT_FIXTURE/pulsar-running"
 reject env FAIL_FLAG=Discoverable "$PULSAR_DIR/ctl.sh" reload --stop
 expect 'Discoverable:false
 Pairable:false'
+[ ! -e "$BT_FIXTURE/supervisor-running" ] || fail 'failed stop restarted production'
+trace
+FAIL_FLAG=Discoverable ctl reload
+expect 'Discoverable:false
+Pairable:false
+supervisor:start'
+[ -f "$BT_FIXTURE/supervisor-running" ] || fail 'ordinary reload stranded production'
 trace
 ctl reload --stop
 expect 'Discoverable:false
@@ -753,5 +798,49 @@ managed:1'
 Discoverable:true'
   [ ! -e "$owner" ] && [ -f "$stale" ] ||
     fail 'restore used a snapshot outside this boot'
+
+  # Replace the canonical path at the start timestamp, after the inode checks.
+  # A real ELF daemon must still have the pulsar process name, hold the old
+  # inode, and get the canonical update path rather than the executable link.
+  rm "$legacy" "$stale"
+  install_fixture /bin/sh
+  ln "$PULSAR_DIR/pulsar" "$BT_FIXTURE/pre-rename"
+  cat > "$PULSAR_DIR/state.conf" <<'EOF'
+set -eu
+exe=$("$REAL_READLINK" "/proc/$$/exe")
+if [ ! -e "$PULSAR_BT_OWNER" ]; then
+  [ "$exe" = "$PULSAR_DIR/pulsar" ] && [ -z "$PULSAR_INSTALLED_BINARY" ] || exit 2
+  (umask 077; printf '1 0 1\n' > "$PULSAR_BT_OWNER")
+  "$PULSAR_BT_INIT" stop
+  echo canonical >> "$BT_FIXTURE/events"
+  rm "$PULSAR_DIR/enabled"
+else
+  [ "${exe##*/}" = pulsar ] && [ "$exe" -ef "$BT_FIXTURE/pre-rename" ] || exit 2
+  [ "$PULSAR_INSTALLED_BINARY" = "$PULSAR_DIR/pulsar" ] && ! [ "$exe" -ef "$PULSAR_INSTALLED_BINARY" ] || exit 2
+  case " $("$REAL_PIDOF" pulsar) " in *" $$ "*) ;; *) exit 2 ;; esac
+  [ ! -d "$PULSAR_BT_PROC/101" ]
+  echo pinned >> "$BT_FIXTURE/events"
+fi
+EOF
+  trace
+  touch "$PULSAR_DIR/enabled"
+  sh "$PULSAR_DIR/supervise.sh"
+  expect 'init:stop
+canonical
+Discoverable:false
+Pairable:false'
+  cp "$BT_FIXTURE/stable" "$BT_FIXTURE/late-replacement"
+  trace
+  touch "$PULSAR_DIR/enabled"
+  SHADOW_AT_START=1 sh "$PULSAR_DIR/supervise.sh"
+  expect 'install:renamed
+pinned
+Discoverable:false
+Pairable:false
+Pairable:true
+Discoverable:false
+init:start
+stable'
+  [ ! -e "$owner" ] || fail 'replacement launched before restoring ownership'
 )
 echo 'Bluetooth ownership tests passed'

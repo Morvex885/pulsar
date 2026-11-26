@@ -46,11 +46,19 @@ struct Request {
     address: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FirstFrameDecision {
+    Waiting,
+    Accepted(u64),
+    Rejected,
+}
+
 struct Control {
     request: Option<Request>,
     shutdown: bool,
     admitted: bool,
     gate: u64,
+    first: Option<(u64, FirstFrameDecision)>,
     station_gain: f32,
     phone_gain: [f32; CHANNELS],
     gain: [f32; CHANNELS],
@@ -87,6 +95,7 @@ impl Shared {
                 shutdown: false,
                 admitted: false,
                 gate: 0,
+                first: None,
                 station_gain: 1.0,
                 phone_gain: UNITY,
                 gain: UNITY,
@@ -113,6 +122,28 @@ impl Shared {
     fn gate(&self, generation: u64) -> Option<(u64, bool)> {
         let ctl = self.control.lock().unwrap();
         (ctl.generation() == Some(generation)).then_some((ctl.gate, ctl.admitted))
+    }
+
+    fn hold_first(&self, generation: u64, order: u64) -> bool {
+        let mut ctl = self.control.lock().unwrap();
+        if ctl.generation() != Some(generation) {
+            return false;
+        }
+        ctl.first = Some((order, FirstFrameDecision::Waiting));
+        true
+    }
+
+    fn first_decision(&self, generation: u64, order: u64) -> FirstFrameDecision {
+        let ctl = self.control.lock().unwrap();
+        if ctl.generation() == Some(generation)
+            && let Some((token, decision)) = ctl.first
+            && token == order
+            && !matches!(decision, FirstFrameDecision::Accepted(gate) if ctl.gate != gate)
+        {
+            decision
+        } else {
+            FirstFrameDecision::Rejected
+        }
     }
 
     fn write_if_admitted<T>(
@@ -170,6 +201,7 @@ impl Worker {
             let mut ctl = self.shared.control.lock().unwrap();
             ctl.admit(false);
             ctl.request = None;
+            ctl.first = None;
             ctl.shutdown = true;
         }
         self.shared.wake.notify_one();
@@ -194,6 +226,7 @@ impl Worker {
                 return;
             }
             ctl.admit(false);
+            ctl.first = None;
             ctl.phone_gain = UNITY;
             ctl.update_gain();
             std::mem::replace(&mut ctl.request, request)
@@ -221,6 +254,29 @@ impl Worker {
 
     pub(super) fn set_admitted(&self, admitted: bool) {
         self.shared.control.lock().unwrap().admit(admitted);
+    }
+
+    pub(super) fn reconcile_admission(
+        &self,
+        generation: u64,
+        admitted: bool,
+        first: Option<(u64, bool)>,
+    ) {
+        let mut ctl = self.shared.control.lock().unwrap();
+        if ctl.generation() != Some(generation) {
+            return;
+        }
+        ctl.admit(admitted);
+        if let Some((order, accepted)) = first
+            && ctl.first == Some((order, FirstFrameDecision::Waiting))
+        {
+            let decision = if accepted && admitted {
+                FirstFrameDecision::Accepted(ctl.gate)
+            } else {
+                FirstFrameDecision::Rejected
+            };
+            ctl.first = Some((order, decision));
+        }
     }
 }
 
@@ -299,7 +355,8 @@ fn configure(pcm: &mut Pcm, stream: Stream, context: &'static str) -> Result<(),
         let period = hw.period_frames.max(1);
         match stream {
             Stream::Capture => pcm.set_sw_params(1, period.min(FRAMES as u64))?,
-            Stream::Playback => pcm.set_sw_params(period, period)?,
+            // A single short prompt can end before a whole period arrives.
+            Stream::Playback => pcm.set_sw_params(1, period)?,
         }
         pcm.prepare()
     })();
@@ -371,6 +428,13 @@ impl Activity {
     }
 }
 
+struct BufferedFirst {
+    order: u64,
+    slot: usize,
+    frames: usize,
+    idle: bool,
+}
+
 fn transfer(
     capture: &mut Pcm,
     output: &mut Pcm,
@@ -378,10 +442,13 @@ fn transfer(
     events: &UnboundedSender<Event>,
     generation: u64,
 ) -> Result<(), PcmError> {
-    let mut input = [0; FRAMES * CHANNELS];
-    let mut scaled = [0; FRAMES * CHANNELS];
+    // Пока решается допуск, второй буфер используется для захвата без
+    // накопления очереди; при записи он же нужен для пересчёта громкости.
+    let mut buffers = [[0; FRAMES * CHANNELS]; 2];
+    let mut first = None::<BufferedFirst>;
     let mut activity = Activity::AwaitingFirstFrame(Instant::now());
     let mut queued_gate = None;
+    let mut idle_after_write = None;
     while let Some((gate, admitted)) = shared.gate(generation) {
         if queued_gate.is_some_and(|previous| previous != gate) {
             output.drop_frames().map_err(|e| ("сброс выхода ALSA", e))?;
@@ -390,42 +457,133 @@ fn transfer(
                 .map_err(|e| ("подготовка выхода ALSA", e))?;
             queued_gate = None;
         }
-        let result = capture.readi(&mut input, FRAMES);
-        let frames = finish_io(capture, result).map_err(|e| ("чтение A2DP", e))?;
-        if let Some(event) = activity.observe(generation, frames != 0, Instant::now())
-            && events.send(event).is_err()
-        {
-            return Ok(());
+        if let Some(pending) = &first {
+            let decision = shared.first_decision(generation, pending.order);
+            // Сначала сбросить очередь предыдущего допуска в начале цикла.
+            if matches!(decision, FirstFrameDecision::Accepted(accepted) if accepted != gate) {
+                continue;
+            }
+            if decision != FirstFrameDecision::Waiting {
+                let pending = first.take().unwrap();
+                let written = if let FirstFrameDecision::Accepted(gate) = decision {
+                    let written = write_frames(
+                        output,
+                        shared,
+                        generation,
+                        gate,
+                        &mut buffers,
+                        (pending.slot, pending.frames),
+                    )?;
+                    if written {
+                        queued_gate = Some(gate);
+                    }
+                    written
+                } else {
+                    false
+                };
+                if pending.idle {
+                    if written {
+                        // Не закрывать затвор, пока только что записанный
+                        // короткий звук ещё находится в очереди ALSA.
+                        idle_after_write = Some(Instant::now() + IDLE_AFTER);
+                    } else if events.send(Event::Idle(generation)).is_err() {
+                        return Ok(());
+                    }
+                }
+                continue;
+            }
         }
-        if !admitted || frames == 0 {
+        let slot = first.as_ref().map_or(0, |pending| pending.slot ^ 1);
+        let result = capture.readi(&mut buffers[slot], FRAMES);
+        let after_idle = matches!(activity, Activity::Idle);
+        let frames = finish_io(capture, result).map_err(|e| ("чтение A2DP", e))?;
+        let now = Instant::now();
+        if idle_after_write.is_some_and(|at| frames != 0 || now >= at) {
+            idle_after_write = None;
+            if events.send(Event::Idle(generation)).is_err() {
+                return Ok(());
+            }
+        }
+        if let Some(event) = activity.observe(generation, frames != 0, now) {
+            match event {
+                Event::Activity(_, order) => {
+                    // Новый фронт заменяет старый буфер, даже если его допуск
+                    // пришёл во время чтения: нельзя записать его за новый сеанс.
+                    let replaced = first.take().is_some();
+                    if replaced && events.send(Event::Idle(generation)).is_err() {
+                        return Ok(());
+                    }
+                    if (!admitted || replaced || after_idle) && shared.hold_first(generation, order)
+                    {
+                        first = Some(BufferedFirst {
+                            order,
+                            slot,
+                            frames,
+                            idle: false,
+                        });
+                    }
+                }
+                Event::Idle(_) => {
+                    if let Some(pending) = &mut first {
+                        // Даже короткий звук из одного буфера ждёт решения.
+                        pending.idle = true;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            if events.send(event).is_err() {
+                return Ok(());
+            }
+        }
+        if !admitted || first.is_some() || frames == 0 {
             continue;
         }
-        let mut done = 0;
-        let mut scaled_gain = UNITY;
-        while done < frames {
-            let pending = (done * CHANNELS)..(frames * CHANNELS);
-            let Some(result) = shared.write_if_admitted(generation, gate, |gain| {
-                let samples = if gain == UNITY {
-                    &input[pending]
-                } else {
-                    if scaled_gain != gain {
-                        apply_gain(&input[pending.clone()], &mut scaled[pending.clone()], gain);
-                        scaled_gain = gain;
-                    }
-                    &scaled[pending]
-                };
-                output.writei_s16(samples, frames - done)
-            }) else {
-                break;
-            };
-            let written = finish_io(output, result).map_err(|e| ("запись ALSA", e))?;
-            if written != 0 {
-                queued_gate = Some(gate);
-                done += written;
-            }
+        if write_frames(
+            output,
+            shared,
+            generation,
+            gate,
+            &mut buffers,
+            (slot, frames),
+        )? {
+            queued_gate = Some(gate);
         }
     }
     Ok(())
+}
+
+fn write_frames(
+    output: &mut Pcm,
+    shared: &Shared,
+    generation: u64,
+    gate: u64,
+    buffers: &mut [[i16; FRAMES * CHANNELS]; 2],
+    (slot, frames): (usize, usize),
+) -> Result<bool, PcmError> {
+    let [a, b] = buffers;
+    let (input, scaled) = if slot == 0 { (a, b) } else { (b, a) };
+    let mut done = 0;
+    let mut scaled_gain = UNITY;
+    while done < frames {
+        let pending = (done * CHANNELS)..(frames * CHANNELS);
+        let Some(result) = shared.write_if_admitted(generation, gate, |gain| {
+            let samples = if gain == UNITY {
+                &input[pending]
+            } else {
+                if scaled_gain != gain {
+                    apply_gain(&input[pending.clone()], &mut scaled[pending.clone()], gain);
+                    scaled_gain = gain;
+                }
+                &scaled[pending]
+            };
+            output.writei_s16(samples, frames - done)
+        }) else {
+            break;
+        };
+        done += finish_io(output, result).map_err(|e| ("запись ALSA", e))?;
+    }
+    Ok(done != 0)
 }
 
 fn finish_io(pcm: &mut Pcm, result: Result<usize, i32>) -> Result<usize, i32> {
@@ -583,6 +741,57 @@ mod tests {
                 .is_some()
         );
         assert_eq!(sink, [[100, 0], [100, 100]]);
+    }
+
+    #[test]
+    fn bluetooth_pcm_first_buffer_needs_its_own_generation_gate_and_episode_grant() {
+        let (worker, _) = Worker::new();
+        let shared = &worker.shared;
+        worker.start(5, String::new());
+        let (gate, _) = shared.gate(5).unwrap();
+        assert!(shared.hold_first(5, 10));
+        assert_eq!(shared.first_decision(5, 10), FirstFrameDecision::Waiting);
+        worker.reconcile_admission(5, true, Some((9, true)));
+        assert_eq!(shared.first_decision(5, 10), FirstFrameDecision::Waiting);
+        worker.reconcile_admission(5, true, Some((10, true)));
+        assert_eq!(
+            shared.first_decision(5, 10),
+            FirstFrameDecision::Accepted(gate)
+        );
+        assert_eq!(
+            shared.write_if_admitted(5, gate, |_| [123_i16, -123]),
+            Some([123, -123])
+        );
+
+        assert!(shared.hold_first(5, 11));
+        assert_eq!(shared.first_decision(5, 10), FirstFrameDecision::Rejected);
+        worker.reconcile_admission(5, true, Some((11, false)));
+        worker.reconcile_admission(5, true, Some((11, true)));
+        assert_eq!(shared.first_decision(5, 11), FirstFrameDecision::Rejected);
+        assert!(shared.hold_first(5, 12));
+        worker.reconcile_admission(5, true, Some((12, true)));
+        worker.set_admitted(false);
+        worker.set_admitted(true);
+        assert_eq!(shared.first_decision(5, 12), FirstFrameDecision::Rejected);
+
+        assert!(shared.hold_first(5, 13));
+        worker.set_admitted(false);
+        assert_eq!(shared.first_decision(5, 13), FirstFrameDecision::Waiting);
+        let (new_gate, _) = shared.gate(5).unwrap();
+        worker.reconcile_admission(5, true, Some((13, true)));
+        assert_eq!(
+            shared.first_decision(5, 13),
+            FirstFrameDecision::Accepted(new_gate)
+        );
+        assert!(shared.hold_first(5, 14));
+        worker.start(6, String::new());
+        worker.reconcile_admission(5, true, Some((14, true)));
+        assert_eq!(shared.first_decision(5, 14), FirstFrameDecision::Rejected);
+        assert!(
+            shared
+                .write_if_admitted(5, new_gate, |_| [123_i16, -123])
+                .is_none()
+        );
     }
 
     #[test]

@@ -21,6 +21,10 @@ impl SendspinHandle {
         match self.never {}
     }
 
+    pub fn stream_is_current(&self, _order: u64) -> bool {
+        match self.never {}
+    }
+
     pub fn connected(&self) -> bool {
         match self.never {}
     }
@@ -41,7 +45,11 @@ impl SendspinHandle {
         match self.never {}
     }
 
-    pub fn pause_for_bluetooth(&self) {
+    pub fn yield_to_music(&self, _order: u64) {
+        match self.never {}
+    }
+
+    pub fn pause_for_bluetooth(&self, _order: u64) {
         match self.never {}
     }
 

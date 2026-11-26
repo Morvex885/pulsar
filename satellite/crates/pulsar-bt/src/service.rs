@@ -41,7 +41,7 @@ impl BtState {
 }
 
 enum Cmd {
-    Enable(bool),
+    Enable { on: bool, at: Option<u64> },
     Avr(BtAction),
     Preempt,
     Admit(u64),
@@ -79,11 +79,12 @@ impl BtHandle {
     }
 
     pub fn set_enabled(&self, on: bool) {
-        self.shared.requested.set(on);
+        let was_on = self.shared.requested.replace(on);
+        let at = (on && !was_on).then(pulsar_core::audio_start_order);
         if !on {
             self.shared.pcm.stop();
         }
-        let _ = self.cmds.send(Cmd::Enable(on));
+        let _ = self.cmds.send(Cmd::Enable { on, at });
     }
 
     pub fn avr(&self, action: BtAction) {
@@ -183,6 +184,7 @@ pub async fn spawn(
         flag_error: None,
         visibility_target: None,
         retry_at: Instant::now(),
+        enable_order: None,
         frames: FrameActivity::default(),
         previous_episode: None,
         granted: None,
@@ -245,11 +247,17 @@ async fn retry_stock_restore(stock: Stock) {
 struct FrameActivity {
     active: Option<bool>,
     start: Option<u64>,
+    // Метка первого PCM-буфера и порядок старта, которому он принадлежит.
+    first: Option<(u64, Option<u64>)>,
+    fallback: bool,
+    covered_avr: Option<u64>,
+    enable_continuation: Option<u64>,
     ignore_snapshot: bool,
 }
 
 impl FrameActivity {
     fn start(&mut self, order: u64) {
+        self.first = Some((order, None));
         // Новое открытие PCM не означает новый старт уже идущего потока.
         if self.active != Some(true) {
             self.active = Some(true);
@@ -260,13 +268,48 @@ impl FrameActivity {
     fn idle(&mut self) {
         self.active = Some(false);
         self.start = None;
+        self.first = None;
+        self.fallback = false;
+        self.enable_continuation = None;
     }
 
     fn after_bus_loss(mut self) -> Self {
         self.ignore_snapshot = true;
         // Первый буфер после открытия не отличим от продолжения старого потока.
+        self.start = None;
+        self.first = None;
+        self.fallback = false;
+        self.enable_continuation = None;
         self.active = Some(true);
         self
+    }
+
+    fn worker_lost(&mut self, playing: bool) {
+        self.first = None;
+        self.start = None;
+        if playing && self.active.is_none() {
+            self.active = Some(true);
+        }
+    }
+
+    fn first_frame_decision(
+        &self,
+        ready: Option<u64>,
+        granted: Option<u64>,
+        preempt_before: u64,
+    ) -> Option<(u64, bool)> {
+        let (token, start) = self.first?;
+        if token >= preempt_before && start.is_some() && start == ready {
+            (granted == ready).then_some((token, true))
+        } else {
+            Some((token, false))
+        }
+    }
+
+    fn avr_order(&self, order: Option<u64>, snapshot_order: u64) -> Option<u64> {
+        order
+            .or((!self.ignore_snapshot).then_some(snapshot_order))
+            .filter(|&order| Some(order) > self.covered_avr)
     }
 
     fn observe_snapshot(
@@ -275,32 +318,39 @@ impl FrameActivity {
         avr: Option<(Playback, Option<u64>)>,
         snapshot_order: u64,
     ) {
-        let avr = avr.map(|(phase, order)| {
-            (
-                phase,
-                order.or((!self.ignore_snapshot).then_some(snapshot_order)),
-            )
-        });
+        let avr = avr.map(|(phase, order)| (phase, self.avr_order(order, snapshot_order)));
         self.observe(policy, avr);
     }
 
     fn observe(&mut self, policy: &mut Policy, avr: Option<(Playback, Option<u64>)>) {
-        let (phase, order) = match avr {
-            Some((phase, order)) => {
-                // Только Playing учитывает текущие кадры: при Paused их старый
-                // порядок ещё может понадобиться при потере статуса AVRCP.
-                if phase == Playback::Playing {
-                    self.start = None;
-                }
-                (Some(phase), order)
+        if self.fallback {
+            // Поздний AVRCP Playing для уже учтённых PCM-кадров не создаёт
+            // новый старт, даже если локальная музыка успела вытеснить звук.
+            if let Some((Playback::Playing, order)) = avr {
+                self.covered_avr = self.covered_avr.max(order);
             }
-            None if self.active == Some(false) => (None, None),
-            None => match self.start.take() {
-                Some(order) => (Some(Playback::Playing), Some(order)),
-                None => return,
-            },
+            return;
+        }
+        let first = self.start.take();
+        let continuation = first.and_then(|_| self.enable_continuation.take());
+        let (phase, order) = match (avr, first) {
+            (Some((Playback::Playing, order)), _)
+                if order.is_some() || policy.admitted || continuation.is_none() =>
+            {
+                (Some(Playback::Playing), order)
+            }
+            (_, Some(order)) => {
+                self.fallback = true;
+                (Some(Playback::Playing), Some(continuation.unwrap_or(order)))
+            }
+            (Some((phase, _)), None) => (Some(phase), None),
+            (None, None) if self.active == Some(false) => (None, None),
+            (None, None) => return,
         };
         policy.observe_playback(policy.generation, phase, order);
+        if let Some(token) = first {
+            self.first = Some((token, policy.admitted.then_some(policy.starts)));
+        }
     }
 }
 
@@ -313,6 +363,23 @@ struct PreviousEpisode {
 impl PreviousEpisode {
     fn recover(self, owner: &str, preempt_before: u64) -> Option<FrameActivity> {
         (self.owner == owner && self.starts < preempt_before).then(|| self.frames.after_bus_loss())
+    }
+
+    fn reopen_after_enable(
+        &self,
+        owner: &str,
+        at: u64,
+        preempt_before: u64,
+    ) -> Option<FrameActivity> {
+        (self.owner == owner && self.frames.fallback && self.starts >= preempt_before).then(|| {
+            FrameActivity {
+                // Повторное открытие потока не даёт его первому буферу
+                // вытеснить локальный источник, запущенный после On.
+                enable_continuation: Some(at.max(self.starts)),
+                covered_avr: self.frames.covered_avr,
+                ..FrameActivity::default()
+            }
+        })
     }
 }
 
@@ -332,6 +399,7 @@ struct Service {
     flag_error: Option<&'static str>,
     visibility_target: Option<bool>,
     retry_at: Instant,
+    enable_order: Option<u64>,
     frames: FrameActivity,
     previous_episode: Option<PreviousEpisode>,
     granted: Option<u64>,
@@ -406,11 +474,14 @@ impl Service {
 
     async fn command(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Enable(on) => {
+            Cmd::Enable { on, at } => {
+                self.enable_order = at.filter(|_| !self.policy.enabled);
+                if !on {
+                    self.remember_episode();
+                }
                 let paired = self.bus.as_ref().filter(|_| on).map(Bus::paired);
                 self.policy.set_enabled(on, Instant::now(), paired);
                 if !on {
-                    self.previous_episode = None;
                     self.reset_session();
                 }
                 self.retry_at = Instant::now();
@@ -442,9 +513,7 @@ impl Service {
         }
     }
 
-    async fn lost_bus(&mut self) {
-        let pinned = self.bus.take();
-        let now = Instant::now();
+    fn remember_episode(&mut self) {
         if (self.policy.playback == Some(Playback::Playing) || self.frames.active == Some(true))
             && let Some(owner) = self.policy.owner.as_ref()
         {
@@ -454,6 +523,12 @@ impl Service {
                 frames: std::mem::take(&mut self.frames),
             });
         }
+    }
+
+    async fn lost_bus(&mut self) {
+        let pinned = self.bus.take();
+        let now = Instant::now();
+        self.remember_episode();
         self.policy.release();
         self.policy.close_pairing(now);
         self.reset_session();
@@ -510,12 +585,20 @@ impl Service {
     fn reconcile(&mut self) -> bool {
         let now = Instant::now();
         self.policy.expire(now);
+        let enable_order = self.enable_order.take();
         if self.pcm_retry_at.is_some_and(|at| now >= at) {
             self.pcm_retry_at = None;
             self.pcm_error = None;
         }
         if let Some(bus) = &self.bus {
             self.policy.observe_pairs(|path| bus.is_paired(path));
+            if !self.policy.enabled
+                && self.previous_episode.as_ref().is_some_and(|episode| {
+                    !bus.candidates().any(|c| c.device == episode.owner.as_str())
+                })
+            {
+                self.previous_episode = None;
+            }
             if let Some(owner) = self.policy.owner.as_deref()
                 && (!self.policy.permits(owner) || selected(bus, &self.policy).is_none())
             {
@@ -526,6 +609,7 @@ impl Service {
         if self.stock_ready
             && let Some(bus) = &self.bus
         {
+            let mut reenable = None;
             if self.shared.requested.get()
                 && let Some(device) = self.policy.choose(
                     bus.candidates()
@@ -533,18 +617,36 @@ impl Service {
                         .map(|c| (c.device, c.sequence)),
                 )
             {
-                if let Some(frames) = self
-                    .previous_episode
-                    .take()
-                    .and_then(|episode| episode.recover(device, self.shared.preempt_before.get()))
-                {
+                reenable = enable_order.filter(|_| {
+                    self.previous_episode
+                        .as_ref()
+                        .is_some_and(|episode| episode.owner == device)
+                });
+                if let Some(frames) = self.previous_episode.take().and_then(|episode| {
+                    let preempt_before = self.shared.preempt_before.get();
+                    reenable
+                        .and_then(|at| episode.reopen_after_enable(device, at, preempt_before))
+                        .or_else(|| episode.recover(device, preempt_before))
+                }) {
                     self.frames = frames;
                 }
                 self.policy.select(device.to_owned(), now);
             }
             if let Some(c) = selected(bus, &self.policy) {
+                let last_start = self.policy.starts;
                 self.frames
                     .observe_snapshot(&mut self.policy, c.phase, bus.snapshot_order());
+                if let Some(enabled_at) = reenable
+                    && let Some((Playback::Playing, order)) = c.phase
+                    && let Some(observed) = self.frames.avr_order(order, bus.snapshot_order())
+                    && observed <= last_start
+                {
+                    self.policy.reauthorize_playback(
+                        observed,
+                        enabled_at,
+                        self.shared.preempt_before.get(),
+                    );
+                }
                 if self.pcm_generation != Some(self.policy.generation)
                     && self.probe.as_ref().is_some_and(PcmProbe::ready)
                     && self.pcm_error.is_none()
@@ -567,9 +669,12 @@ impl Service {
             self.granted = None;
         }
         let ready = self.ready_start();
-        self.shared
-            .pcm
-            .set_admitted(ready.is_some() && self.granted == ready);
+        self.shared.pcm.reconcile_admission(
+            self.policy.generation,
+            ready.is_some() && self.granted == ready,
+            self.frames
+                .first_frame_decision(ready, self.granted, self.shared.preempt_before.get()),
+        );
         self.publish();
         pause
     }
@@ -589,6 +694,8 @@ impl Service {
                 self.pcm_error = Some("PCM output unavailable");
                 // Восстановление выхода не делает старый поток новым источником.
                 self.policy.generation += 1;
+                self.frames
+                    .worker_lost(self.policy.playback == Some(Playback::Playing));
                 self.pcm_retry_at = Some(Instant::now() + RETRY);
             }
             PcmEvent::Started(g) if self.pcm_generation == Some(g) => self.pcm_ready = true,
@@ -596,6 +703,8 @@ impl Service {
                 self.pcm_ready = false;
                 self.pcm_generation = None;
                 self.policy.generation += 1;
+                self.frames
+                    .worker_lost(self.policy.playback == Some(Playback::Playing));
             }
             _ => {}
         }
@@ -605,7 +714,9 @@ impl Service {
         let now = Instant::now();
         let open = self.visibility_open();
         self.retry_at = now + RETRY;
-        if self.bus.is_none() && self.visibility_target != Some(false) {
+        // BlueZ may restart while BlueALSA is still down, so previously
+        // confirmed flags do not prove the current adapter is closed.
+        if self.bus.is_none() {
             self.close_offline_pairing(None).await;
         }
         if !self.stock_ready {
@@ -635,6 +746,8 @@ impl Service {
                 self.shared.pcm.stop();
                 self.pcm_ready = false;
                 self.policy.generation += 1;
+                self.frames
+                    .worker_lost(self.policy.playback == Some(Playback::Playing));
             }
             self.probe = None;
         }
@@ -854,18 +967,91 @@ mod tests {
     }
 
     #[test]
-    fn losing_paused_avrcp_keeps_unaccounted_first_frame_order() {
+    fn pcm_prompt_keeps_its_edge_with_unchanged_paused_avrcp() {
         let mut policy = selected_policy();
         let mut frames = FrameActivity::default();
         let paused = Some((Playback::Paused, None));
         frames.observe(&mut policy, paused);
         frames.start(10);
+        assert_eq!(
+            frames.first_frame_decision(None, None, 0),
+            Some((10, false))
+        );
         frames.observe(&mut policy, paused);
         frames.observe(&mut policy, paused);
-        assert!(policy.ready_start(true, 0).is_none());
+        assert_eq!(policy.ready_start(true, 0), Some(10));
+        assert_eq!(frames.first_frame_decision(Some(10), None, 0), None);
+        assert_eq!(
+            frames.first_frame_decision(Some(10), Some(10), 0),
+            Some((10, true))
+        );
         frames.observe(&mut policy, None);
         assert_eq!(policy.ready_start(true, 0), Some(10));
         assert_eq!(policy.ready_start(true, 20), None);
+        frames.idle();
+        frames.observe(&mut policy, paused);
+        assert_eq!(policy.playback, Some(Playback::Paused));
+        assert!(policy.ready_start(true, 0).is_none());
+    }
+
+    #[test]
+    fn late_avrcp_playing_does_not_replay_preempted_pcm_prompt() {
+        let mut policy = selected_policy();
+        let mut frames = FrameActivity::default();
+        let paused = Some((Playback::Paused, None));
+        frames.start(10);
+        frames.observe(&mut policy, paused);
+        assert!(policy.preempt_before(20));
+        assert_eq!(
+            frames.first_frame_decision(None, None, 20),
+            Some((10, false))
+        );
+        let late_playing = Some((Playback::Playing, Some(30)));
+        frames.observe_snapshot(&mut policy, late_playing, 1);
+        frames.idle();
+        frames.observe_snapshot(&mut policy, late_playing, 1);
+        assert_eq!(policy.ready_start(true, 20), None);
+        assert_eq!(policy.starts, 10);
+
+        frames.observe(&mut policy, paused);
+        frames.start(40);
+        frames.observe(&mut policy, paused);
+        assert_eq!(policy.ready_start(true, 20), Some(40));
+    }
+
+    #[test]
+    fn newer_avrcp_grant_cannot_use_frames_captured_before_local_preemption() {
+        let mut policy = selected_policy();
+        let mut frames = FrameActivity::default();
+        frames.start(10);
+        frames.observe(&mut policy, Some((Playback::Playing, Some(30))));
+        assert_eq!(policy.ready_start(true, 20), Some(30));
+        assert_eq!(
+            frames.first_frame_decision(Some(30), Some(30), 20),
+            Some((10, false))
+        );
+    }
+
+    #[test]
+    fn reopening_paused_metadata_stream_keeps_the_explicit_enable_order() {
+        let mut policy = selected_policy();
+        let mut frames = FrameActivity::default();
+        let paused = Some((Playback::Paused, None));
+        frames.start(10);
+        frames.observe(&mut policy, paused);
+        let previous = PreviousEpisode {
+            owner: "phone".into(),
+            starts: policy.starts,
+            frames,
+        };
+        assert!(previous.reopen_after_enable("phone", 30, 20).is_none());
+        let mut frames = previous.reopen_after_enable("phone", 30, 0).unwrap();
+        policy.release();
+        policy.select("phone".into(), Instant::now());
+        frames.start(50);
+        frames.observe(&mut policy, paused);
+        assert_eq!(policy.ready_start(true, 0), Some(30));
+        assert_eq!(policy.ready_start(true, 40), None);
     }
 
     #[test]
@@ -880,6 +1066,7 @@ mod tests {
         assert!(policy.preempt_before(music_start));
 
         // Первые кадры после повтора открытия ещё принадлежат старому потоку.
+        frames.worker_lost(true);
         frames.start(pulsar_core::audio_start_order());
         frames.observe(&mut policy, None);
         assert_eq!(policy.starts, phone_start);

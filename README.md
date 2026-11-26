@@ -390,7 +390,7 @@ cd /data/pulsar && ./ctl.sh rollback
 cd /data/pulsar && read -r boot < /proc/sys/kernel/random/boot_id &&
   test ! -e ".pulsar-bt-owner.$boot" && test ! -L ".pulsar-bt-owner.$boot" &&
   test ! -e /tmp/pulsar-bt-owner && test ! -L /tmp/pulsar-bt-owner &&
-  cp -p pulsar.prev pulsar.rb && mv pulsar.rb pulsar && ./ctl.sh restart
+  mv -f pulsar.prev pulsar && ./ctl.sh restart
 ```
 
 ### Удаление

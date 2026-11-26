@@ -136,6 +136,23 @@ impl Policy {
         }
     }
 
+    pub(super) fn reauthorize_playback(
+        &mut self,
+        observed: u64,
+        enabled_at: u64,
+        preempt_before: u64,
+    ) {
+        // Явный Off → On может вернуть прежний допуск, но не вытеснить
+        // локальную музыку, начавшуюся после наблюдаемого старта телефона.
+        if observed >= preempt_before {
+            self.observe_playback(
+                self.generation,
+                Some(Playback::Playing),
+                Some(observed.max(enabled_at)),
+            );
+        }
+    }
+
     pub fn ready_start(&self, pcm_ready: bool, preempt_before: u64) -> Option<u64> {
         (pcm_ready && self.admitted && self.starts >= preempt_before).then_some(self.starts)
     }
@@ -235,6 +252,30 @@ mod tests {
         p.observe_playback(generation, Some(Playback::Playing), None);
         assert!(!p.admitted);
         assert!(!p.permits("first"));
+    }
+
+    #[test]
+    fn explicit_reenable_readmits_cached_playing_without_overriding_local_music() {
+        let now = Instant::now();
+        for (preempted, expected) in [(0, Some(30)), (20, None)] {
+            let mut p = Policy::restore(true, BTreeSet::from(["phone".into()]));
+            p.select("phone".into(), now);
+            let old = p.generation;
+            p.observe_playback(old, Some(Playback::Playing), Some(10));
+            p.preempt_before(preempted);
+            p.set_enabled(false, now, None);
+            p.set_enabled(true, now, None);
+            p.select("phone".into(), now);
+            p.observe_playback(old, Some(Playback::Playing), Some(99));
+            p.observe_playback(p.generation, Some(Playback::Playing), Some(10));
+            assert_eq!(p.ready_start(true, preempted), None);
+
+            p.reauthorize_playback(10, 30, preempted);
+            assert_eq!(p.ready_start(true, preempted), expected);
+            p.new_generation();
+            p.observe_playback(p.generation, Some(Playback::Playing), Some(10));
+            assert_eq!(p.ready_start(true, preempted), None);
+        }
     }
 
     #[test]

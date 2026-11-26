@@ -49,26 +49,37 @@ bt_owner=$("$D/ctl.sh" bt-restore --owner-path 2>/dev/null) || bt_owner=
 bt_legacy=/tmp/pulsar-bt-owner
 bt_blocked=$BIN.bt-blocked
 bt_next=$bt_blocked.next
-# /data/pulsar is trusted like ctl.sh itself. Pin the inode for this boot so
-# an executable replacement cannot reuse it and look like an ordinary reload.
+# /data/pulsar is trusted like ctl.sh itself. The boot-scoped inode pin also
+# serves as the executable on a managed restart; keep its basename for pidof.
 boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
-bt_executable=
-[ -z "$boot_id" ] || bt_executable=$D/.pulsar-bt-executable.$boot_id
+bt_runtime= bt_executable=
+case "$boot_id" in
+  ''|*[!0-9a-f-]*) boot_id= ;;
+  *) bt_runtime=$D/.pulsar-bt-executable.$boot_id; bt_executable=$bt_runtime/pulsar ;;
+esac
 
 bt_blocked_now() { [ "$BIN" -ef "$bt_blocked" ] || [ "$BIN" -ef "$bt_next" ]; }
+bt_pending() { [ -e "$bt_owner" ] || [ -L "$bt_owner" ]; }
 
 remember_bt_executable() {
   [ -n "$bt_executable" ] && [ -n "$bt_owner" ] || return 1
   [ "$BIN" -ef "$bt_executable" ] && return 0
   # An unexpected rename during startup must never rebind another binary's snapshot.
-  [ ! -e "$bt_owner" ] && [ ! -L "$bt_owner" ] || return 1
+  bt_pending && return 1
   if [ -z "${PULSAR_BT_OWNER:-}" ]; then
     # Новый boot_id не должен применять флаги от предыдущей загрузки.
     for old in "$D"/.pulsar-bt-owner.*; do
       [ "$old" = "$bt_owner" ] || rm -f "$old" || return 1
     done
   fi
-  rm -f "$D"/.pulsar-bt-executable.* && ln "$BIN" "$bt_executable"
+  for old in "$D"/.pulsar-bt-executable.*; do
+    if [ -d "$old" ]; then
+      rm -f "$old/pulsar" && rmdir "$old" || return 1
+    else
+      rm -f "$old" || return 1
+    fi
+  done
+  mkdir "$bt_runtime" && ln "$BIN" "$bt_executable"
 }
 
 restore_bt() {
@@ -161,36 +172,44 @@ while [ -f "$D/enabled" ]; do
     fi
     give_back "no usable binary"
   fi
-  # Перезапуск того же бинарника не возвращает player штатному стеку.
   inode=$(stat -Lc '%d:%i' "$BIN") || { say "could not identify $BIN"; exit 1; }
-  if [ "$inode" != "$last_inode" ]; then
-    if [ "$bt_allowed" != 1 ] || bt_blocked_now || ! [ "$BIN" -ef "$bt_executable" ]; then
-      wait_restore_bt || exit 0
-      [ "$inode" = "$(stat -Lc '%d:%i' "$BIN")" ] || continue
-    fi
-    last_inode=$inode
-  fi
   clear_dmix
-  bt_managed=0
+  bt_managed=0 launch=$BIN installed_binary=
   if bt_blocked_now; then
+    wait_restore_bt || exit 0
     if [ "$BIN" -ef "$bt_next" ]; then mv -f "$bt_next" "$bt_blocked"; fi
   else
     rm -f "$bt_blocked" "$bt_next"
-    if [ "$bt_allowed" = 1 ] && "$D/ctl.sh" bt-restore --check >/dev/null 2>&1 &&
-      remember_bt_executable; then
-      bt_managed=1
+    if [ "$bt_allowed" = 1 ] && "$D/ctl.sh" bt-restore --check >/dev/null 2>&1; then
+      if [ "$BIN" -ef "$bt_executable" ]; then
+        bt_managed=1
+        if [ -z "${PULSAR_BT_OWNER:-}" ] && bt_pending; then
+          # A concurrent install can replace BIN even after the final stat.
+          # Execute the proven owner; the next iteration will restore before
+          # starting a different inode. Test/legacy launches stay canonical.
+          launch=$bt_executable installed_binary=$BIN
+        fi
+      else
+        wait_restore_bt || exit 0
+        remember_bt_executable && bt_managed=1
+      fi
+    else
+      wait_restore_bt || exit 0
     fi
     # Появился другой бинарь — он получает собственную попытку отката.
     if [ "$swapped" = 1 ]; then swapped=0 fails=0 backoff=$BACKOFF_MIN; fi
   fi
   [ "$inode" = "$(stat -Lc '%d:%i' "$BIN")" ] || continue
+  if [ "$bt_managed" = 1 ] && ! [ "$BIN" -ef "$bt_executable" ]; then continue; fi
+  last_inode=$inode
   echo "=== start $(date)" >> "$LOG"
   t0=$(uptime_s)
-  PULSAR_BT_MANAGED=$bt_managed PULSAR_BT_OWNER=$bt_owner "$BIN" "$D/state.conf" >> "$LOG" 2>&1
+  PULSAR_BT_MANAGED=$bt_managed PULSAR_BT_OWNER=$bt_owner PULSAR_INSTALLED_BINARY=$installed_binary \
+    "$launch" "$D/state.conf" >> "$LOG" 2>&1
   rc=$?
   up=$(($(uptime_s) - t0))
   echo "=== exit $rc after ${up}s $(date)" >> "$LOG"
-  if [ -e "$bt_owner" ] || [ -L "$bt_owner" ]; then
+  if bt_pending; then
     "$D/ctl.sh" bt-restore --hide >> "$LOG" 2>&1 ||
       say "Bluetooth pairing flags could not be closed after daemon exit"
   fi

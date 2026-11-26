@@ -69,7 +69,7 @@ type SsClient = Client<Ctx>;
 struct Ctx {
     /// Main loop events, delivered inside `Client::run_loop` (or start / drop) and handled by
     /// the actor right after it.
-    events: Mutex<Vec<LibEvent>>,
+    events: Mutex<Vec<(LibEvent, Option<u64>)>>,
     sink: Sink,
     state_dir: PathBuf,
     tx: UnboundedSender<SendspinEvent>,
@@ -81,37 +81,39 @@ struct Ctx {
 }
 
 impl Ctx {
-    fn revoke_stream(self: &Arc<Self>, streaming: &Cell<bool>) -> bool {
-        if !streaming.get() {
+    fn revoke_before(self: &Arc<Self>, streaming: &Cell<bool>, order: u64) -> bool {
+        if !self.sink.revoke_before(order) {
             return false;
         }
-        self.sink.request_release();
         // Если sync task уже перестал писать, закрытие PCM всё равно должно выполниться.
         let ctx = self.clone();
         tokio::task::spawn_blocking(move || ctx.sink.finish_request());
-        // Снять локальный статус сразу: следующий StreamStart должен считаться новым,
-        // даже если сервер ещё не прислал StreamEnd для вытесненного потока.
-        streaming.set(false);
-        let _ = self.tx.send(SendspinEvent::Stream(None));
+        // Publish the local loss immediately rather than waiting for the server's StreamEnd.
+        if streaming.replace(false) {
+            let _ = self.tx.send(SendspinEvent::Stream(None));
+        }
         true
     }
 }
 
 impl Listener for Ctx {
     fn event(&self, ev: LibEvent) {
-        match sink_request(&ev) {
+        let order = match sink_request(&ev) {
             Some(SinkRequest::Configure {
                 rate,
                 channels,
                 bits,
-            }) => self.sink.configure(rate, channels, bits),
-            Some(SinkRequest::Release) => self.sink.release(),
-            None => {}
-        }
+            }) => Some(self.sink.configure(rate, channels, bits)),
+            Some(SinkRequest::Release) => {
+                self.sink.release();
+                None
+            }
+            None => None,
+        };
         self.events
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(ev);
+            .push((ev, order));
     }
 
     fn load_blob(&self, key: &OsStr) -> Option<Vec<u8>> {
@@ -173,6 +175,11 @@ impl SendspinHandle {
         self.streaming.get()
     }
 
+    /// Whether a queued start still owns the actual output, independently of the reported hold.
+    pub fn stream_is_current(&self, order: u64) -> bool {
+        self.streaming.get() && self.ctx.sink.owns_start(order)
+    }
+
     /// Sendspin-сервер (например, Music Assistant) подключён: атомарный флаг, который пишет поток
     /// библиотеки; чтение (acquire) не блокирует.
     pub fn connected(&self) -> bool {
@@ -225,10 +232,18 @@ impl SendspinHandle {
         self.leave_group();
     }
 
+    /// Music won a newer start. Revoke only the losing generation, then leave the group
+    /// without pausing the other players.
+    pub fn yield_to_music(&self, order: u64) {
+        if self.ctx.revoke_before(&self.streaming, order) {
+            self.leave_group();
+        }
+    }
+
     /// Bluetooth перехватил динамик. Pause касается всей группы, но не подтверждает
     /// остановку локального PCM: закрыть его независимо от ответа сервера.
-    pub fn pause_for_bluetooth(&self) {
-        if self.ctx.revoke_stream(&self.streaming) && !self.transport(Transport::Pause) {
+    pub fn pause_for_bluetooth(&self, order: u64) {
+        if self.ctx.revoke_before(&self.streaming, order) && !self.transport(Transport::Pause) {
             self.leave_group();
         }
     }
@@ -364,15 +379,13 @@ impl Core {
         }
     }
 
-    fn stream(&self, changed: Option<bool>) {
-        if let Some(active) = changed {
-            self.send(SendspinEvent::Stream(
-                active.then(pulsar_core::audio_start_order),
-            ));
+    fn stream_ended(&self, ended: bool) {
+        if ended {
+            self.send(SendspinEvent::Stream(None));
         }
     }
 
-    fn take_events(&self) -> Vec<LibEvent> {
+    fn take_events(&self) -> Vec<(LibEvent, Option<u64>)> {
         std::mem::take(
             &mut *self
                 .ctx
@@ -382,7 +395,7 @@ impl Core {
         )
     }
 
-    fn event(&mut self, ev: LibEvent) {
+    fn event(&mut self, (ev, order): (LibEvent, Option<u64>)) {
         match ev {
             LibEvent::Group { playing, name } => {
                 info!(
@@ -396,8 +409,8 @@ impl Core {
                     }
                 );
                 if let Some(playing) = playing {
-                    let changed = self.hold.group(playing, &mut self.timers);
-                    self.stream(changed);
+                    let ended = self.hold.group(playing, &mut self.timers);
+                    self.stream_ended(ended);
                 }
             }
             LibEvent::TimeSync(error) => debug!("sendspin: time sync error {error:.0} us"),
@@ -442,14 +455,16 @@ impl Core {
                     p.channels,
                     p.bits
                 );
-                // The sink was configured inside the callback (Ctx::event).
-                let changed = self.hold.start(&mut self.timers);
-                self.stream(changed);
+                // A later callback may already have replaced or ended this PCM.
+                if let Some(order) = order.filter(|&order| self.ctx.sink.owns_start(order)) {
+                    self.hold.start(&mut self.timers);
+                    self.send(SendspinEvent::Stream(Some(order)));
+                }
             }
             LibEvent::StreamEnd => {
                 // The sink was released inside the callback (Ctx::event).
-                let changed = self.hold.end(&mut self.timers, self.hooks);
-                self.stream(changed);
+                let ended = self.hold.end(&mut self.timers, self.hooks);
+                self.stream_ended(ended);
             }
             LibEvent::Volume(v) => {
                 info!("sendspin: server volume {v}");
@@ -501,8 +516,8 @@ impl Actor {
                 key = self.core.timers.next() => match key {
                     Key::Tick => self.poll(),
                     Key::StreamEnd => {
-                        let changed = self.core.hold.finish(&mut self.core.timers);
-                        self.core.stream(changed);
+                        let ended = self.core.hold.finish(&mut self.core.timers);
+                        self.core.stream_ended(ended);
                     }
                 },
                 cmd = cmds.recv() => match cmd {
@@ -536,8 +551,8 @@ impl Actor {
             );
         } else {
             info!("sendspin: server disconnected");
-            let changed = self.core.hold.finish(&mut self.core.timers);
-            self.core.stream(changed);
+            let ended = self.core.hold.finish(&mut self.core.timers);
+            self.core.stream_ended(ended);
         }
     }
 
@@ -604,6 +619,13 @@ mod tests {
     use super::*;
     use crate::event::StreamParams;
 
+    const PARAMS: StreamParams = StreamParams {
+        codec: 0,
+        rate: 48000,
+        channels: 2,
+        bits: 16,
+    };
+
     fn ctx() -> (Ctx, UnboundedReceiver<SendspinEvent>) {
         let (tx, rx) = unbounded_channel();
         let ctx = Ctx {
@@ -624,12 +646,7 @@ mod tests {
     fn stream_callbacks_drive_the_sink_before_the_actor_runs() {
         let (ctx, _rx) = ctx();
         assert!(!ctx.sink.accepts_audio());
-        ctx.event(LibEvent::StreamStart(Some(StreamParams {
-            codec: 0,
-            rate: 48000,
-            channels: 2,
-            bits: 16,
-        })));
+        ctx.event(LibEvent::StreamStart(Some(PARAMS)));
         assert!(ctx.sink.accepts_audio());
         ctx.event(LibEvent::StreamEnd);
         assert!(!ctx.sink.accepts_audio());
@@ -639,37 +656,102 @@ mod tests {
         assert_eq!(ctx.events.lock().unwrap().len(), 3);
     }
 
-    #[tokio::test]
-    async fn bluetooth_revokes_sendspin_until_a_new_stream_starts() {
-        let (ctx, mut rx) = ctx();
+    fn rig() -> (Core, Rc<Cell<bool>>, UnboundedReceiver<SendspinEvent>) {
+        let (ctx, rx) = ctx();
         let streaming = Rc::new(Cell::new(false));
-        let mut core = Core {
+        let core = Core {
             ctx: Arc::new(ctx),
             hold: StreamHold::new(streaming.clone()),
             timers: Timers::new(),
             hooks: true,
         };
-        let params = StreamParams {
-            codec: 0,
-            rate: 48000,
-            channels: 2,
-            bits: 16,
+        (core, streaming, rx)
+    }
+
+    fn dispatch(core: &mut Core) {
+        for ev in core.take_events() {
+            core.event(ev);
+        }
+    }
+
+    fn recv_start(rx: &mut UnboundedReceiver<SendspinEvent>) -> u64 {
+        let Ok(SendspinEvent::Stream(Some(order))) = rx.try_recv() else {
+            panic!("expected a stream start");
         };
+        order
+    }
+
+    #[tokio::test]
+    async fn newer_music_revokes_sendspin_before_or_after_actor_dispatch() {
+        for dispatch_first in [false, true] {
+            let (mut core, streaming, mut rx) = rig();
+            let ctx = core.ctx.clone();
+            ctx.event(LibEvent::StreamStart(Some(PARAMS)));
+            assert!(ctx.sink.accepts_audio());
+            // Another audio thread starts before Sendspin drains its callback queue.
+            let music = pulsar_core::audio_start_order();
+            if dispatch_first {
+                dispatch(&mut core);
+                let sendspin = recv_start(&mut rx);
+                assert!(sendspin < music);
+                assert!(ctx.sink.owns_start(sendspin));
+            }
+
+            assert!(ctx.revoke_before(&streaming, music));
+            assert!(!streaming.get());
+            assert_eq!(ctx.audio_write(&[1; 4], 0), (4, 0, 0));
+            assert!(!ctx.sink.accepts_audio());
+            if dispatch_first {
+                assert_eq!(rx.try_recv(), Ok(SendspinEvent::Stream(None)));
+            } else {
+                // A revoked, not-yet-reported generation cannot reappear on dispatch.
+                dispatch(&mut core);
+                assert!(rx.try_recv().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn newer_callback_survives_older_music_during_held_restart() {
+        let (mut core, streaming, mut rx) = rig();
+        let ctx = core.ctx.clone();
+        ctx.event(LibEvent::StreamStart(Some(PARAMS)));
+        dispatch(&mut core);
+        let first = recv_start(&mut rx);
+
+        ctx.event(LibEvent::StreamEnd);
+        dispatch(&mut core);
+        assert!(streaming.get()); // Still reported while waiting for a seek/skip restart.
+        assert!(!ctx.sink.owns_start(first));
+        let music = pulsar_core::audio_start_order();
+        assert!(!ctx.revoke_before(&streaming, music)); // No active sink to revoke.
+        assert!(rx.try_recv().is_err());
+
+        ctx.event(LibEvent::StreamStart(Some(PARAMS)));
+        assert!(!ctx.revoke_before(&streaming, music)); // Already newer, not yet dispatched.
+        assert!(ctx.sink.accepts_audio());
+        dispatch(&mut core);
+        let second = recv_start(&mut rx);
+        assert!(second > music);
+        assert!(ctx.sink.owns_start(second));
+        assert!(streaming.get());
+        assert!(rx.try_recv().is_err()); // The held activity did not flap.
+    }
+
+    #[tokio::test]
+    async fn bluetooth_revokes_sendspin_until_a_new_stream_starts() {
+        let (mut core, streaming, mut rx) = rig();
         let ctx = core.ctx.clone();
         let mut event = |ev| {
             core.ctx.event(ev);
-            for ev in core.take_events() {
-                core.event(ev);
-            }
+            dispatch(&mut core);
         };
 
-        event(LibEvent::StreamStart(Some(params)));
-        let Ok(SendspinEvent::Stream(Some(first))) = rx.try_recv() else {
-            panic!("нет события начала потока");
-        };
+        event(LibEvent::StreamStart(Some(PARAMS)));
+        let first = recv_start(&mut rx);
         assert!(ctx.sink.accepts_audio());
 
-        assert!(ctx.revoke_stream(&streaming));
+        assert!(ctx.revoke_before(&streaming, pulsar_core::audio_start_order()));
         assert_eq!(rx.try_recv(), Ok(SendspinEvent::Stream(None)));
         assert!(!streaming.get());
         assert!(!ctx.sink.accepts_audio());
@@ -683,10 +765,8 @@ mod tests {
         assert!(!ctx.sink.accepts_audio());
         assert!(rx.try_recv().is_err());
 
-        event(LibEvent::StreamStart(Some(params)));
-        let Ok(SendspinEvent::Stream(Some(second))) = rx.try_recv() else {
-            panic!("нет события начала нового потока");
-        };
+        event(LibEvent::StreamStart(Some(PARAMS)));
+        let second = recv_start(&mut rx);
         assert!(second > first);
         assert!(streaming.get());
         assert!(ctx.sink.accepts_audio());

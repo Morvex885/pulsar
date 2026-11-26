@@ -94,13 +94,15 @@ stop_service() {
 
 bt_error() { echo "bt-restore: $* (снимок сохранён в $bt_owner)" >&2; return 1; }
 
+bt_effective_uid() { awk '$1 == "Uid:" { print $3; exit }' "$1/status" 2>/dev/null; }
+
 bt_player_running() {
   # Штатный init-скрипт сверяет и exe (-x), и имя процесса (-n), а не только pidfile.
   for bt_pid in "$bt_proc"/[0-9]*; do
     { IFS= read -r bt_comm < "$bt_pid/comm"; } 2>/dev/null || continue
     [ "$bt_comm" = bluealsa-aplay ] &&
       [ "$(readlink "$bt_pid/exe" 2>/dev/null)" = "$bt_player" ] &&
-      [ "$(awk '$1 == "Uid:" { print $3; exit }' "$bt_pid/status" 2>/dev/null)" = "$bt_uid" ] &&
+      [ "$(bt_effective_uid "$bt_pid")" = "$bt_uid" ] &&
       return 0
   done
   return 1
@@ -137,7 +139,19 @@ bt_read_owner() {
 }
 
 bt_stopped() {
-  bt_pids=$(pidof pulsar)
+  bt_proc=${PULSAR_BT_PROC:-/proc}
+  bt_pids= bt_test_exe=
+  if [ "${bt_owner##*/}" = bt-owner ]; then bt_test_exe=${bt_owner%/*}/pulsar; fi
+  for bt_pid in $(pidof pulsar); do
+    case "$bt_pid" in ''|*[!0-9]*) continue ;; esac
+    [ "$(bt_effective_uid "$bt_proc/$bt_pid")" = "$bt_uid" ] || continue
+    bt_exe=$(readlink "$bt_proc/$bt_pid/exe" 2>/dev/null) || continue
+    case "${bt_exe%' (deleted)'}" in
+      "$D/pulsar"|"$D"/.pulsar-bt-executable.*/pulsar|"$bt_test_exe") ;;
+      *) continue ;;
+    esac
+    bt_pids=${bt_pids:+$bt_pids }$bt_pid
+  done
   if [ "${1-}" = --self ]; then
     [ "$bt_pids" = "$PPID" ] || { bt_error 'запрос не от единственного процесса pulsar'; return 1; }
   elif [ -n "$bt_pids" ]; then
@@ -161,8 +175,7 @@ bt_restore() {
   [ -n "$bt_flags" ] || return 0
   bt_stopped "${1-}" || return 1
 
-  # Пространства путей подменяются только для изолированной проверки протокола.
-  bt_proc=${PULSAR_BT_PROC:-/proc}
+  # Пространство пути подменяется только для изолированной проверки протокола.
   bt_init=${PULSAR_BT_INIT:-/etc/init.d/S53bluealsa-aplay}
   if [ "${bt_flags##* }" = 1 ]; then
     bt_player=$(readlink -f /usr/bin/bluealsa-aplay) &&
@@ -257,12 +270,19 @@ case "$1" in
     ;;
   reload)
     case "$#:${2-}" in 1:|2:--stop) ;; *) exit 2 ;; esac
-    stop_service && bt_for_owners bt_hide || exit 1
-    [ "${2-}" = --stop ] && exit 0
+    stop_service || exit 1
+    if [ "${2-}" = --stop ]; then
+      bt_for_owners bt_hide
+      exit $?
+    fi
     if [ -f "$D/enabled" ] && [ -x "$D/supervise.sh" ]; then
+      # The replacement supervisor can wait for a handoff or restart the managed
+      # daemon to recover BlueZ. A failed hide must not strand an enabled service.
+      bt_for_owners bt_hide || echo 'Bluetooth hide failed; restarting the supervisor to recover' >&2
       start_supervisor || { echo 'supervisor did not start' >&2; exit 1; }
       echo "supervisor reloaded"
     else
+      bt_for_owners bt_hide || exit 1
       echo "supervisor stopped (not enabled)"
     fi
     ;;

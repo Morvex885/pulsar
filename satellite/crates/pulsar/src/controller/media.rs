@@ -52,11 +52,18 @@ impl Controller {
         }
     }
 
+    pub(super) fn local_music_takes_audio(&mut self, order: u64) {
+        self.bluetooth_yields_audio(order);
+        if let Some(ss) = &self.sendspin {
+            ss.yield_to_music(order);
+        }
+    }
+
     pub(super) fn bluetooth_takes_audio(&mut self) {
         // Остановить также незавершённый запуск Music: его PLAYING может прийти позже.
         self.stop_local_music();
         if let Some(ss) = &self.sendspin {
-            ss.pause_for_bluetooth();
+            ss.pause_for_bluetooth(self.audio_start);
         }
     }
 
@@ -69,7 +76,7 @@ impl Controller {
         if self.music_start_pending.is_none()
             && self.player.state(Channel::Music) == PlayState::Paused
         {
-            self.bluetooth_yields_audio(pulsar_core::audio_start_order());
+            self.local_music_takes_audio(pulsar_core::audio_start_order());
         }
         self.player.resume(Channel::Music);
     }
@@ -186,9 +193,6 @@ impl Controller {
                 let id = self.player.play(Channel::Announce, vec![url]);
                 self.pending.insert(id, Pending::MediaAnnounce { seq });
             } else {
-                if let Some(ss) = &self.sendspin {
-                    ss.yield_to_local(); // HA media takes the speaker from Sendspin
-                }
                 self.music_start_pending = Some(self.player.play(Channel::Music, vec![url]));
             }
         }
@@ -200,15 +204,7 @@ impl Controller {
             let music_state = self.player.state(Channel::Music);
             let music = || music_state;
             match c {
-                MediaCommand::Play => {
-                    if ss_on
-                        && music() == PlayState::Paused
-                        && let Some(ss) = &self.sendspin
-                    {
-                        ss.yield_to_local();
-                    }
-                    self.resume_local_music();
-                }
+                MediaCommand::Play => self.resume_local_music(),
                 MediaCommand::Pause => {
                     if ss_on || matches!(music(), PlayState::Playing | PlayState::Loading) {
                         self.clock.play(ClockShot::Pause);
@@ -263,7 +259,12 @@ impl Controller {
             SendspinEvent::Stream(order) => {
                 let active = order.is_some();
                 if let Some(order) = order {
-                    if order <= self.audio_start || !self.sendspin_streaming() {
+                    if order <= self.audio_start
+                        || !self
+                            .sendspin
+                            .as_ref()
+                            .is_some_and(|ss| ss.stream_is_current(order))
+                    {
                         return;
                     }
                     self.bluetooth_yields_audio(order);

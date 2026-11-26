@@ -21,8 +21,8 @@ pub(crate) enum Key {
 
 pub(crate) const STREAM_END_HOLD_MS: u64 = 1000;
 
-/// Each method returns the `Stream(..)` event to send, if any; `streaming` (the handle's getter)
-/// is already updated when it returns.
+/// Holds reported activity across seek/skip; `end`, `group` and `finish` return whether the
+/// actor should report a stream end. A valid start is always a new audio generation.
 pub(crate) struct StreamHold {
     streaming: Rc<Cell<bool>>,
     group_stopped: bool,
@@ -36,46 +36,41 @@ impl StreamHold {
         }
     }
 
-    pub(crate) fn start(&mut self, timers: &mut Timers<Key>) -> Option<bool> {
+    pub(crate) fn start(&mut self, timers: &mut Timers<Key>) {
         self.group_stopped = false;
         timers.cancel(Key::StreamEnd);
-        if self.streaming.get() {
-            return None;
-        }
         self.streaming.set(true);
-        Some(true)
     }
 
     /// `hold` = false: the owner is tearing the service down, end at once.
-    pub(crate) fn end(&mut self, timers: &mut Timers<Key>, hold: bool) -> Option<bool> {
+    pub(crate) fn end(&mut self, timers: &mut Timers<Key>, hold: bool) -> bool {
         if !self.streaming.get() || timers.is_set(Key::StreamEnd) {
-            return None;
+            return false;
         }
         if self.group_stopped || !hold {
             return self.finish(timers);
         }
         timers.set(Key::StreamEnd, STREAM_END_HOLD_MS);
-        None
+        false
     }
 
     /// A group update that carries a playback state.
-    pub(crate) fn group(&mut self, playing: bool, timers: &mut Timers<Key>) -> Option<bool> {
+    pub(crate) fn group(&mut self, playing: bool, timers: &mut Timers<Key>) -> bool {
         self.group_stopped = !playing;
         if self.group_stopped && timers.is_set(Key::StreamEnd) {
             return self.finish(timers);
         }
-        None
+        false
     }
 
     /// The hold ran out, or the server disconnected.
-    pub(crate) fn finish(&mut self, timers: &mut Timers<Key>) -> Option<bool> {
+    pub(crate) fn finish(&mut self, timers: &mut Timers<Key>) -> bool {
         timers.cancel(Key::StreamEnd);
-        if !self.streaming.get() {
-            return None;
+        if !self.streaming.replace(false) {
+            return false;
         }
         info!("sendspin: stream end");
-        self.streaming.set(false);
-        Some(false)
+        true
     }
 }
 
@@ -104,7 +99,7 @@ mod tests {
         }
 
         /// What the actor does when the timer fires: None if nothing fires within `within`.
-        async fn fire(&mut self, within: Duration) -> Option<Option<bool>> {
+        async fn fire(&mut self, within: Duration) -> Option<bool> {
             match timeout(within, self.timers.next()).await {
                 Ok(Key::StreamEnd) => Some(self.hold.finish(&mut self.timers)),
                 Ok(Key::Tick) => unreachable!(),
@@ -116,45 +111,45 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn end_without_stopped_is_held_one_second() {
         let mut r = Rig::new();
-        assert_eq!(r.hold.start(&mut r.timers), Some(true));
+        r.hold.start(&mut r.timers);
         assert!(r.streaming.get());
         let t0 = Instant::now();
-        assert_eq!(r.hold.end(&mut r.timers, true), None);
+        assert!(!r.hold.end(&mut r.timers, true));
         assert!(r.streaming.get());
-        assert_eq!(r.fire(Duration::from_secs(5)).await, Some(Some(false)));
+        assert_eq!(r.fire(Duration::from_secs(5)).await, Some(true));
         assert_eq!(t0.elapsed(), Duration::from_millis(STREAM_END_HOLD_MS));
         assert!(!r.streaming.get());
         // A second end (sendspin-cpp's stop()) changes nothing.
-        assert_eq!(r.hold.end(&mut r.timers, true), None);
+        assert!(!r.hold.end(&mut r.timers, true));
         assert_eq!(r.fire(Duration::from_secs(5)).await, None);
     }
 
     #[tokio::test(start_paused = true)]
     async fn restart_within_10_ms_keeps_streaming() {
         let mut r = Rig::new();
-        assert_eq!(r.hold.start(&mut r.timers), Some(true));
-        assert_eq!(r.hold.end(&mut r.timers, true), None);
+        r.hold.start(&mut r.timers);
+        assert!(!r.hold.end(&mut r.timers, true));
         advance(Duration::from_millis(10)).await;
-        assert_eq!(r.hold.start(&mut r.timers), None);
+        r.hold.start(&mut r.timers);
         assert!(r.streaming.get());
         assert_eq!(r.fire(Duration::from_secs(5)).await, None);
         assert!(r.streaming.get());
         // The next end is held again from its own time.
         let t0 = Instant::now();
-        assert_eq!(r.hold.end(&mut r.timers, true), None);
-        assert_eq!(r.fire(Duration::from_secs(5)).await, Some(Some(false)));
+        assert!(!r.hold.end(&mut r.timers, true));
+        assert_eq!(r.fire(Duration::from_secs(5)).await, Some(true));
         assert_eq!(t0.elapsed(), Duration::from_millis(STREAM_END_HOLD_MS));
     }
 
     #[tokio::test(start_paused = true)]
     async fn stopped_before_end_ends_at_once() {
         let mut r = Rig::new();
-        assert_eq!(r.hold.start(&mut r.timers), Some(true));
+        r.hold.start(&mut r.timers);
         // "playing" changes nothing; "stopped" without a held end only marks the group.
-        assert_eq!(r.hold.group(true, &mut r.timers), None);
-        assert_eq!(r.hold.group(false, &mut r.timers), None);
+        assert!(!r.hold.group(true, &mut r.timers));
+        assert!(!r.hold.group(false, &mut r.timers));
         assert!(r.streaming.get());
-        assert_eq!(r.hold.end(&mut r.timers, true), Some(false));
+        assert!(r.hold.end(&mut r.timers, true));
         assert!(!r.streaming.get());
         assert_eq!(r.fire(Duration::from_secs(5)).await, None);
     }
@@ -162,11 +157,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stopped_after_end_finishes_the_hold() {
         let mut r = Rig::new();
-        assert_eq!(r.hold.start(&mut r.timers), Some(true));
-        assert_eq!(r.hold.end(&mut r.timers, true), None);
+        r.hold.start(&mut r.timers);
+        assert!(!r.hold.end(&mut r.timers, true));
         advance(Duration::from_millis(300)).await;
         assert!(r.streaming.get());
-        assert_eq!(r.hold.group(false, &mut r.timers), Some(false));
+        assert!(r.hold.group(false, &mut r.timers));
         assert!(!r.streaming.get());
         assert_eq!(r.fire(Duration::from_secs(5)).await, None);
     }
@@ -174,34 +169,33 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn new_stream_clears_stopped() {
         let mut r = Rig::new();
-        assert_eq!(r.hold.group(false, &mut r.timers), None);
-        assert_eq!(r.hold.start(&mut r.timers), Some(true));
+        assert!(!r.hold.group(false, &mut r.timers));
+        r.hold.start(&mut r.timers);
         // The stop belonged to the previous stream: this end is held.
-        assert_eq!(r.hold.end(&mut r.timers, true), None);
-        assert!(r.streaming.get());
-        assert_eq!(r.fire(Duration::from_secs(5)).await, Some(Some(false)));
+        assert!(!r.hold.end(&mut r.timers, true));
+        assert_eq!(r.fire(Duration::from_secs(5)).await, Some(true));
     }
 
     #[tokio::test(start_paused = true)]
     async fn disconnect_ends_a_held_stream_at_once() {
         let mut r = Rig::new();
-        assert_eq!(r.hold.start(&mut r.timers), Some(true));
-        assert_eq!(r.hold.end(&mut r.timers, true), None);
+        r.hold.start(&mut r.timers);
+        assert!(!r.hold.end(&mut r.timers, true));
         advance(Duration::from_millis(100)).await;
-        assert_eq!(r.hold.finish(&mut r.timers), Some(false));
+        assert!(r.hold.finish(&mut r.timers));
         assert!(!r.streaming.get());
         assert_eq!(r.fire(Duration::from_secs(5)).await, None);
         // Disconnect while streaming (no end yet) also ends it; idle: nothing.
-        assert_eq!(r.hold.start(&mut r.timers), Some(true));
-        assert_eq!(r.hold.finish(&mut r.timers), Some(false));
-        assert_eq!(r.hold.finish(&mut r.timers), None);
+        r.hold.start(&mut r.timers);
+        assert!(r.hold.finish(&mut r.timers));
+        assert!(!r.hold.finish(&mut r.timers));
     }
 
     #[tokio::test(start_paused = true)]
     async fn teardown_does_not_hold() {
         let mut r = Rig::new();
-        assert_eq!(r.hold.start(&mut r.timers), Some(true));
-        assert_eq!(r.hold.end(&mut r.timers, false), Some(false));
+        r.hold.start(&mut r.timers);
+        assert!(r.hold.end(&mut r.timers, false));
         assert!(!r.streaming.get());
     }
 }

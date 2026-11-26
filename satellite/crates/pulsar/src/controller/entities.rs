@@ -695,11 +695,29 @@ impl Controller {
             warn!("update: not while the Zigbee radio is being written");
             return;
         }
-        let Ok(exe) = std::fs::read_link("/proc/self/exe") else {
-            error!("update: cannot find the running binary");
-            return;
+        let binary = if let Some(path) =
+            std::env::var_os("PULSAR_INSTALLED_BINARY").filter(|path| !path.is_empty())
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            // Managed restarts may execute a hardlink while an installer renames
+            // the installed binary. Never start an update from a superseded inode.
+            let same_inode = std::fs::metadata("/proc/self/exe").and_then(|running| {
+                let installed = std::fs::metadata(&path)?;
+                Ok((installed.dev(), installed.ino()) == (running.dev(), running.ino()))
+            });
+            if !matches!(same_inode, Ok(true)) {
+                warn!("update: installed binary no longer matches the running binary");
+                return;
+            }
+            std::path::PathBuf::from(path)
+        } else {
+            let Ok(exe) = std::fs::read_link("/proc/self/exe") else {
+                error!("update: cannot find the running binary");
+                return;
+            };
+            std::path::PathBuf::from(logic::strip_deleted(exe.as_os_str()))
         };
-        let binary = std::path::PathBuf::from(logic::strip_deleted(exe.as_os_str()));
         let Some(r) = self.release.clone() else {
             return;
         };

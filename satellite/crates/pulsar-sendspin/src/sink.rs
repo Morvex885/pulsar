@@ -29,9 +29,15 @@ enum Req {
     Release,
 }
 
+struct Request {
+    pending: Req,
+    // The owner of the output, even after the request has been applied to ALSA.
+    start: Option<u64>,
+}
+
 pub(crate) struct Sink {
     io: Mutex<Io>,
-    req: Mutex<Req>,
+    req: Mutex<Request>,
     req_gen: AtomicU32,
     applied_gen: AtomicU32,
     /// f32 bits of the duck gain the output ramps to, 0..1.
@@ -100,29 +106,53 @@ impl Sink {
                 prev_played: 0,
                 stats_us: 0,
             }),
-            req: Mutex::new(Req::None),
+            req: Mutex::new(Request {
+                pending: Req::None,
+                start: None,
+            }),
             req_gen: AtomicU32::new(0),
             applied_gen: AtomicU32::new(0),
             target_gain: AtomicU32::new(1.0f32.to_bits()),
         }
     }
 
-    pub(crate) fn configure(&self, rate: u32, channels: u8, bits: u8) {
-        self.request(Req::Configure {
-            rate,
-            channels,
-            bits,
-        });
+    pub(crate) fn configure(&self, rate: u32, channels: u8, bits: u8) -> u64 {
+        let order = {
+            let mut req = lock(&self.req);
+            let order = pulsar_core::audio_start_order();
+            self.record(
+                &mut req,
+                Req::Configure {
+                    rate,
+                    channels,
+                    bits,
+                },
+                Some(order),
+            );
+            order
+        };
+        self.try_apply();
+        order
+    }
+
+    pub(crate) fn owns_start(&self, order: u64) -> bool {
+        lock(&self.req).start == Some(order)
     }
 
     /// Stream ended: drop what is queued and release the device so dmix is not held while idle.
     pub(crate) fn release(&self) {
-        self.request(Req::Release);
+        self.record(&mut lock(&self.req), Req::Release, None);
+        self.try_apply();
     }
 
     /// Закрывает допуск синхронно; сам PCM закроет sync task или `finish_request`.
-    pub(crate) fn request_release(&self) {
-        self.record(Req::Release);
+    pub(crate) fn revoke_before(&self, order: u64) -> bool {
+        let mut req = lock(&self.req);
+        if !req.start.is_some_and(|start| start < order) {
+            return false;
+        }
+        self.record(&mut req, Req::Release, None);
+        true
     }
 
     /// Вызывается вне LocalSet, если новых записей может не быть.
@@ -287,8 +317,7 @@ impl Sink {
         (frames_done as usize * bpf, report, finish_us)
     }
 
-    fn request(&self, r: Req) {
-        self.record(r);
+    fn try_apply(&self) {
         let io = match self.io.try_lock() {
             Ok(io) => Some(io),
             Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
@@ -299,9 +328,8 @@ impl Sink {
         }
     }
 
-    fn record(&self, r: Req) {
-        let mut req = lock(&self.req);
-        *req = r;
+    fn record(&self, req: &mut Request, pending: Req, start: Option<u64>) {
+        *req = Request { pending, start };
         self.req_gen.fetch_add(1, SeqCst);
     }
 
@@ -309,7 +337,7 @@ impl Sink {
         let r = {
             let mut req = lock(&self.req);
             self.applied_gen.store(self.req_gen.load(SeqCst), SeqCst);
-            std::mem::replace(&mut *req, Req::None)
+            std::mem::replace(&mut req.pending, Req::None)
         };
         match r {
             Req::None => {}
@@ -591,21 +619,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bluetooth_release_invalidates_in_flight_write_generation() {
+    fn preemption_invalidates_only_the_older_write_generation() {
         let model = pulsar_core::model::model_from_dt_id(b"axg_s420_v03").unwrap();
         let sink = Sink::new(model);
-        sink.configure(48000, 2, 16);
+        let first = sink.configure(48000, 2, 16);
         let old = sink.req_gen.load(SeqCst);
+        let local = pulsar_core::audio_start_order();
 
         let io = lock(&sink.io);
-        sink.request_release();
+        assert!(!sink.revoke_before(first));
+        assert!(!sink.pending());
+        assert!(sink.revoke_before(local));
         assert!(sink.pending());
         drop(io);
         sink.finish_request();
         assert!(!sink.accepts_audio());
 
-        sink.configure(48000, 2, 16);
+        let next = sink.configure(48000, 2, 16);
+        assert!(!sink.revoke_before(local));
+        assert!(sink.owns_start(next));
         assert_eq!(sink.write_once(&[1; 4], 0, old), (4, 0, 0));
+        assert!(sink.accepts_audio());
+
+        // The sync task is still in the ring when an older release is superseded by configure.
+        let io = lock(&sink.io);
+        assert!(sink.revoke_before(pulsar_core::audio_start_order()));
+        let latest = sink.configure(48000, 2, 16);
+        drop(io);
+        sink.finish_request();
+        assert!(sink.owns_start(latest));
         assert!(sink.accepts_audio());
     }
 }

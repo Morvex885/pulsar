@@ -812,7 +812,7 @@ impl Controller {
                 if self.music_start_pending == Some(id) {
                     self.music_start_pending = None;
                     if order > self.audio_start {
-                        self.bluetooth_yields_audio(order);
+                        self.local_music_takes_audio(order);
                     }
                 }
                 self.publish_media();
