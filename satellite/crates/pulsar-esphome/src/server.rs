@@ -19,6 +19,8 @@ use socket2::{Domain, SockRef, Socket, TcpKeepalive, Type};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+#[cfg(test)]
+use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use crate::frame::{self, EncryptError, HandshakeError, NOISE_PROTOCOL, Noise, NoiseFrame, Plain};
@@ -116,6 +118,8 @@ const MAX_BACKLOG: usize = 8 << 20;
 thread_local! {
     /// Largest `rbuf` seen by `read_into` on this thread.
     static MAX_RBUF: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Позволяет тесту отправить ACK строго после TCP EOF.
+    static CLIENT_EOF: RefCell<Option<oneshot::Sender<()>>> = const { RefCell::new(None) };
 }
 /// Per wake-up and client, so a flooding peer cannot starve the runtime (capture hand-off,
 /// timers) or grow its buffer without bound before it is parsed.
@@ -455,6 +459,11 @@ fn eviction_victim(clients: impl Iterator<Item = Standing>) -> (Option<u64>, usi
     (victim.map(|v| v.id), established)
 }
 
+enum ReadEnd {
+    Eof,
+    Error,
+}
+
 struct Client {
     id: u64,
     stream: TcpStream,
@@ -470,8 +479,8 @@ struct Client {
     states: bool,
     /// Input left in `rbuf` by a batch that yielded (BATCH_YIELD).
     pending_input: bool,
-    /// EOF arrived while input was still pending; closed once it is parsed.
-    peer_closed: bool,
+    /// Ввод закончен; осталось разобрать уже прочитанные фреймы.
+    read_end: Option<ReadEnd>,
     /// Owns the voice pipeline.
     voice: bool,
     /// Order of its SubscribeVoiceAssistant(true), 0 = not subscribed.
@@ -546,7 +555,7 @@ fn poll_clients(
         let i = (*rr + k) % n;
         let c = &clients[i];
         let writable = c.want_out && c.stream.poll_write_ready(cx).is_ready();
-        let readable = c.stream.poll_read_ready(cx).is_ready();
+        let readable = c.read_end.is_none() && c.stream.poll_read_ready(cx).is_ready();
         // Input left over from a batch that yielded counts as readable.
         if readable || writable || c.pending_input {
             *rr = i + 1;
@@ -655,8 +664,8 @@ impl Server {
                         // Buffered input from a yielded batch is parsed first; the socket
                         // is read again only once rbuf is drained (TCP backpressure).
                         let pending = self.client(id).is_some_and(|c| c.pending_input);
-                        let eof = !pending && self.read_into(id);
-                        self.process(id, eof);
+                        let end = if pending { None } else { self.read_into(id) };
+                        self.process(id, end);
                     }
                 }
             }
@@ -768,7 +777,7 @@ impl Server {
             wake_config_reads: 0,
             states: false,
             pending_input: false,
-            peer_closed: false,
+            read_end: None,
             voice: false,
             voice_wanted: 0,
             close_after_flush: false,
@@ -851,19 +860,22 @@ impl Server {
 
     // ------------------------------------------------------------ input
 
-    /// Reads up to READ_PER_WAKEUP bytes into the client's buffer; true on EOF / error. The
-    /// socket stays ready when more is pending, so the rest is read on the next wake-up.
-    fn read_into(&mut self, id: u64) -> bool {
-        let Some(c) = self.client(id) else {
-            return true;
-        };
+    /// Читает до READ_PER_WAKEUP байт; EOF и ошибки прекращают дальнейшее чтение.
+    fn read_into(&mut self, id: u64) -> Option<ReadEnd> {
+        let c = self.client(id)?;
         let mut buf = [0u8; 16384];
         let mut got = 0;
-        let mut eof = false;
+        let mut end = None;
         while got < READ_PER_WAKEUP {
             match c.stream.try_read(&mut buf) {
                 Ok(0) => {
-                    eof = true;
+                    #[cfg(test)]
+                    CLIENT_EOF.with(|slot| {
+                        if let Some(tx) = slot.borrow_mut().take() {
+                            let _ = tx.send(());
+                        }
+                    });
+                    end = Some(ReadEnd::Eof);
                     break;
                 }
                 Ok(n) => {
@@ -876,7 +888,7 @@ impl Server {
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => {
                     warn!("api: recv: {}", os_error_text(&e));
-                    eof = true;
+                    end = Some(ReadEnd::Error);
                     break;
                 }
             }
@@ -885,21 +897,24 @@ impl Server {
             c.last_rx = Instant::now();
             c.ping_outstanding = false;
         }
-        eof
+        end
     }
 
     /// Handles what `read_into` collected. Replies collect in the client's buffer and leave in
     /// one flush at the end, or earlier once BATCH_FLUSH bytes are pending (so the backlog
     /// limits in flush still bound memory); parsing stops when the client is closed.
-    fn process(&mut self, id: u64, eof: bool) {
+    fn process(&mut self, id: u64, end: Option<ReadEnd>) {
         self.batch = Some(id);
         self.batch_out = 0;
         self.parse_input(id);
         self.batch = None;
-        self.flush(id);
         let Some(c) = self.client(id) else { return };
-        c.peer_closed |= eof;
-        if c.peer_closed && !c.pending_input {
+        if end.is_some() {
+            c.read_end = end;
+        }
+        let read_error = matches!(c.read_end, Some(ReadEnd::Error)) && !c.pending_input;
+        self.flush(id);
+        if read_error {
             self.close_client(id, "connection closed by peer");
         }
     }
@@ -1152,6 +1167,11 @@ impl Server {
         c.want_out = false;
         if c.close_after_flush {
             self.close_client(id, "disconnect requested");
+        } else if matches!(c.read_end, Some(ReadEnd::Eof))
+            && !c.pending_input
+            && c.wake_config_reads == 0
+        {
+            self.close_client(id, "connection closed by peer");
         }
     }
 

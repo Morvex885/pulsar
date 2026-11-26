@@ -661,6 +661,55 @@ async fn wake_config_read_waits_for_actual_selection() {
         .await;
 }
 
+// Реальный TCP не должен автоматически двигать виртуальные часы между сообщениями.
+fn hold_paused_clock() -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+    let (release, guard) = oneshot::channel();
+    let task = tokio::task::spawn_blocking(move || {
+        let _ = guard.blocking_recv();
+    });
+    (release, task)
+}
+
+#[tokio::test(start_paused = true)]
+async fn wake_config_half_close_waits_for_ack_or_timeout() {
+    let (clock_guard, clock_task) = hold_paused_clock();
+    local()
+        .run_until(async {
+            for (ack, expected) in [(true, "yandex"), (false, "alisa")] {
+                let (id, cfg) = selftest("now");
+                let (h, mut rx, port) = start_with(id, cfg);
+                let mut p = Peer::connect(port).await;
+                p.hello("HA").await;
+                event(&mut rx).await;
+
+                let (eof_tx, eof_rx) = oneshot::channel();
+                CLIENT_EOF.with(|slot| *slot.borrow_mut() = Some(eof_tx));
+                p.send(msg::VA_SET_CONFIG, &wake_selection("yandex")).await;
+                p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+                p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+                p.send(msg::PING_REQ, &Writer::new()).await;
+                p.s.shutdown().await.unwrap();
+
+                // ACK должен попасть в сервер только после того, как сервер увидел FIN.
+                eof_rx.await.unwrap();
+                let request = wake_request(&mut rx, "yandex").await;
+                p.expect(msg::PING_RESP).await;
+                if ack {
+                    h.set_active_wake_words(Some(request), vec!["yandex".into()]);
+                } else {
+                    tokio::time::advance(Duration::from_millis(3_001)).await;
+                }
+                for _ in 0..2 {
+                    expect_wake_config(&mut p, &[expected]).await;
+                }
+                assert!(p.recv().await.is_none());
+            }
+        })
+        .await;
+    drop(clock_guard);
+    clock_task.await.unwrap();
+}
+
 #[tokio::test]
 async fn wake_config_requires_latest_ack_across_clients() {
     local()
@@ -705,11 +754,7 @@ async fn wake_config_requires_latest_ack_across_clients() {
 
 #[tokio::test(start_paused = true)]
 async fn wake_config_timeout_keeps_the_first_deadline_and_last_confirmed_state() {
-    // Реальный TCP не должен автоматически двигать виртуальные часы между сообщениями.
-    let (_clock_guard, guard) = std::sync::mpsc::channel::<()>();
-    tokio::task::spawn_blocking(move || {
-        let _ = guard.recv_timeout(Duration::from_secs(5));
-    });
+    let (clock_guard, clock_task) = hold_paused_clock();
     local()
         .run_until(async {
             let (id, cfg) = selftest("now");
@@ -734,6 +779,8 @@ async fn wake_config_timeout_keeps_the_first_deadline_and_last_confirmed_state()
             expect_wake_config(&mut p, &["yandex"]).await;
         })
         .await;
+    drop(clock_guard);
+    clock_task.await.unwrap();
 }
 
 #[tokio::test]

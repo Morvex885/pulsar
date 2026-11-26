@@ -122,10 +122,9 @@ pub struct FrontendHandle {
 
 /// Запускает фронтенд: dlopen, VQE по пресету модели, спотер wake word из первого загрузившегося
 /// каталога `wake_model_dirs` (например, .../spotter_models/activation/alisa) и, если задан,
-/// командный спотер (.../spotter_models/command), затем потоки захвата и обработки; загруженная
-/// модель приходит событием [`FrontendEvent::WakeModel`]. При ошибке (в логе «microphone
-/// front-end failed to start») handle работает, но событий нет. Устройство захвата, которое не
-/// открылось, переоткрывается каждые 2 с.
+/// командный спотер (.../spotter_models/command), затем потоки захвата и обработки. Отсутствие
+/// модели активации не мешает ручному запросу; статус приходит в [`FrontendEvent::WakeModel`].
+/// При отказе фронтенда handle работает без событий. Захват переоткрывается каждые 2 с.
 pub fn spawn(
     model: &'static Model,
     wake_model_dirs: Vec<PathBuf>,
@@ -146,14 +145,15 @@ pub fn spawn(
             inner.frame = eng.frame();
             let dir = eng.wake_dir().to_path_buf();
             let ok = wake_model_dirs.first() == Some(&dir);
-            let started = inner
-                .start_threads(model, eng, tx.clone())
+            inner
+                .start_threads(
+                    model,
+                    eng,
+                    tx.clone(),
+                    FrontendEvent::WakeModel { id: None, dir, ok },
+                )
                 .inspect_err(|e| error!("audio threads: {e}"))
-                .is_ok();
-            if started {
-                let _ = tx.send(FrontendEvent::WakeModel { id: None, dir, ok });
-            }
-            started
+                .is_ok()
         }
         None => false,
     };
@@ -373,6 +373,7 @@ impl Inner {
         model: &'static Model,
         eng: Engine,
         tx: UnboundedSender<FrontendEvent>,
+        initial_model: FrontendEvent,
     ) -> std::io::Result<()> {
         let nch = model.capture_channels as usize;
         let period = eng.chunk;
@@ -394,7 +395,10 @@ impl Inner {
             std::thread::Builder::new()
                 .name("audio-process".into())
                 .stack_size(PROCESSING_STACK)
-                .spawn(move || processing(model, eng, &shared, &pipe, &tx))?,
+                .spawn(move || {
+                    let _ = tx.send(initial_model);
+                    processing(model, eng, &shared, &pipe, &tx);
+                })?,
         );
         Ok(())
     }

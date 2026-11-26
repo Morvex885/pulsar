@@ -109,7 +109,7 @@ impl Controller {
     // ---------------- wake word ----------------
 
     pub(super) fn on_wake(&mut self, phrase: &str, level_db: f32, preroll: Vec<i16>) {
-        if self.mic_muted() {
+        if self.mic_muted() || self.active_wake_word.is_empty() {
             return;
         }
         info!("wake word '{phrase}', level {level_db:.1} dB");
@@ -119,7 +119,7 @@ impl Controller {
             self.cancel_arbitration();
             if self.arbitration_on() {
                 self.arbiter
-                    .claim(&self.st.wake_word, level_db, true, false);
+                    .claim(&self.active_wake_word, level_db, true, false);
             }
             return self.stop_timer_ring();
         }
@@ -140,7 +140,10 @@ impl Controller {
         self.mic.set_streaming(true);
         self.update_ui();
         let busy = self.phase == Phase::Speaking || self.announcing;
-        self.arb_claim = Some(self.arbiter.claim(&self.st.wake_word, level_db, busy, true));
+        self.arb_claim = Some(
+            self.arbiter
+                .claim(&self.active_wake_word, level_db, busy, true),
+        );
     }
 
     fn answer_wake(&mut self, phrase: &str, preroll: Vec<i16>) {

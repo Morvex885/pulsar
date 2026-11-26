@@ -52,6 +52,8 @@ pub struct Settings {
     /// User ring light.
     pub light: LightState,
     pub wake_word: String,
+    /// В файле был ключ `wake_word=`; при его отсутствии выбираем модель для новой установки.
+    pub has_wake_word: bool,
     /// POSIX TZ (the default matches what the Yandex firmware showed); updated from HA.
     pub tz: String,
     /// Install new releases without asking.
@@ -105,6 +107,7 @@ impl Default for Settings {
             clock_scroll_ms: 400,
             light: LightState::default(),
             wake_word: "alisa".into(),
+            has_wake_word: false,
             tz: "MSK-3".into(),
             auto_update: false,
             nearest_answers: true,
@@ -179,7 +182,10 @@ impl Settings {
                 b"light_g" => self.light.g = fv,
                 b"light_b" => self.light.b = fv,
                 b"light_effect" => self.light.effect = v,
-                b"wake_word" => self.wake_word = v,
+                b"wake_word" => {
+                    self.wake_word = v;
+                    self.has_wake_word = true;
+                }
                 b"tz" => self.tz = v,
                 b"auto_update" => self.auto_update = on,
                 b"nearest_answers" => self.nearest_answers = on,

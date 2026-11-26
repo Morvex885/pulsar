@@ -880,39 +880,32 @@ fn wake_word_names_lists_valid_models_alisa_first() {
 
 #[test]
 fn wake_word_names_keeps_the_saved_model_when_listing_fails() {
-    // Каталог без права чтения: read_dir отказывает, но модель внутри доступна по пути (под root
-    // read_dir проходит, ответ тот же).
-    use std::os::unix::fs::PermissionsExt as _;
     let t = TmpDir::new();
     t.model("yasmina");
-    std::fs::set_permissions(&t.0, std::fs::Permissions::from_mode(0o311)).unwrap();
-    let names = wake_word_names(&t.0, "yasmina");
-    std::fs::set_permissions(&t.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let names = wake_word_names_from(
+        &t.0,
+        "yasmina",
+        Err(std::io::ErrorKind::PermissionDenied.into()),
+    );
     assert_eq!(names, strings(&["yasmina"]));
 }
 
 #[test]
-fn wake_word_english_labels() {
-    assert_eq!(wake_word_phrase("alisa"), "Alisa");
-    assert_eq!(wake_word_phrase("yandex"), "Yandex");
+fn wake_word_labels_preserve_legacy_ha_bindings() {
+    assert_eq!(wake_word_phrase("alisa"), "Алиса");
+    assert_eq!(wake_word_phrase("yandex"), "Яндекс");
     assert_eq!(wake_word_phrase("yasmina"), "Yasmina");
     assert_eq!(wake_word_phrase("other_word"), "other_word");
 }
 
 #[test]
-fn wake_word_resolution_and_candidates() {
+fn initial_wake_word_never_replaces_a_saved_selection() {
     let all = strings(&["alisa", "yandex", "yasmina"]);
-    assert_eq!(resolve_wake_word("yandex", &all), "yandex");
-    assert_eq!(resolve_wake_word("gone", &all[1..]), "yandex");
-    assert_eq!(resolve_wake_word("yandex", &[]), "alisa");
-    assert_eq!(
-        wake_candidates("yasmina", &all),
-        strings(&["yasmina", "alisa", "yandex"])
-    );
-    assert_eq!(
-        wake_candidates("gone", &all),
-        strings(&["gone", "alisa", "yandex", "yasmina"])
-    );
+    assert_eq!(initial_wake_word(Some("yandex"), &all), Some("yandex"));
+    assert_eq!(initial_wake_word(Some("gone"), &all), Some("gone"));
+    assert_eq!(initial_wake_word(Some("yandex"), &[]), Some("yandex"));
+    assert_eq!(initial_wake_word(Some("../bad"), &all), None);
+    assert_eq!(initial_wake_word(None, &all[2..]), Some("yasmina"));
 }
 
 #[test]

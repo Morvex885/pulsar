@@ -166,6 +166,7 @@ pub struct Controller {
     hw_mic_muted: bool,
     error_shown: bool,
     wake_switch: logic::WakeSwitch,
+    active_wake_word: String,
     // Wake arbitration: the window between our claim and the decision. Microphone audio and a
     // command word heard in it are held until the decision.
     arbitrating: bool,
@@ -297,17 +298,15 @@ impl Controller {
             VERSION,
             BUILD_TIME,
         );
-        let mut wake_names = logic::wake_word_names(Path::new(MODELS), &st.wake_word);
-        if wake_names.is_empty() {
-            // Каталог не прочитан или пуст: список в HA не должен расходиться с активным словом.
-            wake_names.push("alisa".into());
+        let wake_names = logic::wake_word_names(Path::new(MODELS), &st.wake_word);
+        let saved = st.has_wake_word.then_some(st.wake_word.as_str());
+        let initial = logic::initial_wake_word(saved, &wake_names);
+        let wake_dirs = initial.into_iter().map(model_dir).collect();
+        if !st.has_wake_word
+            && let Some(id) = initial
+        {
+            st.wake_word = id.to_owned();
         }
-        // Стартовый запасной ID заменит сохранённый только после подтверждения загрузки.
-        let initial_wake_word = logic::resolve_wake_word(&st.wake_word, &wake_names);
-        let wake_dirs = logic::wake_candidates(&initial_wake_word, &wake_names)
-            .iter()
-            .map(|id| model_dir(id))
-            .collect::<Vec<_>>();
         let case_colors = pulsar_hw::case_colors();
         let dir = logic::state_dir(state_path.as_os_str());
         let strings = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -336,7 +335,7 @@ impl Controller {
                     languages: vec!["ru".into()],
                 })
                 .collect(),
-            active_wake_words: vec![initial_wake_word],
+            active_wake_words: Vec::new(),
             light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
             clock_faces: with_none(strings(pulsar_clock::face_names())),
             music_styles: strings(pulsar_hw::music_styles()),
@@ -585,6 +584,7 @@ impl Controller {
             hw_mic_muted,
             error_shown: false,
             wake_switch: logic::WakeSwitch::default(),
+            active_wake_word: String::new(),
             arbitrating: false,
             arb_claim: None,
             arb_phrase: String::new(),

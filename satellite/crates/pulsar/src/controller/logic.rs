@@ -627,19 +627,27 @@ pub fn wake_word_id_ok(id: &str) -> bool {
 /// модель сохранённого слова `saved` проверяется напрямую: урезанный ошибкой список не должен
 /// сбросить уже выбранное слово.
 pub fn wake_word_names(models: &Path, saved: &str) -> Vec<String> {
+    wake_word_names_from(models, saved, std::fs::read_dir(models))
+}
+
+fn wake_word_names_from(
+    models: &Path,
+    saved: &str,
+    entries: std::io::Result<std::fs::ReadDir>,
+) -> Vec<String> {
     let present = |id: &str| {
         MODEL_FILES
             .iter()
             .all(|f| models.join(id).join(f).is_file())
     };
     let mut out = Vec::new();
-    if wake_word_id_ok(saved) && present(saved) {
-        out.push(saved.to_owned());
-    }
-    let rd = match std::fs::read_dir(models) {
+    let rd = match entries {
         Ok(rd) => rd,
         Err(e) => {
             warn!("cannot list activation models in {}: {e}", models.display());
+            if wake_word_id_ok(saved) && present(saved) {
+                out.push(saved.to_owned());
+            }
             return out;
         }
     };
@@ -659,16 +667,15 @@ pub fn wake_word_names(models: &Path, saved: &str) -> Vec<String> {
             continue;
         }
         match e.file_name().to_str() {
-            Some(name) if wake_word_id_ok(name) => {
-                if name != saved {
-                    out.push(name.to_owned());
-                }
-            }
+            Some(name) if wake_word_id_ok(name) => out.push(name.to_owned()),
             _ => warn!(
                 "activation model {:?} skipped: id must be 1-{WAKE_ID_MAX} chars of [a-z0-9_-]",
                 e.file_name()
             ),
         }
+    }
+    if wake_word_id_ok(saved) && !out.iter().any(|id| id == saved) && present(saved) {
+        out.push(saved.to_owned());
     }
     out.sort_by(|a, b| (a != "alisa", a).cmp(&(b != "alisa", b)));
     out
@@ -695,33 +702,19 @@ impl WakeSwitch {
     }
 }
 
-/// Сохранённое слово, если модель есть на станции, иначе первая найденная (`alisa`, если есть):
-/// спотер не должен ждать каталог, которого нет.
-pub fn resolve_wake_word(saved: &str, available: &[String]) -> String {
-    if available.iter().any(|n| n == saved) {
-        return saved.to_owned();
+/// Новый экземпляр выбирает умолчание из прошивки; сохранённое слово нельзя подменять.
+pub fn initial_wake_word<'a>(saved: Option<&'a str>, available: &'a [String]) -> Option<&'a str> {
+    match saved {
+        Some(id) => wake_word_id_ok(id).then_some(id),
+        None => Some(available.first().map_or("alisa", String::as_str)),
     }
-    if !saved.is_empty() {
-        warn!("wake word {saved:?} is not on this device; falling back");
-    }
-    available
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "alisa".to_owned())
-}
-
-/// Порядок попыток загрузки при старте: активное слово, затем остальные модели.
-pub fn wake_candidates(active: &str, available: &[String]) -> Vec<String> {
-    std::iter::once(active.to_owned())
-        .chain(available.iter().filter(|n| *n != active).cloned())
-        .collect()
 }
 
 /// Для неизвестной модели подписью остаётся её ID.
 pub fn wake_word_phrase(id: &str) -> String {
     match id {
-        "alisa" => "Alisa".into(),
-        "yandex" => "Yandex".into(),
+        "alisa" => "Алиса".into(),
+        "yandex" => "Яндекс".into(),
         "yasmina" => "Yasmina".into(),
         other => other.to_owned(),
     }

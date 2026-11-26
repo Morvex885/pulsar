@@ -89,6 +89,7 @@ fn parses_a_file_written_by_cxx() {
     let want = Settings {
         volume: 0.3,
         has_volume: true,
+        has_wake_word: true,
         volume_legacy: 0.123_457,
         light: LightState {
             brightness: 1_234_570.0,

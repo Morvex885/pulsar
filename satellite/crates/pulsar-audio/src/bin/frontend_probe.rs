@@ -213,7 +213,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// Ok(false): no VQE chunk was processed.
+/// `Ok(false)`: не загрузилось стартовое wake word или не прошёл тест аудиопотока.
 async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
     out!(
         "frontend_probe: {} ({}), {} s, wake {}, stream {}, music {}, commands {}{}",
@@ -263,6 +263,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
     let (mut audio_samples_ok, mut loudness) = (true, 0f32);
     let mut audio_samples = 0usize;
     let mut prev = FrontendStats::default();
+    let mut wake_started = None;
     let mut prev_counts = (0u64, 0u64);
     let mut first: Option<(Instant, FrontendStats, u64, u64)> = None;
     loop {
@@ -300,6 +301,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
                     loudness = f.loudness;
                 }
                 Some(FrontendEvent::WakeModel { dir, ok, .. }) => {
+                    wake_started.get_or_insert(ok);
                     out!("t={:6.2}s WAKE_MODEL {} ok={ok}", secs(start), dir.display());
                 }
                 None => break,
@@ -369,7 +371,11 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
             );
         }
     }
-    Ok(s.chunks > 0 && audio_samples_ok && (!a.stream || audio > 0) && (!a.music || music > 0))
+    Ok(wake_started == Some(true)
+        && s.chunks > 0
+        && audio_samples_ok
+        && (!a.stream || audio > 0)
+        && (!a.music || music > 0))
 }
 
 fn secs(start: Instant) -> f64 {
