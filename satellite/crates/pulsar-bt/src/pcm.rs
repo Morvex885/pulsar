@@ -355,7 +355,7 @@ fn configure(pcm: &mut Pcm, stream: Stream, context: &'static str) -> Result<(),
         let period = hw.period_frames.max(1);
         match stream {
             Stream::Capture => pcm.set_sw_params(1, period.min(FRAMES as u64))?,
-            // A single short prompt can end before a whole period arrives.
+            // Короткий сигнал может закончиться, не заполнив целый период.
             Stream::Playback => pcm.set_sw_params(1, period)?,
         }
         pcm.prepare()

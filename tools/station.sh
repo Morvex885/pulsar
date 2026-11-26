@@ -103,7 +103,11 @@ TEST_DIR_OPTIONAL="$TEST_DIR_CHECK
   if [ -e '$T' ] || [ -L '$T' ]; then test_dir_check || exit 1; fi"
 # Не запускать установленный сервис и не удалять стенд, пока не возвращён тестовый BT.
 TEST_BT_RESTORED="$TEST_DIR_OPTIONAL
-  if [ -e '$T/bt-owner' ] || [ -L '$T/bt-owner' ]; then echo 'test Bluetooth not restored: run test-stop' >&2; exit 1; fi"
+  if [ -e '$T/bt-reserved' ] || [ -L '$T/bt-reserved' ] ||
+    [ -e '$T/bt-owner' ] || [ -L '$T/bt-owner' ]; then
+    echo 'test Bluetooth not restored: run test-stop' >&2
+    exit 1
+  fi"
 # Сначала остановить обоих: работающий pulsar ещё может записать снимок и захватить player.
 PROD_BT_CTL="'$D/ctl.sh' bt-restore --supported >/dev/null 2>&1 ||
   '$D/ctl.sh' bt-restore --check >/dev/null 2>&1"
@@ -173,7 +177,7 @@ case "$cmd" in
   stop)
     own
     r "[ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
-       $TEST_DIR_OPTIONAL
+       $TEST_BT_RESTORED
        if $PROD_BT_CTL; then
          '$D/ctl.sh' reload --stop || exit 1
        else
@@ -211,18 +215,35 @@ D=$2
 vol=$3
 station=$4
 bt=$5
-! pidof supervise.sh >/dev/null || { echo 'run stop first' >&2; exit 1; }
-! pidof pulsar >/dev/null || { echo 'pulsar still running: run stop or test-stop first' >&2; exit 1; }
-[ ! -e "$T/bt-owner" ] && [ ! -L "$T/bt-owner" ] ||
+production_stopped() {
+  ! pidof supervise.sh >/dev/null || { echo 'run stop first' >&2; return 1; }
+  ! pidof pulsar >/dev/null || { echo 'pulsar still running: run stop or test-stop first' >&2; return 1; }
+}
+production_stopped || exit 1
+[ ! -e "$T/bt-reserved" ] && [ ! -L "$T/bt-reserved" ] &&
+  [ ! -e "$T/bt-owner" ] && [ ! -L "$T/bt-owner" ] ||
   { echo 'test Bluetooth not restored: run test-stop' >&2; exit 1; }
 [ -x "$T/pulsar" ] || { echo 'push pulsar first' >&2; exit 1; }
 if [ "$bt" = 1 ]; then
-  [ -f "$D/enabled" ] && ! pidof quasar_launcher2 maind >/dev/null ||
-    { echo 'Yandex mode or stack running: Bluetooth test refused' >&2; exit 1; }
-  if ! "$T/ctl.sh" bt-restore --check >/dev/null 2>&1; then
+  stock_stopped() {
+    [ -f "$D/enabled" ] && ! pidof quasar_launcher2 maind >/dev/null ||
+      { echo 'Yandex mode or stack running: Bluetooth test refused' >&2; return 1; }
+  }
+  stock_stopped || exit 1
+  if ! "$T/ctl.sh" bt-restore --test-check >/dev/null 2>&1; then
     echo 'Bluetooth test needs a separately pushed satellite/deploy/ctl.sh with bt-restore' >&2
     exit 1
   fi
+  # Одним ln публикуем резерв и PID начала запуска. test-stop не снимает
+  # резерв, пока этот shell может ещё запустить процесс.
+  started=$(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$$/stat") || exit 1
+  [ -n "$started" ] || exit 1
+  ln -s "$$:$started" "$T/bt-reserved" ||
+    { echo 'test Bluetooth already reserved: run test-stop' >&2; exit 1; }
+  trap 'rm -f "$T/bt-reserved"' EXIT
+  # Supervisor, появившийся до резерва, побеждает; появившийся после
+  # увидит резерв сам. Не изменяем тестовый state.conf при отказе.
+  production_stopped && stock_stopped || exit 1
 fi
 # api_key не копируется: тестовый экземпляр отдаёт plaintext API, ключ клиенту не нужен.
 if [ "$bt" = 1 ]; then set -- -e '^zigbee_role='; else set --; fi
@@ -240,6 +261,9 @@ if [ "$station" = mini ]; then
   [ -f "$D/asound.conf" ] || { echo 'Mini needs /data/pulsar/asound.conf (satellite/deploy/asound.conf)' >&2; exit 1; }
 fi
 : > "$T/pid" || exit 1
+# После этой точки резерв снимает только test-stop, даже если запуск оборвётся.
+trap '' HUP
+trap - EXIT
 nohup env PULSAR_PORT_OFFSET=10000 PULSAR_BT_MANAGED="$bt" PULSAR_BT_OWNER="$T/bt-owner" \
   ./pulsar "$T/state.conf" < /dev/null >> "$T/log" 2>&1 &
 p=$!
@@ -256,8 +280,21 @@ EOF
   test-stop)
     own
     r "$TEST_DIR_OPTIONAL"
-    r sh -s -- "$T" <<'EOF'
+    {
+      cat <<'EOF'
 T=$1
+reserved=0
+if [ -e "$T/bt-reserved" ] || [ -L "$T/bt-reserved" ]; then reserved=1; fi
+if [ -L "$T/bt-reserved" ]; then
+  starter=$(readlink "$T/bt-reserved") || exit 1
+  owner=${starter%%:*}
+  case "$owner" in ''|*[!0-9]*) ;; *)
+    if [ "$starter" = "$owner:$(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$owner/stat" 2>/dev/null)" ]; then
+      echo 'test-start is still launching the daemon' >&2
+      exit 1
+    fi ;;
+  esac
+fi
 test_running() {
   case "$(readlink "/proc/$p/exe" 2>/dev/null)" in
     "$T/pulsar"|"$T/pulsar (deleted)") return 0 ;;
@@ -279,8 +316,8 @@ if [ -s "$T/pid" ]; then
     fi
   fi
 fi
-# Если запуск оборвался до записи PID, снимок можно применить только после выхода процесса.
-if [ -e "$T/pid" ] || [ -e "$T/bt-owner" ] || [ -L "$T/bt-owner" ]; then
+if [ -e "$T/pid" ] || [ "$reserved" = 1 ] ||
+  [ -e "$T/bt-owner" ] || [ -L "$T/bt-owner" ]; then
   for exe in /proc/[0-9]*/exe; do
     p=${exe%/exe}
     p=${p##*/}
@@ -289,13 +326,14 @@ if [ -e "$T/pid" ] || [ -e "$T/bt-owner" ] || [ -L "$T/bt-owner" ]; then
   rm -f "$T/pid" || exit 1
 fi
 if [ -e "$T/bt-owner" ] || [ -L "$T/bt-owner" ]; then
-  if ! PULSAR_BT_OWNER="$T/bt-owner" "$T/ctl.sh" bt-restore; then
+  if ! "$T/ctl.sh" bt-restore --test; then
     echo 'test Bluetooth not restored: keep the test files, do not start the installed service' >&2
     exit 1
   fi
 fi
 EOF
-    r "$DMIX"
+      printf '%s\n' "$DMIX" '[ "$reserved" = 0 ] || rm -f "$T/bt-reserved"'
+    } | r sh -s -- "$T"
     echo stopped ;;
   test-log) r "$TEST_DIR_CHECK; test_dir_check && tail -n ${1:-50} $T/log" ;;
   swap)

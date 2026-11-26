@@ -88,7 +88,7 @@ impl Ctx {
         // Если sync task уже перестал писать, закрытие PCM всё равно должно выполниться.
         let ctx = self.clone();
         tokio::task::spawn_blocking(move || ctx.sink.finish_request());
-        // Publish the local loss immediately rather than waiting for the server's StreamEnd.
+        // Другой источник уже занял выход; не ждём StreamEnd от сервера.
         if streaming.replace(false) {
             let _ = self.tx.send(SendspinEvent::Stream(None));
         }
@@ -175,7 +175,7 @@ impl SendspinHandle {
         self.streaming.get()
     }
 
-    /// Whether a queued start still owns the actual output, independently of the reported hold.
+    /// Проверяет владение выходом, даже если индикатор ещё показывает активный поток.
     pub fn stream_is_current(&self, order: u64) -> bool {
         self.streaming.get() && self.ctx.sink.owns_start(order)
     }
@@ -232,8 +232,7 @@ impl SendspinHandle {
         self.leave_group();
     }
 
-    /// Music won a newer start. Revoke only the losing generation, then leave the group
-    /// without pausing the other players.
+    /// Передаёт выход более свежему запуску Music, не ставя остальные плееры группы на паузу.
     pub fn yield_to_music(&self, order: u64) {
         if self.ctx.revoke_before(&self.streaming, order) {
             self.leave_group();
@@ -455,7 +454,7 @@ impl Core {
                     p.channels,
                     p.bits
                 );
-                // A later callback may already have replaced or ended this PCM.
+                // Следующий колбэк мог уже остановить или заменить этот PCM.
                 if let Some(order) = order.filter(|&order| self.ctx.sink.owns_start(order)) {
                     self.hold.start(&mut self.timers);
                     self.send(SendspinEvent::Stream(Some(order)));
@@ -688,7 +687,7 @@ mod tests {
             let ctx = core.ctx.clone();
             ctx.event(LibEvent::StreamStart(Some(PARAMS)));
             assert!(ctx.sink.accepts_audio());
-            // Another audio thread starts before Sendspin drains its callback queue.
+            // Другой аудиопоток может стартовать, пока событие Sendspin ещё в очереди.
             let music = pulsar_core::audio_start_order();
             if dispatch_first {
                 dispatch(&mut core);
@@ -704,7 +703,7 @@ mod tests {
             if dispatch_first {
                 assert_eq!(rx.try_recv(), Ok(SendspinEvent::Stream(None)));
             } else {
-                // A revoked, not-yet-reported generation cannot reappear on dispatch.
+                // Обработка очереди не должна вернуть уже вытесненное поколение.
                 dispatch(&mut core);
                 assert!(rx.try_recv().is_err());
             }
@@ -721,21 +720,21 @@ mod tests {
 
         ctx.event(LibEvent::StreamEnd);
         dispatch(&mut core);
-        assert!(streaming.get()); // Still reported while waiting for a seek/skip restart.
+        assert!(streaming.get()); // Ждём возобновления после перемотки или смены трека.
         assert!(!ctx.sink.owns_start(first));
         let music = pulsar_core::audio_start_order();
-        assert!(!ctx.revoke_before(&streaming, music)); // No active sink to revoke.
+        assert!(!ctx.revoke_before(&streaming, music)); // Выход уже свободен.
         assert!(rx.try_recv().is_err());
 
         ctx.event(LibEvent::StreamStart(Some(PARAMS)));
-        assert!(!ctx.revoke_before(&streaming, music)); // Already newer, not yet dispatched.
+        assert!(!ctx.revoke_before(&streaming, music)); // Новый старт ещё в очереди.
         assert!(ctx.sink.accepts_audio());
         dispatch(&mut core);
         let second = recv_start(&mut rx);
         assert!(second > music);
         assert!(ctx.sink.owns_start(second));
         assert!(streaming.get());
-        assert!(rx.try_recv().is_err()); // The held activity did not flap.
+        assert!(rx.try_recv().is_err()); // Индикатор не переключался на паузу.
     }
 
     #[tokio::test]

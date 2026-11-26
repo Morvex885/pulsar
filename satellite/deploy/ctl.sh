@@ -16,23 +16,28 @@ Q=${PULSAR_Q:-/system/vendor/quasar/q}
 bt_legacy=/tmp/pulsar-bt-owner
 bt_test_dir=/tmp/pulsar-test
 
+bt_test_owner=$bt_test_dir/bt-owner
+
+bt_test_dir_trusted() {
+  [ -d "$bt_test_dir" ] && [ ! -L "$bt_test_dir" ] &&
+    bt_test_uid=$(id -u) && [ "$(stat -c '%u:%a' "$bt_test_dir" 2>/dev/null)" = "$bt_test_uid:700" ]
+}
+
 bt_test_clear() {
-  bt_test_owner=$bt_test_dir/bt-owner
-  # Как в tools/station.sh: не доверяем снимку вне закрытого каталога нашего UID.
-  if [ -d "$bt_test_dir" ] && [ ! -L "$bt_test_dir" ] &&
-    bt_test_uid=$(id -u) && [ "$(stat -c '%u:%a' "$bt_test_dir" 2>/dev/null)" = "$bt_test_uid:700" ]; then
-    if [ "${1-}" = --own ] && [ "${PULSAR_BT_OWNER:-}" = "$bt_test_owner" ]; then
-      return 0
-    fi
+  # Как в tools/station.sh: проверяем только закрытый каталог нашего UID.
+  bt_test_dir_trusted || return 0
+  [ -e "$bt_test_dir/bt-reserved" ] || [ -L "$bt_test_dir/bt-reserved" ] ||
     [ -e "$bt_test_owner" ] || [ -L "$bt_test_owner" ] || return 0
-    echo 'Bluetooth тестового экземпляра не восстановлен: выполните test-stop' >&2
+  echo 'Bluetooth тестового экземпляра не восстановлен: выполните test-stop' >&2
+  return 1
+}
+
+bt_test_ctl() {
+  if [ "$0" != "$bt_test_dir/ctl.sh" ] || ! bt_test_dir_trusted; then
+    echo 'bt-restore: требуется отдельный ctl.sh в закрытом тестовом каталоге' >&2
     return 1
   fi
-  if [ "${1-}" = --own ] && [ "${PULSAR_BT_OWNER:-}" = "$bt_test_owner" ]; then
-    echo 'bt-restore: небезопасный каталог тестового снимка' >&2
-    return 1
-  fi
-  return 0
+  bt_owner=$bt_test_owner
 }
 
 bt_owner_path() {
@@ -46,7 +51,8 @@ bt_owner_path() {
 }
 
 bt_for_owners() {
-  bt_test_clear --own || return 1
+  [ "${PULSAR_BT_OWNER:-}" != "$bt_test_owner" ] || return 1
+  bt_test_clear || return 1
   if [ -z "${PULSAR_BT_OWNER:-}" ]; then
     bt_owner=$bt_legacy
     "$@" || return 1
@@ -380,7 +386,14 @@ case "$1" in
   bt-restore)
     case "$#:${2-}" in
       1:) bt_for_owners bt_restore ;;
-      2:--self) bt_for_owners bt_restore --self ;;
+      2:--self)
+        if [ "${PULSAR_BT_OWNER:-}" = "$bt_test_owner" ]; then
+          bt_test_ctl && bt_restore --self
+        else
+          bt_for_owners bt_restore --self
+        fi ;;
+      2:--test-check) bt_test_ctl && command -v dbus-send >/dev/null 2>&1 ;;
+      2:--test) bt_test_ctl && bt_restore ;;
       2:--hide) bt_for_owners bt_hide ;;
       2:--owner-path) bt_owner_path ;;
       2:--supported) : ;;

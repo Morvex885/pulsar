@@ -66,7 +66,8 @@ bt_test_clear() {
   # Проверяем здесь, даже если установленная ctl.sh ещё не знает о тестовом снимке.
   bt_test_dir=/tmp/pulsar-test
   [ -d "$bt_test_dir" ] && [ ! -L "$bt_test_dir" ] &&
-    { [ -e "$bt_test_dir/bt-owner" ] || [ -L "$bt_test_dir/bt-owner" ]; } &&
+    { [ -e "$bt_test_dir/bt-reserved" ] || [ -L "$bt_test_dir/bt-reserved" ] ||
+      [ -e "$bt_test_dir/bt-owner" ] || [ -L "$bt_test_dir/bt-owner" ]; } &&
     bt_test_uid=$(id -u) &&
     [ "$(stat -c '%u:%a' "$bt_test_dir" 2>/dev/null)" = "$bt_test_uid:700" ] || return 0
   say 'Bluetooth тестового экземпляра не восстановлен: выполните test-stop'
@@ -77,6 +78,7 @@ remember_bt_executable() {
   [ -n "$bt_executable" ] && [ -n "$bt_owner" ] || return 1
   bt_pinned_now && return 0
   # При замене бинаря не перепривязываем снимок к чужому inode.
+  bt_protocol_inode= bt_protocol=
   bt_pending && return 1
   if [ -z "${PULSAR_BT_OWNER:-}" ]; then
     # Новый boot_id не должен применять флаги от предыдущей загрузки.
@@ -92,6 +94,22 @@ remember_bt_executable() {
     fi
   done
   mkdir "$bt_runtime" && ln "$BIN" "$bt_executable"
+}
+
+bt_protocol_supported() {
+  probe_inode=$(stat -Lc '%d:%i' "$bt_executable") || return 1
+  if [ "$probe_inode" != "$bt_protocol_inode" ]; then
+    bt_protocol_inode=$probe_inode bt_protocol=0
+    # Первый аргумент --version безопасен и для старого демона.
+    probe_output=$(mktemp "$D/.bt-probe.XXXXXX") || return 1
+    if "$bt_executable" --version --supervisor-protocol > "$probe_output" 2>/dev/null &&
+      printf 'pulsar-bt-managed/1\n' | cmp -s "$probe_output" - &&
+      [ "$probe_inode" = "$(stat -Lc '%d:%i' "$bt_executable")" ]; then
+      bt_protocol=1
+    fi
+    rm -f "$probe_output"
+  fi
+  [ "$bt_protocol" = 1 ]
 }
 
 restore_bt() {
@@ -166,7 +184,7 @@ ROT=$!
 trap 'kill $ROT 2>/dev/null; exit 143' TERM INT HUP
 trap 'kill $ROT 2>/dev/null' EXIT
 
-fails=0 swapped=0 backoff=$BACKOFF_MIN last_inode=
+fails=0 swapped=0 backoff=$BACKOFF_MIN last_inode= bt_protocol_inode= bt_protocol=
 bt_test_clear || exit 1
 if [ -z "${PULSAR_BT_OWNER:-}" ] &&
   [ "$(stat -c '%u' "$bt_legacy" 2>/dev/null)" = "$(id -u)" ]; then
@@ -198,16 +216,17 @@ while [ -f "$D/enabled" ]; do
   else
     rm -f "$bt_blocked" "$bt_next"
     if [ "$bt_allowed" = 1 ] && "$D/ctl.sh" bt-restore --check >/dev/null 2>&1; then
-      if bt_pinned_now; then
+      if ! bt_pinned_now; then
+        wait_restore_bt || exit 0
+        remember_bt_executable || :
+      fi
+      if bt_pinned_now && bt_protocol_supported; then
         bt_managed=1
+        # Рабочий путь могут заменить после последней сверки inode. Старый
+        # демон, напротив, запускаем только по нему: его обновление читает /proc/self/exe.
+        launch=$bt_executable installed_binary=$BIN
       else
         wait_restore_bt || exit 0
-        remember_bt_executable && bt_pinned_now && bt_managed=1
-      fi
-      if [ "$bt_managed" = 1 ] && [ -z "${PULSAR_BT_OWNER:-}" ]; then
-        # Рабочий путь могут заменить после последней сверки inode, даже при
-        # первом запуске. Новый бинарь пойдёт только после возврата владения.
-        launch=$bt_executable installed_binary=$BIN
       fi
     else
       wait_restore_bt || exit 0

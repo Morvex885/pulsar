@@ -44,8 +44,17 @@ fn arm_teardown_watchdog(status: i32) {
 }
 
 fn main() -> ExitCode {
-    let arg = std::env::args_os().nth(1);
+    let mut args = std::env::args_os().skip(1);
+    let arg = args.next();
     if arg.as_deref() == Some(OsStr::new("--version")) {
+        if args.next().as_deref() == Some(OsStr::new("--supervisor-protocol"))
+            && args.next().is_none()
+        {
+            return match writeln!(std::io::stdout(), "pulsar-bt-managed/1") {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => ExitCode::FAILURE,
+            };
+        }
         // println! would panic (abort) on a closed pipe.
         let _ = writeln!(std::io::stdout(), "pulsar {VERSION}");
         return ExitCode::SUCCESS;

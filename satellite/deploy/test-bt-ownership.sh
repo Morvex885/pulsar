@@ -3,7 +3,7 @@
 set -eu
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 station=$here/../../tools/station.sh
-BT_FIXTURE=$(mktemp -d)
+BT_FIXTURE=$(mktemp -d /tmp/pulsar-bt-test.XXXXXX)
 cleanup() {
   p=${test_pid_for_cleanup:-}
   if [ -s "$BT_FIXTURE/test/pid" ]; then read -r p < "$BT_FIXTURE/test/pid"; fi
@@ -114,7 +114,11 @@ case "$*" in
       read -r p < "$BT_FIXTURE/test/pid"
       if [ "$(readlink "/proc/$p/exe" 2>/dev/null)" = "$BT_FIXTURE/test/pulsar" ]; then echo "$p"; exit 0; fi
     fi ;;
-  supervise.sh) if [ -f "$BT_FIXTURE/supervisor-running" ]; then echo 502; exit 0; fi ;;
+  supervise.sh)
+    if [ "${START_PROD_AFTER_TEST_RESERVES:-0}" = 1 ] && [ -L "$BT_FIXTURE/test/bt-reserved" ]; then
+      touch "$BT_FIXTURE/supervisor-running"
+    fi
+    if [ -f "$BT_FIXTURE/supervisor-running" ]; then echo 502; exit 0; fi ;;
   'quasar_launcher2 maind') [ ! -f "$BT_FIXTURE/quasar-running" ] || { echo 503; exit 0; } ;;
 esac
 exit 1
@@ -411,6 +415,13 @@ quasar:start'
 # Краш-цикл меняет бинарь только после восстановления, не возвращая player между попытками.
 cat > "$PULSAR_DIR/pulsar" <<'EOF'
 #!/bin/sh
+if [ "${1-}" = --version ]; then
+  [ "$*" = '--version --supervisor-protocol' ] || exit 2
+  [ "$0" != "$PULSAR_DIR/pulsar" ] || exit 2
+  echo probe >> "$BT_FIXTURE/probes"
+  echo pulsar-bt-managed/1
+  exit 0
+fi
 if [ ! -e "$PULSAR_BT_OWNER" ]; then
   (umask 077; printf '1 1 1\n' > "$PULSAR_BT_OWNER") || exit 2
   "$PULSAR_BT_INIT" stop || exit 2
@@ -432,6 +443,7 @@ touch "$BT_FIXTURE/pulsar-running" "$BT_FIXTURE/supervisor-running"
 EOF
 cat > "$BT_FIXTURE/corrected" <<'EOF'
 #!/bin/sh
+if [ "${1-}" = --version ]; then echo pulsar-bt-managed/1; exit 0; fi
 printf 'corrected:%s\n' "$PULSAR_BT_MANAGED" >> "$BT_FIXTURE/events"
 rm -f "$PULSAR_DIR/enabled" "$BT_FIXTURE/supervisor-running"
 EOF
@@ -452,6 +464,7 @@ prev:0
 prev:0
 corrected:1"
 [ ! -e "$PULSAR_BT_OWNER" ]
+[ "$(cat "$BT_FIXTURE/probes")" = probe ] || fail 'repeated capability probe for the same inode'
 
 # Ручной откат (в т.ч. из установщика): отказ копии не гасит текущий сервис,
 # отказ замены после возврата Bluetooth запускает незаменённый бинарь.
@@ -516,6 +529,7 @@ quasar:start'
 # A normal HA-style rename may install a pre-Bluetooth release with no private CLI flags.
 cat > "$BT_FIXTURE/replacing" <<'EOF'
 #!/bin/sh
+if [ "${1-}" = --version ]; then echo pulsar-bt-managed/1; exit 0; fi
 [ "$PULSAR_BT_MANAGED" = 1 ] || exit 2
 (umask 077; printf '1 0 1\n' > "$PULSAR_BT_OWNER") || exit 2
 "$PULSAR_BT_INIT" stop || exit 2
@@ -524,7 +538,14 @@ printf 'updated\n' >> "$BT_FIXTURE/events"
 EOF
 cat > "$BT_FIXTURE/stable" <<'EOF'
 #!/bin/sh
+if [ "${1-}" = --version ]; then
+  [ "$0" != "$PULSAR_DIR/pulsar" ] || exit 2
+  printf 'pulsar legacy\n'
+  exit 0
+fi
 [ "$#" = 1 ] && [ "$1" = "$PULSAR_DIR/state.conf" ] &&
+  [ "$0" = "$PULSAR_DIR/pulsar" ] && [ "$PULSAR_BT_MANAGED" = 0 ] &&
+  [ -z "$PULSAR_INSTALLED_BINARY" ] &&
   [ ! -e "$PULSAR_BT_OWNER" ] && [ -d "$PULSAR_BT_PROC/101" ] || exit 2
 printf 'stable\n' >> "$BT_FIXTURE/events"
 rm -f "$PULSAR_DIR/enabled"
@@ -578,6 +599,7 @@ stable'
 cat > "$BT_FIXTURE/same" <<'EOF'
 #!/bin/sh
 set -eu
+if [ "${1-}" = --version ]; then echo pulsar-bt-managed/1; exit 0; fi
 if [ ! -e "$PULSAR_BT_OWNER" ]; then
   (umask 077; printf '1 0 1\n' > "$PULSAR_BT_OWNER")
   "$PULSAR_BT_INIT" stop
@@ -684,11 +706,42 @@ reject sh "$station" lite2 cleanup
 [ -x "$t/ctl.sh" ] && [ ! -e "$t/state.conf" ] || fail 'unsafe test directory was modified'
 chmod 700 "$t"
 expect ''
+# Проверяем именно окно до создания снимка: запуск первым видит резерв,
+# а тест уступает, если supervisor появился до его повторной проверки.
+started=$(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$$/stat")
+ln -s "$$:$started" "$t/bt-reserved"
+reject ctl restart
+reject ctl bt-restore
+reject ctl bt-restore --test
+reject supervise
+reject sh "$station" lite2 start
+reject sh "$station" lite2 cleanup
+expect ''
+reject sh "$station" lite2 test-stop
+[ -L "$t/bt-reserved" ] || fail 'test-stop released a reservation during launch'
+rm "$t/bt-reserved"
+ln -s dead "$t/bt-reserved"
+sh "$station" lite2 test-stop
+[ ! -L "$t/bt-reserved" ] || fail 'test-stop left a reservation without a snapshot'
+reject env START_PROD_AFTER_TEST_RESERVES=1 sh "$station" lite2 test-start --bt
+[ -f "$BT_FIXTURE/supervisor-running" ] && [ ! -L "$t/bt-reserved" ] &&
+  [ ! -e "$t/bt-owner" ] && [ ! -e "$t/state.conf" ] ||
+  fail 'test did not yield to a supervisor already starting'
+rm "$BT_FIXTURE/supervisor-running"
+expect ''
+# Снимок старого теста защищён и восстанавливается даже без резерва.
+(umask 077; printf '0 0 0\n' > "$t/bt-owner")
+reject ctl bt-restore
+sh "$station" lite2 test-stop
+expect 'Pairable:false
+Discoverable:false'
+[ ! -e "$t/bt-owner" ] || fail 'test-stop did not restore a legacy test marker'
 marker '0 1 0'
 trace
 sh "$station" lite2 test-start --bt
 await_test_ready
-[ -f "$t/bt-owner" ] && [ ! -e "$PULSAR_BT_PROC/101" ] || fail 'test did not take Bluetooth ownership'
+[ -L "$t/bt-reserved" ] && [ -f "$t/bt-owner" ] && [ ! -e "$PULSAR_BT_PROC/101" ] ||
+  fail 'test did not reserve and take Bluetooth ownership'
 [ "$(grep '^zigbee_role=' "$t/state.conf")" = 'zigbee_role=off' ]
 [ ! -e "$t/zigbee-coordinator.ybl" ]
 read -r p < "$t/pid"
@@ -704,7 +757,8 @@ while [ "$("$REAL_READLINK" "/proc/$p/exe" 2>/dev/null)" = "$t/pulsar" ]; do
   i=$((i + 1))
 done
 reject env FAIL_START=1 sh "$station" lite2 test-stop
-[ -f "$t/bt-owner" ]
+[ -L "$t/bt-reserved" ] && [ -f "$t/bt-owner" ] ||
+  fail 'failed test restore released Bluetooth ownership'
 reject env FOREIGN_OWNER=1 FOREIGN_MARKER="$t/bt-owner" sh "$station" lite2 test-stop
 [ -f "$t/bt-owner" ] || fail 'test-stop consumed a foreign test snapshot'
 reject sh "$station" lite2 start
@@ -719,7 +773,7 @@ init:start
 Pairable:true
 Discoverable:false
 init:start'
-[ ! -e "$t/bt-owner" ] && [ "$(cat "$PULSAR_BT_OWNER")" = '0 1 0' ] ||
+[ ! -L "$t/bt-reserved" ] && [ ! -e "$t/bt-owner" ] && [ "$(cat "$PULSAR_BT_OWNER")" = '0 1 0' ] ||
   fail 'test restore did not isolate the ownership markers'
 
 # Подмена и восстановление установленного бинаря ждут возврата его BT-владения.
@@ -830,6 +884,7 @@ cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-swap"
   (umask 077; printf '1 0 0\n' > "$legacy"; printf '1 1 0\n' > "$stale")
   cat > "$PULSAR_DIR/pulsar" <<'EOF'
 #!/bin/sh
+if [ "${1-}" = --version ]; then echo pulsar-bt-managed/1; exit 0; fi
 printf 'managed:%s\n' "$PULSAR_BT_MANAGED" >> "$BT_FIXTURE/events"
 printf '%s\n' "$PULSAR_BT_OWNER" > "$PULSAR_DIR/owner-path"
 rm -f "$PULSAR_DIR/enabled"
@@ -896,15 +951,43 @@ quasar:start'
 
   # Подменяем рабочий путь после последней сверки inode. Даже первый запуск
   # должен исполнить закреплённый ELF с именем pulsar и рабочим путём обновления.
-  install_fixture /bin/sh
+  cat > "$BT_FIXTURE/pinned.c" <<'EOF'
+#define _POSIX_C_SOURCE 200809L
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "--version") && !strcmp(argv[2], "--supervisor-protocol")) {
+        if (getenv("FIXTURE_EXTRA_NEWLINE")) return puts("pulsar-bt-managed/1\n") < 0;
+        return puts("pulsar-bt-managed/1") < 0;
+    }
+    if (argc != 2) return 2;
+    char pid[32];
+    snprintf(pid, sizeof pid, "%ld", (long)getpid());
+    if (setenv("FIXTURE_PINNED_PID", pid, 1) != 0) return 2;
+    pid_t child = fork();
+    if (child == 0) {
+        execl("/bin/sh", "sh", argv[1], (char *)NULL);
+        _exit(2);
+    }
+    int status;
+    return child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status)
+        ? WEXITSTATUS(status) : 2;
+}
+EOF
+  "${CC:-cc}" "$BT_FIXTURE/pinned.c" -o "$BT_FIXTURE/pinned"
+  install_fixture "$BT_FIXTURE/pinned"
   ln "$PULSAR_DIR/pulsar" "$BT_FIXTURE/pre-rename"
   cat > "$PULSAR_DIR/state.conf" <<'EOF'
 set -eu
-exe=$("$REAL_READLINK" "/proc/$$/exe")
+exe=$("$REAL_READLINK" "/proc/$FIXTURE_PINNED_PID/exe")
 case "$exe" in "$PULSAR_DIR"/.pulsar-bt-executable.*/pulsar) ;; *) exit 2 ;; esac
 [ "$PULSAR_BT_MANAGED" = 1 ] && [ "$exe" -ef "$BT_FIXTURE/pre-rename" ] || exit 2
 [ "$PULSAR_INSTALLED_BINARY" = "$PULSAR_DIR/pulsar" ] || exit 2
-case " $("$REAL_PIDOF" pulsar) " in *" $$ "*) ;; *) exit 2 ;; esac
+case " $("$REAL_PIDOF" pulsar) " in *" $FIXTURE_PINNED_PID "*) ;; *) exit 2 ;; esac
 if [ ! -e "$PULSAR_BT_OWNER" ]; then
   # Без подмены оставляем снимок для следующего запуска.
   (umask 077; printf '1 0 1\n' > "$PULSAR_BT_OWNER")
@@ -953,5 +1036,17 @@ Discoverable:false
 init:start
 stable'
   [ ! -e "$owner" ] || fail 'replacement launched before restoring ownership'
+  ln -f "$BT_FIXTURE/pre-rename" "$PULSAR_DIR/pulsar"
+  cat > "$PULSAR_DIR/state.conf" <<'EOF'
+set -eu
+[ "$("$REAL_READLINK" "/proc/$FIXTURE_PINNED_PID/exe")" = "$PULSAR_DIR/pulsar" ]
+[ "$PULSAR_BT_MANAGED" = 0 ] && [ -z "$PULSAR_INSTALLED_BINARY" ] || exit 2
+echo legacy:canonical >> "$BT_FIXTURE/events"
+rm "$PULSAR_DIR/enabled"
+EOF
+  trace
+  touch "$PULSAR_DIR/enabled"
+  FIXTURE_EXTRA_NEWLINE=1 supervise
+  expect 'legacy:canonical'
 )
 echo 'Bluetooth ownership tests passed'

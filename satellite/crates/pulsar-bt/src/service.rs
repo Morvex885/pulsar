@@ -347,7 +347,14 @@ impl FrameActivity {
         let first = self.start.take();
         let continuation = first.and_then(|_| self.enable_continuation.take());
         let (phase, order) = match (avr, first) {
-            (Some((Playback::Playing, Some(order))), _) => (Some(Playback::Playing), Some(order)),
+            (Some((Playback::Playing, Some(order))), _) => {
+                // Первый PCM-буфер ещё относится к AVRCP-фронту. После простоя
+                // тот же Playing уже не должен подменять новый фронт кадров.
+                if self.first.is_some() {
+                    self.covered_avr = self.covered_avr.max(Some(order));
+                }
+                (Some(Playback::Playing), Some(order))
+            }
             (_, Some(order)) => {
                 // Покрытый Playing не заменяет свежий фронт кадров после Idle.
                 self.fallback = Some(if matches!(avr, Some((Playback::Playing, _))) {
@@ -727,8 +734,8 @@ impl Service {
         let now = Instant::now();
         let open = self.visibility_open();
         self.retry_at = now + RETRY;
-        // BlueZ may restart while BlueALSA is still down, so previously
-        // confirmed flags do not prove the current adapter is closed.
+        // BlueZ может перезапуститься, пока BlueALSA недоступен: старые
+        // подтверждения не доказывают, что текущий адаптер закрыт для новых пар.
         if self.bus.is_none() {
             self.close_offline_pairing(None).await;
         }
@@ -965,7 +972,7 @@ mod tests {
             frames,
         };
         policy.release();
-        // Music can start while the Bluetooth bus is down.
+        // Музыка может начаться, пока шина Bluetooth недоступна.
         frames = previous.recover("phone", 20).unwrap();
         policy.select("phone".into(), Instant::now());
         frames.observe_snapshot(&mut policy, Some((Playback::Playing, None)), 30);
@@ -1127,6 +1134,43 @@ mod tests {
         frames.start(next);
         frames.observe(&mut policy, None);
         assert_eq!(policy.ready_start(true, music_start), Some(next));
+    }
+
+    #[test]
+    fn avrcp_first_worker_reopen_does_not_admit_pcm_until_a_confirmed_idle() {
+        let mut policy = selected_policy();
+        let mut frames = FrameActivity::default();
+        let playing = Some((Playback::Playing, Some(10)));
+        frames.observe_snapshot(&mut policy, playing, 1);
+        frames.observe_snapshot(&mut policy, playing, 1);
+        frames.start(15);
+        frames.observe_snapshot(&mut policy, playing, 1);
+        assert_eq!(policy.ready_start(true, 0), Some(10));
+        assert_eq!(
+            frames.first_frame_decision(Some(10), Some(10), 0),
+            Some((15, true))
+        );
+        assert!(policy.preempt_before(20));
+
+        frames.worker_lost(true);
+        frames.start(30);
+        frames.observe_snapshot(&mut policy, playing, 1);
+        assert_eq!(policy.ready_start(true, 20), None);
+        assert_eq!(
+            frames.first_frame_decision(None, None, 20),
+            Some((30, false))
+        );
+
+        frames.idle();
+        frames.observe_snapshot(&mut policy, playing, 1);
+        assert_eq!(policy.ready_start(true, 20), None);
+        frames.start(40);
+        frames.observe_snapshot(&mut policy, playing, 1);
+        assert_eq!(policy.ready_start(true, 20), Some(40));
+        assert_eq!(
+            frames.first_frame_decision(Some(40), Some(40), 20),
+            Some((40, true))
+        );
     }
 
     #[test]

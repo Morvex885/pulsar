@@ -21,8 +21,8 @@ pub(crate) enum Key {
 
 pub(crate) const STREAM_END_HOLD_MS: u64 = 1000;
 
-/// Holds reported activity across seek/skip; `end`, `group` and `finish` return whether the
-/// actor should report a stream end. A valid start is always a new audio generation.
+/// Скрывает короткий разрыв потока при перемотке или смене трека. `end`, `group`
+/// и `finish` решают, сообщать ли об остановке. Каждый запуск получает новое поколение.
 pub(crate) struct StreamHold {
     streaming: Rc<Cell<bool>>,
     group_stopped: bool,

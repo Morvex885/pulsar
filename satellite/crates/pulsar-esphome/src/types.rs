@@ -279,7 +279,7 @@ pub enum SwitchId {
     ClockSpokenNumbers = 8,
     WakeSound = 9,
     ClockColonBlink = 10,
-    /// Режим Bluetooth-колонки: org.bluez.Adapter1.Discoverable (`ApiConfig::bluetooth`).
+    /// Разрешает входящий A2DP; не отражает видимость окна сопряжения (`ApiConfig::bluetooth`).
     Bluetooth = 11,
 }
 

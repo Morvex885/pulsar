@@ -31,7 +31,7 @@ enum Req {
 
 struct Request {
     pending: Req,
-    // The owner of the output, even after the request has been applied to ALSA.
+    // Владелец выхода сохраняется и после применения запроса к ALSA.
     start: Option<u64>,
 }
 
@@ -641,7 +641,7 @@ mod tests {
         assert_eq!(sink.write_once(&[1; 4], 0, old), (4, 0, 0));
         assert!(sink.accepts_audio());
 
-        // The sync task is still in the ring when an older release is superseded by configure.
+        // Пока задача синхронизации ещё пишет в кольцо, configure заменяет отложенный release.
         let io = lock(&sink.io);
         assert!(sink.revoke_before(pulsar_core::audio_start_order()));
         let latest = sink.configure(48000, 2, 16);

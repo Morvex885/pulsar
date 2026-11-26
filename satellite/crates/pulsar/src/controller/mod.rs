@@ -258,8 +258,8 @@ pub struct Controller {
     bt_starts: u64,
     bt_connection: Option<u64>,
     audio_start: u64,
-    // Порядок отправки Play нужен для отмены; арбитраж идёт по фактическому старту.
-    music_start_pending: Option<(PlayId, u64)>,
+    // Один id действует и для первого Playing, и для подтверждённых Resume.
+    music_play_id: Option<PlayId>,
     sendspin_pairing_prompt: bool,
 }
 
@@ -660,7 +660,7 @@ impl Controller {
             bt_starts: 0,
             bt_connection: None,
             audio_start: 0,
-            music_start_pending: None,
+            music_play_id: None,
             sendspin_pairing_prompt: false,
         };
         // The rest of the C++ start(), in its order: every call below only queues commands to
@@ -809,12 +809,8 @@ impl Controller {
                 }
             }
             PlayerEvent::MusicStarted { id, order } => {
-                self.sendspin_ended_ms = None;
-                if self
-                    .music_start_pending
-                    .is_some_and(|(pending, _)| pending == id)
-                {
-                    self.music_start_pending = None;
+                if self.music_play_id == Some(id) {
+                    self.sendspin_ended_ms = None;
                     if order > self.audio_start {
                         self.local_music_takes_audio(order);
                     }
@@ -835,11 +831,8 @@ impl Controller {
                 self.publish_media();
             }
             PlayerEvent::Done { id, ok } => {
-                if self
-                    .music_start_pending
-                    .is_some_and(|(pending, _)| pending == id)
-                {
-                    self.music_start_pending = None;
+                if self.music_play_id == Some(id) {
+                    self.music_play_id = None;
                 }
                 if let Some(p) = self.pending.remove(&id) {
                     self.play_done(p, ok);
