@@ -54,7 +54,7 @@ impl Controller {
                         && !self.timer_ringing
                         && !self.mic_muted()
                     {
-                        self.start_pipeline("", false, Vec::new());
+                        self.start_pipeline(String::new(), false, Vec::new());
                     }
                     self.end_announce();
                 }
@@ -127,13 +127,15 @@ impl Controller {
             return;
         }
         // Without the HA pipeline this station could win and stay silent: it does not take part.
+        let label = logic::wake_word_phrase(&self.active_wake_word);
         if !self.arbitration_on() || !self.api.voice_subscribed() {
-            return self.answer_wake(phrase, preroll);
+            return self.answer_wake(label.to_owned(), preroll);
         }
         self.arbitrating = true;
         // A station that lost the previous wake word may win this one.
         self.commands_blocked_until_ms = 0;
-        self.arb_phrase = phrase.to_owned();
+        self.arb_phrase.clear();
+        self.arb_phrase.push_str(label);
         self.arb_level = level_db;
         self.arb_audio = preroll;
         self.arb_command.clear();
@@ -146,7 +148,7 @@ impl Controller {
         );
     }
 
-    fn answer_wake(&mut self, phrase: &str, preroll: Vec<i16>) {
+    fn answer_wake(&mut self, phrase: String, preroll: Vec<i16>) {
         if self.timer_ringing {
             return self.stop_timer_ring();
         }
@@ -187,8 +189,8 @@ impl Controller {
         }
         // Capture keeps streaming into the new dialog: switching it off here could drop the
         // chunk between the preroll and live audio.
-        let phrase = self.arb_phrase.clone();
-        self.answer_wake(&phrase, audio);
+        let phrase = std::mem::take(&mut self.arb_phrase);
+        self.answer_wake(phrase, audio);
         if self.phase != Phase::Listening {
             self.mic.set_streaming(false); // no dialog started (e.g. HA gone)
         }
@@ -211,7 +213,7 @@ impl Controller {
     // ---------------- pipeline ----------------
 
     /// The only way into LISTENING (the watchdog bounds it).
-    pub(super) fn start_pipeline(&mut self, phrase: &str, explicit: bool, preroll: Vec<i16>) {
+    fn start_pipeline(&mut self, phrase: String, explicit: bool, preroll: Vec<i16>) {
         if self.mic_muted() {
             return;
         }
@@ -448,7 +450,7 @@ impl Controller {
         ) {
             // Продолжение слушает, пока часы дочитывают предыдущий ответ.
             let display = std::mem::take(&mut self.speech_display);
-            self.start_pipeline("", false, Vec::new());
+            self.start_pipeline(String::new(), false, Vec::new());
             self.speech_display = display;
             self.speech_display.followup();
             self.update_speech_number();
@@ -607,7 +609,7 @@ impl Controller {
             self.interrupt_speech();
             return self.finish_interaction();
         }
-        self.start_pipeline("", true, Vec::new());
+        self.start_pipeline(String::new(), true, Vec::new());
     }
 
     // ---------------- announcements ----------------

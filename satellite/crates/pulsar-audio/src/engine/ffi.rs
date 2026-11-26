@@ -338,12 +338,12 @@ impl Vqe {
         self.frame
     }
 
-    /// Число выходов известно из пресета до первого чанка.
+    /// Маска выходов из пресета или, если её не удалось прочитать, из пробного чанка.
     // см. docs/hardware.md, «Библиотеки Яндекса (C API)»
     pub(super) fn output_mask(&mut self) -> Result<u32, String> {
-        let mut mask = 0;
         if let Some(count) = self.lib.cfg_output_count {
-            for ty in 0..=MAX_CHANNEL_TYPE {
+            let mut mask = 0;
+            let result = (0..=MAX_CHANNEL_TYPE).try_for_each(|ty| {
                 let mut n = 0;
                 // SAFETY: живой cfg, допустимый тип канала, выходной указатель на c_int.
                 let err = unsafe { count(self.cfg, ty, &mut n) };
@@ -351,15 +351,19 @@ impl Vqe {
                 if n > 0 {
                     mask |= 1 << ty;
                 }
+                Ok::<(), String>(())
+            });
+            match result {
+                Ok(()) => return Ok(mask),
+                Err(e) => log::warn!("VQE config output count: {e}; probing a silent chunk"),
             }
-        } else {
-            // Без геттера пресета выходы доступны только после обработки чанка.
-            let silence = vec![0.0; self.mic_samples.max(self.spk_samples)];
-            self.process(&silence[..self.mic_samples], &silence[..self.spk_samples])?;
-            for ty in 0..=MAX_CHANNEL_TYPE {
-                if self.output(ty).is_ok_and(|d| !d.is_empty()) {
-                    mask |= 1 << ty;
-                }
+        }
+        let silence = vec![0.0; self.mic_samples.max(self.spk_samples)];
+        self.process(&silence[..self.mic_samples], &silence[..self.spk_samples])?;
+        let mut mask = 0;
+        for ty in 0..=MAX_CHANNEL_TYPE {
+            if self.output(ty).is_ok_and(|d| !d.is_empty()) {
+                mask |= 1 << ty;
             }
         }
         Ok(mask)
