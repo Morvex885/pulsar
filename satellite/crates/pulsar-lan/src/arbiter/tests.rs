@@ -33,11 +33,33 @@ fn level(bits: &str) -> f32 {
 
 fn claim(station: &str, wake: &str, busy: bool, level_db: f32) -> Claim {
     Claim {
+        kind: ClaimKind::Wake,
         station: station.to_owned(),
         wake: wake.to_owned(),
         busy,
         level_db,
     }
+}
+
+fn bluetooth_claim(station: &str, level_db: f32) -> Claim {
+    Claim {
+        kind: ClaimKind::Bluetooth,
+        ..claim(station, "alisa", false, level_db)
+    }
+}
+
+#[test]
+fn legacy_wake_decoder_ignores_bluetooth_claims() {
+    let claim = bluetooth_claim("st-z", -1.0);
+    let datagram = wire::format(&claim).unwrap();
+    assert_eq!(datagram, "pulsar-bt/1 st-z alisa 0 -1.0");
+    // Старая версия отбрасывает пакеты, у которых первое поле не равно pulsar-wake/1.
+    assert_ne!(
+        datagram.split_ascii_whitespace().next(),
+        Some("pulsar-wake/1")
+    );
+    assert_eq!(wire::parse(datagram.as_bytes()), Some(claim));
+    assert_eq!(wire::parse(b"pulsar-bt/1 st-z alisa 1 -1.0"), None);
 }
 
 #[test]
@@ -130,11 +152,28 @@ impl Rig {
     fn claim(&mut self, id: u64, level_db: f32, busy: bool, decide: bool) {
         self.a.on_cmd(Cmd::Claim {
             id,
+            kind: ClaimKind::Wake,
             wake: "alisa".to_owned(),
             level_db,
             busy,
             decide,
         });
+    }
+
+    fn claim_bluetooth(&mut self, id: u64, level_db: f32) {
+        self.a.on_cmd(Cmd::Claim {
+            id,
+            kind: ClaimKind::Bluetooth,
+            wake: "alisa".to_owned(),
+            level_db,
+            busy: false,
+            decide: true,
+        });
+    }
+
+    fn bluetooth_peer(&mut self, station: &str, level_db: f32) {
+        let datagram = wire::format(&bluetooth_claim(station, level_db)).unwrap();
+        self.a.on_datagram(Ok(datagram.len()), datagram.as_bytes());
     }
 
     fn peer(&mut self, station: &str, wake: &str, busy: bool, level_db: f32) {
@@ -218,6 +257,49 @@ async fn level_decides_within_the_window() {
     r.peer("st-c", "alisa", false, -10.0);
     r.run_for(150).await;
     assert_eq!(r.decided(), Some((2, false, "st-c".into(), 2)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn bluetooth_fallback_yields_to_a_subscribed_peer_even_after_the_normal_window() {
+    let mut offline = Rig::new("st-z");
+    offline.claim_bluetooth(1, -1.0);
+    offline.run_for(300).await;
+    assert_eq!(offline.decided(), None);
+    offline.peer("st-a", "alisa", false, -100.0);
+    offline.run_for(200).await;
+    assert_eq!(offline.decided(), Some((1, false, "st-a".into(), 1)));
+
+    let mut online = Rig::new("st-a");
+    online.bluetooth_peer("st-z", -1.0);
+    online.run_for(300).await;
+    online.claim(1, -100.0, false, true);
+    online.run_for(250).await;
+    assert_eq!(online.decided(), Some((1, true, "st-a".into(), 0)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn bluetooth_claim_does_not_replace_an_ordinary_claim_from_the_same_peer() {
+    let mut online = Rig::new("st-a");
+    online.claim(1, -30.0, false, true);
+    online.peer("st-z", "alisa", false, -20.0);
+    online.bluetooth_peer("st-z", -10.0);
+    online.run_for(250).await;
+    assert_eq!(online.decided(), Some((1, false, "st-z".into(), 1)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn bluetooth_fallback_peers_elect_one_station() {
+    let mut first = Rig::new("st-a");
+    let mut second = Rig::new("st-z");
+    first.claim_bluetooth(1, -20.0);
+    second.bluetooth_peer("st-a", -20.0);
+    first.run_for(300).await;
+    second.claim_bluetooth(2, -20.0);
+    first.bluetooth_peer("st-z", -20.0);
+    first.run_for(200).await;
+    assert_eq!(first.decided(), Some((1, false, "st-z".into(), 1)));
+    second.run_for(300).await;
+    assert_eq!(second.decided(), Some((2, true, "st-z".into(), 1)));
 }
 
 #[tokio::test(start_paused = true)]

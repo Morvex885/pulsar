@@ -80,6 +80,23 @@ struct Ctx {
     vis_beat: AtomicBool,
 }
 
+impl Ctx {
+    fn revoke_stream(self: &Arc<Self>, streaming: &Cell<bool>) -> bool {
+        if !streaming.get() {
+            return false;
+        }
+        self.sink.request_release();
+        // Если sync task уже перестал писать, закрытие PCM всё равно должно выполниться.
+        let ctx = self.clone();
+        tokio::task::spawn_blocking(move || ctx.sink.finish_request());
+        // Снять локальный статус сразу: следующий StreamStart должен считаться новым,
+        // даже если сервер ещё не прислал StreamEnd для вытесненного потока.
+        streaming.set(false);
+        let _ = self.tx.send(SendspinEvent::Stream(None));
+        true
+    }
+}
+
 impl Listener for Ctx {
     fn event(&self, ev: LibEvent) {
         match sink_request(&ev) {
@@ -205,6 +222,18 @@ impl SendspinHandle {
         if !self.streaming.get() {
             return;
         }
+        self.leave_group();
+    }
+
+    /// Bluetooth перехватил динамик. Pause касается всей группы, но не подтверждает
+    /// остановку локального PCM: закрыть его независимо от ответа сервера.
+    pub fn pause_for_bluetooth(&self) {
+        if self.ctx.revoke_stream(&self.streaming) && !self.transport(Transport::Pause) {
+            self.leave_group();
+        }
+    }
+
+    fn leave_group(&self) {
         info!("sendspin: local playback took over, leaving the group");
         self.client.leave();
     }
@@ -608,5 +637,58 @@ mod tests {
         ctx.event(LibEvent::StreamStart(None));
         assert!(!ctx.sink.accepts_audio());
         assert_eq!(ctx.events.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    fn bluetooth_revokes_sendspin_until_a_new_stream_starts() {
+        let (ctx, mut rx) = ctx();
+        let streaming = Rc::new(Cell::new(false));
+        let mut core = Core {
+            ctx: Arc::new(ctx),
+            hold: StreamHold::new(streaming.clone()),
+            timers: Timers::new(),
+            hooks: true,
+        };
+        let params = StreamParams {
+            codec: 0,
+            rate: 48000,
+            channels: 2,
+            bits: 16,
+        };
+        let ctx = core.ctx.clone();
+        let mut event = |ev| {
+            core.ctx.event(ev);
+            for ev in core.take_events() {
+                core.event(ev);
+            }
+        };
+
+        event(LibEvent::StreamStart(Some(params)));
+        let Ok(SendspinEvent::Stream(Some(first))) = rx.try_recv() else {
+            panic!("нет события начала потока");
+        };
+        assert!(ctx.sink.accepts_audio());
+
+        assert!(ctx.revoke_stream(&streaming));
+        assert_eq!(rx.try_recv(), Ok(SendspinEvent::Stream(None)));
+        assert!(!streaming.get());
+        assert!(!ctx.sink.accepts_audio());
+        assert_eq!(ctx.audio_write(&[1; 4], 0), (4, 0, 0));
+
+        event(LibEvent::Group {
+            playing: Some(true),
+            name: None,
+        });
+        event(LibEvent::StreamStart(None));
+        assert!(!ctx.sink.accepts_audio());
+        assert!(rx.try_recv().is_err());
+
+        event(LibEvent::StreamStart(Some(params)));
+        let Ok(SendspinEvent::Stream(Some(second))) = rx.try_recv() else {
+            panic!("нет события начала нового потока");
+        };
+        assert!(second > first);
+        assert!(streaming.get());
+        assert!(ctx.sink.accepts_audio());
     }
 }

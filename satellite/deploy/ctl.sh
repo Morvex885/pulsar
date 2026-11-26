@@ -1,9 +1,10 @@
 #!/bin/sh
-# pulsar control: enable | disable | restart | reload | status | log | api-key | bt-restore
+# pulsar control: enable | disable | restart | reload | rollback | status | log | api-key | bt-restore
 #   enable  - stop the Yandex stack, run pulsar now and on every boot
 #   disable - stop pulsar, start the Yandex stack again (also after reboot)
 #   reload  - restart the supervisor and the daemon (after supervise.sh was replaced); never starts
 #             the Yandex stack
+#   rollback - установить .prev после возврата штатного Bluetooth.
 #   api-key [base64|clear] - ESPHome Noise key ($D/api_key, base64 of 32 bytes, mode 0600): no
 #             argument shows whether one is set; a value sets it, `clear` removes it; both restart.
 #             recent Home Assistant (mid-2026+) provisions a key automatically over the API on first
@@ -12,6 +13,7 @@
 #   bt-restore - вернуть флаги адаптера и штатный player после остановки pulsar.
 D=${PULSAR_DIR:-/data/pulsar}
 Q=${PULSAR_Q:-/system/vendor/quasar/q}
+bt_owner=${PULSAR_BT_OWNER:-/tmp/pulsar-bt-owner}
 
 # SIGTERM, wait up to 10 s for the process to go, then SIGKILL. Returns 1 if it is still there.
 stop_daemon() {
@@ -38,12 +40,13 @@ start_supervisor() {
     sleep 1
     i=$((i + 1))
   done
+  pidof supervise.sh >/dev/null 2>&1
 }
 
 # After stopping the daemon: the supervisor restarts it; start one if `enabled` but none runs.
 restarted() {
   if [ -f "$D/enabled" ] && [ -x "$D/supervise.sh" ] && ! pidof supervise.sh >/dev/null 2>&1; then
-    start_supervisor
+    start_supervisor || { echo 'supervisor did not start' >&2; return 1; }
     echo "no supervisor was running, started one"
   else
     echo "supervisor restarts it in ~1 s"
@@ -84,21 +87,44 @@ bt_restore_flag() {
     "variant:boolean:$bt_value" >/dev/null || bt_error "не удалось вернуть $1"
 }
 
-bt_restore() {
-  bt_owner=${PULSAR_BT_OWNER:-/tmp/pulsar-bt-owner}
-  [ -e "$bt_owner" ] || [ -L "$bt_owner" ] || return 0
-  [ -f "$bt_owner" ] && [ ! -L "$bt_owner" ] ||
+bt_owner_exists() { [ -e "$bt_owner" ] || [ -L "$bt_owner" ]; }
+
+bt_read_owner() {
+  bt_uid=$(id -u) &&
+    [ -f "$bt_owner" ] && [ ! -L "$bt_owner" ] &&
+    [ "$(stat -c '%u:%a:%s' "$bt_owner")" = "$bt_uid:600:6" ] ||
     { bt_error 'некорректный файл снимка'; return 1; }
-  if ! {
-    IFS= read -r bt_flags && ! IFS= read -r bt_extra && [ -z "$bt_extra" ]
-  } < "$bt_owner"; then
-    bt_error 'некорректный формат снимка'; return 1
-  fi
+  # Точка сохраняет перевод строки при подстановке; читаем не более шести байт.
+  bt_flags=$(head -c 6 "$bt_owner" && printf .) || return 1
   case "$bt_flags" in
-    [01]' '[01]' '[01]) ;;
+    [01]' '[01]' '[01]'
+.') bt_flags=${bt_flags%??} ;;
     *) bt_error 'некорректный формат снимка'; return 1 ;;
   esac
-  pidof pulsar >/dev/null 2>&1 && { bt_error 'pulsar ещё работает'; return 1; }
+}
+
+bt_stopped() {
+  bt_pids=$(pidof pulsar)
+  if [ "${1-}" = --self ]; then
+    [ "$bt_pids" = "$PPID" ] || { bt_error 'запрос не от единственного процесса pulsar'; return 1; }
+  elif [ -n "$bt_pids" ]; then
+    bt_error 'pulsar ещё работает'
+    return 1
+  fi
+}
+
+bt_hide() {
+  bt_owner_exists || return 0
+  bt_read_owner && bt_stopped || return 1
+  bt_ok=0
+  bt_restore_flag Discoverable 0 || bt_ok=1
+  bt_restore_flag Pairable 0 || bt_ok=1
+  return "$bt_ok"
+}
+
+bt_restore() {
+  bt_owner_exists || return 0
+  bt_read_owner && bt_stopped "${1-}" || return 1
 
   # Пространства путей подменяются только для изолированной проверки протокола.
   bt_proc=${PULSAR_BT_PROC:-/proc}
@@ -123,6 +149,27 @@ bt_restore() {
   rm -f "$bt_owner" || bt_error 'не удалось удалить снимок'
 }
 
+rollback() {
+  (
+    cd "$D" || exit 1
+    # Пока копия не готова, рабочую службу не останавливаем.
+    trap 'rm -f pulsar.rb' EXIT
+    rm -f pulsar.rb && cp -p pulsar.prev pulsar.rb && [ -x pulsar.rb ] || exit 1
+    "$D/ctl.sh" reload --stop && bt_restore || exit 1
+    # Сохраняем текущий бинарь, не снимая его с рабочего пути до атомарной замены.
+    if { [ pulsar -ef pulsar.bad ] || ln -f pulsar pulsar.bad; } &&
+      ln -f pulsar.rb pulsar.bt-blocked && [ pulsar.rb -ef pulsar.bt-blocked ] &&
+      mv -f pulsar.rb pulsar; then
+      sync
+      "$D/ctl.sh" reload
+    else
+      echo 'rollback: бинарь не заменён; перезапускаем текущий' >&2
+      "$D/ctl.sh" reload
+      exit 1
+    fi
+  )
+}
+
 valid_key() { # 44 base64 chars (32 bytes + one '='), and 32 bytes when a decoder exists
   case "$1" in
     *[!A-Za-z0-9+/=]*) return 1 ;;
@@ -142,7 +189,7 @@ case "$1" in
     fi
     touch "$D/enabled"
     $Q stop >/dev/null 2>&1
-    start_supervisor
+    start_supervisor || { echo 'supervisor did not start' >&2; exit 1; }
     echo "enabled"
     ;;
   disable)
@@ -172,11 +219,15 @@ case "$1" in
     wait_supervisors_gone || { echo "supervisor is still running" >&2; exit 1; }
     [ "${2-}" = --stop ] && exit 0
     if [ -f "$D/enabled" ] && [ -x "$D/supervise.sh" ]; then
-      start_supervisor
+      start_supervisor || { echo 'supervisor did not start' >&2; exit 1; }
       echo "supervisor reloaded"
     else
       echo "supervisor stopped (not enabled)"
     fi
+    ;;
+  rollback)
+    [ "$#" -eq 1 ] || exit 2
+    rollback
     ;;
   status)
     [ -f "$D/enabled" ] && echo "mode: pulsar" || echo "mode: yandex"
@@ -210,12 +261,14 @@ case "$1" in
   bt-restore)
     case "$#:${2-}" in
       1:) bt_restore ;;
+      2:--self) bt_restore --self ;;
+      2:--hide) bt_hide ;;
       2:--check) command -v dbus-send >/dev/null 2>&1 ;;
       *) exit 2 ;;
     esac
     ;;
   *)
-    echo "usage: $0 enable|disable|restart|reload [--stop]|status|log [lines]|api-key [base64|clear]|bt-restore"
+    echo "usage: $0 enable|disable|restart|reload [--stop]|rollback|status|log [lines]|api-key [base64|clear]|bt-restore"
     exit 1
     ;;
 esac

@@ -53,8 +53,8 @@ description: >-
 
 `make -C satellite ARCH=<arch> tools` → `satellite/build/<arch>/tools/<name>`
 (`AGENTS.md`, «Сборка и проверки»); список — `docs/architecture.md`, «Workspace». `push` файла в
-`/tmp/pulsar-test/`, запуск — `ssh "$PULSAR_<X>" /tmp/pulsar-test/<name> …` (то же ssh-назначение,
-что у `station.sh`; команды запуска в нём нет). Утилиты со звуком — п. 6.
+`/tmp/pulsar-test/`, запуск — `ssh "$host" /tmp/pulsar-test/<name> …`, где `host` — то же
+SSH-назначение из переменной или файла, что использует `station.sh`. Утилиты со звуком — п. 6.
 
 ## 6. Звук
 

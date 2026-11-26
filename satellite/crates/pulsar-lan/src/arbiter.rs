@@ -39,8 +39,15 @@ const DRAIN_MAX: usize = 64;
 /// Peer claims kept at most (one per station; more only from a flood of names).
 const MAX_RECENT: usize = 32;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaimKind {
+    Wake,
+    Bluetooth,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Claim {
+    kind: ClaimKind,
     /// DeviceIdentity::name of the sender.
     pub station: String,
     /// Wake word id: "alisa" / "yandex".
@@ -49,6 +56,17 @@ pub struct Claim {
     pub busy: bool,
     /// AudioFrontend level, 0.1 dB steps.
     pub level_db: f32,
+}
+
+impl Claim {
+    fn decision_window_ms(&self) -> i64 {
+        if self.kind == ClaimKind::Bluetooth {
+            // Обычный ответ должен победить в пределах всего горизонта арбитража.
+            LOOKBACK_MS
+        } else {
+            WINDOW_MS
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +84,7 @@ pub enum ArbiterEvent {
 enum Cmd {
     Claim {
         id: u64,
+        kind: ClaimKind,
         wake: String,
         level_db: f32,
         busy: bool,
@@ -100,12 +119,22 @@ impl ArbiterHandle {
     /// `Decided` with the returned id follows after the window; without, the claim only keeps
     /// the peers quiet (busy claim while a timer rings). Ids grow from 1.
     pub fn claim(&self, wake: &str, level_db: f32, busy: bool, decide: bool) -> u64 {
+        self.submit(ClaimKind::Wake, wake, level_db, busy, decide)
+    }
+
+    /// Заявка на локальное окно Bluetooth: не участвует в выборе ответа Assist.
+    pub fn claim_bluetooth(&self, wake: &str, level_db: f32) -> u64 {
+        self.submit(ClaimKind::Bluetooth, wake, level_db, false, true)
+    }
+
+    fn submit(&self, kind: ClaimKind, wake: &str, level_db: f32, busy: bool, decide: bool) -> u64 {
         let id = self.next_id.get() + 1;
         self.next_id.set(id);
         match &self.link {
             Link::Actor(cmds) => {
                 let _ = cmds.send(Cmd::Claim {
                     id,
+                    kind,
                     wake: wake.to_owned(),
                     level_db,
                     busy,
@@ -115,6 +144,7 @@ impl ArbiterHandle {
             Link::Alone { station, events } => {
                 if decide {
                     let best = Claim {
+                        kind,
                         station: station.to_string(),
                         wake: wake.to_owned(),
                         busy,
@@ -240,6 +270,8 @@ struct Arbiter {
     dest: SocketAddrV4,
     /// One entry per peer station: its latest claim.
     recent: Vec<Received>,
+    // Заявки Bluetooth не вытесняют обычные заявки из их кэша.
+    recent_bluetooth: Vec<Received>,
     mine: Claim,
     /// `mine` as sent; None when too long for the C++ arbiter's 128-byte buffer (never sent).
     datagram: Option<String>,
@@ -263,6 +295,7 @@ impl Arbiter {
     ) -> Self {
         Self {
             mine: Claim {
+                kind: ClaimKind::Wake,
                 station: station.clone(),
                 wake: String::new(),
                 busy: false,
@@ -272,6 +305,7 @@ impl Arbiter {
             sock,
             dest,
             recent: Vec::new(),
+            recent_bluetooth: Vec::new(),
             datagram: None,
             claim_ms: 0,
             copies_left: 0,
@@ -326,11 +360,12 @@ impl Arbiter {
         match cmd {
             Cmd::Claim {
                 id,
+                kind,
                 wake,
                 level_db,
                 busy,
                 decide,
-            } => self.claim(id, wake, level_db, busy, decide),
+            } => self.claim(id, kind, wake, level_db, busy, decide),
             Cmd::Cancel => self.cancel(),
         }
     }
@@ -340,9 +375,18 @@ impl Arbiter {
         (Instant::now() - self.epoch).as_millis() as i64
     }
 
-    fn claim(&mut self, id: u64, wake: String, level_db: f32, busy: bool, decide: bool) {
+    fn claim(
+        &mut self,
+        id: u64,
+        kind: ClaimKind,
+        wake: String,
+        level_db: f32,
+        busy: bool,
+        decide: bool,
+    ) {
         self.cancel();
         self.mine = Claim {
+            kind,
             station: self.station.clone(),
             wake,
             busy,
@@ -356,7 +400,8 @@ impl Arbiter {
             .set_repeating(Timer::Resend, RESEND_MS as u64, RESEND_MS as u64);
         if decide {
             self.pending = Some(id);
-            self.timers.set(Timer::Decide, WINDOW_MS as u64);
+            self.timers
+                .set(Timer::Decide, self.mine.decision_window_ms() as u64);
         }
     }
 
@@ -397,7 +442,11 @@ impl Arbiter {
             return;
         };
         let now = self.now_ms();
-        let resent = self.recent.iter().any(|r| {
+        let recent = match c.kind {
+            ClaimKind::Wake => &mut self.recent,
+            ClaimKind::Bluetooth => &mut self.recent_bluetooth,
+        };
+        let resent = recent.iter().any(|r| {
             r.claim.station == c.station
                 && r.claim.wake == c.wake
                 && r.claim.busy == c.busy
@@ -407,10 +456,10 @@ impl Arbiter {
         if resent {
             return;
         }
-        self.recent
-            .retain(|r| now - r.at_ms <= KEEP_MS && r.claim.station != c.station);
+        recent.retain(|r| now - r.at_ms <= KEEP_MS && r.claim.station != c.station);
         info!(
-            "arbiter: claim from {} wake={} busy={} level={}",
+            "arbiter: {:?} claim from {} wake={} busy={} level={}",
+            c.kind,
             c.station,
             c.wake,
             u8::from(c.busy),
@@ -419,13 +468,13 @@ impl Arbiter {
         if let Some(trace) = &self.trace {
             let _ = trace.send(c.clone());
         }
-        self.recent.push(Received {
+        recent.push(Received {
             claim: c,
             at_ms: now,
         });
         // Bounds a flood of distinct station names; the oldest claim goes first.
-        if self.recent.len() > MAX_RECENT {
-            self.recent.remove(0);
+        if recent.len() > MAX_RECENT {
+            recent.remove(0);
         }
     }
 
@@ -433,7 +482,12 @@ impl Arbiter {
         let Some(claim_id) = self.pending.take() else {
             return;
         };
-        let (won, best, peers) = decision(&self.mine, self.claim_ms, &self.recent);
+        let bluetooth = match self.mine.kind {
+            ClaimKind::Wake => &[][..],
+            ClaimKind::Bluetooth => self.recent_bluetooth.as_slice(),
+        };
+        let recent = self.recent.iter().chain(bluetooth);
+        let (won, best, peers) = decision(&self.mine, self.claim_ms, recent);
         let _ = self.events.send(ArbiterEvent::Decided {
             claim_id,
             won,
@@ -452,8 +506,11 @@ fn accept(datagram: &[u8], own_station: &str) -> Option<Claim> {
     wire::parse(datagram).filter(|c| c.station != own_station)
 }
 
-/// Busy beats idle, then the higher level, then the larger station name.
+/// Обычная заявка выше Bluetooth, затем решают занятость, уровень и имя станции.
 fn beats(a: &Claim, b: &Claim) -> bool {
+    if a.kind != b.kind {
+        return a.kind == ClaimKind::Wake;
+    }
     if a.busy != b.busy {
         return a.busy;
     }
@@ -467,7 +524,7 @@ fn beats(a: &Claim, b: &Claim) -> bool {
 fn decision<'a>(
     mine: &'a Claim,
     claim_ms: i64,
-    recent: &'a [Received],
+    recent: impl Iterator<Item = &'a Received>,
 ) -> (bool, &'a Claim, usize) {
     let mut best = mine;
     let mut won = true;
@@ -480,7 +537,7 @@ fn decision<'a>(
             continue;
         }
         peers += 1;
-        if r.at_ms < claim_ms - WINDOW_MS {
+        if r.at_ms < claim_ms - r.claim.decision_window_ms() {
             if early.is_none_or(|e| beats(&r.claim, e)) {
                 early = Some(&r.claim);
             }

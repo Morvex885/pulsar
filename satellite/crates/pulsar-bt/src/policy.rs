@@ -29,13 +29,15 @@ impl Policy {
         }
     }
 
-    pub fn set_enabled(&mut self, on: bool, now: Instant, paired: BTreeSet<String>) {
+    pub fn set_enabled(&mut self, on: bool, now: Instant, paired: Option<BTreeSet<String>>) {
         self.enabled = on;
         if !on {
             self.deadline = None;
             self.release();
         } else if self.owner.is_none() {
-            self.known = paired;
+            if let Some(paired) = paired {
+                self.known = paired;
+            }
             self.deadline = Some(now + PAIRING_TIME);
         }
     }
@@ -110,8 +112,12 @@ impl Policy {
         }
     }
 
-    pub fn preempt(&mut self, starts: u64) -> bool {
-        if self.admitted && self.starts == starts {
+    pub fn ready_start(&self, pcm_ready: bool, preempt_before: u64) -> Option<u64> {
+        (pcm_ready && self.admitted && self.starts >= preempt_before).then_some(self.starts)
+    }
+
+    pub fn preempt_before(&mut self, order: u64) -> bool {
+        if self.admitted && self.starts < order {
             self.admitted = false;
             true
         } else {
@@ -130,9 +136,20 @@ mod tests {
         let original = BTreeSet::from(["first".into()]);
         let mut p = Policy::restore(true, original.clone());
         assert!(p.deadline.is_none());
-        p.set_enabled(true, now, original);
+        p.set_enabled(true, now, Some(original));
         p.expire(now + Duration::from_secs(119));
         assert!(p.deadline.is_some());
+        p.expire(now + PAIRING_TIME);
+        p.observe_pairs(&BTreeSet::from(["first".into(), "late".into()]));
+        assert!(p.permits("first"));
+        assert!(!p.permits("late"));
+    }
+
+    #[test]
+    fn on_during_outage_does_not_forget_existing_pairs() {
+        let now = Instant::now();
+        let mut p = Policy::restore(false, BTreeSet::from(["first".into()]));
+        p.set_enabled(true, now, None);
         p.expire(now + PAIRING_TIME);
         p.observe_pairs(&BTreeSet::from(["first".into(), "late".into()]));
         assert!(p.permits("first"));
@@ -150,7 +167,7 @@ mod tests {
         p.observe_playback(generation, Some(Playback::Playing), Some(start));
         assert_eq!(p.starts, start);
         assert!(p.starts < local_start);
-        assert!(p.preempt(start));
+        assert!(p.preempt_before(local_start));
         p.observe_playback(generation, Some(Playback::Playing), None);
         assert!(!p.admitted);
         p.observe_playback(generation, Some(Playback::Paused), None);
@@ -158,9 +175,9 @@ mod tests {
         assert!(!p.admitted);
         p.observe_playback(generation, Some(Playback::Paused), None);
         p.observe_playback(generation, Some(Playback::Playing), None);
-        assert!(!p.preempt(start));
+        assert!(!p.preempt_before(local_start));
         assert!(p.admitted);
-        p.set_enabled(false, Instant::now(), BTreeSet::new());
+        p.set_enabled(false, Instant::now(), None);
         p.observe_playback(generation, Some(Playback::Playing), None);
         assert!(!p.admitted);
         assert!(!p.permits("first"));

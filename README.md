@@ -377,7 +377,15 @@ ESPHome-устройство `yandex-midi-xxxxxx`, `yandex-station2-xxxxxx`, `ya
 Откат на предыдущую версию вручную:
 
 ```sh
-cd /data/pulsar && mv pulsar.prev pulsar && ./ctl.sh restart
+cd /data/pulsar && ./ctl.sh rollback
+```
+
+В установках со старыми скриптами (до поддержки Bluetooth) допустим прежний способ, только
+если нет снимка владения Bluetooth:
+
+```sh
+cd /data/pulsar && test ! -e /tmp/pulsar-bt-owner && test ! -L /tmp/pulsar-bt-owner &&
+  cp -p pulsar.prev pulsar.rb && mv pulsar.rb pulsar && ./ctl.sh restart
 ```
 
 ### Удаление
@@ -386,10 +394,12 @@ cd /data/pulsar && mv pulsar.prev pulsar && ./ctl.sh restart
 перемонтировать на запись):
 
 ```sh
-/data/pulsar/ctl.sh disable
-rm -rf /data/pulsar
-mount -o remount,rw / && rm -f /etc/init.d/S99zpulsar; mount -o remount,ro /
+/data/pulsar/ctl.sh disable && rm -rf /data/pulsar &&
+  mount -o remount,rw / && { rm -f /etc/init.d/S99zpulsar; mount -o remount,ro /; }
 ```
+
+Если `disable` сообщает об ошибке восстановления Bluetooth, не удаляйте `/data/pulsar`:
+устраните причину и повторите `disable`.
 
 ## Music Assistant
 
@@ -507,6 +517,8 @@ pulsar отдаёт модуль по протоколу deCONZ (ConBee/RaspBee)
   и звучит короткий джингл, если станция не занята диалогом или таймером и звук не выключен.
   Второй телефон не вытесняет первый. По истечении окна или после рестарта разрешение
   сохраняется, но подключиться для воспроизведения могут только известные телефоны.
+  Чтобы снова открыть окно для нового телефона, повторите голосовую команду «Алиса, включи
+  блютуз» или выключите и включите переключатель в HA.
 - При отключении телефона синяя вспышка плавно гаснет, `bt` исчезает с часов и звучит другой
   короткий джингл при тех же условиях. Пауза трека не считается отключением, окно не открывается.
 - Выключение в HA или «Алиса, выключи блютуз» блокирует входящий звук, не удаляя сопряжение.

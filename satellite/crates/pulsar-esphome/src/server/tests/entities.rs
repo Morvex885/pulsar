@@ -1047,6 +1047,26 @@ async fn bluetooth_entities_are_gated_on_the_adapter_and_round_trip() {
                     action: "pause".into()
                 }
             );
+            // Ошибка в конце внешнего поля или вложенного аргумента не применяет команду.
+            let good = kv(key::SW_BLUETOOTH, |w| w.boolean(2, true, false));
+            let mut broken = good.data().to_vec();
+            broken.push(0x80);
+            let mut frame = Vec::new();
+            append_plain(&mut frame, msg::SWITCH_CMD, &broken);
+            p.write(&frame).await;
+            p.send(msg::SWITCH_CMD, &kv(key::SW_BLUETOOTH, |_| {}))
+                .await;
+            assert_eq!(
+                event(&mut rx).await,
+                ApiEvent::Switch(SwitchId::Bluetooth, false)
+            );
+            let mut broken_arg = arg.data().to_vec();
+            broken_arg.push(0x80);
+            let mut cmd = Writer::new();
+            cmd.fixed32(1, key::ACTION_BT, true);
+            cmd.bytes(2, &broken_arg, true);
+            p.send(msg::EXECUTE_SERVICE_REQ, &cmd).await;
+            assert!(drain(&mut p, &mut rx).await.is_empty());
             p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
             // сливаем начальный дамп закэшированных состояний — ниже проверяем только публикации
             p.sync().await;

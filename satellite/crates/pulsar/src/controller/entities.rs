@@ -591,16 +591,14 @@ impl Controller {
             });
             self.play_bluetooth_cue(connected);
         }
-        if self.bt_starts != state.starts {
+        if state.admitted && self.bt_starts != state.starts {
             self.bt_starts = state.starts;
-            if state.admitted {
-                if state.starts > self.audio_start {
-                    self.audio_start = state.starts;
-                    self.bluetooth_takes_audio();
-                    bt.admit(state.starts);
-                } else {
-                    bt.preempt_before(self.audio_start);
-                }
+            if state.starts > self.audio_start {
+                self.audio_start = state.starts;
+                self.bluetooth_takes_audio();
+                bt.admit(state.starts);
+            } else {
+                bt.preempt_before(self.audio_start);
             }
         }
         self.update_ui();
@@ -665,6 +663,7 @@ impl Controller {
             self.timer_ringing,
             self.player.state(Channel::Music),
             self.sendspin_streaming(),
+            self.bt.as_ref().is_some_and(|bt| bt.playing()),
             self.zigbee_flashing(),
         )
     }

@@ -1,10 +1,9 @@
-//! The claim datagram, one ASCII line: `pulsar-wake/1 <station> <wake> <busy 0|1> <level %.1f>`.
-//! Parsing follows the C++ `sscanf("%15s %31s %15s %d %f")` field limits, so both sides accept
-//! and reject the same datagrams (tests/golden/arbiter.txt).
+//! Заявка: `pulsar-wake/1 <station> <wake> <busy 0|1> <level %.1f>`.
+//! Для локального Bluetooth префикс `pulsar-bt/1` и `busy=0`. Пределы полей те же,
+//! что у C++ `sscanf("%15s %31s %15s %d %f")` (tests/golden/arbiter.txt).
 
-use super::Claim;
+use super::{Claim, ClaimKind};
 
-const MAGIC: &[u8] = b"pulsar-wake/1";
 /// The C++ arbiter formatted into char[128] and did not send longer claims.
 const MAX_DATAGRAM: usize = 127;
 const MAGIC_FIELD: usize = 15;
@@ -22,8 +21,12 @@ pub fn level_text(level: f32) -> String {
 
 /// The datagram of a claim; None when it would not fit the C++ buffer.
 pub fn format(c: &Claim) -> Option<String> {
+    let magic = match c.kind {
+        ClaimKind::Wake => "pulsar-wake/1",
+        ClaimKind::Bluetooth => "pulsar-bt/1",
+    };
     let d = format!(
-        "pulsar-wake/1 {} {} {} {}",
+        "{magic} {} {} {} {}",
         c.station,
         c.wake,
         u8::from(c.busy),
@@ -44,15 +47,23 @@ pub fn parse(datagram: &[u8]) -> Option<Claim> {
         s: &datagram[..end],
         pos: 0,
     };
-    let magic = s.word(MAGIC_FIELD)?;
+    let kind = match s.word(MAGIC_FIELD)? {
+        b"pulsar-wake/1" => ClaimKind::Wake,
+        b"pulsar-bt/1" => ClaimKind::Bluetooth,
+        _ => return None,
+    };
     let station = s.word(STATION_FIELD)?;
     let wake = s.word(WAKE_FIELD)?;
     let busy = s.int_nonzero()?;
     let level = s.float()?;
-    if !level.is_finite() || !(-100.0..=0.0).contains(&level) || magic != MAGIC {
+    if !level.is_finite()
+        || !(-100.0..=0.0).contains(&level)
+        || (kind == ClaimKind::Bluetooth && busy)
+    {
         return None;
     }
     Some(Claim {
+        kind,
         station: String::from_utf8_lossy(station).into_owned(),
         wake: String::from_utf8_lossy(wake).into_owned(),
         busy,

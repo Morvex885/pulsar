@@ -4,12 +4,14 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 thread_local! {
     // Per thread: parallel `cargo test` threads each run their own runtime and registry.
     static REGISTRY: RefCell<Vec<(&'static str, JoinHandle<()>)>> = const { RefCell::new(Vec::new()) };
+    static SHUTDOWN: watch::Sender<bool> = watch::channel(false).0;
 }
 
 /// Spawns `fut` on the current `LocalSet` and registers it for `join_all`.
@@ -21,9 +23,25 @@ pub fn spawn_actor(name: &'static str, fut: impl Future<Output = ()> + 'static) 
     });
 }
 
+/// Для акторов восстановления, которым при старте не выдают handle.
+pub async fn shutdown_requested() {
+    let mut rx = SHUTDOWN.with(watch::Sender::subscribe);
+    let _ = rx.wait_for(|&stopping| stopping).await;
+}
+
+struct Shutdown;
+
+impl Drop for Shutdown {
+    fn drop(&mut self) {
+        SHUTDOWN.with(|tx| tx.send_replace(false));
+    }
+}
+
 /// Waits until every registered actor (including ones spawned meanwhile) has finished, at most
 /// `timeout` in total; true if all did.
 pub async fn join_all(timeout: Duration) -> bool {
+    SHUTDOWN.with(|tx| tx.send_replace(true));
+    let _shutdown = Shutdown;
     let deadline = Instant::now() + timeout;
     loop {
         let actors = REGISTRY.with_borrow_mut(std::mem::take);
@@ -60,6 +78,11 @@ mod tests {
                 spawn_actor("quick", async {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 });
+                let (stopped, recovered) = tokio::sync::oneshot::channel();
+                spawn_actor("recovery", async move {
+                    shutdown_requested().await;
+                    let _ = stopped.send(());
+                });
                 spawn_actor("waits", async {
                     let _ = rx.await;
                     // Spawned during shutdown: still waited for.
@@ -68,6 +91,7 @@ mod tests {
                 drop(tx);
                 let start = Instant::now();
                 assert!(join_all(Duration::from_secs(3)).await);
+                assert!(recovered.await.is_ok());
                 assert_eq!((Instant::now() - start).as_millis(), 200);
 
                 spawn_actor("stuck", std::future::pending());

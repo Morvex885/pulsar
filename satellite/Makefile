@@ -51,6 +51,7 @@ check:
 	  --all-targets --locked --target aarch64-unknown-linux-gnu --target armv7-unknown-linux-gnueabihf \
 	  -- -D warnings
 	$(CARGO) test --workspace --locked
+	sh deploy/test-bt-ownership.sh
 
 clean:
 	rm -rf build target

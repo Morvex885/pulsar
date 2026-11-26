@@ -42,6 +42,7 @@ shift 2
 L=/tmp/pulsar-agent.lock
 T=/tmp/pulsar-test
 D=/data/pulsar
+BT_OWNER=/tmp/pulsar-bt-owner
 r() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$H" "$@"; }
 # up SRC DEST: upload to DEST.part, verify size and sha256 against SRC, then rename to DEST (mode 755).
 up() {
@@ -86,8 +87,22 @@ done
 if [ -n "$r" ]; then echo "removed stale ALSA dmix lock (${r# })"; fi
 EOF
 )
+# Из /tmp запускаем код только из закрытого каталога текущего SSH-пользователя.
+TEST_DIR_CHECK="test_dir_check() {
+  [ -d '$T' ] && [ ! -L '$T' ] && uid=\$(id -u) &&
+    [ \"\$(stat -c '%u:%a' '$T')\" = \"\$uid:700\" ] ||
+    { echo 'unsafe test directory: expected a private directory owned by the SSH user' >&2; return 1; }
+}"
+TEST_DIR_OPTIONAL="$TEST_DIR_CHECK
+  if [ -e '$T' ] || [ -L '$T' ]; then test_dir_check || exit 1; fi"
 # Не запускать установленный сервис и не удалять стенд, пока не возвращён тестовый BT.
-TEST_BT_RESTORED="if [ -e '$T/bt-owner' ] || [ -L '$T/bt-owner' ]; then echo 'test Bluetooth not restored: run test-stop' >&2; exit 1; fi"
+TEST_BT_RESTORED="$TEST_DIR_OPTIONAL
+  if [ -e '$T/bt-owner' ] || [ -L '$T/bt-owner' ]; then echo 'test Bluetooth not restored: run test-stop' >&2; exit 1; fi"
+PROD_BT_RESTORE="if [ -e '$BT_OWNER' ] || [ -L '$BT_OWNER' ]; then
+  '$D/ctl.sh' reload --stop && '$D/ctl.sh' bt-restore &&
+    [ ! -e '$BT_OWNER' ] && [ ! -L '$BT_OWNER' ] ||
+    { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
+fi"
 case "$cmd" in
   lock)
     [ $# -eq 1 ] || usage
@@ -117,7 +132,10 @@ case "$cmd" in
   start) own; r "$TEST_BT_RESTORED; $D/ctl.sh reload" ;;
   push)
     [ $# -ge 1 ] || usage
-    own; r "mkdir -p $T"
+    own
+    r "$TEST_DIR_CHECK
+       if [ ! -e '$T' ] && [ ! -L '$T' ]; then (umask 077; mkdir '$T') || exit 1; fi
+       test_dir_check"
     for f; do b=$(basename "$f"); up "$f" "$T/$b"; done ;;
   test-start)
     case "$#:${1-}" in
@@ -126,6 +144,7 @@ case "$cmd" in
       *) usage ;;
     esac
     own
+    r "$TEST_DIR_CHECK; test_dir_check"
     # Один уровень для всех моделей: у Мини громкость программная, по той же шкале в дБ.
     vol=0.2
     # A quoted heredoc: no local shell expansion and no nested quotes in the remote command.
@@ -140,9 +159,13 @@ bt=$5
 [ ! -e "$T/bt-owner" ] && [ ! -L "$T/bt-owner" ] ||
   { echo 'test Bluetooth not restored: run test-stop' >&2; exit 1; }
 [ -x "$T/pulsar" ] || { echo 'push pulsar first' >&2; exit 1; }
-if [ "$bt" = 1 ] && ! "$T/ctl.sh" bt-restore --check >/dev/null 2>&1; then
-  echo 'Bluetooth test needs a separately pushed satellite/deploy/ctl.sh with bt-restore' >&2
-  exit 1
+if [ "$bt" = 1 ]; then
+  [ -f "$D/enabled" ] && ! pidof quasar_launcher2 maind >/dev/null ||
+    { echo 'Yandex mode or stack running: Bluetooth test refused' >&2; exit 1; }
+  if ! "$T/ctl.sh" bt-restore --check >/dev/null 2>&1; then
+    echo 'Bluetooth test needs a separately pushed satellite/deploy/ctl.sh with bt-restore' >&2
+    exit 1
+  fi
 fi
 # api_key не копируется: тестовый экземпляр отдаёт plaintext API, ключ клиенту не нужен.
 if [ "$bt" = 1 ]; then set -- -e '^zigbee_role='; else set --; fi
@@ -175,6 +198,7 @@ EOF
     ;;
   test-stop)
     own
+    r "$TEST_DIR_OPTIONAL"
     r sh -s -- "$T" <<'EOF'
 T=$1
 test_running() {
@@ -212,7 +236,7 @@ fi
 EOF
     r "$DMIX"
     echo stopped ;;
-  test-log) r "tail -n ${1:-50} $T/log" ;;
+  test-log) r "$TEST_DIR_CHECK; test_dir_check && tail -n ${1:-50} $T/log" ;;
   swap)
     [ $# -eq 1 ] || usage
     own
@@ -225,13 +249,16 @@ EOF
        cd $D && { [ -f pulsar.orig ] || cp -p pulsar pulsar.orig; } \
          && { [ ! -f pulsar.prev ] || [ -f pulsar.prev.orig ] || cp -p pulsar.prev pulsar.prev.orig; }"
     up "$1" "$D/pulsar.new"
-    r "cd $D && ./pulsar.new --version && cp -p pulsar.orig pulsar.prev \
-       && mv pulsar.new pulsar && sync && ./ctl.sh restart" ;;
+    r "$TEST_BT_RESTORED
+       cd $D && ./pulsar.new --version || exit 1
+       $PROD_BT_RESTORE
+       cp -p pulsar.orig pulsar.prev && mv pulsar.new pulsar && sync && ./ctl.sh restart" ;;
   restore)
     own
     # Если после краш-цикла supervise.sh удалил enabled (give_back), станцию возвращает ctl.sh enable.
     r "$TEST_BT_RESTORED
        cd $D && [ -f pulsar.orig ] || { echo 'no pulsar.orig' >&2; exit 1; }
+       $PROD_BT_RESTORE
        cd $D && cp -p pulsar.orig pulsar.tmp && mv pulsar.tmp pulsar && rm -f pulsar.orig || exit 1
        if [ -f pulsar.prev.orig ]; then mv pulsar.prev.orig pulsar.prev; fi
        sync

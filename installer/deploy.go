@@ -509,9 +509,7 @@ func healthCheck(s string, changed bool, mark string) bool {
 			ans = readLine("roll back to the previous binary? [Y/n] ")
 		}
 		if !strings.HasPrefix(ans, "n") && !strings.HasPrefix(ans, "N") {
-			if err := shTo(os.Stdout, s, "cd "+dataDir+" && ./ctl.sh reload --stop && ./ctl.sh bt-restore &&\n"+
-				"        cp -p pulsar.prev pulsar.rb && mv pulsar pulsar.bad && mv pulsar.rb pulsar && sync &&\n"+
-				"        PULSAR_BT_MANAGED=0 ./ctl.sh reload"); err != nil {
+			if err := shTo(os.Stdout, s, dataDir+"/ctl.sh rollback"); err != nil {
 				fmt.Fprintf(os.Stderr, "%s: rollback failed: %v\n", s, err)
 			} else {
 				fmt.Fprintf(os.Stderr, "%s: rolled back (bad binary kept as %s/pulsar.bad)\n", s, dataDir)

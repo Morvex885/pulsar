@@ -46,6 +46,7 @@ say() { echo "=== supervise: $* $(date)" >> "$LOG"; }
 # Старая ctl.sh не гарантирует возврат player при disable или откате.
 bt_allowed=${PULSAR_BT_MANAGED:-1}
 bt_owner=${PULSAR_BT_OWNER:-/tmp/pulsar-bt-owner}
+bt_blocked=$BIN.bt-blocked
 
 restore_bt() {
   if [ -e "$bt_owner" ] || [ -L "$bt_owner" ]; then
@@ -54,7 +55,15 @@ restore_bt() {
       return 1
     fi
   fi
-  bt_allowed=0
+  return 0
+}
+
+install_prev() {
+  # Жёсткая ссылка запрещает захват только этому экземпляру .prev, даже после reload.
+  # Новый бинарь устанавливается через rename и никогда не совпадает с этой ссылкой.
+  rm -f "$BIN.tmp" && cp -p "$BIN.prev" "$BIN.tmp" &&
+    ln -f "$BIN.tmp" "$bt_blocked" && [ "$BIN.tmp" -ef "$bt_blocked" ] &&
+    mv -f "$BIN.tmp" "$BIN"
 }
 
 give_back() { # Yandex stack again, like ctl.sh disable
@@ -98,7 +107,7 @@ while [ -f "$D/enabled" ]; do
     say "$BIN missing or not executable"
     if [ "$swapped" = 0 ] && [ -x "$BIN.prev" ]; then
       restore_bt || exit 1
-      cp -p "$BIN.prev" "$BIN.tmp" && mv "$BIN.tmp" "$BIN" && swapped=1 && fails=0 && say "restored .prev" && continue
+      install_prev && swapped=1 && fails=0 && say "restored .prev" && continue
     fi
     give_back "no usable binary"
   fi
@@ -106,13 +115,22 @@ while [ -f "$D/enabled" ]; do
   echo "=== start $(date)" >> "$LOG"
   t0=$(uptime_s)
   bt_managed=0
-  if [ "$bt_allowed" = 1 ] && "$D/ctl.sh" bt-restore --check >/dev/null 2>&1; then
-    bt_managed=1
+  if ! [ "$BIN" -ef "$bt_blocked" ]; then
+    rm -f "$bt_blocked"
+    if [ "$bt_allowed" = 1 ] && "$D/ctl.sh" bt-restore --check >/dev/null 2>&1; then
+      bt_managed=1
+    fi
+    # Появился другой бинарь — он получает собственную попытку отката.
+    if [ "$swapped" = 1 ]; then swapped=0 fails=0 backoff=$BACKOFF_MIN; fi
   fi
   PULSAR_BT_MANAGED=$bt_managed "$BIN" "$D/state.conf" >> "$LOG" 2>&1
   rc=$?
   up=$(($(uptime_s) - t0))
   echo "=== exit $rc after ${up}s $(date)" >> "$LOG"
+  if [ -e "$bt_owner" ] || [ -L "$bt_owner" ]; then
+    "$D/ctl.sh" bt-restore --hide >> "$LOG" 2>&1 ||
+      say "Bluetooth pairing flags could not be closed after daemon exit"
+  fi
 
   if [ $up -ge $LONG ]; then
     fails=0 swapped=0 backoff=$BACKOFF_MIN
@@ -127,14 +145,12 @@ while [ -f "$D/enabled" ]; do
   if [ $fails -ge $CRASHES ]; then
     if [ "$swapped" = 0 ] && [ -f "$BIN.prev" ] && ! cmp -s "$BIN" "$BIN.prev"; then
       restore_bt || exit 1
-      mv -f "$BIN" "$BIN.bad"
-      if cp -p "$BIN.prev" "$BIN.tmp" && mv "$BIN.tmp" "$BIN"; then
+      if { [ "$BIN" -ef "$BIN.bad" ] || ln -f "$BIN" "$BIN.bad"; } && install_prev; then
         swapped=1 fails=0 backoff=$BACKOFF_MIN
         note=; [ -f "$D/api_key" ] && note="; api_key is set: the previous binary may not support API encryption, so Home Assistant (which holds the key) may be unable to connect - remove the key in HA or re-add the device"
         say "$CRASHES short crashes in a row, rolled back to .prev (bad binary kept as .bad)$note"
         continue
       fi
-      mv -f "$BIN.bad" "$BIN"
     fi
     if [ "$swapped" = 1 ]; then give_back "$CRASHES short crashes in a row, also with the rolled-back .prev"
     else give_back "$CRASHES short crashes in a row, no different previous binary to fall back to"; fi

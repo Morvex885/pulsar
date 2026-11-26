@@ -39,10 +39,10 @@
   (поток на ALSA `default`), `just-works-bluez-agent` (сопряжение без PIN). В `main.conf`
   вендором включены `DiscoverableTimeout=0`, `AlwaysPairable=true`, `FastConnectable=true`,
   `JustWorksRepairing=always`.
-- Режим колонки — свойство `org.bluez.Adapter1.Discoverable`: по set адаптер за секунду уходит в
-  PSCAN/ISCAN («Yandex.Mini2» виден для сопряжения), обратно — исчезает; перезапуск чего-либо не
-  нужен. Микрофонный захват (hw:0,1) при этом не затронут, а выход общий через dmix: wake word
-  и локальные команды работают, пока телефон играет.
+- Видимость для нового сопряжения задаёт `org.bluez.Adapter1.Discoverable`: по set адаптер за
+  секунду уходит в PSCAN/ISCAN («Yandex.Mini2» виден для сопряжения), обратно — исчезает;
+  перезапуск не нужен. Микрофонный захват (hw:0,1) не затронут, выход общий через dmix:
+  wake word и локальные команды работают, пока телефон играет.
 
 ## Светодиоды и часы
 

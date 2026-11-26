@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use pulsar_alsa::{Format, HwRequest, Pcm, Stream};
 use pulsar_core::model::Model;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{oneshot, watch};
 
 const RATE: u32 = 48_000;
 const CHANNELS: usize = 2;
@@ -29,6 +30,7 @@ pub(super) enum Event {
 pub(super) struct Worker {
     shared: Arc<Shared>,
     events: UnboundedSender<Event>,
+    terminated: watch::Receiver<bool>,
 }
 
 struct Request {
@@ -123,16 +125,61 @@ impl Shared {
 }
 
 impl Worker {
-    pub(super) fn spawn(model: &'static Model) -> io::Result<(Self, UnboundedReceiver<Event>)> {
+    pub(super) async fn spawn(
+        model: &'static Model,
+    ) -> io::Result<(Self, UnboundedReceiver<Event>)> {
         let shared = Arc::new(Shared::new());
         let (events, rx) = mpsc::unbounded_channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (terminated_tx, terminated) = watch::channel(false);
         let thread_shared = Arc::clone(&shared);
         let thread_events = events.clone();
-        let thread = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("bluetooth-pcm".into())
-            .spawn(move || run(model, &thread_shared, &thread_events))?;
-        drop(thread);
-        Ok((Self { shared, events }, rx))
+            .spawn(move || {
+                // Тот же выход и формат, что у сеанса. Закрываем PCM до ответа и не пишем звук.
+                let probe = open_output(model).map(drop).map_err(|(op, errno)| {
+                    let kind = io::Error::from_raw_os_error(-errno).kind();
+                    io::Error::new(kind, format!("{op}: {}", pulsar_alsa::strerror(errno)))
+                });
+                let ready = probe.is_ok();
+                if ready_tx.send(probe).is_ok() && ready {
+                    run(model, &thread_shared, &thread_events);
+                }
+                drop(thread_events);
+                drop(thread_shared);
+                let _ = terminated_tx.send(true);
+            })?;
+
+        // Отмена ожидания тоже отзывает worker, даже если ответ уже был отправлен.
+        let worker = Self {
+            shared,
+            events,
+            terminated,
+        };
+        ready_rx
+            .await
+            .map_err(|_| io::Error::other("поток Bluetooth PCM завершился до проверки выхода"))??;
+        Ok((worker, rx))
+    }
+
+    pub(super) async fn shutdown(&self) {
+        self.signal_stop();
+        let _ = self
+            .terminated
+            .clone()
+            .wait_for(|terminated| *terminated)
+            .await;
+    }
+
+    fn signal_stop(&self) {
+        {
+            let mut ctl = self.shared.control.lock().unwrap();
+            ctl.admit(false);
+            ctl.request = None;
+            ctl.shutdown = true;
+        }
+        self.shared.wake.notify_one();
     }
 
     /// Поколение должно быть уникальным. Сначала оно закрыто для вывода.
@@ -150,6 +197,9 @@ impl Worker {
     fn replace(&self, request: Option<Request>) {
         let pending = {
             let mut ctl = self.shared.control.lock().unwrap();
+            if ctl.shutdown {
+                return;
+            }
             ctl.admit(false);
             ctl.phone_gain = UNITY;
             ctl.update_gain();
@@ -183,12 +233,7 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        {
-            let mut ctl = self.shared.control.lock().unwrap();
-            ctl.request = None;
-            ctl.shutdown = true;
-        }
-        self.shared.wake.notify_one();
+        self.signal_stop();
     }
 }
 
@@ -243,6 +288,12 @@ fn configure(pcm: &mut Pcm, stream: Stream, context: &'static str) -> Result<(),
     result.map_err(|e| (context, e))
 }
 
+fn open_output(model: &Model) -> Result<Pcm, PcmError> {
+    let mut output = pulsar_alsa::open_playback_nonblock(model).map_err(|e| ("выход ALSA", e))?;
+    configure(&mut output, Stream::Playback, "формат выхода ALSA")?;
+    Ok(output)
+}
+
 fn session(
     model: &Model,
     shared: &Shared,
@@ -259,8 +310,7 @@ fn session(
     if shared.gate(generation).is_none() {
         return Ok(());
     }
-    let mut output = pulsar_alsa::open_playback_nonblock(model).map_err(|e| ("выход ALSA", e))?;
-    configure(&mut output, Stream::Playback, "формат выхода ALSA")?;
+    let mut output = open_output(model)?;
     let result =
         if shared.gate(generation).is_some() && events.send(Event::Started(generation)).is_ok() {
             transfer(&mut capture, &mut output, shared, events, generation)
@@ -277,26 +327,28 @@ fn session(
     result
 }
 
-#[derive(Default)]
-struct Activity {
-    last_frame: Option<Instant>,
+enum Activity {
+    AwaitingFirstFrame(Instant),
+    Active(Instant),
+    Idle,
 }
 
 impl Activity {
     fn observe(&mut self, generation: u64, data: bool, now: Instant) -> Option<Event> {
         if data {
-            self.last_frame
-                .replace(now)
-                .is_none()
-                .then(|| Event::Activity(generation, pulsar_core::audio_start_order()))
-        } else if self
-            .last_frame
-            .is_some_and(|last| now.duration_since(last) >= IDLE_AFTER)
-        {
-            self.last_frame = None;
-            Some(Event::Idle(generation))
-        } else {
-            None
+            let was_active = matches!(*self, Self::Active(_));
+            *self = Self::Active(now);
+            return (!was_active)
+                .then(|| Event::Activity(generation, pulsar_core::audio_start_order()));
+        }
+        match *self {
+            Self::AwaitingFirstFrame(since) | Self::Active(since)
+                if now.duration_since(since) >= IDLE_AFTER =>
+            {
+                *self = Self::Idle;
+                Some(Event::Idle(generation))
+            }
+            _ => None,
         }
     }
 }
@@ -310,7 +362,7 @@ fn transfer(
 ) -> Result<(), PcmError> {
     let mut input = [0; FRAMES * CHANNELS];
     let mut scaled = [0; FRAMES * CHANNELS];
-    let mut activity = Activity::default();
+    let mut activity = Activity::AwaitingFirstFrame(Instant::now());
     let mut queued_gate = None;
     while let Some((gate, admitted)) = shared.gate(generation) {
         if queued_gate.is_some_and(|previous| previous != gate) {
@@ -437,6 +489,7 @@ mod tests {
         let worker = Worker {
             shared: Arc::new(Shared::new()),
             events,
+            terminated: watch::channel(true).1,
         };
         let mut sink = Vec::new();
         let mut write = |gain: [f32; CHANNELS]| {
@@ -499,8 +552,8 @@ mod tests {
 
     #[test]
     fn bluetooth_pcm_activity_needs_frames_and_only_reports_edges() {
-        let mut activity = Activity::default();
         let start = Instant::now();
+        let mut activity = Activity::AwaitingFirstFrame(start);
         assert_eq!(activity.observe(7, false, start), None);
         let Some(Event::Activity(7, first)) = activity.observe(7, true, start) else {
             panic!("first PCM frames must start a playback episode");
@@ -515,6 +568,20 @@ mod tests {
         assert!(matches!(
             activity.observe(7, true, start + IDLE_AFTER),
             Some(Event::Activity(7, next)) if next > first
+        ));
+    }
+
+    #[test]
+    fn bluetooth_pcm_reports_initial_idle_once_before_first_frames() {
+        let start = Instant::now();
+        let mut activity = Activity::AwaitingFirstFrame(start);
+        let first_idle = start + IDLE_AFTER;
+        assert_eq!(activity.observe(7, false, start + IDLE_AFTER / 2), None);
+        assert_eq!(activity.observe(7, false, first_idle), Some(Event::Idle(7)));
+        assert_eq!(activity.observe(7, false, first_idle + IDLE_AFTER), None);
+        assert!(matches!(
+            activity.observe(7, true, first_idle + IDLE_AFTER),
+            Some(Event::Activity(7, _))
         ));
     }
 }

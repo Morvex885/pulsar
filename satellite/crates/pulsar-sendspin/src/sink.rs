@@ -120,6 +120,18 @@ impl Sink {
         self.request(Req::Release);
     }
 
+    /// Закрывает допуск синхронно; сам PCM закроет sync task или `finish_request`.
+    pub(crate) fn request_release(&self) {
+        self.record(Req::Release);
+    }
+
+    /// Вызывается вне LocalSet, если новых записей может не быть.
+    pub(crate) fn finish_request(&self) {
+        if self.pending() {
+            self.apply_pending(&mut lock(&self.io));
+        }
+    }
+
     pub(crate) fn set_gain(&self, g: f32) {
         let g = g.clamp(0.0, 1.0);
         self.target_gain.store(g.to_bits(), SeqCst);
@@ -149,12 +161,11 @@ impl Sink {
 
     /// Sync task: (bytes consumed, frames played to report, their finish time in µs).
     pub(crate) fn write(&self, data: &[u8], timeout_ms: u32) -> (usize, u32, i64) {
-        let r = self.write_once(data, timeout_ms);
+        let generation = self.req_gen.load(SeqCst);
+        let r = self.write_once(data, timeout_ms, generation);
         // A request that arrived while `io` was held (request()'s try_lock failed) must not wait
         // for the next write: a release may be the last event, and the device would stay open.
-        if self.pending() {
-            self.apply_pending(&mut lock(&self.io));
-        }
+        self.finish_request();
         r
     }
 
@@ -162,7 +173,7 @@ impl Sink {
         self.req_gen.load(SeqCst) != self.applied_gen.load(SeqCst)
     }
 
-    fn write_once(&self, data: &[u8], timeout_ms: u32) -> (usize, u32, i64) {
+    fn write_once(&self, data: &[u8], timeout_ms: u32, generation: u32) -> (usize, u32, i64) {
         let length = data.len();
         let deadline = now_us() + i64::from(timeout_ms) * 1000;
         let mut frames_done: u32 = 0;
@@ -171,7 +182,7 @@ impl Sink {
         let mut io = lock(&self.io);
         self.apply_pending(&mut io);
         let bpf = usize::from(io.want_channels) * usize::from(io.want_bits / 8);
-        if !io.active || bpf == 0 {
+        if !io.active || bpf == 0 || self.applied_gen.load(SeqCst) != generation || self.pending() {
             return (length, 0, 0); // stale audio after stream end: discard
         }
         if io.pcm.is_none() && !io.open() {
@@ -191,6 +202,9 @@ impl Sink {
 
         let mut first = true;
         while (frames_done as usize) < frames_total {
+            if self.pending() {
+                break;
+            }
             let Some(pcm) = io.pcm.as_mut() else { break };
             if !first && now_us() >= deadline {
                 break;
@@ -215,16 +229,13 @@ impl Sink {
                 {
                     break;
                 }
-                if self.pending() {
-                    // Stream restarted / ended: this audio is stale.
-                    io.scratch = scratch;
-                    self.apply_pending(&mut io);
-                    return (length, 0, 0);
-                }
                 continue;
             }
             let done = frames_done as usize;
             let chunk = (frames_total - done).min(avail);
+            if self.pending() {
+                break;
+            }
             match pcm.writei(&src[done * bpf..], chunk) {
                 Ok(w) => frames_done += w as u32,
                 Err(e) => {
@@ -235,6 +246,11 @@ impl Sink {
             }
         }
         io.scratch = scratch;
+        if self.pending() {
+            // Буфер относится к отозванному потоку, не переносить остаток в новый.
+            self.apply_pending(&mut io);
+            return (length, 0, 0);
+        }
         // Commit the ramp by the frames actually written; an unwritten tail is presented again.
         io.gain = gain::ramp_end_gain(io.gain, self.target_gain(), io.rate, frames_done);
 
@@ -272,11 +288,7 @@ impl Sink {
     }
 
     fn request(&self, r: Req) {
-        {
-            let mut req = lock(&self.req);
-            *req = r;
-            self.req_gen.fetch_add(1, SeqCst);
-        }
+        self.record(r);
         let io = match self.io.try_lock() {
             Ok(io) => Some(io),
             Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
@@ -285,6 +297,12 @@ impl Sink {
         if let Some(mut io) = io {
             self.apply_pending(&mut io);
         }
+    }
+
+    fn record(&self, r: Req) {
+        let mut req = lock(&self.req);
+        *req = r;
+        self.req_gen.fetch_add(1, SeqCst);
     }
 
     fn apply_pending(&self, io: &mut Io) {
@@ -565,5 +583,29 @@ fn hw_step(step: &'static str) -> &'static str {
         "any" => "hw_params_any",
         "access" | "format" | "channels" | "rate" => step,
         _ => "hw_params",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bluetooth_release_invalidates_in_flight_write_generation() {
+        let model = pulsar_core::model::model_from_dt_id(b"axg_s420_v03").unwrap();
+        let sink = Sink::new(model);
+        sink.configure(48000, 2, 16);
+        let old = sink.req_gen.load(SeqCst);
+
+        let io = lock(&sink.io);
+        sink.request_release();
+        assert!(sink.pending());
+        drop(io);
+        sink.finish_request();
+        assert!(!sink.accepts_audio());
+
+        sink.configure(48000, 2, 16);
+        assert_eq!(sink.write_once(&[1; 4], 0, old), (4, 0, 0));
+        assert!(sink.accepts_audio());
     }
 }

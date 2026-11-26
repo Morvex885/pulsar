@@ -465,7 +465,7 @@ fn volume_click_gating() {
 
 #[test]
 fn idle_and_auto_update() {
-    let idle = |phase, a, r, m, ss, z| idle_for_update(phase, a, r, m, ss, z);
+    let idle = |phase, a, r, m, ss, z| idle_for_update(phase, a, r, m, ss, false, z);
     assert!(idle(
         Phase::Idle,
         false,
@@ -537,6 +537,15 @@ fn idle_and_auto_update() {
         PlayState::Idle,
         false,
         true
+    ));
+    assert!(!idle_for_update(
+        Phase::Idle,
+        false,
+        false,
+        PlayState::Idle,
+        false,
+        true,
+        false
     ));
 
     use AutoUpdate::*;
@@ -928,8 +937,8 @@ fn wake_word_names_keeps_the_saved_model_when_listing_fails() {
 
 #[test]
 fn wake_word_labels_preserve_legacy_ha_bindings() {
-    assert_eq!(wake_word_phrase("alisa"), "Alice");
-    assert_eq!(wake_word_phrase("yandex"), "Yandex");
+    assert_eq!(wake_word_phrase("alisa"), "Алиса");
+    assert_eq!(wake_word_phrase("yandex"), "Яндекс");
     assert_eq!(wake_word_phrase("yasmina"), "Yasmina");
     assert_eq!(wake_word_phrase("other_word"), "other_word");
 }

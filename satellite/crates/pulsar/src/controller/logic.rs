@@ -437,6 +437,7 @@ pub fn idle_for_update(
     timer_ringing: bool,
     music: PlayState,
     sendspin_streaming: bool,
+    bluetooth_playing: bool,
     zigbee_flashing: bool,
 ) -> bool {
     phase == Phase::Idle
@@ -444,6 +445,7 @@ pub fn idle_for_update(
         && !timer_ringing
         && music != PlayState::Playing
         && !sendspin_streaming
+        && !bluetooth_playing
         && !zigbee_flashing
 }
 
@@ -749,8 +751,8 @@ pub fn initial_wake_words<'a>(
 /// См. docs/voice.md, «Голосовой ассистент HA (ESPHome)».
 pub fn wake_word_phrase(id: &str) -> &str {
     match id {
-        "alisa" => "Alice",
-        "yandex" => "Yandex",
+        "alisa" => "Алиса",
+        "yandex" => "Яндекс",
         "yasmina" => "Yasmina",
         other => other,
     }

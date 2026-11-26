@@ -4,7 +4,7 @@ use log::debug;
 use pulsar_core::{ClockShot, now_ms};
 use pulsar_esphome::{MediaCommand, MediaCommandRequest};
 use pulsar_media::{Channel, PlayState};
-use pulsar_sendspin::{SendspinEvent, Transport};
+use pulsar_sendspin::SendspinEvent;
 
 use super::logic::{self, cxx_max, cxx_min};
 use super::{Controller, DUCK_GAIN, Pending, SOUNDS};
@@ -55,11 +55,8 @@ impl Controller {
     pub(super) fn bluetooth_takes_audio(&self) {
         // Остановить также незавершённый запуск Music: его PLAYING может прийти позже.
         self.player.stop(Channel::Music);
-        if let Some(ss) = &self.sendspin
-            && ss.streaming()
-            && !ss.transport(Transport::Pause)
-        {
-            ss.yield_to_local();
+        if let Some(ss) = &self.sendspin {
+            ss.pause_for_bluetooth();
         }
     }
 

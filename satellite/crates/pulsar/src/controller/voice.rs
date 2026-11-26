@@ -145,7 +145,6 @@ impl Controller {
         self.arb_phrase.clear();
         self.arb_phrase
             .push_str(logic::wake_word_phrase(&self.active_wake_word));
-        self.arb_level = level_db;
         self.arb_captures_voice = voice;
         self.arb_audio = if voice { preroll } else { Vec::new() };
         self.arb_command.clear();
@@ -153,11 +152,15 @@ impl Controller {
             self.mic.set_streaming(true);
         }
         self.update_ui();
-        let busy = self.phase == Phase::Speaking || self.announcing;
-        self.arb_claim = Some(
+        self.arb_level = level_db;
+        self.arb_claim = Some(if voice {
+            let busy = self.phase == Phase::Speaking || self.announcing;
             self.arbiter
-                .claim(&self.active_wake_word, level_db, busy, true),
-        );
+                .claim(&self.active_wake_word, level_db, busy, true)
+        } else {
+            self.arbiter
+                .claim_bluetooth(&self.active_wake_word, level_db)
+        });
     }
 
     fn answer_wake(&mut self, start: PipelineStart, preroll: Vec<i16>, voice: bool) {
@@ -912,15 +915,15 @@ impl Controller {
         }
         let after_wake =
             logic::after_wake(self.phase, self.wake_dialog, now, self.listen_started_ms);
-        let wake = logic::command_wake(
-            command,
-            held || after_wake,
-            &mut self.bt_voice_until_ms,
-            now,
-        );
+        let voice_wake = held || after_wake;
+        let bluetooth_only = now < self.bt_voice_until_ms && !voice_wake && !self.timer_ringing;
+        let wake = logic::command_wake(command, voice_wake, &mut self.bt_voice_until_ms, now);
         let Some(c) = command else {
             return;
         };
+        if bluetooth_only && !matches!(c, VoiceCommand::Bluetooth(_)) {
+            return;
+        }
         if self.timer_ringing && matches!(c, VoiceCommand::Bluetooth(_)) {
             return;
         }

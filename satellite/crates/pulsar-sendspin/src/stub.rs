@@ -41,6 +41,10 @@ impl SendspinHandle {
         match self.never {}
     }
 
+    pub fn pause_for_bluetooth(&self) {
+        match self.never {}
+    }
+
     pub fn confirm_pairing_window(&self) {
         match self.never {}
     }
