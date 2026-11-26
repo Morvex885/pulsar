@@ -351,9 +351,17 @@ impl Controller {
                 None
             }
         };
-        let (bt, bt_rx) = pulsar_bt::spawn(model, st.bluetooth_enabled)
-            .await
-            .map_or((None, None), |(handle, rx)| (Some(handle), Some(rx)));
+        // Наличие Bluetooth-сущностей решается до публикации списка API.
+        let (bt, bt_rx) = match pulsar_bt::probe(model).await {
+            Ok(probe) => {
+                let (handle, rx) = pulsar_bt::spawn(model, st.bluetooth_enabled, probe);
+                (Some(handle), Some(rx))
+            }
+            Err(reason) => {
+                warn!("bluetooth: unavailable until Pulsar restarts: {reason}");
+                (None, None)
+            }
+        };
         let bluetooth = bt.is_some();
         let cfg = ApiConfig {
             port: ports.api,

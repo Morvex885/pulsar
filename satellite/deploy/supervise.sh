@@ -214,9 +214,15 @@ registered_daemon() {
 launch_daemon() {
   # Сбросить унаследованную блокировку родителя и дождаться регистрации.
   exec 7>&-
-  exec 7>>"$launch_lock" && flock -x 7 || exit 1
+  if [ "$have_flock" = 1 ]; then
+    exec 7>>"$launch_lock" && flock -x 7 || exit 1
+  fi
   IFS=' ' read -r child_pid _ < /proc/self/stat || exit 1
-  registered_daemon && [ "$daemon_pid" = "$child_pid" ] || exit 1
+  while ! registered_daemon || [ "$daemon_pid" != "$child_pid" ]; do
+    [ "$have_flock" = 0 ] &&
+      [ "$(process_start "$$" 2>/dev/null)" = "$supervisor_start" ] || exit 1
+    sleep 1
+  done
   exec 7>&-
   PULSAR_BT_MANAGED=$bt_managed PULSAR_BT_OWNER=$bt_owner PULSAR_INSTALLED_BINARY=$installed_binary \
     exec "$launch" "$D/state.conf"
@@ -227,6 +233,15 @@ ROT=$!
 # busybox ash does not run an EXIT trap on SIGTERM: clean up in the signal traps themselves.
 trap 'kill $ROT 2>/dev/null; exit 143' TERM INT HUP
 trap 'kill $ROT 2>/dev/null' EXIT
+
+have_flock=0
+if command -v flock >/dev/null 2>&1; then
+  have_flock=1
+else
+  # Без flock ctl не может подтвердить BT-протокол. Регистрацию PID
+  # всё равно надо дождаться: родитель может умереть до записи.
+  supervisor_start=$(process_start "$$") || exit 1
+fi
 
 fails=0 swapped=0 backoff=$BACKOFF_MIN last_inode= bt_protocol_inode= bt_protocol=
 bt_test_clear || exit 1
@@ -262,7 +277,7 @@ while [ -f "$D/enabled" ]; do
     if [ "$BIN" -ef "$bt_next" ]; then mv -f "$bt_next" "$bt_blocked"; fi
   else
     rm -f "$bt_blocked" "$bt_next"
-    if [ "$bt_allowed" = 1 ] &&
+    if [ "$have_flock" = 1 ] && [ "$bt_allowed" = 1 ] &&
       bt_lock_protocol=$("$D/ctl.sh" bt-restore --owner-lock 2>/dev/null) &&
       [ "$bt_lock_protocol" = pulsar-bt-owner-lock/2 ]; then
       # Шестибайтный снимок умеет возвращать ctl без блокировки.
@@ -295,14 +310,21 @@ while [ -f "$D/enabled" ]; do
     # Появился другой бинарь — он получает собственную попытку отката.
     if [ "$swapped" = 1 ]; then swapped=0 fails=0 backoff=$BACKOFF_MIN; fi
   fi
-  (umask 077; : >> "$launch_lock") || exit 1
-  exec 7>>"$launch_lock" || exit 1
-  if ! flock -xn 7; then
-    exec 7>&-
-    sleep 1
-    continue
+  if [ "$have_flock" = 1 ]; then
+    (umask 077; : >> "$launch_lock") || exit 1
+    exec 7>>"$launch_lock" || exit 1
+    if ! flock -xn 7; then
+      exec 7>&-
+      sleep 1
+      continue
+    fi
   fi
   [ -f "$D/enabled" ] || exit 0
+  # Другой ctl мог начать возврат после первой проверки, но до flock.
+  if [ -n "$bt_owner" ] && bt_exists "$bt_owner.pending"; then
+    exec 7>&-
+    continue
+  fi
   if [ "$inode" != "$(stat -Lc '%d:%i' "$BIN")" ] ||
     { [ "$bt_managed" = 1 ] && ! bt_pinned_now; }; then
     exec 7>&-

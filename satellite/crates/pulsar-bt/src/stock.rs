@@ -371,8 +371,19 @@ fn plugin_registered(config: &Path, confdir: &Path, etc_alsa: &Path) -> bool {
         Ok(text)
     };
     let defined = |s: &str| {
-        s.lines()
-            .any(|line| line.trim_start().starts_with("pcm.bluealsa"))
+        s.lines().any(|line| {
+            let Some(name) = line.trim_start().strip_prefix("pcm.") else {
+                return false;
+            };
+            name.strip_prefix('!')
+                .unwrap_or(name)
+                .strip_prefix("bluealsa")
+                .is_some_and(|tail| {
+                    tail.is_empty()
+                        || tail.starts_with('{')
+                        || tail.starts_with(char::is_whitespace)
+                })
+        })
     };
     let registered = |path: &Path, text: &str| {
         defined(text)
@@ -456,7 +467,13 @@ mod tests {
         assert!(!plugin_registered(&config, &confdir, &etc_alsa));
         fs::write(
             confdir.join("conf.d/20-bluealsa.conf"),
-            "pcm.bluealsa { type plug }\n",
+            "pcm.bluealsa_monitor { type plug }\n",
+        )
+        .unwrap();
+        assert!(!plugin_registered(&config, &confdir, &etc_alsa));
+        fs::write(
+            confdir.join("conf.d/20-bluealsa.conf"),
+            "pcm.!bluealsa{ type plug }\n",
         )
         .unwrap();
         assert!(plugin_registered(&config, &confdir, &etc_alsa));

@@ -31,6 +31,7 @@ const A2DP_SINK: &str = "A2DP-sink";
 const AUDIO_SOURCE: &str = "0000110a-0000-1000-8000-00805f9b34fb";
 const AUDIO_SINK: &str = "0000110b-0000-1000-8000-00805f9b34fb";
 const TIMEOUT: Duration = Duration::from_millis(750);
+const SIGNAL_CAPACITY: usize = 256;
 
 type Properties = HashMap<String, OwnedVariant>;
 type Interfaces = HashMap<String, Properties>;
@@ -348,6 +349,53 @@ struct Signal {
     order: u64,
 }
 
+// До GetNameOwner отправителя нельзя проверить, но порядок приёма уже важен.
+type EarlySignal = (Message, (Instant, u64));
+
+fn signal_time() -> (Instant, u64) {
+    (Instant::now(), pulsar_core::audio_start_order())
+}
+
+async fn drain_during_setup<T>(
+    stream: &mut (impl futures_util::Stream<Item = zbus::Result<Message>> + Unpin),
+    setup: impl Future<Output = zbus::Result<T>>,
+) -> zbus::Result<(T, Vec<EarlySignal>)> {
+    tokio::pin!(setup);
+    let mut signals = Vec::new();
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut setup => return Ok((result?, signals)),
+            message = stream.next() => {
+                let message = message.ok_or(zbus::Error::InvalidReply)??;
+                if message.message_type() == Type::Signal {
+                    if signals.len() == SIGNAL_CAPACITY {
+                        return Err(zbus::Error::Failure("Bluetooth setup signal queue overflow".into()));
+                    }
+                    signals.push((message, signal_time()));
+                }
+            }
+        }
+    }
+}
+
+async fn subscribe(conn: &Connection) -> zbus::Result<Owners> {
+    for service in [BLUEZ, BLUEALSA] {
+        for rule in [
+            format!("type='signal',sender='{service}',interface='{OBJECTS}'"),
+            format!("type='signal',sender='{service}',interface='{PROPS}'"),
+            format!(
+                "type='signal',sender='{DBUS}',interface='{DBUS}',member='NameOwnerChanged',arg0='{service}'"
+            ),
+        ] {
+            conn.call_method(Some(DBUS), DBUS_PATH, Some(DBUS), "AddMatch", &(rule,))
+                .await?;
+        }
+    }
+    let (bluez, alsa) = tokio::try_join!(Owner::get(conn, BLUEZ), Owner::get(conn, BLUEALSA))?;
+    Ok(Owners { bluez, alsa })
+}
+
 #[derive(Default)]
 struct StartupPairs {
     known: BTreeSet<String>,
@@ -389,28 +437,36 @@ fn take_through(
 
 async fn collect_signals(
     mut stream: impl futures_util::Stream<Item = zbus::Result<Message>> + Unpin,
+    early: Vec<EarlySignal>,
     owners: Rc<Owners>,
     tx: mpsc::Sender<Signal>,
     mut startup: Option<watch::Sender<Progress>>,
 ) {
     // Отмечаем сигналы независимо от ожидания исходящих вызовов актором.
     let mut owner_changed = false;
+    let mut early = early.into_iter();
     loop {
-        let Some(Ok(message)) = (tokio::select! {
-            biased;
-            () = tx.closed() => return,
-            msg = stream.next() => msg,
-        }) else {
-            return;
+        let (message, received) = if let Some((message, received)) = early.next() {
+            (message, Some(received))
+        } else {
+            let Some(Ok(message)) = (tokio::select! {
+                biased;
+                () = tx.closed() => return,
+                msg = stream.next() => msg,
+            }) else {
+                return;
+            };
+            (message, None)
         };
         let seq = message.recv_position();
         if let Some(kind) = owners.classify(&message) {
             owner_changed |= kind == SignalKind::OwnerChanged;
+            let (received, order) = received.unwrap_or_else(signal_time);
             let signal = Signal {
                 message,
                 kind,
-                received: Instant::now(),
-                order: pulsar_core::audio_start_order(),
+                received,
+                order,
             };
             if tx.try_send(signal).is_err() {
                 // При переполнении переснять состояние вместо отложенной маркировки.
@@ -440,31 +496,15 @@ pub(crate) struct Bus {
 impl Bus {
     pub async fn connect() -> zbus::Result<Self> {
         let mut conn = Connection::system().await?;
-        conn.set_max_queued(256.try_into().expect("positive capacity"));
-        let stream = MessageStream::from(&conn);
-        for service in [BLUEZ, BLUEALSA] {
-            for rule in [
-                format!("type='signal',sender='{service}',interface='{OBJECTS}'"),
-                format!("type='signal',sender='{service}',interface='{PROPS}'"),
-                format!(
-                    "type='signal',sender='{DBUS}',interface='{DBUS}',member='NameOwnerChanged',arg0='{service}'"
-                ),
-            ] {
-                conn.call_method(Some(DBUS), DBUS_PATH, Some(DBUS), "AddMatch", &(rule,))
-                    .await?;
-            }
-        }
-        let (bluez_owner, alsa_owner) =
-            tokio::try_join!(Owner::get(&conn, BLUEZ), Owner::get(&conn, BLUEALSA))?;
-        let owners = Rc::new(Owners {
-            bluez: bluez_owner,
-            alsa: alsa_owner,
-        });
-        let (tx, signals) = mpsc::channel(256);
+        conn.set_max_queued(SIGNAL_CAPACITY.try_into().expect("positive capacity"));
+        let mut stream = MessageStream::from(&conn);
+        let (owners, early) = drain_during_setup(&mut stream, subscribe(&conn)).await?;
+        let owners = Rc::new(owners);
+        let (tx, signals) = mpsc::channel(SIGNAL_CAPACITY);
         let (progress, startup) = watch::channel(None);
         actors::spawn_actor(
             "bluetooth D-Bus signals",
-            collect_signals(stream, owners.clone(), tx, Some(progress)),
+            collect_signals(stream, early, owners.clone(), tx, Some(progress)),
         );
         let (bluez, alsa) = tokio::try_join!(
             Registry::get(&conn, &owners.bluez.unique, "/"),
@@ -638,6 +678,7 @@ impl Bus {
         .await
     }
 
+    // Как и остальные управляющие вызовы, AVRCP ограничен TIMEOUT в call.
     pub async fn avr(&self, player: &str, method: &str) -> zbus::Result<()> {
         call(
             &self.conn,
@@ -991,6 +1032,7 @@ mod tests {
                 Ok(forged_owner_change),
                 Ok(signal),
             ]),
+            Vec::new(),
             owners,
             tx,
             None,
@@ -1001,6 +1043,19 @@ mod tests {
         assert_eq!(signal.kind, SignalKind::Bluez);
         assert!(signal.order < music_order);
         assert!(signal.received >= before_receive);
+    }
+
+    #[tokio::test]
+    async fn overflowing_signal_queue_aborts_setup() {
+        let signal = Message::signal("/player", PROPS, "PropertiesChanged")
+            .build(&())
+            .unwrap();
+        let mut stream =
+            futures_util::stream::iter((0..=SIGNAL_CAPACITY).map(|_| Ok(signal.clone())));
+        let Err(err) = drain_during_setup::<()>(&mut stream, std::future::pending()).await else {
+            panic!("overflow did not abort D-Bus setup");
+        };
+        assert!(matches!(err, zbus::Error::Failure(reason) if reason.contains("queue overflow")));
     }
 
     #[test]

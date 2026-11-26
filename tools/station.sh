@@ -174,8 +174,15 @@ PROD_BT_CTL="'$D/ctl.sh' bt-restore --supported >/dev/null 2>&1 ||
   '$D/ctl.sh' bt-restore --check >/dev/null 2>&1"
 PROD_BT_RESTORE="
 if $PROD_BT_CTL; then
-  '$D/ctl.sh' reload --stop && test_lifecycle_child '$D/ctl.sh' bt-restore ||
-    { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
+  '$D/ctl.sh' reload --stop ||
+    { echo 'installed service did not stop cleanly; leaving binaries untouched' >&2; exit 1; }
+  if ! test_lifecycle_child '$D/ctl.sh' bt-restore; then
+    echo 'installed Bluetooth not restored; leaving binaries untouched' >&2
+    if [ -f '$D/enabled' ]; then
+      test_lifecycle_child '$D/ctl.sh' restart || echo 'installed supervisor did not restart' >&2
+    fi
+    exit 1
+  fi
 fi
 # Старый ctl может сообщить об успехе, не восстановив один из путей снимка.
 reject_bt_marker() {

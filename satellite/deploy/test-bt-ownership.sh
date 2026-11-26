@@ -52,11 +52,13 @@ REAL_STAT=$(command -v stat)
 REAL_DATE=$(command -v date)
 REAL_PIDOF=$(command -v pidof)
 REAL_MKTEMP=$(command -v mktemp)
+REAL_FLOCK=$(command -v flock)
 REAL_LN=$(command -v ln)
 REAL_ENV=$(command -v env)
 export REAL_LN REAL_ENV
 export BT_FIXTURE REAL_READLINK REAL_SLEEP REAL_MV REAL_STAT REAL_CP
 export REAL_DATE REAL_PIDOF REAL_MKTEMP
+export REAL_FLOCK
 export PULSAR_DIR=$BT_FIXTURE/data PULSAR_LOG=$BT_FIXTURE/supervise.log PULSAR_Q=$BT_FIXTURE/bin/quasar
 export PULSAR_BT_OWNER=$BT_FIXTURE/owner PULSAR_BT_PROC=$BT_FIXTURE/proc PULSAR_BT_INIT=$BT_FIXTURE/bin/init
 export PULSAR_TAG=isolated PULSAR_LITE2=station.invalid
@@ -152,6 +154,16 @@ case "$1" in
     ;;
   *) exit 2 ;;
 esac
+EOF
+cat > "$BT_FIXTURE/bin/flock" <<'EOF'
+#!/bin/sh
+if [ "${LATE_PENDING:-0}" = 1 ] && [ "$*" = '-xn 7' ] && [ ! -e "$BT_FIXTURE/late-pending" ]; then
+  "$REAL_FLOCK" "$@" || exit 1
+  (umask 077; printf 'v2 1 0 0\n' > "$PULSAR_BT_OWNER"; : > "$PULSAR_BT_OWNER.pending") || exit 1
+  touch "$BT_FIXTURE/late-pending"
+  exit
+fi
+exec "$REAL_FLOCK" "$@"
 EOF
 cat > "$BT_FIXTURE/bin/pidof" <<'EOF'
 #!/bin/sh
@@ -289,7 +301,9 @@ touch "$BT_FIXTURE/supervisor-running"
 EOF
 cat > "$BT_FIXTURE/bin/mv" <<'EOF'
 #!/bin/sh
-if [ "${FAIL_REPLACE:-0}" = 1 ] && [ "$*" = '-f pulsar.rb pulsar' ]; then exit 1; fi
+if [ "${FAIL_REPLACE:-0}" = 1 ]; then
+  case "$*" in '-f .pulsar-rollback.'*' pulsar') exit 1 ;; esac
+fi
 if [ "${FAIL_STATION_REPLACE:-0}" = 1 ]; then
   case "$*" in '-f .station-upload.'*' pulsar'|'-f .station-replace.'*'/pulsar pulsar') exit 1 ;; esac
 fi
@@ -702,8 +716,19 @@ supervisor:start'
 cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-manual"
 [ ! -e "$PULSAR_BT_OWNER" ]
 trace
-ctl rollback
-expect 'supervisor:start'
+marker '1 0 0'
+rm -f "$BT_FIXTURE/restore-held" "$BT_FIXTURE/restore-release"
+HOLD_RESTORE=1 ctl rollback &
+rolling_back=$!
+await_file "$BT_FIXTURE/restore-held"
+reject ctl rollback
+touch "$BT_FIXTURE/restore-release"
+wait "$rolling_back"
+(set -- "$PULSAR_DIR"/.pulsar-rollback.*; [ "$#" -eq 1 ] && [ ! -e "$1" ]) ||
+  fail 'rollback left a staged executable'
+expect 'Pairable:true
+Discoverable:false
+supervisor:start'
 [ "$PULSAR_DIR/pulsar" -ef "$PULSAR_DIR/pulsar.bt-blocked" ]
 trace
 reject env FAIL_REPLACE=1 "$PULSAR_DIR/ctl.sh" rollback
@@ -730,6 +755,37 @@ expect 'Pairable:false
 Discoverable:false
 quasar:start'
 [ ! -e "$PULSAR_BT_OWNER" ] && [ ! -e "$PULSAR_DIR/enabled" ] || fail 'give_back left ownership pending'
+
+# Без flock неуправляемый Pulsar должен запуститься и через ctl, и из supervisor.
+no_flock=$BT_FIXTURE/no-flock
+mkdir "$no_flock"
+for command in awk cat date id ipcs killall mv pidof rm setsid sleep stat touch wc; do
+  ln -s "$(command -v "$command")" "$no_flock/$command"
+done
+cat > "$BT_FIXTURE/no-flock-binary" <<'EOF'
+#!/bin/sh
+[ "$PULSAR_BT_MANAGED" = 0 ] || exit 2
+echo 'unmanaged:no-flock' >> "$BT_FIXTURE/events"
+rm "$PULSAR_DIR/enabled"
+EOF
+chmod +x "$BT_FIXTURE/no-flock-binary"
+install_fixture "$BT_FIXTURE/no-flock-binary"
+trace
+PATH="$no_flock" ctl enable
+PATH="$no_flock" /bin/sh "$PULSAR_DIR/supervise.sh"
+expect 'quasar:stop
+supervisor:start
+unmanaged:no-flock'
+rm -f "$BT_FIXTURE/supervisor-running"
+
+# Снимок появился между первичной проверкой и блокировкой запуска.
+trace
+touch "$PULSAR_DIR/enabled"
+PULSAR_BT_MANAGED=0 LATE_PENDING=1 supervise
+expect 'Pairable:true
+Discoverable:false
+unmanaged:no-flock'
+[ ! -e "$PULSAR_BT_OWNER.pending" ] || fail 'supervisor launched before late Bluetooth recovery'
 
 # Обычное переименование при обновлении из HA может установить старый бинарь без служебных флагов Bluetooth.
 cat > "$BT_FIXTURE/replacing" <<'EOF'
@@ -1184,7 +1240,7 @@ sh "$station" lite2 stop
 expect 'Discoverable:false
 Pairable:false'
 rm "$PULSAR_BT_OWNER"
-touch "$BT_FIXTURE/pulsar-running" "$BT_FIXTURE/supervisor-running"
+touch "$PULSAR_DIR/enabled" "$BT_FIXTURE/pulsar-running" "$BT_FIXTURE/supervisor-running"
 trace
 reject env FAIL_STATION_COPY=1 sh "$station" lite2 swap "$BT_FIXTURE/swap"
 expect ''
@@ -1195,10 +1251,11 @@ expect 'init:stop
 Discoverable:false
 Pairable:false
 Pairable:false
-Discoverable:true'
+Discoverable:true
+supervisor:start'
 cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-swap"
-[ -f "$PULSAR_BT_OWNER" ] && [ ! -e "$BT_FIXTURE/pulsar-running" ] && [ ! -e "$BT_FIXTURE/supervisor-running" ] ||
-  fail 'swap did not stop production and retain the late ownership marker'
+[ -f "$PULSAR_BT_OWNER" ] && [ ! -e "$BT_FIXTURE/pulsar-running" ] && [ -e "$BT_FIXTURE/supervisor-running" ] ||
+  fail 'failed swap did not restart the supervisor with the original state'
 trace
 reject env FAIL_STATION_REPLACE=1 sh "$station" lite2 swap "$BT_FIXTURE/swap"
 expect 'Discoverable:false
@@ -1224,10 +1281,11 @@ reject env LATE_ACQUIRE='v2 1 0 1' FAIL_FLAG=Pairable FAIL_VALUE=true sh "$stati
 expect 'init:stop
 Discoverable:false
 Pairable:false
-Pairable:true'
+Pairable:true
+supervisor:start'
 cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/swap"
-[ -f "$PULSAR_BT_OWNER" ] && [ -f "$PULSAR_DIR/pulsar.orig" ] ||
-  fail 'failed restore discarded the late ownership marker or original backup'
+[ -f "$PULSAR_BT_OWNER" ] && [ -f "$PULSAR_DIR/pulsar.orig" ] && [ -e "$BT_FIXTURE/supervisor-running" ] ||
+  fail 'failed restore did not restart the supervisor with the original state'
 trace
 reject env FAIL_STATION_REPLACE=1 sh "$station" lite2 restore
 expect 'Discoverable:false

@@ -112,25 +112,26 @@ impl BtHandle {
     }
 }
 
-pub async fn spawn(
-    model: &'static Model,
-    enabled: bool,
-) -> Option<(BtHandle, UnboundedReceiver<BtEvent>)> {
+pub struct BtProbe {
+    stock: Stock,
+    owned: bool,
+    bus: Option<Bus>,
+    pcm: Worker,
+    pcm_rx: UnboundedReceiver<PcmEvent>,
+    probe: Option<PcmProbe>,
+}
+
+pub async fn probe(model: &'static Model) -> Result<BtProbe, String> {
     let deadline = Instant::now() + PROBE;
     let (stock, ownership) = match tokio::task::spawn_blocking(Stock::load).await {
-        Ok(Ok(station)) => station?,
-        Ok(Err(e)) => {
-            warn!("bluetooth: cannot verify stock ownership: {e}");
-            return None;
-        }
-        Err(e) => {
-            warn!("bluetooth: cannot inspect stock ownership: {e}");
-            return None;
-        }
+        Ok(Ok(Some(station))) => station,
+        Ok(Ok(None)) => return Err("stock player handoff is not enabled by the supervisor".into()),
+        Ok(Err(e)) => return Err(format!("cannot verify stock ownership: {e}")),
+        Err(e) => return Err(format!("cannot inspect stock ownership: {e}")),
     };
     if ownership == Ownership::PendingRestore {
         actors::spawn_actor("bluetooth stock restore", retry_stock_restore(stock));
-        return None;
+        return Err("stock player ownership recovery is still pending".into());
     }
     let owned = ownership == Ownership::Owned;
     let mut bus = connect_bus(deadline).await;
@@ -158,27 +159,54 @@ pub async fn spawn(
         }
     }
     if !owned {
-        let taken = match bus
-            .as_mut()
-            .filter(|_| probe.as_ref().is_some_and(PcmProbe::ready))
-        {
-            Some(bus) => stock.take(deadline, stock_flags(bus, deadline)).await,
-            None => Ok(false),
-        };
-        if !matches!(taken, Ok(true)) {
-            if let Err(e) = taken {
-                warn!("bluetooth: cannot take stock player: {e}");
-                if e.kind() != std::io::ErrorKind::WouldBlock {
-                    // Init-скрипт мог остановить player прежде, чем вернуть ошибку.
-                    actors::spawn_actor("bluetooth stock restore", retry_stock_restore(stock));
+        let taken = match (&mut bus, probe.as_ref().is_some_and(PcmProbe::ready)) {
+            (Some(bus), true) => match stock.take(deadline, stock_flags(bus, deadline)).await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err("could not refresh the original BlueZ flags".into()),
+                Err(e) => {
+                    if e.kind() != std::io::ErrorKind::WouldBlock {
+                        // Init-скрипт мог остановить player прежде, чем вернуть ошибку.
+                        actors::spawn_actor(
+                            "bluetooth stock restore",
+                            retry_stock_restore(stock.clone()),
+                        );
+                    }
+                    Err(format!("could not take stock player ownership: {e}"))
                 }
-            }
+            },
+            (None, _) => Err("incoming A2DP capability probe failed".into()),
+            (Some(_), false) => Err("PCM output was not ready during the startup probe".into()),
+        };
+        if let Err(reason) = taken {
             if let Some(probe) = probe {
                 probe.retire(&pcm);
             }
-            return None;
+            return Err(reason);
         }
     }
+    Ok(BtProbe {
+        stock,
+        owned,
+        bus,
+        pcm,
+        pcm_rx,
+        probe,
+    })
+}
+
+pub fn spawn(
+    model: &'static Model,
+    enabled: bool,
+    prepared: BtProbe,
+) -> (BtHandle, UnboundedReceiver<BtEvent>) {
+    let BtProbe {
+        stock,
+        owned,
+        mut bus,
+        pcm,
+        pcm_rx,
+        probe,
+    } = prepared;
     let mut policy = Policy::restore(enabled, Default::default());
     if let Some(bus) = &mut bus {
         seed_startup_pairs(bus, &mut policy, false);
@@ -216,7 +244,7 @@ pub async fn spawn(
     };
     svc.publish();
     actors::spawn_actor("bluetooth", svc.run(cmd_rx, pcm_rx));
-    Some((BtHandle { shared, cmds }, ev_rx))
+    (BtHandle { shared, cmds }, ev_rx)
 }
 
 async fn stock_flags(bus: &mut Bus, deadline: Instant) -> Option<[bool; 2]> {
@@ -406,6 +434,11 @@ impl FrameActivity {
         let first = self.start.take();
         let continuation = first.and_then(|_| self.enable_continuation.take());
         let (phase, order) = match (avr, first) {
+            (Some((Playback::Playing, _)), None) if self.enable_continuation.is_some() => {
+                // Первый Playing может лишь подтвердить переоткрытие. До первого
+                // кадра не приписываем продолжающемуся потоку новый порядок.
+                (Some(Playback::Playing), None)
+            }
             (Some((Playback::Playing, Some(order))), _)
                 if first.is_none() || order > self.start_floor =>
             {
@@ -414,7 +447,7 @@ impl FrameActivity {
                 if self.first.is_some() {
                     self.covered_avr = self.covered_avr.max(Some(order));
                 }
-                (Some(Playback::Playing), Some(order))
+                (Some(Playback::Playing), Some(continuation.unwrap_or(order)))
             }
             (_, Some(order)) => {
                 // Покрытый Playing не заменяет свежий фронт кадров после Idle.
@@ -1186,25 +1219,32 @@ mod tests {
     }
 
     #[test]
-    fn reopening_paused_metadata_stream_keeps_the_explicit_enable_order() {
-        let mut policy = selected_policy();
-        let mut frames = FrameActivity::default();
+    fn reopening_keeps_explicit_enable_order_even_with_late_playing() {
         let paused = Some((Playback::Paused, None));
-        frames.start(10);
-        frames.observe(&mut policy, paused);
-        let previous = PreviousEpisode {
-            owner: "phone".into(),
-            starts: policy.starts,
-            frames,
-        };
-        assert!(previous.reopen_after_enable("phone", 30, 20).is_none());
-        let mut frames = previous.reopen_after_enable("phone", 30, 0).unwrap();
-        policy.release();
-        policy.select("phone".into(), Instant::now());
-        frames.start(50);
-        frames.observe(&mut policy, paused);
-        assert_eq!(policy.ready_start(true, 0), Some(30));
-        assert_eq!(policy.ready_start(true, 40), None);
+        let playing = Some((Playback::Playing, Some(60)));
+        for (avr, playing_before_pcm) in [(paused, false), (playing, false), (playing, true)] {
+            let mut policy = selected_policy();
+            let mut frames = FrameActivity::default();
+            frames.start(10);
+            frames.observe(&mut policy, paused);
+            let previous = PreviousEpisode {
+                owner: "phone".into(),
+                starts: policy.starts,
+                frames,
+            };
+            assert!(previous.reopen_after_enable("phone", 30, 20).is_none());
+            let mut frames = previous.reopen_after_enable("phone", 30, 0).unwrap();
+            policy.release();
+            policy.select("phone".into(), Instant::now());
+            if playing_before_pcm {
+                frames.observe(&mut policy, playing);
+                assert_eq!(policy.ready_start(true, 40), None);
+            }
+            frames.start(50);
+            frames.observe(&mut policy, avr);
+            assert_eq!(policy.ready_start(true, 0), Some(30));
+            assert_eq!(policy.ready_start(true, 40), None);
+        }
     }
 
     #[test]

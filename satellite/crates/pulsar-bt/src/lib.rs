@@ -11,7 +11,7 @@ mod policy;
 mod service;
 mod stock;
 
-pub use service::{BtEvent, BtHandle, BtState, spawn};
+pub use service::{BtEvent, BtHandle, BtProbe, BtState, probe, spawn};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Playback {

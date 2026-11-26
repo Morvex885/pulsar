@@ -118,6 +118,8 @@ bt_for_owners_locked() {
 service_lock() (
   service_flock=$1
   shift
+  # Для неуправляемой станции без flock нет снимка нового протокола.
+  if ! command -v flock >/dev/null 2>&1; then "$@"; return; fi
   umask 077
   exec 7>>"$D/.pulsar-launch-lock" && flock "$service_flock" 7 || return 1
   "$@"
@@ -418,40 +420,50 @@ bt_restore() {
     bt_error 'не удалось завершить возврат владения'
 }
 
+rollback_resume() {
+  [ ! -f "$D/enabled" ] || start_supervisor_locked ||
+    { echo 'rollback: supervisor did not start' >&2; return 1; }
+}
+
+rollback_locked() (
+  cd "$D" || exit 1
+  # Пока копия не готова, рабочую службу не останавливаем.
+  rb=$(mktemp .pulsar-rollback.XXXXXX) || exit 1
+  trap 'rm -f "$rb"' EXIT
+  cp -p pulsar.prev "$rb" && [ -x "$rb" ] || exit 1
+  stop_service_locked || exit 1
+  if ! bt_for_owners bt_restore; then
+    # Бинарь ещё не заменён. Supervisor повторит незавершённый возврат.
+    rollback_resume
+    exit 1
+  fi
+  # Перед повторным использованием временного пути закрепляем действующий запрет захвата.
+  if [ pulsar -ef pulsar.bt-blocked.next ]; then
+    mv -f pulsar.bt-blocked.next pulsar.bt-blocked || { rollback_resume; exit 1; }
+  fi
+  # Сохраняем текущий бинарь, не снимая его с рабочего пути до атомарной замены.
+  if { [ pulsar -ef pulsar.bad ] || ln -f pulsar pulsar.bad; } &&
+    rm -f pulsar.bt-blocked.next && ln "$rb" pulsar.bt-blocked.next &&
+    [ "$rb" -ef pulsar.bt-blocked.next ] &&
+    mv -f "$rb" pulsar; then
+    # Пока запрет не перенесён на постоянный путь, supervisor учтёт временный.
+    mv -f pulsar.bt-blocked.next pulsar.bt-blocked
+    sync
+    rollback_resume || exit 1
+    if [ -f "$D/enabled" ]; then echo "supervisor reloaded"
+    else echo "supervisor stopped (not enabled)"; fi
+  else
+    rm -f pulsar.bt-blocked.next
+    echo 'rollback: бинарь не заменён; перезапускаем текущий' >&2
+    rollback_resume
+    exit 1
+  fi
+)
+
 rollback() {
-  (
-    cd "$D" || exit 1
-    # Пока копия не готова, рабочую службу не останавливаем.
-    trap 'rm -f pulsar.rb' EXIT
-    rm -f pulsar.rb && cp -p pulsar.prev pulsar.rb && [ -x pulsar.rb ] || exit 1
-    stop_service || exit 1
-    if ! service_locked bt_for_owners bt_restore; then
-      # Бинарь ещё не заменён. Supervisor повторит незавершённый возврат.
-      if [ -f "$D/enabled" ]; then
-        start_supervisor || echo 'rollback: supervisor did not start' >&2
-      fi
-      exit 1
-    fi
-    # Перед повторным использованием временного пути закрепляем действующий запрет захвата.
-    if [ pulsar -ef pulsar.bt-blocked.next ]; then
-      mv -f pulsar.bt-blocked.next pulsar.bt-blocked || { "$D/ctl.sh" reload; exit 1; }
-    fi
-    # Сохраняем текущий бинарь, не снимая его с рабочего пути до атомарной замены.
-    if { [ pulsar -ef pulsar.bad ] || ln -f pulsar pulsar.bad; } &&
-      rm -f pulsar.bt-blocked.next && ln pulsar.rb pulsar.bt-blocked.next &&
-      [ pulsar.rb -ef pulsar.bt-blocked.next ] &&
-      mv -f pulsar.rb pulsar; then
-      # Пока запрет не перенесён на постоянный путь, supervisor учтёт временный.
-      mv -f pulsar.bt-blocked.next pulsar.bt-blocked
-      sync
-      "$D/ctl.sh" reload
-    else
-      rm -f pulsar.bt-blocked.next
-      echo 'rollback: бинарь не заменён; перезапускаем текущий' >&2
-      "$D/ctl.sh" reload
-      exit 1
-    fi
-  )
+  command -v flock >/dev/null 2>&1 ||
+    { echo 'rollback: требуется flock для безопасной замены бинаря' >&2; return 1; }
+  service_try_locked rollback_locked
 }
 
 valid_key() { # 44 base64 chars (32 bytes + one '='), and 32 bytes when a decoder exists
