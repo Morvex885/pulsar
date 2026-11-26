@@ -406,27 +406,23 @@ impl Controller {
     }
 
     fn on_active_wake_words(&mut self, request: u64, id: String) {
-        if !self.wake_switch.wants(&id, &self.st.wake_word) {
-            if !self.wake_switch.retarget(request) {
-                self.api.set_active_wake_words(Some(request), vec![id]);
-            }
-            return;
-        }
         if self.mic.frame() == 0 {
             // Фронтенд не запущен: события WakeModel не будет, выбор принимается сразу.
-            self.st.wake_word = id.clone();
-            info!("wake word -> {}", self.st.wake_word);
+            if self.st.wake_word != id {
+                self.st.wake_word.clone_from(&id);
+                info!("wake word -> {}", self.st.wake_word);
+                self.persist();
+            }
             self.api.set_active_wake_words(Some(request), vec![id]);
-            self.persist();
             return;
         }
         info!("wake word requested: {id}");
         let req = self.mic.set_model(model_dir(&id));
-        self.wake_switch.requested(req, id, request);
+        self.wake_switch.requested(req, request);
     }
 
     /// Не сохраняем пустой выбор: после перезапуска спотер снова попробует прежнюю модель.
-    pub(super) fn on_wake_model(&mut self, req: ModelId, dir: &Path, ok: bool) {
+    pub(super) fn on_wake_model(&mut self, req: Option<ModelId>, dir: &Path, ok: bool) {
         let id = dir
             .file_name()
             .and_then(OsStr::to_str)
@@ -435,7 +431,7 @@ impl Controller {
         if !ok {
             warn!("wake word model did not load; active: {id:?}");
         }
-        let request = self.wake_switch.answered(req, !id.is_empty());
+        let request = self.wake_switch.answered(req);
         if !id.is_empty() && id != self.st.wake_word {
             self.st.wake_word.clone_from(&id);
             info!("wake word -> {}", self.st.wake_word);
@@ -449,14 +445,14 @@ impl Controller {
 
     pub(super) fn on_input(&mut self, ev: InputEvent) {
         match ev {
-            InputEvent::Mute(m) => {
+            InputEvent::Mute(m) | InputEvent::MuteSync(m) => {
                 if m {
                     self.cancel_arbitration();
                 }
                 self.hw_mic_muted = m;
                 info!("hardware mic mute: {}", u8::from(m));
                 self.api.publish_binary_sensor(BinarySensorId::HwMicMute, m);
-                let sw_muted = logic::sw_mute_after_button(self.st.mic_muted, m);
+                let sw_muted = logic::sw_mute_after_hw_event(self.st.mic_muted, ev);
                 if sw_muted != self.st.mic_muted {
                     info!("mute button lifted the mute from Home Assistant");
                     self.st.mic_muted = sw_muted;

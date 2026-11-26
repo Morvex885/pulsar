@@ -192,13 +192,24 @@ impl AsRawFd for Evdev {
 }
 
 impl Evdev {
-    /// Opens `path`, an event node the caller found in /proc/bus/input/devices.
-    pub fn open(path: &str) -> io::Result<Self> {
-        std::fs::OpenOptions::new()
+    pub fn open(path: &str, expected_name: &str) -> io::Result<Self> {
+        let dev = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
             .open(path)
-            .map(Self)
+            .map(Self)?;
+        // eventN мог сменить владельца после чтения /proc/bus/input/devices.
+        let name = dev.eviocg::<256>(0x06)?; // EVIOCGNAME
+        let expected = expected_name.as_bytes();
+        if name.get(..expected.len()) != Some(expected) || name.get(expected.len()) != Some(&0) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(dev)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_file(file: File) -> Self {
+        Self(file)
     }
 
     /// Registers the device with the runtime's reactor for reading.
@@ -221,9 +232,7 @@ impl Evdev {
 
     fn eviocg<const N: usize>(&self, nr: u32) -> io::Result<[u8; N]> {
         let mut bits = [0u8; N];
-        // SAFETY: `self` is an evdev node (Evdev is only created by open()), for which this
-        // request copies at most `N` bytes, the length encoded in it, into `bits`, which is
-        // writable for `N` bytes.
+        // SAFETY: запрос кодирует длину N, а bits доступен для записи на N байт.
         let r = unsafe { libc::ioctl(self.as_raw_fd(), evioc_read(nr, N), bits.as_mut_ptr()) };
         if r < 0 {
             Err(io::Error::last_os_error())
@@ -249,7 +258,7 @@ mod tests {
 
     #[test]
     fn evdev_ioctl_numbers_match_the_kernel_macros() {
-        // EVIOCGKEY(96) and EVIOCGSW(8) as computed by the C preprocessor.
+        // EVIOCGKEY(96) и EVIOCGSW(8), как их считает препроцессор C.
         assert_eq!(evioc_read(0x18, 96) as u64, 0x8060_4518);
         assert_eq!(evioc_read(0x1b, 8) as u64, 0x8008_451b);
     }

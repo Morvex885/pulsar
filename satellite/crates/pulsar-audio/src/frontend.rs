@@ -56,6 +56,7 @@ pub enum FrontendEvent {
     /// level_db: wake word level in dBFS on VQE_OMNI (after echo cancellation, before AGC),
     /// rounded to 0.1 dB; -100 = no data.
     Wake {
+        epoch: VoiceEpoch,
         phrase: String,
         level_db: f32,
         /// 16 кГц моно от точки хита спотера (`spotter_get_unhandled_nbytes`, сдвиг
@@ -65,25 +66,38 @@ pub enum FrontendEvent {
         preroll: Vec<i16>,
     },
     Command {
+        epoch: VoiceEpoch,
         word: String,
     },
     /// 16 kHz mono, one VQE chunk (512 samples, 256 on the Mini 3 and Mini), while streaming is on
     /// or a `Wake` is not yet handled.
-    Audio(Vec<i16>),
+    Audio {
+        epoch: VoiceEpoch,
+        pcm: Vec<i16>,
+    },
     /// One per 32 ms FFT window while music analysis is on.
     Music(MusicFrame),
-    /// Модель wake word, активная после старта (`id` 0) или запроса
-    /// [`FrontendHandle::set_model`] с этим `id`. `ok` — запрошенная модель (при старте — первый
-    /// кандидат) загрузилась. `dir` пуст, если модели нет. На запрос, вытесненный следующим до
-    /// применения, события нет.
+    /// Фактически активная модель wake word. `id` указан только в ответ на `set_model`;
+    /// `ok` означает, что загрузилась запрошенная модель (при старте — первый кандидат).
+    /// `dir` пуст, если спотера нет. На запрос, вытесненный до применения, события нет.
     WakeModel {
-        id: ModelId,
+        id: Option<ModelId>,
         dir: PathBuf,
         ok: bool,
     },
 }
 
-/// Запрос смены модели wake word ([`FrontendHandle::set_model`]); 0 — модель старта.
+/// Поколение голосового ввода. Нечётные поколения соответствуют отключённым микрофонам.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VoiceEpoch(u32);
+
+impl VoiceEpoch {
+    fn enabled(self) -> bool {
+        self.0 & 1 == 0
+    }
+}
+
+/// Запрос смены модели wake word ([`FrontendHandle::set_model`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModelId(pub u64);
 
@@ -116,10 +130,11 @@ pub fn spawn(
     model: &'static Model,
     wake_model_dirs: Vec<PathBuf>,
     command_model_dir: Option<PathBuf>,
+    voice_enabled: bool,
 ) -> (FrontendHandle, UnboundedReceiver<FrontendEvent>) {
     let (tx, rx) = unbounded_channel();
     let mut inner = Inner {
-        shared: Arc::new(Shared::new()),
+        shared: Arc::new(Shared::new(voice_enabled)),
         pipe: None,
         threads: Vec::new(),
         frame: 0,
@@ -136,11 +151,7 @@ pub fn spawn(
                 .inspect_err(|e| error!("audio threads: {e}"))
                 .is_ok();
             if started {
-                let _ = tx.send(FrontendEvent::WakeModel {
-                    id: ModelId(0),
-                    dir,
-                    ok,
-                });
+                let _ = tx.send(FrontendEvent::WakeModel { id: None, dir, ok });
             }
             started
         }
@@ -170,9 +181,14 @@ impl FrontendHandle {
         id
     }
 
-    /// Wake word detection on/off (e.g. software mute). On by default.
+    /// Блокирует голосовой ввод; события и пре-ролл из предыдущего поколения недействительны.
     pub fn set_detection(&self, on: bool) {
-        self.inner.shared.detect.store(on, Relaxed);
+        self.inner.shared.set_detection(on);
+    }
+
+    /// Устаревший Wake нужно сбросить вместе с удержанием потока, которое он открыл.
+    pub fn discard_stale_voice(&self, event: &FrontendEvent) -> bool {
+        self.inner.shared.discard_stale_voice(event)
     }
 
     /// Command spotter on/off (commands without the wake word).
@@ -188,11 +204,7 @@ impl FrontendHandle {
     /// The owner handled one [`FrontendEvent::Wake`]: ends the stream hold it started. Call it
     /// after `set_streaming` for that wake word.
     pub fn wake_handled(&self) {
-        let _ = self
-            .inner
-            .shared
-            .wake_pending
-            .try_update(AcqRel, Acquire, |v| v.checked_sub(1));
+        self.inner.shared.wake_handled();
     }
 
     /// Сдвиг начала пре-ролла от точки хита спотера, мс: плюс — позже, минус — раньше. По
@@ -248,7 +260,7 @@ struct Shared {
     // With stop_cv: wakes the capture thread's reopen delay on stop.
     stop_lock: Mutex<()>,
     stop_cv: Condvar,
-    detect: AtomicBool,
+    voice_epoch: AtomicU32,
     commands: AtomicBool,
     stream: AtomicBool,
     /// `Wake` events sent and not yet handled: audio keeps coming meanwhile, so nothing is lost
@@ -268,12 +280,12 @@ struct Shared {
 }
 
 impl Shared {
-    fn new() -> Self {
+    fn new(voice_enabled: bool) -> Self {
         Shared {
             running: AtomicBool::new(false),
             stop_lock: Mutex::new(()),
             stop_cv: Condvar::new(),
-            detect: AtomicBool::new(true),
+            voice_epoch: AtomicU32::new(u32::from(!voice_enabled)),
             commands: AtomicBool::new(false),
             stream: AtomicBool::new(false),
             wake_pending: AtomicU32::new(0),
@@ -293,6 +305,39 @@ impl Shared {
 
     fn running(&self) -> bool {
         self.running.load(Relaxed)
+    }
+
+    fn set_detection(&self, on: bool) {
+        let _ = self.voice_epoch.try_update(Relaxed, Relaxed, |v| {
+            (VoiceEpoch(v).enabled() != on).then(|| v.wrapping_add(1))
+        });
+    }
+
+    fn voice_epoch(&self) -> VoiceEpoch {
+        VoiceEpoch(self.voice_epoch.load(Relaxed))
+    }
+
+    fn accepts_voice(&self, epoch: VoiceEpoch) -> bool {
+        epoch.enabled() && self.voice_epoch() == epoch
+    }
+
+    fn discard_stale_voice(&self, event: &FrontendEvent) -> bool {
+        match event {
+            FrontendEvent::Wake { epoch, .. } if !self.accepts_voice(*epoch) => {
+                self.wake_handled();
+                true
+            }
+            FrontendEvent::Audio { epoch, .. } | FrontendEvent::Command { epoch, .. } => {
+                !self.accepts_voice(*epoch)
+            }
+            _ => false,
+        }
+    }
+
+    fn wake_handled(&self) {
+        let _ = self
+            .wake_pending
+            .try_update(AcqRel, Acquire, |v| v.checked_sub(1));
     }
 
     /// Sleeps `d` or until stopped.
@@ -379,6 +424,7 @@ impl Drop for Inner {
 /// Interleaved capture frames, oldest first, at most `max` samples.
 pub(crate) struct Fifo {
     buf: VecDeque<i16>,
+    epoch: VoiceEpoch,
     nch: usize,
     chunk: usize,
     max: usize,
@@ -389,10 +435,20 @@ impl Fifo {
     pub(crate) fn new(nch: usize, chunk_frames: usize, max_frames: usize) -> Self {
         Fifo {
             buf: VecDeque::new(),
+            epoch: VoiceEpoch::default(),
             nch,
             chunk: chunk_frames * nch,
             max: max_frames * nch,
         }
+    }
+
+    fn push_captured(&mut self, samples: &[i16], epoch: VoiceEpoch) -> Option<usize> {
+        if self.epoch != epoch {
+            // Целый чанк VQE должен принадлежать одному поколению микрофонного ввода.
+            self.buf.clear();
+            self.epoch = epoch;
+        }
+        self.push(samples)
     }
 
     /// Appends whole frames; past the limit the oldest are dropped: returns how many frames.
@@ -487,17 +543,30 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
     let mut pcm: Option<Pcm> = None;
     let mut hw_period = period;
     let mut buf = CaptureBuf::new(model.capture_format, period * nch);
+    let mut capture_epoch = VoiceEpoch::default();
     while shared.running() {
         let Some(p) = pcm.as_mut() else {
+            let opening_epoch = shared.voice_epoch();
             match open_capture(model, period) {
                 Some((p, per)) => {
                     pcm = Some(p);
                     hw_period = per;
+                    capture_epoch = opening_epoch;
                 }
                 None => shared.pause(REOPEN_DELAY),
             }
             continue;
         };
+        let epoch = shared.voice_epoch();
+        if epoch != capture_epoch && epoch.enabled() {
+            // Буфер ALSA ещё может хранить кадры, записанные до снятия блокировки.
+            if let Err(e) = p.drop_frames().and_then(|()| p.prepare()) {
+                warn!("capture: flush on unmute: {}", pulsar_alsa::strerror(e));
+                pcm = None;
+                continue;
+            }
+        }
+        capture_epoch = epoch;
         let mut r = buf.read(p, hw_period);
         if r == Err(-libc::EAGAIN) {
             match p.wait(READ_WAIT_MS) {
@@ -526,7 +595,7 @@ fn capture(model: &'static Model, period: usize, shared: &Shared, pipe: &Pipe) {
         }
         let dropped = {
             let mut f = lock(&pipe.fifo);
-            let dropped = f.push(block);
+            let dropped = f.push_captured(block, epoch);
             shared.fifo_frames.store(f.frames() as u64, Relaxed);
             dropped
         };
@@ -708,6 +777,7 @@ impl LevelHistory {
 /// The last VQE chunks as s16, for the pre-roll after a wake word.
 pub(crate) struct PrerollRing {
     buf: Vec<i16>,
+    epoch: VoiceEpoch,
     frame: usize,
     /// Slot the next chunk goes to.
     next: usize,
@@ -718,10 +788,20 @@ impl PrerollRing {
     pub(crate) fn new(chunks: usize, frame: usize) -> Self {
         PrerollRing {
             buf: vec![0; chunks * frame],
+            epoch: VoiceEpoch::default(),
             frame,
             next: 0,
             filled: 0,
         }
+    }
+
+    fn start_epoch(&mut self, epoch: VoiceEpoch) -> bool {
+        if self.epoch == epoch {
+            return false;
+        }
+        self.epoch = epoch;
+        self.clear();
+        true
     }
 
     fn chunks(&self) -> usize {
@@ -806,6 +886,26 @@ impl<T: std::fmt::Display> std::fmt::Display for Opt<T> {
     }
 }
 
+fn update_spotter_epoch(
+    previous: &mut Option<VoiceEpoch>,
+    current: VoiceEpoch,
+    tx: &UnboundedSender<FrontendEvent>,
+    restart: impl FnOnce() -> Option<PathBuf>,
+) {
+    // Иначе первое подтверждение после mute может закончить фразу из старой эпохи.
+    if previous
+        .replace(current)
+        .is_some_and(|epoch| epoch != current)
+        && let Some(dir) = restart()
+    {
+        let _ = tx.send(FrontendEvent::WakeModel {
+            id: None,
+            ok: !dir.as_os_str().is_empty(),
+            dir,
+        });
+    }
+}
+
 fn processing(
     model: &'static Model,
     mut eng: Engine,
@@ -828,6 +928,7 @@ fn processing(
     let mut music_was_on = false;
     let frame = eng.frame();
     let mut ring = PrerollRing::new(PREROLL_SAMPLES / frame.max(1), frame);
+    let mut spotter_epoch = None;
     let mut gain_db = shared.mic_gain_db.load(Relaxed);
     let mut gain = db_to_gain(gain_db);
 
@@ -842,10 +943,14 @@ fn processing(
                 );
             }
             let dir = eng.wake_dir().to_path_buf();
-            let _ = tx.send(FrontendEvent::WakeModel { id, dir, ok });
+            let _ = tx.send(FrontendEvent::WakeModel {
+                id: Some(id),
+                dir,
+                ok,
+            });
         }
         // Exactly one VQE chunk.
-        {
+        let epoch = {
             let f = lock(&pipe.fifo);
             let (mut f, _) = pipe
                 .ready
@@ -855,10 +960,13 @@ fn processing(
                 continue;
             }
             shared.fifo_frames.store(f.frames() as u64, Relaxed);
-        }
+            f.epoch
+        };
         shared.chunks.fetch_add(1, Relaxed);
 
-        deinterleave(&input, nch, mic_ch, spk_ch, &mut mics, &mut spk);
+        let voice_on = shared.accepts_voice(epoch);
+        let channels = if voice_on { mic_ch } else { &[] };
+        deinterleave(&input, nch, channels, spk_ch, &mut mics, &mut spk);
         let music_on = shared.music.load(Relaxed) && ana.ok();
         if music_on && !music_was_on {
             ana.reset();
@@ -868,8 +976,22 @@ fn processing(
         if music_on && ana.process(&spk, nspk, &mut mf) {
             let _ = tx.send(FrontendEvent::Music(mf));
         }
+        if ring.start_epoch(epoch) {
+            level_hist.values.fill(0.0);
+            level_hist.pos = 0;
+            level_hist.used = 0;
+        }
+        if voice_on {
+            update_spotter_epoch(&mut spotter_epoch, epoch, tx, || eng.restart_spotters());
+        }
+        if !voice_on {
+            mics.fill(0.0);
+        }
         if !eng.process(&mics, &spk) {
             ring.clear();
+            continue;
+        }
+        if !voice_on {
             continue;
         }
 
@@ -901,45 +1023,47 @@ fn processing(
                 if let Some(slot) = ring.push(d, gain)
                     && (shared.wake_pending.load(Acquire) > 0 || shared.stream.load(Relaxed))
                 {
-                    let _ = tx.send(FrontendEvent::Audio(slot.to_vec()));
+                    let _ = tx.send(FrontendEvent::Audio {
+                        epoch,
+                        pcm: slot.to_vec(),
+                    });
                 }
             }
             None => ring.clear(),
         }
 
-        if shared.detect.load(Relaxed) {
-            let hits = eng.feed_wake();
-            if !hits.is_empty() {
-                let level_db = wake_level_db(&level_hist.values);
-                let speech_end = level_hist.speech_end_ms();
-                let offset_ms = shared.command_offset_ms.load(Relaxed);
-                for hit in hits {
-                    // ring.push выше в этой же итерации: конец кольца = конец поданного спотеру,
-                    // так что ring.tail(after) начинается в точке хита.
-                    let stored = ring.stored();
-                    if let Some(a) = hit.after.filter(|&a| a > stored) {
-                        warn!("wake anchor {a} samples back, the ring holds {stored}; no pre-roll");
-                    }
-                    let n = preroll_samples(hit.after, offset_ms, stored);
-                    let preroll = ring.tail(n);
-                    info!(
-                        "wake anchor: unhandled={} preroll={} ms speech_end={} ms",
-                        Opt(hit.unhandled),
-                        n / SAMPLES_PER_MS,
-                        Opt(speech_end)
-                    );
-                    shared.wake_pending.fetch_add(1, Relaxed);
-                    let _ = tx.send(FrontendEvent::Wake {
-                        phrase: hit.phrase,
-                        level_db,
-                        preroll,
-                    });
+        let hits = eng.feed_wake();
+        if !hits.is_empty() {
+            let level_db = wake_level_db(&level_hist.values);
+            let speech_end = level_hist.speech_end_ms();
+            let offset_ms = shared.command_offset_ms.load(Relaxed);
+            for hit in hits {
+                // ring.push выше в этой же итерации: конец кольца = конец поданного спотеру,
+                // так что ring.tail(after) начинается в точке хита.
+                let stored = ring.stored();
+                if let Some(a) = hit.after.filter(|&a| a > stored) {
+                    warn!("wake anchor {a} samples back, the ring holds {stored}; no pre-roll");
                 }
+                let n = preroll_samples(hit.after, offset_ms, stored);
+                let preroll = ring.tail(n);
+                info!(
+                    "wake anchor: unhandled={} preroll={} ms speech_end={} ms",
+                    Opt(hit.unhandled),
+                    n / SAMPLES_PER_MS,
+                    Opt(speech_end)
+                );
+                shared.wake_pending.fetch_add(1, Relaxed);
+                let _ = tx.send(FrontendEvent::Wake {
+                    epoch,
+                    phrase: hit.phrase,
+                    level_db,
+                    preroll,
+                });
             }
         }
         if shared.commands.load(Relaxed) {
             for word in eng.feed_command() {
-                let _ = tx.send(FrontendEvent::Command { word });
+                let _ = tx.send(FrontendEvent::Command { epoch, word });
             }
         }
     }
@@ -950,6 +1074,100 @@ mod tests {
     use super::*;
     use pulsar_alsa::HwResult;
     use pulsar_core::model::model_from_compatible;
+
+    #[test]
+    fn spotter_restart_reports_loss_and_recovery_without_request_id() {
+        let (tx, mut rx) = unbounded_channel();
+        let mut previous = None;
+        update_spotter_epoch(&mut previous, VoiceEpoch(0), &tx, || {
+            panic!("initial epoch already has a fresh spotter")
+        });
+        update_spotter_epoch(&mut previous, VoiceEpoch(2), &tx, || Some(PathBuf::new()));
+        update_spotter_epoch(&mut previous, VoiceEpoch(2), &tx, || {
+            panic!("same epoch must not restart the spotter")
+        });
+        let model = PathBuf::from("alisa");
+        update_spotter_epoch(&mut previous, VoiceEpoch(4), &tx, || Some(model.clone()));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            FrontendEvent::WakeModel { id: None, dir, ok: false } if dir.as_os_str().is_empty()
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            FrontendEvent::WakeModel { id: None, dir, ok: true } if dir == model
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn unmute_rejects_queued_voice_and_does_not_replay_captured_pcm() {
+        let shared = Shared::new(true);
+        let mut fifo = Fifo::new(1, 2, 8);
+        let prior_wake = shared.voice_epoch();
+        fifo.push_captured(&[10, 11], prior_wake);
+
+        shared.set_detection(false);
+        let muted = shared.voice_epoch();
+        fifo.push_captured(&[20, 21, 22], muted);
+        assert!(!shared.accepts_voice(muted));
+        shared.set_detection(true);
+        assert!(!shared.accepts_voice(prior_wake));
+        assert!(!shared.accepts_voice(muted));
+
+        let resumed = shared.voice_epoch();
+        fifo.push_captured(&[30], resumed);
+        let mut samples = [0; 2];
+        assert!(!fifo.take_chunk(&mut samples));
+        fifo.push_captured(&[31], resumed);
+        assert!(fifo.take_chunk(&mut samples));
+        assert!(shared.accepts_voice(fifo.epoch));
+        assert_eq!(samples, [30, 31]);
+    }
+
+    #[test]
+    fn mute_boundary_invalidates_queued_events_and_preroll() {
+        let shared = Shared::new(false);
+        assert!(!shared.accepts_voice(shared.voice_epoch()));
+        shared.set_detection(true);
+        let before_mute = shared.voice_epoch();
+        let mut ring = PrerollRing::new(3, 2);
+        ring.start_epoch(before_mute);
+        ring.push(&[0.5, 0.75], 1.0).unwrap();
+        let wake = FrontendEvent::Wake {
+            epoch: before_mute,
+            phrase: "Алиса".to_owned(),
+            level_db: -20.0,
+            preroll: ring.tail(2),
+        };
+        shared.wake_pending.fetch_add(1, Relaxed);
+        assert!(!shared.discard_stale_voice(&wake));
+
+        shared.set_detection(false);
+        shared.set_detection(true);
+        for event in [
+            wake,
+            FrontendEvent::Command {
+                epoch: before_mute,
+                word: "стоп".to_owned(),
+            },
+            FrontendEvent::Audio {
+                epoch: before_mute,
+                pcm: vec![7, 8],
+            },
+        ] {
+            assert!(shared.discard_stale_voice(&event));
+        }
+        assert_eq!(shared.wake_pending.load(Acquire), 0);
+
+        let resumed = shared.voice_epoch();
+        ring.start_epoch(resumed);
+        let pcm = ring.push(&[-0.5, -0.75], 1.0).unwrap().to_vec();
+        assert_eq!(ring.tail(4), pcm);
+        assert!(!shared.discard_stale_voice(&FrontendEvent::Audio {
+            epoch: resumed,
+            pcm,
+        }));
+    }
 
     #[test]
     fn s32_capture_keeps_the_top_16_of_24_bits() {
@@ -1089,7 +1307,9 @@ mod tests {
         let lite2 = model_from_compatible(b"yandex,plum\0").unwrap();
         let mini3 = model_from_compatible(b"yandex,bergamot\0").unwrap();
         let station2 = model_from_compatible(b"yandex,station-midi\0").unwrap();
-        for m in [midi, lite2, mini3, station2] {
+        // Лайт: склейка multi — микрофоны 0–3, референс 4–5.
+        let lite = model_from_compatible(b"yandex,station-micro\0").unwrap();
+        for m in [midi, lite2, mini3, station2, lite] {
             let nch = m.capture_channels as usize;
             let frames = 4;
             // Sample = frame * 100 + channel.
@@ -1241,7 +1461,7 @@ mod tests {
     fn without_the_yandex_library_the_handle_is_degraded() {
         // No /system/vendor/quasar/libs on the build host: dlopen fails.
         let midi = model_from_compatible(b"yandex,cucumber\0").unwrap();
-        let (h, mut rx) = spawn(midi, vec![PathBuf::from("/nonexistent")], None);
+        let (h, mut rx) = spawn(midi, vec![PathBuf::from("/nonexistent")], None, true);
         h.set_streaming(true);
         h.set_model(PathBuf::from("/nonexistent/2"));
         let h2 = h.clone();

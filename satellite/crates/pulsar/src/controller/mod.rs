@@ -136,7 +136,7 @@ pub struct Controller {
     updater: UpdaterHandle,
     arbiter: ArbiterHandle,
     /// Held only: the input actor runs while its handle exists.
-    _input: Option<InputHandle>,
+    _input: InputHandle,
     clock: pulsar_clock::ClockHandle,
     leds: LedsHandle,
     mixer: Mixer,
@@ -445,16 +445,14 @@ impl Controller {
         let (updater, updater_rx) =
             pulsar_update::spawn(pulsar_update::UPDATE_REPO.into(), VERSION.into());
 
-        let (input, input_rx) = match pulsar_hw::spawn_input(model) {
-            Ok((h, rx)) => (Some(h), Some(rx)),
-            Err(e) => {
-                warn!("{e}");
-                (None, None)
-            }
-        };
-        let hw_mic_muted = input.as_ref().is_some_and(InputHandle::hw_muted);
-        let (mic, mic_rx) =
-            pulsar_audio::spawn(model, wake_dirs, Some(PathBuf::from(COMMAND_MODEL)));
+        let (input, input_rx) = pulsar_hw::spawn_input(model);
+        let hw_mic_muted = input.hw_muted();
+        let (mic, mic_rx) = pulsar_audio::spawn(
+            model,
+            wake_dirs,
+            Some(PathBuf::from(COMMAND_MODEL)),
+            !st.mic_muted && !hw_mic_muted,
+        );
         mic.set_command_offset(st.command_start_offset_ms);
         mic.set_mic_gain(st.mic_gain_db);
 
@@ -566,7 +564,7 @@ impl Controller {
                 frontend: Some(mic_rx),
                 player: Some(player_rx),
                 arbiter: Some(arbiter_rx),
-                input: input_rx,
+                input: Some(input_rx),
                 lux: lux_rx,
                 sendspin: sendspin_rx,
                 zigbee: zigbee_rx,
@@ -676,6 +674,10 @@ impl Controller {
                     info!("signal {}, exiting", libc::SIGINT);
                     break ExitReason::Signal;
                 }
+                ev = recv(&mut self.rx.input) => match ev {
+                    Some(ev) => self.on_input(ev),
+                    None => self.rx.input = None,
+                },
                 ev = recv(&mut self.rx.api) => match ev {
                     Some(ev) => self.on_api(ev),
                     None => self.rx.api = None,
@@ -695,10 +697,6 @@ impl Controller {
                         }
                     }
                     None => self.rx.arbiter = None,
-                },
-                ev = recv(&mut self.rx.input) => match ev {
-                    Some(ev) => self.on_input(ev),
-                    None => self.rx.input = None,
                 },
                 ev = recv(&mut self.rx.sendspin) => match ev {
                     Some(ev) => self.on_sendspin(ev),
@@ -792,18 +790,25 @@ impl Controller {
     }
 
     fn on_frontend(&mut self, ev: FrontendEvent) {
+        if self.mic.discard_stale_voice(&ev) {
+            return;
+        }
         match ev {
             FrontendEvent::Wake {
                 phrase,
                 level_db,
                 preroll,
+                ..
             } => {
                 self.on_wake(&phrase, level_db, preroll);
                 // After on_wake has switched streaming on where the wake word starts a request.
                 self.mic.wake_handled();
             }
-            FrontendEvent::Command { word } => self.on_command(&word, false),
-            FrontendEvent::Audio(pcm) => {
+            FrontendEvent::Command { word, .. } => self.on_command(&word, false),
+            FrontendEvent::Audio { pcm, .. } => {
+                if self.mic_muted() {
+                    return;
+                }
                 if self.phase == Phase::Listening {
                     self.api.voice_send_audio(pcm);
                 } else if self.arbitrating {
@@ -842,7 +847,8 @@ impl Controller {
     }
 
     fn mic_muted(&self) -> bool {
-        self.st.mic_muted || self.hw_mic_muted
+        // Ввод уже мог заблокировать микрофоны, пока его событие ещё ждёт обработки.
+        self.st.mic_muted || self.hw_mic_muted || self._input.hw_muted()
     }
 
     fn sendspin_streaming(&self) -> bool {

@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use pulsar_clock::ClockHandle;
 use pulsar_core::model::{LedLayout, LedStrip, Model};
 use pulsar_core::{AmbientDimmer, ClockShot, MusicFrame, UiState, actors};
-use pulsar_hw::{Button, InputEvent, InputHandle, LedsHandle, Press, Rgb};
+use pulsar_hw::{Button, InputEvent, LedsHandle, Press, Rgb};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::LocalSet;
 
@@ -172,16 +172,21 @@ fn fb_mode(model: &Model, s: &LedStrip) -> bool {
     ok && trigger.contains(&format!("[{}]", s.trigger))
 }
 
+fn fb_bytes_per_pixel(s: &LedStrip) -> Option<usize> {
+    let dev = s.fb_dev.rsplit('/').next().unwrap_or(s.fb_dev);
+    let bpp = std::fs::read_to_string(format!("/sys/class/graphics/{dev}/bits_per_pixel")).ok()?;
+    match bpp.trim() {
+        "24" => Some(3),
+        "32" => Some(4),
+        _ => None,
+    }
+}
+
 /// Фреймбуфер ленты как RGB по светодиодам; None, если его не прочитать. Пиксель 24 bpp —
 /// B, G, R; 32 bpp (панель Станции 2) — R, G, B, W, белый байт не читается.
 fn strip_fb(s: &LedStrip) -> Option<Vec<[u8; 3]>> {
     let n = usize::try_from(s.count).ok()?;
-    let dev = s.fb_dev.rsplit('/').next().unwrap_or(s.fb_dev);
-    let bpp = std::fs::read_to_string(format!("/sys/class/graphics/{dev}/bits_per_pixel"))
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(24);
-    let bytes_per_px = if bpp == 32 { 4 } else { 3 };
+    let bytes_per_px = fb_bytes_per_pixel(s)?;
     let mut raw = vec![0u8; n * bytes_per_px];
     std::fs::File::open(s.fb_dev)
         .ok()?
@@ -264,22 +269,47 @@ fn check_strip(model: &Model, s: &LedStrip, what: &str, fb: [u8; 3]) -> bool {
     ok
 }
 
-/// Raw framebuffer write rate (ring, 72 bytes).
-fn fb_rate() {
+fn fb_rate(model: &Model) {
+    let ring = &model.ring;
+    if !fb_mode(model, ring) {
+        return;
+    }
+    let Some(bytes_per_px) = fb_bytes_per_pixel(ring) else {
+        say(&format!(
+            "{}: unknown pixel format, skipping write benchmark",
+            ring.fb_dev
+        ));
+        return;
+    };
     let Ok(fb) = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open("/dev/fb0")
+        .open(ring.fb_dev)
     else {
         return;
     };
-    let zero = [0u8; 72];
+    let zero = vec![0; ring.count as usize * bytes_per_px];
     let t0 = Instant::now();
     for _ in 0..100 {
-        let _ = fb.write_at(&zero, 0);
+        match fb.write_at(&zero, 0) {
+            Ok(n) if n == zero.len() => {}
+            Ok(n) => {
+                say(&format!(
+                    "{}: short frame write ({n}/{})",
+                    ring.fb_dev,
+                    zero.len()
+                ));
+                return;
+            }
+            Err(e) => {
+                say(&format!("{}: frame write failed: {e}", ring.fb_dev));
+                return;
+            }
+        }
     }
     say(&format!(
-        "fb0: 100 frame writes in {} ms",
+        "{}: 100 frame writes in {} ms",
+        ring.fb_dev,
         t0.elapsed().as_millis()
     ));
 }
@@ -539,7 +569,7 @@ async fn leds_off_after_exit(model: &Model) -> bool {
 }
 
 async fn leds(model: &'static Model, state_ms: u64) -> bool {
-    fb_rate();
+    fb_rate(model);
     let leds = pulsar_hw::spawn_leds(model);
     let music = Rc::new(Cell::new(false));
     let done = Rc::new(Cell::new(false));
@@ -566,15 +596,10 @@ async fn leds(model: &'static Model, state_ms: u64) -> bool {
 // input
 
 async fn input(model: &'static Model, seconds: u64) -> bool {
-    let (input, rx) = match pulsar_hw::spawn_input(model) {
-        Ok(v) => v,
-        Err(e) => {
-            say(&format!("open: input=0 ({e})"));
-            return false;
-        }
-    };
+    let (input, rx) = pulsar_hw::spawn_input(model);
     say(&format!(
-        "open: input=1 hw_muted={}",
+        "open: input={} hw_muted={}",
+        u8::from(input.is_available()),
         u8::from(input.hw_muted())
     ));
     say(&format!(
@@ -582,7 +607,7 @@ async fn input(model: &'static Model, seconds: u64) -> bool {
     ));
     monitor(Some(rx), None, seconds).await;
     say(&format!("final hw_muted={}", u8::from(input.hw_muted())));
-    true
+    input.is_available()
 }
 
 /// Prints buttons, mute and lux until `seconds` are up; the number of lux readings.
@@ -608,6 +633,7 @@ async fn monitor(
                     say(&format!("BUTTON {b} {p}"));
                 }
                 Some(InputEvent::Mute(m)) => say(&format!("MUTE {}", if m { "on" } else { "off" })),
+                Some(InputEvent::MuteSync(m)) => say(&format!("MUTE_SYNC {}", if m { "on" } else { "off" })),
                 Some(InputEvent::MuteToggle) => say("MUTE_TOGGLE"),
                 None => input = None,
             },
@@ -1022,16 +1048,10 @@ async fn light(seconds: u64) -> bool {
 
 async fn all(model: &'static Model, input_s: u64, state_ms: u64) -> bool {
     let saved = save_current(model);
-    fb_rate();
+    fb_rate(model);
     let leds = pulsar_hw::spawn_leds(model);
     let clock = pulsar_clock::spawn(model);
-    let (input, input_rx): (Option<InputHandle>, _) = match pulsar_hw::spawn_input(model) {
-        Ok((h, rx)) => (Some(h), Some(rx)),
-        Err(e) => {
-            say(&format!("input: {e}"));
-            (None, None)
-        }
-    };
+    let (input, input_rx) = pulsar_hw::spawn_input(model);
     let light_rx = match pulsar_clock::spawn_light_sensor(1000) {
         Ok(rx) => Some(rx),
         Err(e) => {
@@ -1063,9 +1083,9 @@ async fn all(model: &'static Model, input_s: u64, state_ms: u64) -> bool {
         "open: leds={} clock={} input={} light={} hw_muted={}",
         u8::from(leds_open),
         u8::from(clock_open),
-        u8::from(input.is_some()),
+        u8::from(input.is_available()),
         u8::from(light_rx.is_some()),
-        u8::from(input.as_ref().is_some_and(InputHandle::hw_muted))
+        u8::from(input.hw_muted())
     ));
     let music = Rc::new(Cell::new(false));
     let done = Rc::new(Cell::new(false));
@@ -1094,7 +1114,7 @@ async fn all(model: &'static Model, input_s: u64, state_ms: u64) -> bool {
         while rx.try_recv().is_ok() {}
     }
     let light_opened = light_rx.is_some();
-    let readings = monitor(input_rx, light_rx, input_s).await;
+    let readings = monitor(Some(input_rx), light_rx, input_s).await;
     say(&format!("final clock {}", clock_dump(model)));
     done.set(true);
     drop(input);

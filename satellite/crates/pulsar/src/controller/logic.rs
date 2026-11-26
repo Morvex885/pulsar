@@ -13,7 +13,7 @@ use pulsar_audio::engine::MODEL_FILES;
 
 use pulsar_core::model::Model;
 use pulsar_esphome::{DeviceIdentity, MediaState, VaEvent};
-use pulsar_hw::Rgb;
+use pulsar_hw::{InputEvent, Rgb};
 use pulsar_media::PlayState;
 
 /// After the wake word a stock command ("Алиса, громче") is handled locally if it is heard
@@ -403,10 +403,9 @@ pub fn sw_mute_after_switch(on: bool, sw_muted: bool, hw_muted: bool) -> bool {
     if on && hw_muted { sw_muted } else { !on }
 }
 
-/// The software mute after the mute button switched to `hw_muted`: lifting the button's mute
-/// also lifts the mute from HA, so the button alone always brings the microphones back.
-pub fn sw_mute_after_button(sw_muted: bool, hw_muted: bool) -> bool {
-    sw_muted && hw_muted
+/// Только физическое снятие блокировки отменяет mute из HA; переоткрытие устройства — нет.
+pub fn sw_mute_after_hw_event(sw_muted: bool, event: InputEvent) -> bool {
+    sw_muted && !matches!(event, InputEvent::Mute(false))
 }
 
 /// Restarting cuts off whatever plays: automatic installs wait for silence.
@@ -675,42 +674,21 @@ pub fn wake_word_names(models: &Path, saved: &str) -> Vec<String> {
     out
 }
 
-/// Смена модели wake word: последний запрос к фронтенду и есть ли загруженная модель.
+/// Последний запрос смены wake word к фронтенду, который владеет состоянием спотера.
 #[derive(Debug, Default)]
 pub struct WakeSwitch {
-    pending: Option<(ModelId, String, u64)>,
-    /// По последнему событию фронтенда модели нет: не загрузилась ни новая, ни прежняя.
-    empty: bool,
+    pending: Option<(ModelId, u64)>,
 }
 
 impl WakeSwitch {
-    /// Нужен ли запрос слова `id` при активном `active`: повтор ожидающего запроса не нужен,
-    /// выбор активного слова отменяет ожидающую смену или перезагружает модель, если её нет.
-    pub fn wants(&self, id: &str, active: &str) -> bool {
-        match &self.pending {
-            Some((_, p, _)) => p != id,
-            None => self.empty || id != active,
-        }
+    pub fn requested(&mut self, req: ModelId, request: u64) {
+        self.pending = Some((req, request));
     }
 
-    pub fn requested(&mut self, req: ModelId, id: String, request: u64) {
-        self.pending = Some((req, id, request));
-    }
-
-    /// Повтор того же слова меняет номер подтверждения, не запуская новую загрузку.
-    pub fn retarget(&mut self, request: u64) -> bool {
-        let Some((_, _, pending)) = &mut self.pending else {
-            return false;
-        };
-        *pending = request;
-        true
-    }
-
-    /// Событие `WakeModel`: ответ на устаревший запрос не снимает более новый.
-    pub fn answered(&mut self, req: ModelId, loaded: bool) -> Option<u64> {
-        self.empty = !loaded;
-        if self.pending.as_ref().is_some_and(|(r, _, _)| *r == req) {
-            self.pending.take().map(|(_, _, request)| request)
+    /// Независимое изменение доступности модели не подтверждает ожидающий запрос HA.
+    pub fn answered(&mut self, req: Option<ModelId>) -> Option<u64> {
+        if self.pending.as_ref().is_some_and(|(r, _)| Some(*r) == req) {
+            self.pending.take().map(|(_, request)| request)
         } else {
             None
         }

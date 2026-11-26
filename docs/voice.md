@@ -49,8 +49,9 @@ pulsar, и протокол арбитража wake word между станци
 
 - maind начинает распознавание от точки спотера (`spotter_get_unhandled_nbytes`, см.
   [«Библиотеки Яндекса (C API)»](hardware.md#библиотеки-яндекса-c-api)). В `quasar.cfg` Миди
-  (старая прошивка), Лайт 2 и Micro есть `voiceDialogSettings.recognizer.spotterSubscribePointShiftMs:
-  -80`; в новой прошивке Миди ключа нет.
+  (старая прошивка), Лайт 2 и Лайт (`yandexmicro`) есть
+  `voiceDialogSettings.recognizer.spotterSubscribePointShiftMs: -80`; в новой прошивке Миди ключа
+  нет.
 
 ### Командный спотер
 

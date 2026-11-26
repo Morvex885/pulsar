@@ -10,5 +10,5 @@ pub mod engine;
 mod frontend;
 mod spectrum;
 
-pub use frontend::{FrontendEvent, FrontendHandle, FrontendStats, ModelId, spawn};
+pub use frontend::{FrontendEvent, FrontendHandle, FrontendStats, ModelId, VoiceEpoch, spawn};
 pub use spectrum::SpectrumAnalyzer;

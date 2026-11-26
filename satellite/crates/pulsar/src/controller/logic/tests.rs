@@ -666,11 +666,19 @@ fn microphones_mutes() {
             "on={on} sw={sw} hw={hw}"
         );
     }
-    // Muted from HA only: the first press adds the button's mute, the second lifts both.
-    assert!(sw_mute_after_button(true, true));
-    assert!(!sw_mute_after_button(true, false));
-    // The button never sets the software mute.
-    assert!(!sw_mute_after_button(false, true));
+}
+
+#[test]
+fn recovering_hardware_mute_preserves_ha_mute() {
+    for sw_muted in [false, true] {
+        let lost = sw_mute_after_hw_event(sw_muted, InputEvent::MuteSync(true));
+        assert_eq!(lost, sw_muted);
+        let recovered = sw_mute_after_hw_event(lost, InputEvent::MuteSync(false));
+        assert_eq!(recovered, sw_muted);
+        let blocked = sw_mute_after_hw_event(recovered, InputEvent::Mute(true));
+        assert_eq!(blocked, sw_muted);
+        assert!(!sw_mute_after_hw_event(blocked, InputEvent::Mute(false)));
+    }
 }
 
 #[test]
@@ -908,36 +916,12 @@ fn wake_word_resolution_and_candidates() {
 }
 
 #[test]
-fn wake_switch_follows_the_last_request() {
-    use pulsar_audio::ModelId;
+fn wake_switch_ignores_queued_reply_when_ha_repeats_the_request() {
     let mut w = WakeSwitch::default();
-    assert!(!w.wants("alisa", "alisa"));
-    assert!(w.wants("yasmina", "alisa"));
-    w.requested(ModelId(1), "yasmina".into(), 10);
-    assert!(!w.wants("yasmina", "alisa"));
-    // Выбор активного слова во время смены отменяет её.
-    assert!(w.wants("alisa", "alisa"));
-    w.requested(ModelId(2), "alisa".into(), 11);
-    assert!(!w.wants("alisa", "alisa"));
-    assert!(w.retarget(12));
-    // Ответ на вытесненный запрос не снимает последний.
-    assert_eq!(w.answered(ModelId(0), true), None);
-    assert_eq!(w.answered(ModelId(1), true), None);
-    assert!(!w.wants("alisa", "yasmina"));
-    assert_eq!(w.answered(ModelId(2), true), Some(12));
-    assert!(!w.wants("alisa", "alisa"));
-    assert!(!w.retarget(13));
-}
-
-#[test]
-fn wake_switch_reloads_when_no_model_is_loaded() {
-    use pulsar_audio::ModelId;
-    let mut w = WakeSwitch::default();
-    w.requested(ModelId(1), "yasmina".into(), 10);
-    // Не загрузилась ни новая, ни прежняя модель: повтор прежнего слова снова грузит её.
-    assert_eq!(w.answered(ModelId(1), false), Some(10));
-    assert!(w.wants("alisa", "alisa"));
-    w.requested(ModelId(2), "alisa".into(), 11);
-    assert_eq!(w.answered(ModelId(2), true), Some(11));
-    assert!(!w.wants("alisa", "alisa"));
+    w.requested(ModelId(1), 10);
+    // Ответ первого SET и потеря модели уже в очереди; HA повторяет SET того же слова.
+    w.requested(ModelId(2), 11);
+    assert_eq!(w.answered(Some(ModelId(1))), None);
+    assert_eq!(w.answered(None), None);
+    assert_eq!(w.answered(Some(ModelId(2))), Some(11));
 }

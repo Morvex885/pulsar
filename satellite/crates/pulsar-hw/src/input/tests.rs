@@ -1,7 +1,11 @@
 //! The key / switch state machine on injected evdev events, on tokio's paused clock.
 
+use std::io::Write as _;
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
+use pulsar_core::model::{model_from_compatible, model_from_dt_id};
 use tokio::sync::mpsc::error::TryRecvError;
 
 use super::*;
@@ -9,6 +13,22 @@ use super::*;
 const UP: u16 = KEY_VOLUMEUP;
 const KEY_MUTE: u16 = 113;
 const KEY_ACTION: u16 = 582;
+
+fn lite() -> &'static Model {
+    model_from_compatible(b"yandex,station-micro\0").unwrap()
+}
+
+fn mini() -> &'static Model {
+    model_from_dt_id(b"axg_s420_v03").unwrap()
+}
+
+fn mini2() -> &'static Model {
+    model_from_compatible(b"yandex,station-mini2\0").unwrap()
+}
+
+fn midi() -> &'static Model {
+    model_from_compatible(b"yandex,cucumber\0").unwrap()
+}
 
 fn ev(type_: u16, code: u16, value: i32) -> RawInputEvent {
     RawInputEvent {
@@ -32,13 +52,13 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        Self::with_keys(KEY_ACTION, 0)
+        Self::for_model(midi())
     }
 
-    fn with_keys(action_key: u16, mute_key: u16) -> Self {
+    fn for_model(model: &Model) -> Self {
         let (tx, rx) = unbounded_channel();
         Self {
-            m: Machine::new(Rc::new(Cell::new(false)), tx, action_key, mute_key),
+            m: Machine::new(Rc::new(Cell::new(false)), tx, model),
             rx,
             keys: Ok([0; 96]),
             sw: Ok([0; 8]),
@@ -58,13 +78,15 @@ impl Rig {
             .copied();
         let mut keys = Some(keys);
         let mut sw = Some(sw);
-        self.m.process(
-            dev,
-            7,
-            events,
-            &mut || keys.take().expect("one key query"),
-            &mut || sw.take().expect("one switch query"),
-        );
+        self.m
+            .process(
+                dev,
+                7,
+                events,
+                &mut || keys.take().expect("one key query"),
+                &mut || sw.take().expect("one switch query"),
+            )
+            .unwrap();
     }
 
     /// Runs the machine's timers for `ms` of (paused) time.
@@ -89,7 +111,8 @@ impl Rig {
                 queued,
                 &mut || Ok([0; 96]),
                 &mut || Ok([0; 8]),
-            );
+            )
+            .unwrap();
         });
     }
 
@@ -110,7 +133,9 @@ const VOL_UP: InputEvent = InputEvent::Button(Button::VolumeUp, Press::Short);
 
 #[tokio::test(start_paused = true)]
 async fn mute_key_toggles_once_per_press() {
-    let mut r = Rig::with_keys(KEY_ACTION, KEY_MUTE);
+    let mut r = Rig::for_model(mini());
+    r.feed(Dev::Mute, &key(KEY_MUTE, 1));
+    assert!(r.events().is_empty());
     r.feed(Dev::Keys, &key(KEY_MUTE, 1));
     assert_eq!(r.events(), [InputEvent::MuteToggle]);
     // Autorepeat and release are not new presses.
@@ -128,9 +153,45 @@ async fn mute_key_toggles_once_per_press() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn mute_key_on_its_own_device() {
+    // Лайт: KEY_MUTE приходит с отдельного устройства-кнопки, а не с сенсорных кнопок.
+    let mut r = Rig::for_model(lite());
+    r.feed(Dev::Keys, &key(KEY_MUTE, 1));
+    r.feed(Dev::Mute, &key(UP, 1));
+    assert!(r.events().is_empty());
+    r.feed(Dev::Mute, &key(KEY_MUTE, 1));
+    assert_eq!(r.events(), [InputEvent::MuteToggle]);
+    r.feed(Dev::Mute, &key(KEY_MUTE, 0));
+    assert_eq!(r.events(), []);
+    // Потерянные события у кнопки не восстанавливаются: состояние переключателя не запрашивается.
+    // Rig отдал бы «микрофоны выключены» (бит SW_MUTE_DEVICE): запрос включил бы mute и послал
+    // событие Mute.
+    let mut sw = [0u8; 8];
+    sw[usize::from(SW_MUTE_DEVICE / 8)] |= 1 << (SW_MUTE_DEVICE % 8);
+    r.sw = Ok(sw);
+    r.feed(
+        Dev::Mute,
+        &[ev(EV_SYN, SYN_DROPPED, 0), ev(EV_SYN, SYN_REPORT, 0)],
+    );
+    // EV_SW с устройства-кнопки тоже не источник состояния.
+    r.feed(
+        Dev::Mute,
+        &[ev(EV_SW, SW_MUTE_DEVICE, 1), ev(EV_SYN, SYN_REPORT, 0)],
+    );
+    assert_eq!(r.events(), []);
+    assert!(!r.m.muted.get());
+
+    // У переключателя (Миди и др.) его KEY_MUTE по-прежнему игнорируется.
+    let mut r = Rig::new();
+    r.feed(Dev::Mute, &key(KEY_MUTE, 1));
+    r.feed(Dev::Mute, &key(KEY_MUTE, 0));
+    assert_eq!(r.events(), []);
+}
+
+#[tokio::test(start_paused = true)]
 async fn no_action_key_leaves_key_voicecommand_unhandled() {
     // The Mini: mute button only.
-    let mut r = Rig::with_keys(0, KEY_MUTE);
+    let mut r = Rig::for_model(mini());
     r.feed(Dev::Keys, &key(KEY_ACTION, 1));
     r.run(1000).await;
     r.feed(Dev::Keys, &key(KEY_ACTION, 0));
@@ -303,13 +364,16 @@ async fn syn_dropped_resyncs_keys_from_the_device() {
 #[tokio::test(start_paused = true)]
 async fn mute_switch_and_its_resync() {
     let mut r = Rig::new();
-    let mut on = [0u8; 8];
-    on[1] = 0x40; // SW_MUTE_DEVICE = bit 14
-    // The state read at spawn changes hw_muted without an event.
-    r.m.read_mute_state(Ok(on), false);
     assert!(r.m.muted.get());
-    assert_eq!(r.events(), []);
+    r.m.read_mute_state(Ok([0; 8]), true).unwrap();
+    assert!(!r.m.muted.get());
+    assert_eq!(r.events(), [InputEvent::MuteSync(false)]);
 
+    r.feed(Dev::Keys, &[ev(EV_SW, SW_MUTE_DEVICE, 1)]);
+    assert!(!r.m.muted.get());
+    assert!(r.events().is_empty());
+    r.feed(Dev::Mute, &[ev(EV_SW, SW_MUTE_DEVICE, 1)]);
+    assert_eq!(r.events(), [InputEvent::Mute(true)]);
     r.feed(
         Dev::Mute,
         &[ev(EV_SW, SW_MUTE_DEVICE, 0), ev(EV_SYN, SYN_REPORT, 0)],
@@ -320,15 +384,44 @@ async fn mute_switch_and_its_resync() {
     r.feed(Dev::Mute, &key(113, 1));
     assert_eq!(r.events(), []);
 
-    r.sw = Ok(on);
+    r.sw = Ok([0; 8]);
     r.feed(
         Dev::Mute,
         &[ev(EV_SYN, SYN_DROPPED, 0), ev(EV_SW, SW_MUTE_DEVICE, 0)],
     );
-    assert_eq!(r.events(), []);
-    r.feed(Dev::Mute, &[ev(EV_SYN, SYN_REPORT, 0)]);
     assert!(r.m.muted.get());
-    assert_eq!(r.events(), [InputEvent::Mute(true)]);
+    assert_eq!(r.events(), [InputEvent::MuteSync(true)]);
+    r.feed(Dev::Mute, &[ev(EV_SYN, SYN_REPORT, 0)]);
+    assert!(!r.m.muted.get());
+    assert_eq!(r.events(), [InputEvent::MuteSync(false)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn switch_resync_does_not_replay_events_older_than_ioctl() {
+    let mut r = Rig::new();
+    r.m.read_mute_state(Ok([0; 8]), false).unwrap();
+    let mut on = [0; 8];
+    on[1] = 0x40;
+    r.sw = Ok(on);
+    r.feed(
+        Dev::Mute,
+        &[
+            ev(EV_SYN, SYN_DROPPED, 0),
+            ev(EV_SYN, SYN_REPORT, 0),
+            ev(EV_SW, SW_MUTE_DEVICE, 0),
+            ev(EV_SYN, SYN_REPORT, 0),
+            ev(EV_SW, SW_MUTE_DEVICE, 1),
+            ev(EV_SYN, SYN_REPORT, 0),
+        ],
+    );
+    assert!(r.m.muted.get());
+    assert_eq!(r.events(), [InputEvent::MuteSync(true)]);
+
+    r.feed(
+        Dev::Mute,
+        &[ev(EV_SW, SW_MUTE_DEVICE, 0), ev(EV_SYN, SYN_REPORT, 0)],
+    );
+    assert_eq!(r.events(), [InputEvent::Mute(false)]);
 }
 
 #[test]
@@ -346,21 +439,167 @@ fn event_device_by_name() {
                    N: Name=\"no-handler\"\n\
                    \n\
                    H: Handlers=event9\n";
-    assert_eq!(
-        find_event_dev_in(devices, "gpio-keys").as_deref(),
-        Some("/dev/input/event1")
-    );
-    assert_eq!(
-        find_event_dev_in(devices, "aw9610x").as_deref(),
-        Some("/dev/input/event2")
-    );
-    // A blank line ends the device block.
-    assert_eq!(find_event_dev_in(devices, "no-handler"), None);
-    assert_eq!(find_event_dev_in(devices, "aw9610"), None);
+    let find = |name| try_named(devices, &[name], |_, handler| Some(handler.to_owned()));
+    assert_eq!(find("gpio-keys").as_deref(), Some("event1"));
+    assert_eq!(find("aw9610x").as_deref(), Some("event2"));
+    assert_eq!(find("no-handler"), None);
+    assert_eq!(find("aw9610"), None);
 }
 
 #[test]
-fn mute_gpio_is_an_active_low_input() {
+fn lite_tries_only_named_devices_in_model_order() {
+    const UNKNOWN: &str = "N: Name=\"other\"\nH: Handlers=event0\n\n";
+    const CYPRESS: &str = "N: Name=\"cy8cmbr3108\"\nH: Handlers=event1\n\n";
+    const SAR: &str = "N: Name=\"sar0_pad0\"\nH: Handlers=event2\n\n";
+    let choose = |devices, broken| {
+        try_named(devices, lite().keys_input, |_, handler| {
+            (handler != broken).then(|| handler.to_owned())
+        })
+    };
+    let both = [UNKNOWN, CYPRESS, SAR].concat();
+    assert_eq!(choose(CYPRESS, "").as_deref(), Some("event1"));
+    assert_eq!(choose(&both, "").as_deref(), Some("event2"));
+    assert_eq!(choose(&both, "event2").as_deref(), Some("event1"));
+    assert_eq!(choose(UNKNOWN, ""), None);
+}
+
+fn socket_evdev() -> (Evdev, UnixStream) {
+    let (read, write) = UnixStream::pair().unwrap();
+    read.set_nonblocking(true).unwrap();
+    (
+        Evdev::from_test_file(File::from(OwnedFd::from(read))),
+        write,
+    )
+}
+
+fn write_event(writer: &mut UnixStream, event: RawInputEvent) {
+    let mut bytes = [0u8; size_of::<RawInputEvent>()];
+    let data = &mut bytes[std::mem::offset_of!(RawInputEvent, type_)..];
+    data[..2].copy_from_slice(&event.type_.to_ne_bytes());
+    data[2..4].copy_from_slice(&event.code.to_ne_bytes());
+    data[4..].copy_from_slice(&event.value.to_ne_bytes());
+    writer.write_all(&bytes).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_lite_mute_key_survives_empty_start() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let present = Rc::new(Cell::new(false));
+            let (fd, mut writer) = socket_evdev();
+            let fd = Cell::new(Some(fd));
+            let (handle, mut events) = spawn_input_with(
+                lite(),
+                {
+                    let present = Rc::clone(&present);
+                    move || {
+                        if present.get() {
+                            "N: Name=\"gpio-keys-filter\"\nH: Handlers=event1\n".into()
+                        } else {
+                            String::new()
+                        }
+                    }
+                },
+                move |path, name| {
+                    assert_eq!(name, "gpio-keys-filter");
+                    assert_eq!(path, "/dev/input/event1");
+                    fd.take().ok_or_else(|| io::ErrorKind::NotFound.into())
+                },
+            );
+            assert!(!handle.is_available());
+            assert!(!handle.hw_muted());
+            present.set(true);
+            write_event(&mut writer, ev(EV_KEY, KEY_MUTE, 1));
+            assert_eq!(
+                tokio::time::timeout(Duration::from_millis(REOPEN_MS + 100), events.recv())
+                    .await
+                    .unwrap(),
+                Some(InputEvent::MuteToggle)
+            );
+            assert!(handle.is_available());
+            drop(writer);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            assert!(!handle.is_available());
+            assert!(!handle.hw_muted());
+            assert_eq!(events.try_recv(), Err(TryRecvError::Empty));
+        })
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn losing_switch_fd_blocks_microphones_without_syn_dropped() {
+    let mut r = Rig::new();
+    let mut devs = Devices::empty(midi(), Rc::new(Cell::new(false)));
+    let (fd, writer) = socket_evdev();
+    devs.mute = Some(fd.into_async().unwrap());
+    devs.update_availability();
+    r.m.read_mute_state(Ok([0; 8]), false).unwrap();
+
+    drop(writer);
+    drain(
+        &mut r.m,
+        &mut devs,
+        Dev::Mute,
+        &mut [sys::EMPTY_EVENT; 16],
+        Read::Now,
+    );
+    assert!(!devs.available.get());
+    assert!(r.m.muted.get());
+    assert_eq!(r.events(), [InputEvent::MuteSync(true)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_switch_resync_drops_fd_and_retries() {
+    let mut r = Rig::new();
+    let mut devs = Devices::empty(midi(), Rc::new(Cell::new(false)));
+    let (fd, mut writer) = socket_evdev();
+    devs.mute = register_dev(fd, "mute", "/dev/input/event1");
+    r.m.read_mute_state(Ok([0; 8]), false).unwrap();
+    assert!(!r.m.muted.get());
+    assert!(r.events().is_empty());
+    write_event(&mut writer, ev(EV_SYN, SYN_DROPPED, 0));
+    write_event(&mut writer, ev(EV_SYN, SYN_REPORT, 0));
+    drain(
+        &mut r.m,
+        &mut devs,
+        Dev::Mute,
+        &mut [sys::EMPTY_EVENT; 16],
+        Read::Now,
+    );
+    assert!(devs.mute.is_none());
+    assert!(r.m.muted.get());
+    assert_eq!(r.events(), [InputEvent::MuteSync(true)]);
+
+    for recover in [false, false, true] {
+        let (fd, _writer) = socket_evdev();
+        let fd = Cell::new(Some(fd));
+        devs.open_missing(
+            &mut r.m,
+            || "N: Name=\"mute\"\nH: Handlers=event1\n".into(),
+            |_, _| Ok(fd.take().expect("missing switch is opened again")),
+            |fd| {
+                if recover {
+                    Ok([0; 8])
+                } else {
+                    fd.switch_state()
+                }
+            },
+            false,
+        );
+        assert!(fd.take().is_none());
+        assert_eq!(devs.available.get(), recover);
+        assert_eq!(devs.mute.is_some(), recover);
+        assert_eq!(r.m.muted.get(), !recover);
+        if recover {
+            assert_eq!(r.events(), [InputEvent::MuteSync(false)]);
+        } else {
+            assert!(r.events().is_empty());
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn mute_gpio_is_active_low_and_fails_closed() {
     let dir = std::env::temp_dir().join(format!("pulsar-hw-gpio-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let line = dir.join("gpio414");
@@ -376,10 +615,41 @@ fn mute_gpio_is_an_active_low_input() {
         std::fs::read_to_string(line.join("direction")).unwrap(),
         "out\n"
     );
+    let mut r = Rig::for_model(mini2());
+    let mut devs = Devices::empty(mini2(), Rc::new(Cell::new(false)));
+    assert!(r.m.muted.get());
+    devs.open_gpio(&mut r.m, d, true);
+    assert!(devs.mute_gpio.is_none());
     std::fs::write(line.join("direction"), "in\n").unwrap();
-    let f = open_mute_gpio(d, 414, true).unwrap();
-    assert!(gpio_muted(&f).unwrap());
-    std::fs::write(line.join("value"), "1\n").unwrap();
-    assert!(!gpio_muted(&f).unwrap());
+    let value = line.join("value");
+    std::fs::write(&value, "1\n").unwrap();
+    devs.open_gpio(&mut r.m, d, false);
+    assert!(!r.m.muted.get());
+    assert_eq!(r.events(), [InputEvent::MuteSync(false)]);
+    for dev in [Dev::Keys, Dev::Mute] {
+        r.feed(dev, &[ev(EV_SW, SW_MUTE_DEVICE, 1)]);
+    }
+    assert!(r.events().is_empty());
+    assert!(!r.m.muted.get());
+
+    std::fs::write(&value, "0\n").unwrap();
+    devs.poll_mute_gpio(&mut r.m);
+    assert_eq!(r.events(), [InputEvent::Mute(true)]);
+    std::fs::write(&value, "1\n").unwrap();
+    devs.poll_mute_gpio(&mut r.m);
+    assert_eq!(r.events(), [InputEvent::Mute(false)]);
+    std::fs::write(&value, "").unwrap();
+    devs.poll_mute_gpio(&mut r.m);
+    assert!(devs.mute_gpio.is_none());
+    assert!(r.m.muted.get());
+    assert_eq!(r.events(), [InputEvent::MuteSync(true)]);
+    devs.open_gpio(&mut r.m, d, false);
+    assert!(devs.mute_gpio.is_none());
+    assert!(r.m.muted.get());
+    assert!(r.events().is_empty());
+    std::fs::write(&value, "1\n").unwrap();
+    devs.open_gpio(&mut r.m, d, false);
+    assert!(!r.m.muted.get());
+    assert_eq!(r.events(), [InputEvent::MuteSync(false)]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
