@@ -89,9 +89,15 @@ EOF
 )
 # Из /tmp запускаем код только из закрытого каталога текущего SSH-пользователя.
 TEST_DIR_CHECK="test_dir_check() {
-  [ -d '$T' ] && [ ! -L '$T' ] && uid=\$(id -u) &&
-    [ \"\$(stat -c '%u:%a' '$T')\" = \"\$uid:700\" ] ||
-    { echo 'unsafe test directory: expected a private directory owned by the SSH user' >&2; return 1; }
+  if [ -d '$T' ] && [ ! -L '$T' ] && uid=\$(id -u); then
+    case \$(stat -c '%u:%a' '$T') in
+      \"\$uid:700\") return 0 ;;
+      \"\$uid:755\")
+        echo 'legacy test directory: if no test or Bluetooth recovery is pending, move $T to an unused name, keep it for inspection, and push fresh files' >&2 ;;
+    esac
+  fi
+  echo 'unsafe test directory: expected a private directory owned by the SSH user' >&2
+  return 1
 }"
 TEST_DIR_OPTIONAL="$TEST_DIR_CHECK
   if [ -e '$T' ] || [ -L '$T' ]; then test_dir_check || exit 1; fi"
@@ -109,6 +115,39 @@ elif [ -L '$BT_OWNER' ] || [ -e '$BT_OWNER' ]; then
   owner=\$(stat -c '%u' '$BT_OWNER') && uid=\$(id -u) && [ \"\$owner\" != \"\$uid\" ] ||
     { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
 fi"
+# Prepare all file contents before stopping production. Keep the previous rollback slot
+# and the inode guard until both metadata changes and the final executable rename succeed.
+PROD_REPLACE="stage_replace() {
+  stage=\$(mktemp -d .station-replace.XXXXXX) || exit 1
+  trap 'rm -rf -- \"\$stage\"' EXIT
+  [ ! -e pulsar.prev ] || ln pulsar.prev \"\$stage/prev.old\" || exit 1
+}
+stage_guard() {
+  [ -f \"\$stage/guard\" ] || return 0
+  if [ pulsar -ef pulsar.bt-blocked.next ]; then
+    mv -f pulsar.bt-blocked.next pulsar.bt-blocked || return 1
+  fi
+  mv -f \"\$stage/guard\" pulsar.bt-blocked.next
+}
+replace_pulsar() {
+  prev_changed=0
+  if { if [ -f \"\$stage/prev\" ]; then mv -f \"\$stage/prev\" pulsar.prev; else rm -f pulsar.prev; fi; } &&
+     { prev_changed=1; stage_guard; } &&
+     mv -f \"\$1\" pulsar; then
+    if [ pulsar -ef pulsar.bt-blocked.next ]; then
+      mv -f pulsar.bt-blocked.next pulsar.bt-blocked
+    fi
+    return 0
+  fi
+  echo 'replacement failed; keeping the installed binary' >&2
+  if ! [ pulsar -ef pulsar.bt-blocked.next ]; then rm -f pulsar.bt-blocked.next; fi
+  if [ \"\$prev_changed\" = 1 ]; then
+    if [ -f \"\$stage/prev.old\" ]; then mv -f \"\$stage/prev.old\" pulsar.prev
+    else rm -f pulsar.prev; fi || echo 'could not restore the previous rollback binary' >&2
+  fi
+  [ ! -f enabled ] || ./ctl.sh restart
+  exit 1
+}"
 case "$cmd" in
   lock)
     [ $# -eq 1 ] || usage
@@ -127,6 +166,7 @@ case "$cmd" in
   stop)
     own
     r "[ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
+       $TEST_DIR_OPTIONAL
        if $PROD_BT_CTL; then
          '$D/ctl.sh' reload --stop || exit 1
        else
@@ -256,21 +296,40 @@ EOF
     r "$TEST_BT_RESTORED
        [ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
        [ \$(df -Pk $D | awk 'NR==2 {print \$4}') -gt 30000 ] || { echo 'less than 30 MB free in $D' >&2; exit 1; }
-       cd $D && { [ -f pulsar.orig ] || cp -p pulsar pulsar.orig; } \
-         && { [ ! -f pulsar.prev ] || [ -f pulsar.prev.orig ] || cp -p pulsar.prev pulsar.prev.orig; }"
+       cd $D || exit 1
+       if [ ! -f pulsar.orig ]; then
+         $PROD_REPLACE
+         stage_replace
+         ln pulsar \"\$stage/orig\" && rm -f pulsar.orig.bt-blocked pulsar.prev.orig || exit 1
+         if [ \"\$stage/orig\" -ef pulsar.bt-blocked ] || [ \"\$stage/orig\" -ef pulsar.bt-blocked.next ]; then
+           ln \"\$stage/orig\" pulsar.orig.bt-blocked || exit 1
+         fi
+         if [ -f \"\$stage/prev.old\" ]; then ln \"\$stage/prev.old\" pulsar.prev.orig || exit 1; fi
+         mv \"\$stage/orig\" pulsar.orig
+       fi"
     up "$1" "$D/pulsar.new"
     r "$TEST_BT_RESTORED
        cd $D && ./pulsar.new --version || exit 1
+       $PROD_REPLACE
+       stage_replace
+       cp -p pulsar.orig \"\$stage/prev\" || exit 1
        $PROD_BT_RESTORE
-       cp -p pulsar.orig pulsar.prev && mv pulsar.new pulsar && sync && ./ctl.sh restart" ;;
+       replace_pulsar pulsar.new
+       sync && ./ctl.sh restart" ;;
   restore)
     own
     # Если после краш-цикла supervise.sh удалил enabled (give_back), станцию возвращает ctl.sh enable.
     r "$TEST_BT_RESTORED
        cd $D && [ -f pulsar.orig ] || { echo 'no pulsar.orig' >&2; exit 1; }
+       $PROD_REPLACE
+       stage_replace
+       cp -p pulsar.orig \"\$stage/pulsar\" || exit 1
+       if [ -f pulsar.prev.orig ]; then ln pulsar.prev.orig \"\$stage/prev\" || exit 1; fi
+       if [ pulsar.orig -ef pulsar.orig.bt-blocked ]; then ln \"\$stage/pulsar\" \"\$stage/guard\" || exit 1; fi
        $PROD_BT_RESTORE
-       cd $D && cp -p pulsar.orig pulsar.tmp && mv pulsar.tmp pulsar && rm -f pulsar.orig || exit 1
-       if [ -f pulsar.prev.orig ]; then mv pulsar.prev.orig pulsar.prev; fi
+       replace_pulsar \"\$stage/pulsar\"
+       rm -f pulsar.orig pulsar.orig.bt-blocked pulsar.prev.orig ||
+         echo 'restored the binary but could not remove swap backups' >&2
        sync
        if [ -f enabled ]; then ./ctl.sh restart; else ./ctl.sh enable; fi" ;;
   cleanup)

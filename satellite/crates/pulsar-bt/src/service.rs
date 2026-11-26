@@ -9,7 +9,7 @@ use pulsar_core::{Timers, actors, model::Model};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::{Instant, timeout_at};
 
-use crate::bus::{Bus, Candidate};
+use crate::bus::{Bus, Candidate, close_pairing};
 use crate::pcm::{Event as PcmEvent, Probe as PcmProbe, Worker};
 use crate::policy::Policy;
 use crate::stock::{Stock, plugin_present};
@@ -19,7 +19,7 @@ const PROBE: Duration = Duration::from_secs(2);
 const RETRY: Duration = Duration::from_secs(5);
 
 pub enum BtEvent {
-    Changed,
+    Changed { connection: Option<u64> },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -184,6 +184,7 @@ pub async fn spawn(
         visibility_target: None,
         retry_at: Instant::now(),
         frames: FrameActivity::default(),
+        previous_episode: None,
         granted: None,
         pcm_ready: false,
         pcm_retry_at: None,
@@ -244,6 +245,7 @@ async fn retry_stock_restore(stock: Stock) {
 struct FrameActivity {
     active: Option<bool>,
     start: Option<u64>,
+    ignore_snapshot: bool,
 }
 
 impl FrameActivity {
@@ -260,18 +262,57 @@ impl FrameActivity {
         self.start = None;
     }
 
-    fn observe(&mut self, policy: &mut Policy, avr: Option<(Playback, u64)>) {
-        // Кадры, уже учтённые через AVRCP, не создают фронт при исчезновении статуса.
-        let start = self.start.take();
+    fn after_bus_loss(mut self) -> Self {
+        self.ignore_snapshot = true;
+        // Первый буфер после открытия не отличим от продолжения старого потока.
+        self.active = Some(true);
+        self
+    }
+
+    fn observe_snapshot(
+        &mut self,
+        policy: &mut Policy,
+        avr: Option<(Playback, Option<u64>)>,
+        snapshot_order: u64,
+    ) {
+        let avr = avr.map(|(phase, order)| {
+            (
+                phase,
+                order.or((!self.ignore_snapshot).then_some(snapshot_order)),
+            )
+        });
+        self.observe(policy, avr);
+    }
+
+    fn observe(&mut self, policy: &mut Policy, avr: Option<(Playback, Option<u64>)>) {
         let (phase, order) = match avr {
-            Some((phase, order)) => (Some(phase), Some(order)),
+            Some((phase, order)) => {
+                // Только Playing учитывает текущие кадры: при Paused их старый
+                // порядок ещё может понадобиться при потере статуса AVRCP.
+                if phase == Playback::Playing {
+                    self.start = None;
+                }
+                (Some(phase), order)
+            }
             None if self.active == Some(false) => (None, None),
-            None => match start {
+            None => match self.start.take() {
                 Some(order) => (Some(Playback::Playing), Some(order)),
                 None => return,
             },
         };
         policy.observe_playback(policy.generation, phase, order);
+    }
+}
+
+struct PreviousEpisode {
+    owner: String,
+    starts: u64,
+    frames: FrameActivity,
+}
+
+impl PreviousEpisode {
+    fn recover(self, owner: &str, preempt_before: u64) -> Option<FrameActivity> {
+        (self.owner == owner && self.starts < preempt_before).then(|| self.frames.after_bus_loss())
     }
 }
 
@@ -292,6 +333,7 @@ struct Service {
     visibility_target: Option<bool>,
     retry_at: Instant,
     frames: FrameActivity,
+    previous_episode: Option<PreviousEpisode>,
     granted: Option<u64>,
     pcm_ready: bool,
     pcm_retry_at: Option<Instant>,
@@ -338,10 +380,16 @@ impl Service {
                     (old, result, bus.flags())
                 }, if self.bus.is_some() => {
                     let (old, result, flags) = res;
-                    if result.is_err() || flags.is_none() {
-                        self.lost_bus();
-                    } else if flags != old && flags != Some([self.visibility_open(); 2]) {
-                        self.retry_at = Instant::now();
+                    match result {
+                        Ok(pair) if flags.is_some() => {
+                            if let Some((path, received)) = pair {
+                                self.policy.observe_pair(path, received);
+                            }
+                            if flags != old && flags != Some([self.visibility_open(); 2]) {
+                                self.retry_at = Instant::now();
+                            }
+                        }
+                        _ => self.lost_bus().await,
                     }
                 },
                 ev = pcm_rx.recv() => match ev {
@@ -362,6 +410,7 @@ impl Service {
                 let paired = self.bus.as_ref().filter(|_| on).map(Bus::paired);
                 self.policy.set_enabled(on, Instant::now(), paired);
                 if !on {
+                    self.previous_episode = None;
                     self.reset_session();
                 }
                 self.retry_at = Instant::now();
@@ -393,15 +442,55 @@ impl Service {
         }
     }
 
-    fn lost_bus(&mut self) {
-        self.bus = None;
+    async fn lost_bus(&mut self) {
+        let pinned = self.bus.take();
+        let now = Instant::now();
+        if (self.policy.playback == Some(Playback::Playing) || self.frames.active == Some(true))
+            && let Some(owner) = self.policy.owner.as_ref()
+        {
+            self.previous_episode = Some(PreviousEpisode {
+                owner: owner.clone(),
+                starts: self.policy.starts,
+                frames: std::mem::take(&mut self.frames),
+            });
+        }
         self.policy.release();
-        self.policy.deadline = None;
+        self.policy.close_pairing(now);
         self.reset_session();
         self.flag_error = None;
         self.visibility_target = None;
         self.reject_at.clear();
+        self.publish();
+        self.close_offline_pairing(pinned).await;
         self.retry_at = Instant::now() + RETRY;
+    }
+
+    async fn close_offline_pairing(&mut self, pinned: Option<Bus>) {
+        let pinned_closed = if let Some(bus) = pinned {
+            matches!(
+                timeout_at(Instant::now() + PROBE, bus.close_pairing()).await,
+                Ok(Ok(()))
+            )
+        } else {
+            false
+        };
+        if !pinned_closed {
+            match timeout_at(Instant::now() + PROBE, close_pairing()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    warn!("bluetooth: close pairing: {}", error_name(&e));
+                    self.flag_error = Some("cannot close pairing flags");
+                    return;
+                }
+                Err(_) => {
+                    warn!("bluetooth: close pairing timed out");
+                    self.flag_error = Some("cannot close pairing flags");
+                    return;
+                }
+            }
+        }
+        self.visibility_target = Some(false);
+        self.flag_error = None;
     }
 
     fn reset_session(&mut self) {
@@ -415,17 +504,18 @@ impl Service {
     }
 
     fn visibility_open(&self) -> bool {
-        self.policy.deadline.is_some() && self.shared.requested.get()
+        self.shared.requested.get() && self.policy.deadline.is_some_and(|at| Instant::now() < at)
     }
 
     fn reconcile(&mut self) -> bool {
-        self.policy.expire(Instant::now());
-        if self.pcm_retry_at.is_some_and(|at| Instant::now() >= at) {
+        let now = Instant::now();
+        self.policy.expire(now);
+        if self.pcm_retry_at.is_some_and(|at| now >= at) {
             self.pcm_retry_at = None;
             self.pcm_error = None;
         }
         if let Some(bus) = &self.bus {
-            self.policy.observe_pairs(&bus.paired());
+            self.policy.observe_pairs(|path| bus.is_paired(path));
             if let Some(owner) = self.policy.owner.as_deref()
                 && (!self.policy.permits(owner) || selected(bus, &self.policy).is_none())
             {
@@ -443,10 +533,18 @@ impl Service {
                         .map(|c| (c.device, c.sequence)),
                 )
             {
-                self.policy.select(device.to_owned());
+                if let Some(frames) = self
+                    .previous_episode
+                    .take()
+                    .and_then(|episode| episode.recover(device, self.shared.preempt_before.get()))
+                {
+                    self.frames = frames;
+                }
+                self.policy.select(device.to_owned(), now);
             }
             if let Some(c) = selected(bus, &self.policy) {
-                self.frames.observe(&mut self.policy, c.phase);
+                self.frames
+                    .observe_snapshot(&mut self.policy, c.phase, bus.snapshot_order());
                 if self.pcm_generation != Some(self.policy.generation)
                     && self.probe.as_ref().is_some_and(PcmProbe::ready)
                     && self.pcm_error.is_none()
@@ -507,6 +605,9 @@ impl Service {
         let now = Instant::now();
         let open = self.visibility_open();
         self.retry_at = now + RETRY;
+        if self.bus.is_none() && self.visibility_target != Some(false) {
+            self.close_offline_pairing(None).await;
+        }
         if !self.stock_ready {
             match self.stock.keep_stopped().await {
                 Ok(()) => {
@@ -518,12 +619,13 @@ impl Service {
             return;
         }
         let Some(bus) = &self.bus else {
-            if let Some(bus) = connect_bus(now + PROBE).await {
+            if let Some(bus) = connect_bus(Instant::now() + PROBE).await {
                 if !self.seeded_pairs {
                     self.policy.seed_known(bus.paired());
                     self.seeded_pairs = true;
                 }
                 self.bus = Some(bus);
+                self.visibility_target = None;
                 self.retry_at = Instant::now();
             }
             return;
@@ -635,8 +737,9 @@ impl Service {
             connection: c.and(self.policy.connection),
         };
         if *old != next {
+            let connection = next.connection;
             *old = next;
-            let _ = self.events.send(BtEvent::Changed);
+            let _ = self.events.send(BtEvent::Changed { connection });
         }
     }
 }
@@ -683,7 +786,7 @@ mod tests {
 
     fn selected_policy() -> Policy {
         let mut policy = Policy::restore(true, BTreeSet::from(["phone".into()]));
-        policy.select("phone".into());
+        policy.select("phone".into(), Instant::now());
         policy
     }
 
@@ -696,19 +799,73 @@ mod tests {
         let music_start = pulsar_core::audio_start_order();
         assert!(phone_start < music_start);
         // Сигнал телефона уже принят, но актор ещё ожидал исходящий D-Bus вызов.
-        frames.observe(&mut policy, Some((Playback::Playing, phone_start)));
+        frames.observe(&mut policy, Some((Playback::Playing, Some(phone_start))));
         assert_eq!(policy.ready_start(false, 0), None);
         assert_eq!(policy.ready_start(true, 0), Some(phone_start));
         assert_eq!(policy.ready_start(true, music_start), None);
         assert!(policy.preempt_before(music_start));
-        frames.observe(&mut policy, Some((Playback::Playing, phone_start)));
+        frames.observe(&mut policy, Some((Playback::Playing, Some(phone_start))));
         assert!(!policy.preempt_before(music_start));
         assert_eq!(policy.ready_start(true, music_start), None);
 
-        frames.observe(&mut policy, Some((Playback::Paused, music_start)));
+        frames.observe(&mut policy, Some((Playback::Paused, None)));
         let next = pulsar_core::audio_start_order();
-        frames.observe(&mut policy, Some((Playback::Playing, next)));
+        frames.observe(&mut policy, Some((Playback::Playing, Some(next))));
         assert_eq!(policy.ready_start(true, music_start), Some(next));
+    }
+
+    #[test]
+    fn new_playing_edge_with_unchanged_phase_can_reclaim_audio() {
+        let mut policy = selected_policy();
+        let mut frames = FrameActivity::default();
+        frames.observe(&mut policy, Some((Playback::Playing, Some(10))));
+        assert!(policy.preempt_before(20));
+        frames.observe(&mut policy, Some((Playback::Playing, Some(10))));
+        frames.observe(&mut policy, Some((Playback::Playing, Some(9))));
+        assert_eq!(policy.ready_start(true, 20), None);
+        frames.observe(&mut policy, Some((Playback::Playing, Some(30))));
+        frames.observe(&mut policy, Some((Playback::Playing, Some(10))));
+        assert_eq!(policy.ready_start(true, 20), Some(30));
+    }
+
+    #[test]
+    fn resnapshot_and_first_reopened_frames_do_not_reclaim_displaced_audio() {
+        let mut policy = selected_policy();
+        let mut frames = FrameActivity::default();
+        frames.observe_snapshot(&mut policy, Some((Playback::Playing, None)), 10);
+        let previous = PreviousEpisode {
+            owner: "phone".into(),
+            starts: policy.starts,
+            frames,
+        };
+        policy.release();
+        // Music can start while the Bluetooth bus is down.
+        frames = previous.recover("phone", 20).unwrap();
+        policy.select("phone".into(), Instant::now());
+        frames.observe_snapshot(&mut policy, Some((Playback::Playing, None)), 30);
+        assert_eq!(policy.playback, Some(Playback::Playing));
+        assert_eq!(policy.ready_start(true, 20), None);
+        frames.start(40);
+        frames.observe_snapshot(&mut policy, None, 30);
+        assert_eq!(policy.ready_start(true, 20), None);
+
+        frames.observe_snapshot(&mut policy, Some((Playback::Playing, Some(50))), 30);
+        assert_eq!(policy.ready_start(true, 20), Some(50));
+    }
+
+    #[test]
+    fn losing_paused_avrcp_keeps_unaccounted_first_frame_order() {
+        let mut policy = selected_policy();
+        let mut frames = FrameActivity::default();
+        let paused = Some((Playback::Paused, None));
+        frames.observe(&mut policy, paused);
+        frames.start(10);
+        frames.observe(&mut policy, paused);
+        frames.observe(&mut policy, paused);
+        assert!(policy.ready_start(true, 0).is_none());
+        frames.observe(&mut policy, None);
+        assert_eq!(policy.ready_start(true, 0), Some(10));
+        assert_eq!(policy.ready_start(true, 20), None);
     }
 
     #[test]
@@ -741,10 +898,10 @@ mod tests {
         let mut policy = selected_policy();
         let mut frames = FrameActivity::default();
         let phone_start = pulsar_core::audio_start_order();
-        frames.observe(&mut policy, Some((Playback::Playing, phone_start)));
+        frames.observe(&mut policy, Some((Playback::Playing, Some(phone_start))));
         frames.start(pulsar_core::audio_start_order());
-        frames.observe(&mut policy, Some((Playback::Playing, phone_start)));
-        frames.observe(&mut policy, Some((Playback::Paused, phone_start)));
+        frames.observe(&mut policy, Some((Playback::Playing, Some(phone_start))));
+        frames.observe(&mut policy, Some((Playback::Paused, None)));
         frames.observe(&mut policy, None);
         assert_eq!(policy.starts, phone_start);
         assert_eq!(policy.ready_start(true, 0), None);
@@ -761,7 +918,7 @@ mod tests {
         let mut policy = selected_policy();
         let mut frames = FrameActivity::default();
         let phone_start = pulsar_core::audio_start_order();
-        let avr = Some((Playback::Playing, phone_start));
+        let avr = Some((Playback::Playing, Some(phone_start)));
         frames.observe(&mut policy, avr);
         frames.start(pulsar_core::audio_start_order());
         frames.observe(&mut policy, avr);

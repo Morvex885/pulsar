@@ -1,9 +1,11 @@
 use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use pulsar_core::actors;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::time::Instant;
 use zbus::message::{Sequence, Type};
 use zbus::{
     Connection, Message, MessageStream, ObjectPath, OwnedObjectPath, OwnedVariant, Variant,
@@ -15,11 +17,13 @@ const BLUEZ: &str = "org.bluez";
 const BLUEALSA: &str = "org.bluealsa";
 const BLUEALSA_ROOT: &str = "/org/bluealsa";
 const DBUS: &str = "org.freedesktop.DBus";
+const DBUS_PATH: &str = "/org/freedesktop/DBus";
 const PROPS: &str = "org.freedesktop.DBus.Properties";
 const OBJECTS: &str = "org.freedesktop.DBus.ObjectManager";
 const ADAPTER: &str = "/org/bluez/hci0";
 const ADAPTER_IFACE: &str = "org.bluez.Adapter1";
 const DEVICE: &str = "org.bluez.Device1";
+const MEDIA_CONTROL: &str = "org.bluez.MediaControl1";
 const PLAYER: &str = "org.bluez.MediaPlayer1";
 const TRANSPORT: &str = "org.bluez.MediaTransport1";
 const PCM: &str = "org.bluealsa.PCM1";
@@ -33,7 +37,6 @@ type Interfaces = HashMap<String, Properties>;
 type Objects = HashMap<OwnedObjectPath, Interfaces>;
 
 struct Registry {
-    owner: String,
     baseline: Sequence,
     snapshot_order: u64,
     playing_edges: HashMap<String, u64>,
@@ -41,24 +44,24 @@ struct Registry {
 }
 
 impl Registry {
-    async fn get(conn: &Connection, service: &str, path: &str) -> zbus::Result<Self> {
+    async fn get(conn: &Connection, owner: &str, path: &str) -> zbus::Result<Self> {
         let msg = conn
-            .call_method(Some(service), path, Some(OBJECTS), "GetManagedObjects", &())
+            .call_method(Some(owner), path, Some(OBJECTS), "GetManagedObjects", &())
             .await?;
         let snapshot_order = pulsar_core::audio_start_order();
-        let owner = msg
+        if msg
             .header()
             .sender()
-            .ok_or(zbus::Error::InvalidReply)?
-            .as_str()
-            .to_owned();
+            .is_none_or(|name| name.as_str() != owner)
+        {
+            return Err(zbus::Error::InvalidReply);
+        }
         let objects: Objects = msg.body().deserialize()?;
         let objects = objects
             .into_iter()
             .map(|(path, ifaces)| (path.as_str().to_owned(), ifaces))
             .collect();
         Ok(Self {
-            owner,
             baseline: msg.recv_position(),
             snapshot_order,
             playing_edges: HashMap::new(),
@@ -66,14 +69,8 @@ impl Registry {
         })
     }
 
-    fn apply(&mut self, msg: &Message, order: u64) -> zbus::Result<()> {
-        if msg.recv_position() <= self.baseline {
-            return Ok(());
-        }
+    fn apply(&mut self, msg: &Message, order: u64) -> zbus::Result<Option<String>> {
         let header = msg.header();
-        if header.sender().is_none_or(|s| s.as_str() != self.owner) {
-            return Ok(());
-        }
         let iface = header.interface().map(|s| s.as_str());
         let member = header.member().map(|s| s.as_str());
         match (iface, member) {
@@ -81,6 +78,12 @@ impl Registry {
                 let (path, interfaces): (OwnedObjectPath, Interfaces) = msg.body().deserialize()?;
                 let adds_player = interfaces.contains_key(PLAYER);
                 let was_playing = adds_player && self.playing(path.as_str());
+                let selection = self.selection_before(
+                    path.as_str(),
+                    interfaces.contains_key(MEDIA_CONTROL),
+                    adds_player,
+                );
+                let pairs_device = interfaces.contains_key(DEVICE) && !self.paired(path.as_str());
                 self.objects
                     .entry(path.as_str().to_owned())
                     .or_default()
@@ -88,10 +91,19 @@ impl Registry {
                 if adds_player {
                     self.update_playing_edge(path.as_str(), was_playing, order);
                 }
+                self.update_selected_edge(selection, order);
+                if pairs_device && self.paired(path.as_str()) {
+                    return Ok(Some(path.as_str().to_owned()));
+                }
             }
             (Some(OBJECTS), Some("InterfacesRemoved")) => {
                 let (path, interfaces): (OwnedObjectPath, Vec<String>) =
                     msg.body().deserialize()?;
+                let selection = self.selection_before(
+                    path.as_str(),
+                    interfaces.iter().any(|iface| iface == MEDIA_CONTROL),
+                    interfaces.iter().any(|iface| iface == PLAYER),
+                );
                 if let Some(obj) = self.objects.get_mut(path.as_str()) {
                     for interface in interfaces {
                         obj.remove(&interface);
@@ -103,14 +115,25 @@ impl Registry {
                         self.objects.remove(path.as_str());
                     }
                 }
+                self.update_selected_edge(selection, order);
             }
             (Some(PROPS), Some("PropertiesChanged")) => {
                 let Some(path) = header.path() else {
-                    return Ok(());
+                    return Ok(None);
                 };
                 let (iface, changed, invalidated): (String, Properties, Vec<String>) =
                     msg.body().deserialize()?;
                 let was_playing = iface == PLAYER && self.playing(path.as_str());
+                let selection = self.selection_before(
+                    path.as_str(),
+                    iface == MEDIA_CONTROL
+                        && (changed.contains_key("Player")
+                            || invalidated.iter().any(|n| n == "Player")),
+                    false,
+                );
+                let pairs_device = iface == DEVICE
+                    && prop(&changed, "Paired") == Some(true)
+                    && !self.paired(path.as_str());
                 if let Some(props) = self
                     .objects
                     .get_mut(path.as_str())
@@ -124,10 +147,48 @@ impl Registry {
                 if iface == PLAYER {
                     self.update_playing_edge(path.as_str(), was_playing, order);
                 }
+                self.update_selected_edge(selection, order);
+                if pairs_device && self.paired(path.as_str()) {
+                    return Ok(Some(path.as_str().to_owned()));
+                }
             }
             _ => {}
         }
-        Ok(())
+        Ok(None)
+    }
+
+    fn paired(&self, path: &str) -> bool {
+        self.props(path, DEVICE).is_some_and(|p| {
+            object(p, "Adapter") == Some(ADAPTER) && prop(p, "Paired") == Some(true)
+        })
+    }
+
+    fn selection_before<'a>(
+        &self,
+        path: &'a str,
+        media_control: bool,
+        player: bool,
+    ) -> Option<(&'a str, Option<String>)> {
+        let device = if media_control {
+            path
+        } else if player {
+            path.rmatch_indices('/')
+                .map(|(i, _)| &path[..i])
+                .find(|path| self.props(path, DEVICE).is_some())?
+        } else {
+            return None;
+        };
+        Some((device, self.player(device).map(str::to_owned)))
+    }
+
+    fn update_selected_edge(&mut self, before: Option<(&str, Option<String>)>, order: u64) {
+        if let Some((device, old)) = before
+            && let Some(player) = self.player(device)
+            && Some(player) != old.as_deref()
+            && self.playing(player)
+        {
+            self.playing_edges.insert(player.to_owned(), order);
+        }
     }
 
     fn playing(&self, path: &str) -> bool {
@@ -182,36 +243,149 @@ pub(crate) struct Candidate<'a> {
     pub address: &'a str,
     pub name: &'a str,
     pub player: Option<&'a str>,
-    pub phase: Option<(Playback, u64)>,
+    pub phase: Option<(Playback, Option<u64>)>,
     pub phone_gain: [f32; 2],
+}
+
+struct Owner {
+    unique: String,
+    since: Sequence,
+}
+
+impl Owner {
+    async fn get(conn: &Connection, service: &str) -> zbus::Result<Self> {
+        let msg = conn
+            .call_method(
+                Some(DBUS),
+                DBUS_PATH,
+                Some(DBUS),
+                "GetNameOwner",
+                &(service,),
+            )
+            .await?;
+        Ok(Self {
+            unique: msg.body().deserialize()?,
+            since: msg.recv_position(),
+        })
+    }
+}
+
+struct Owners {
+    bluez: Owner,
+    alsa: Owner,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignalKind {
+    Bluez,
+    Alsa,
+    OwnerChanged,
+}
+
+impl Owners {
+    fn classify(&self, msg: &Message) -> Option<SignalKind> {
+        if msg.message_type() != Type::Signal {
+            return None;
+        }
+        let header = msg.header();
+        let sender = header.sender()?.as_str();
+        match (header.interface()?.as_str(), header.member()?.as_str()) {
+            (DBUS, "NameOwnerChanged")
+                if sender == DBUS && header.path()?.as_str() == DBUS_PATH =>
+            {
+                let body = msg.body();
+                let (name, _, new): (&str, &str, &str) = body.deserialize().ok()?;
+                let owner = match name {
+                    BLUEZ => &self.bluez,
+                    BLUEALSA => &self.alsa,
+                    _ => return None,
+                };
+                (msg.recv_position() > owner.since && new != owner.unique)
+                    .then_some(SignalKind::OwnerChanged)
+            }
+            (interface @ OBJECTS, "InterfacesAdded" | "InterfacesRemoved")
+            | (interface @ PROPS, "PropertiesChanged") => {
+                let kind = if sender == self.bluez.unique {
+                    SignalKind::Bluez
+                } else if sender == self.alsa.unique {
+                    SignalKind::Alsa
+                } else {
+                    return None;
+                };
+                if interface == PROPS {
+                    let body = msg.body();
+                    let changed: &str = body.deserialize_ignore_signature().ok()?;
+                    let relevant = match kind {
+                        SignalKind::Bluez => {
+                            matches!(
+                                changed,
+                                ADAPTER_IFACE | DEVICE | MEDIA_CONTROL | PLAYER | TRANSPORT
+                            )
+                        }
+                        SignalKind::Alsa => changed == PCM,
+                        SignalKind::OwnerChanged => unreachable!(),
+                    };
+                    if !relevant {
+                        return None;
+                    }
+                }
+                Some(kind)
+            }
+            _ => None,
+        }
+    }
+}
+
+struct Signal {
+    message: Message,
+    kind: SignalKind,
+    received: Instant,
+    order: u64,
 }
 
 async fn collect_signals(
     mut stream: impl futures_util::Stream<Item = zbus::Result<Message>> + Unpin,
-    tx: mpsc::Sender<(Message, u64)>,
+    owners: Rc<Owners>,
+    tx: mpsc::Sender<Signal>,
+    mut startup: Option<watch::Sender<Option<(Sequence, bool)>>>,
 ) {
-    // Сигналы получают порядок независимо от ожидания исходящих D-Bus вызовов.
+    // Отмечаем сигналы независимо от ожидания исходящих вызовов актором.
+    let mut owner_changed = false;
     loop {
-        let Some(Ok(msg)) = (tokio::select! {
+        let Some(Ok(message)) = (tokio::select! {
             biased;
             () = tx.closed() => return,
             msg = stream.next() => msg,
         }) else {
             return;
         };
-        if msg.message_type() == Type::Signal
-            && tx
-                .try_send((msg, pulsar_core::audio_start_order()))
-                .is_err()
-        {
-            // При переполнении переснять состояние вместо отложенной маркировки.
-            break;
+        let seq = message.recv_position();
+        if let Some(kind) = owners.classify(&message) {
+            owner_changed |= kind == SignalKind::OwnerChanged;
+            let signal = Signal {
+                message,
+                kind,
+                received: Instant::now(),
+                order: pulsar_core::audio_start_order(),
+            };
+            if tx.try_send(signal).is_err() {
+                // При переполнении переснять состояние вместо отложенной маркировки.
+                return;
+            }
+        }
+        if let Some(progress) = &startup {
+            if progress.is_closed() {
+                startup = None;
+            } else {
+                progress.send_replace(Some((seq, owner_changed)));
+            }
         }
     }
 }
 
 pub(crate) struct Bus {
-    signals: mpsc::Receiver<(Message, u64)>,
+    signals: mpsc::Receiver<Signal>,
+    owners: Rc<Owners>,
     conn: Connection,
     bluez: Registry,
     alsa: Registry,
@@ -221,11 +395,7 @@ impl Bus {
     pub async fn connect() -> zbus::Result<Self> {
         let mut conn = Connection::system().await?;
         conn.set_max_queued(256.try_into().expect("positive capacity"));
-        let (tx, signals) = mpsc::channel(256);
-        actors::spawn_actor(
-            "bluetooth D-Bus signals",
-            collect_signals(MessageStream::from(&conn), tx),
-        );
+        let stream = MessageStream::from(&conn);
         for service in [BLUEZ, BLUEALSA] {
             for rule in [
                 format!("type='signal',sender='{service}',interface='{OBJECTS}'"),
@@ -234,28 +404,52 @@ impl Bus {
                     "type='signal',sender='{DBUS}',interface='{DBUS}',member='NameOwnerChanged',arg0='{service}'"
                 ),
             ] {
-                conn.call_method(
-                    Some(DBUS),
-                    "/org/freedesktop/DBus",
-                    Some(DBUS),
-                    "AddMatch",
-                    &(rule,),
-                )
-                .await?;
+                conn.call_method(Some(DBUS), DBUS_PATH, Some(DBUS), "AddMatch", &(rule,))
+                    .await?;
             }
         }
+        let (bluez_owner, alsa_owner) =
+            tokio::try_join!(Owner::get(&conn, BLUEZ), Owner::get(&conn, BLUEALSA))?;
+        let owners = Rc::new(Owners {
+            bluez: bluez_owner,
+            alsa: alsa_owner,
+        });
+        let (tx, signals) = mpsc::channel(256);
+        let (progress, mut startup) = watch::channel(None);
+        actors::spawn_actor(
+            "bluetooth D-Bus signals",
+            collect_signals(stream, owners.clone(), tx, Some(progress)),
+        );
         let (bluez, alsa) = tokio::try_join!(
-            Registry::get(&conn, BLUEZ, "/"),
-            Registry::get(&conn, BLUEALSA, BLUEALSA_ROOT),
+            Registry::get(&conn, &owners.bluez.unique, "/"),
+            Registry::get(&conn, &owners.alsa.unique, BLUEALSA_ROOT),
         )?;
         let bus = Self {
             conn,
             signals,
+            owners,
             bluez,
             alsa,
         };
         if bus.flags().is_none() || !bus.has_sink().await? {
             return Err(zbus::Error::Failure("no incoming A2DP adapter".into()));
+        }
+        let (bluez, alsa) = tokio::try_join!(
+            Owner::get(&bus.conn, BLUEZ),
+            Owner::get(&bus.conn, BLUEALSA)
+        )?;
+        let barrier = bluez.since.max(alsa.since);
+        // Проверяем также краткую смену владельца с возвратом между снимками и проверкой.
+        let settled = startup
+            .wait_for(|progress| progress.is_some_and(|(seq, _)| seq >= barrier))
+            .await
+            .map_err(|_| zbus::Error::InvalidReply)?;
+        if bluez.unique != bus.owners.bluez.unique
+            || alsa.unique != bus.owners.alsa.unique
+            || settled.is_some_and(|(_, changed)| changed)
+            || bus.signals.is_closed()
+        {
+            return Err(owner_changed());
         }
         Ok(bus)
     }
@@ -264,7 +458,7 @@ impl Bus {
         let msg = self
             .conn
             .call_method(
-                Some(self.alsa.owner.as_str()),
+                Some(self.owners.alsa.unique.as_str()),
                 BLUEALSA_ROOT,
                 Some(PROPS),
                 "GetAll",
@@ -275,33 +469,28 @@ impl Bus {
         Ok(manager_has_sink(&props))
     }
 
-    pub async fn next(&mut self) -> zbus::Result<()> {
-        let (msg, order) = self.signals.recv().await.ok_or(zbus::Error::InvalidReply)?;
+    pub async fn next(&mut self) -> zbus::Result<Option<(String, Instant)>> {
+        let signal = self.signals.recv().await.ok_or(zbus::Error::InvalidReply)?;
         if self.signals.is_closed() {
             return Err(zbus::Error::InvalidReply);
         }
-        let header = msg.header();
-        if header.sender().is_some_and(|s| s.as_str() == DBUS)
-            && header.interface().is_some_and(|i| i.as_str() == DBUS)
-            && header
-                .member()
-                .is_some_and(|m| m.as_str() == "NameOwnerChanged")
-        {
-            let body = msg.body();
-            let (name, _, new): (&str, &str, &str) = body.deserialize()?;
-            let r = match name {
-                BLUEZ => Some(&self.bluez),
-                BLUEALSA => Some(&self.alsa),
-                _ => None,
-            };
-            if r.is_some_and(|r| msg.recv_position() > r.baseline && new != r.owner) {
-                return Err(zbus::Error::Failure(
-                    "Bluetooth service owner changed".into(),
-                ));
+        let seq = signal.message.recv_position();
+        match signal.kind {
+            SignalKind::Bluez if seq > self.bluez.baseline => Ok(self
+                .bluez
+                .apply(&signal.message, signal.order)?
+                .map(|path| (path, signal.received))),
+            SignalKind::Alsa if seq > self.alsa.baseline => {
+                self.alsa.apply(&signal.message, signal.order)?;
+                Ok(None)
             }
+            SignalKind::OwnerChanged => Err(owner_changed()),
+            _ => Ok(None),
         }
-        self.bluez.apply(&msg, order)?;
-        self.alsa.apply(&msg, order)
+    }
+
+    pub fn snapshot_order(&self) -> u64 {
+        self.bluez.snapshot_order
     }
 
     pub fn flags(&self) -> Option<[bool; 2]> {
@@ -312,13 +501,14 @@ impl Bus {
     pub fn paired(&self) -> BTreeSet<String> {
         self.bluez
             .objects
-            .iter()
-            .filter_map(|(path, obj)| {
-                let p = obj.get(DEVICE)?;
-                (object(p, "Adapter") == Some(ADAPTER) && prop(p, "Paired") == Some(true))
-                    .then(|| path.as_str().to_owned())
-            })
+            .keys()
+            .filter(|path| self.bluez.paired(path))
+            .cloned()
             .collect()
+    }
+
+    pub fn is_paired(&self, path: &str) -> bool {
+        self.bluez.paired(path)
     }
 
     pub fn candidates(&self) -> impl Iterator<Item = Candidate<'_>> {
@@ -326,55 +516,94 @@ impl Bus {
     }
 
     pub async fn visibility(&self, on: bool) -> zbus::Result<()> {
-        let set = |name: &'static str| async move {
-            self.call(
-                ADAPTER,
-                PROPS,
-                "Set",
-                &(ADAPTER_IFACE, name, Variant::Bool(on)),
-            )
-            .await
-        };
-        if on {
-            set("Pairable").await?;
-            set("Discoverable").await
-        } else {
-            // Отказ одного флага не должен оставить второй разрешённым.
-            let (visible, pairable) = tokio::join!(set("Discoverable"), set("Pairable"));
-            visible.and(pairable)
-        }
+        visibility(&self.conn, &self.owners.bluez.unique, on).await
+    }
+
+    pub async fn close_pairing(&self) -> zbus::Result<()> {
+        self.visibility(false).await?;
+        check_bluez_owner(&self.conn, &self.owners.bluez.unique).await
     }
 
     pub async fn disconnect(&self, path: &str) -> zbus::Result<()> {
-        self.call(path, DEVICE, "DisconnectProfile", &(AUDIO_SOURCE,))
-            .await
+        call(
+            &self.conn,
+            &self.owners.bluez.unique,
+            path,
+            DEVICE,
+            "DisconnectProfile",
+            &(AUDIO_SOURCE,),
+        )
+        .await
     }
 
     pub async fn avr(&self, player: &str, method: &str) -> zbus::Result<()> {
-        self.call(player, PLAYER, method, &()).await
-    }
-
-    async fn call<B: serde::Serialize + zbus::zvariant::DynamicType>(
-        &self,
-        path: &str,
-        iface: &str,
-        method: &str,
-        body: &B,
-    ) -> zbus::Result<()> {
-        tokio::time::timeout(
-            TIMEOUT,
-            self.conn.call_method(
-                Some(self.bluez.owner.as_str()),
-                path,
-                Some(iface),
-                method,
-                body,
-            ),
+        call(
+            &self.conn,
+            &self.owners.bluez.unique,
+            player,
+            PLAYER,
+            method,
+            &(),
         )
         .await
-        .map_err(|_| zbus::Error::Failure("D-Bus timeout".into()))??;
-        Ok(())
     }
+}
+
+pub(crate) async fn close_pairing() -> zbus::Result<()> {
+    let conn = Connection::system().await?;
+    let owner = Owner::get(&conn, BLUEZ).await?;
+    visibility(&conn, &owner.unique, false).await?;
+    check_bluez_owner(&conn, &owner.unique).await
+}
+
+async fn check_bluez_owner(conn: &Connection, pinned: &str) -> zbus::Result<()> {
+    if Owner::get(conn, BLUEZ).await?.unique != pinned {
+        return Err(owner_changed());
+    }
+    Ok(())
+}
+
+fn owner_changed() -> zbus::Error {
+    zbus::Error::Failure("Bluetooth service owner changed".into())
+}
+
+async fn visibility(conn: &Connection, owner: &str, on: bool) -> zbus::Result<()> {
+    let set = |name: &'static str| async move {
+        call(
+            conn,
+            owner,
+            ADAPTER,
+            PROPS,
+            "Set",
+            &(ADAPTER_IFACE, name, Variant::Bool(on)),
+        )
+        .await
+    };
+    if on {
+        set("Pairable").await?;
+        set("Discoverable").await
+    } else {
+        // Отказ одного флага не должен оставить второй разрешённым.
+        let (visible, pairable) = tokio::join!(set("Discoverable"), set("Pairable"));
+        visible.and(pairable)
+    }
+}
+
+async fn call<B: serde::Serialize + zbus::zvariant::DynamicType>(
+    conn: &Connection,
+    owner: &str,
+    path: &str,
+    iface: &str,
+    method: &str,
+    body: &B,
+) -> zbus::Result<()> {
+    tokio::time::timeout(
+        TIMEOUT,
+        conn.call_method(Some(owner), path, Some(iface), method, body),
+    )
+    .await
+    .map_err(|_| zbus::Error::Failure("D-Bus timeout".into()))??;
+    Ok(())
 }
 
 impl Registry {
@@ -408,11 +637,7 @@ impl Registry {
                     Some("paused" | "stopped") => Playback::Paused,
                     _ => return None,
                 };
-                let order = self
-                    .playing_edges
-                    .get(path)
-                    .copied()
-                    .unwrap_or(self.snapshot_order);
+                let order = self.playing_edges.get(path).copied();
                 Some((phase, order))
             });
             Some(Candidate {
@@ -429,7 +654,7 @@ impl Registry {
 
     fn player(&self, device: &str) -> Option<&str> {
         if let Some(path) = self
-            .props(device, "org.bluez.MediaControl1")
+            .props(device, MEDIA_CONTROL)
             .and_then(|p| object(p, "Player"))
         {
             return self
@@ -513,21 +738,64 @@ fn phone_gain(pcm: &Properties, transport: impl FnOnce() -> Option<u16>) -> [f32
 mod tests {
     use super::*;
 
+    fn owners(baseline: Sequence) -> Rc<Owners> {
+        Rc::new(Owners {
+            bluez: Owner {
+                unique: ":1.1".into(),
+                since: baseline,
+            },
+            alsa: Owner {
+                unique: ":1.2".into(),
+                since: baseline,
+            },
+        })
+    }
+
     #[tokio::test]
     async fn inbound_signal_is_stamped_before_delayed_service_consumption() {
-        let signal = Message::signal("/player", PROPS, "PropertiesChanged")
-            .build(&(
-                PLAYER,
-                Properties::from([("Status".into(), zbus::Str::from("playing").into())]),
-                Vec::<String>::new(),
-            ))
+        let props_changed = |sender: &'static str, interface: &'static str| {
+            Message::signal("/player", PROPS, "PropertiesChanged")
+                .sender(sender)
+                .build(&(
+                    interface,
+                    Properties::from([("Status".into(), zbus::Str::from("playing").into())]),
+                    Vec::<String>::new(),
+                ))
+                .unwrap()
+        };
+        let signal = props_changed(":1.1", PLAYER);
+        let owners = owners(signal.recv_position());
+        let unrelated = props_changed(":1.3", PLAYER);
+        let unrelated_interface = props_changed(":1.1", "org.bluez.Battery1");
+        let forged_owner_change = Message::signal(DBUS_PATH, DBUS, "NameOwnerChanged")
+            .sender(":1.3")
+            .build(&(BLUEZ, ":1.1", ""))
+            .unwrap();
+        let unrelated_member = Message::signal("/player", PROPS, "Other")
+            .sender(":1.1")
+            .build(&())
             .unwrap();
         let (tx, mut rx) = mpsc::channel(1);
-        // Актор ещё не опустошил очередь: он ждёт ответа исходящего вызова.
-        collect_signals(futures_util::stream::iter([Ok(signal)]), tx).await;
+        let before_receive = Instant::now();
+        // Чужие сообщения не занимают очередь даже при исчерпании её ёмкости.
+        collect_signals(
+            futures_util::stream::iter([
+                Ok(unrelated),
+                Ok(unrelated_interface),
+                Ok(unrelated_member),
+                Ok(forged_owner_change),
+                Ok(signal),
+            ]),
+            owners,
+            tx,
+            None,
+        )
+        .await;
         let music_order = pulsar_core::audio_start_order();
-        let (_, signal_order) = rx.recv().await.unwrap();
-        assert!(signal_order < music_order);
+        let signal = rx.recv().await.unwrap();
+        assert_eq!(signal.kind, SignalKind::Bluez);
+        assert!(signal.order < music_order);
+        assert!(signal.received >= before_receive);
     }
 
     #[test]
@@ -568,7 +836,6 @@ mod tests {
     #[test]
     fn incoming_only_and_selected_player_not_player_zero() {
         let registry = |objects| Registry {
-            owner: ":1.1".into(),
             baseline: Message::signal("/", OBJECTS, "InterfacesAdded")
                 .build(&())
                 .unwrap()
@@ -589,13 +856,13 @@ mod tests {
         let first = "/org/bluez/hci0/dev_first";
         let second = "/org/bluez/hci0/dev_second";
         let player7 = "/org/bluez/hci0/dev_first/player7";
-        let bluez = registry(HashMap::from([
+        let mut bluez = registry(HashMap::from([
             (
                 first.into(),
                 HashMap::from([
                     (DEVICE.into(), device()),
                     (
-                        "org.bluez.MediaControl1".into(),
+                        MEDIA_CONTROL.into(),
                         HashMap::from([("Player".into(), path(player7))]),
                     ),
                 ]),
@@ -642,11 +909,58 @@ mod tests {
                 incoming[0].player,
                 incoming[0].phase
             ),
-            (first, "device", Some(player7), Some((Playback::Playing, 1)))
+            (
+                first,
+                "device",
+                Some(player7),
+                Some((Playback::Playing, None))
+            )
         );
         assert_eq!(
             (incoming[1].device, incoming[1].player, incoming[1].phase),
             (second, None, None)
         );
+
+        drop(incoming);
+        let second_player = "/org/bluez/hci0/dev_first/player0";
+        bluez
+            .objects
+            .get_mut(second_player)
+            .unwrap()
+            .get_mut(PLAYER)
+            .unwrap()
+            .insert("Status".into(), text("playing"));
+        let switch = Message::signal(first, PROPS, "PropertiesChanged")
+            .build(&(
+                MEDIA_CONTROL,
+                Properties::from([("Player".into(), path(second_player))]),
+                Vec::<String>::new(),
+            ))
+            .unwrap();
+        bluez.apply(&switch, 10).unwrap();
+        bluez.apply(&switch, 11).unwrap();
+        let selected = bluez.candidates(&alsa).find(|c| c.device == first).unwrap();
+        assert_eq!(selected.player, Some(second_player));
+        assert_eq!(selected.phase, Some((Playback::Playing, Some(10))));
+
+        let changed = |device, props| {
+            Message::signal(device, PROPS, "PropertiesChanged")
+                .build(&(DEVICE, props, Vec::<String>::new()))
+                .unwrap()
+        };
+        let alias = changed(first, Properties::from([("Alias".into(), text("Phone"))]));
+        assert_eq!(bluez.apply(&alias, 12).unwrap(), None);
+        let pair = changed(first, Properties::from([("Paired".into(), true.into())]));
+        assert_eq!(bluez.apply(&pair, 13).unwrap().as_deref(), Some(first));
+        assert_eq!(bluez.apply(&pair, 14).unwrap(), None);
+        bluez
+            .objects
+            .get_mut(second)
+            .unwrap()
+            .get_mut(DEVICE)
+            .unwrap()
+            .insert("Adapter".into(), path("/org/bluez/hci1"));
+        let wrong_adapter = changed(second, Properties::from([("Paired".into(), true.into())]));
+        assert_eq!(bluez.apply(&wrong_adapter, 15).unwrap(), None);
     }
 }

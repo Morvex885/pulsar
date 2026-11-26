@@ -47,6 +47,22 @@ say() { echo "=== supervise: $* $(date)" >> "$LOG"; }
 bt_allowed=${PULSAR_BT_MANAGED:-1}
 bt_owner=${PULSAR_BT_OWNER:-/tmp/pulsar-bt-owner}
 bt_blocked=$BIN.bt-blocked
+bt_next=$bt_blocked.next
+# /data/pulsar is trusted like ctl.sh itself. Pin the inode for this boot so
+# an executable replacement cannot reuse it and look like an ordinary reload.
+boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+bt_executable=
+[ -z "$boot_id" ] || bt_executable=$D/.pulsar-bt-executable.$boot_id
+
+bt_blocked_now() { [ "$BIN" -ef "$bt_blocked" ] || [ "$BIN" -ef "$bt_next" ]; }
+
+remember_bt_executable() {
+  [ -n "$bt_executable" ] || return 1
+  [ "$BIN" -ef "$bt_executable" ] && return 0
+  # An unexpected rename during startup must never rebind another binary's snapshot.
+  [ ! -e "$bt_owner" ] && [ ! -L "$bt_owner" ] || return 1
+  rm -f "$D"/.pulsar-bt-executable.* && ln "$BIN" "$bt_executable"
+}
 
 restore_bt() {
   if [ -e "$bt_owner" ] || [ -L "$bt_owner" ]; then
@@ -58,17 +74,33 @@ restore_bt() {
   return 0
 }
 
+# Не запускать ни один стек, пока владение не возвращено. При disable решение
+# о запуске штатного стека принимает ctl.sh, а не ожидающий supervisor.
+wait_restore_bt() {
+  restore_delay=$BACKOFF_MIN
+  while [ -f "$D/enabled" ]; do
+    if restore_bt; then
+      [ -f "$D/enabled" ]
+      return
+    fi
+    sleep "$restore_delay"
+    restore_delay=$((restore_delay * 2))
+    [ "$restore_delay" -le "$BACKOFF_MAX" ] || restore_delay=$BACKOFF_MAX
+  done
+  return 1
+}
+
 install_prev() {
-  # Жёсткая ссылка запрещает захват только этому экземпляру .prev, даже после reload.
-  # Новый бинарь устанавливается через rename и никогда не совпадает с этой ссылкой.
-  rm -f "$BIN.tmp" && cp -p "$BIN.prev" "$BIN.tmp" &&
-    ln -f "$BIN.tmp" "$bt_blocked" && [ "$BIN.tmp" -ef "$bt_blocked" ] &&
-    mv -f "$BIN.tmp" "$BIN"
+  # Keep any guard for the current executable until the replacement is committed.
+  if [ "$BIN" -ef "$bt_next" ]; then mv -f "$bt_next" "$bt_blocked" || return 1; fi
+  rm -f "$BIN.tmp" "$bt_next" && cp -p "$BIN.prev" "$BIN.tmp" &&
+    ln "$BIN.tmp" "$bt_next" && mv -f "$BIN.tmp" "$BIN" ||
+    { rm -f "$BIN.tmp" "$bt_next"; return 1; }
 }
 
 give_back() { # Yandex stack again, like ctl.sh disable
+  wait_restore_bt || exit 0
   rm -f "$D/enabled"
-  restore_bt || exit 1
   say "$1; disabled, starting the Yandex stack"
   pidof quasar_launcher2 >/dev/null 2>&1 || "$Q" start >/dev/null 2>&1
   exit 1
@@ -106,27 +138,35 @@ while [ -f "$D/enabled" ]; do
   if [ ! -x "$BIN" ]; then
     say "$BIN missing or not executable"
     if [ "$swapped" = 0 ] && [ -x "$BIN.prev" ]; then
-      restore_bt || exit 1
+      wait_restore_bt || exit 0
+      [ ! -x "$BIN" ] || continue
       install_prev && swapped=1 && fails=0 && say "restored .prev" && continue
     fi
     give_back "no usable binary"
   fi
+  # Reload and executable replacement are handoffs; normal restarts keep stock audio stopped.
+  inode=$(stat -Lc '%d:%i' "$BIN") || { say "could not identify $BIN"; exit 1; }
+  if [ "$inode" != "$last_inode" ]; then
+    if [ "$bt_allowed" != 1 ] || bt_blocked_now || ! [ "$BIN" -ef "$bt_executable" ]; then
+      wait_restore_bt || exit 0
+      [ "$inode" = "$(stat -Lc '%d:%i' "$BIN")" ] || continue
+    fi
+    last_inode=$inode
+  fi
   clear_dmix
   bt_managed=0
-  if ! [ "$BIN" -ef "$bt_blocked" ]; then
-    rm -f "$bt_blocked"
-    if [ "$bt_allowed" = 1 ] && "$D/ctl.sh" bt-restore --check >/dev/null 2>&1; then
+  if bt_blocked_now; then
+    if [ "$BIN" -ef "$bt_next" ]; then mv -f "$bt_next" "$bt_blocked"; fi
+  else
+    rm -f "$bt_blocked" "$bt_next"
+    if [ "$bt_allowed" = 1 ] && "$D/ctl.sh" bt-restore --check >/dev/null 2>&1 &&
+      remember_bt_executable; then
       bt_managed=1
     fi
     # Появился другой бинарь — он получает собственную попытку отката.
     if [ "$swapped" = 1 ]; then swapped=0 fails=0 backoff=$BACKOFF_MIN; fi
   fi
-  # Reload and executable replacement are handoffs; normal restarts keep stock audio stopped.
-  inode=$(stat -Lc '%d:%i' "$BIN") || { say "could not identify $BIN"; exit 1; }
-  if [ "$inode" != "$last_inode" ]; then
-    restore_bt || exit 1
-    last_inode=$inode
-  fi
+  [ "$inode" = "$(stat -Lc '%d:%i' "$BIN")" ] || continue
   echo "=== start $(date)" >> "$LOG"
   t0=$(uptime_s)
   PULSAR_BT_MANAGED=$bt_managed "$BIN" "$D/state.conf" >> "$LOG" 2>&1
@@ -150,7 +190,8 @@ while [ -f "$D/enabled" ]; do
   fails=$((fails + 1))
   if [ $fails -ge $CRASHES ]; then
     if [ "$swapped" = 0 ] && [ -f "$BIN.prev" ] && ! cmp -s "$BIN" "$BIN.prev"; then
-      restore_bt || exit 1
+      wait_restore_bt || exit 0
+      [ "$last_inode" = "$(stat -Lc '%d:%i' "$BIN")" ] || continue
       if { [ "$BIN" -ef "$BIN.bad" ] || ln -f "$BIN" "$BIN.bad"; } && install_prev; then
         swapped=1 fails=0 backoff=$BACKOFF_MIN
         note=; [ -f "$D/api_key" ] && note="; api_key is set: the previous binary may not support API encryption, so Home Assistant (which holds the key) may be unable to connect - remove the key in HA or re-add the device"

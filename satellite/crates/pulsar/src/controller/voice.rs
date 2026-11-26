@@ -880,9 +880,9 @@ impl Controller {
         paused
     }
 
-    fn music_resume(&self) {
+    fn music_resume(&mut self) {
         if self.player.state(Channel::Music) == PlayState::Paused {
-            self.player.resume(Channel::Music);
+            self.resume_local_music();
         } else if let Some(ss) = &self.sendspin {
             ss.transport(Transport::Play);
         }

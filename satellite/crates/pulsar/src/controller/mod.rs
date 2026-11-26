@@ -258,6 +258,7 @@ pub struct Controller {
     bt_starts: u64,
     bt_connection: Option<u64>,
     audio_start: u64,
+    music_start_pending: Option<PlayId>,
     sendspin_pairing_prompt: bool,
 }
 
@@ -658,6 +659,7 @@ impl Controller {
             bt_starts: 0,
             bt_connection: None,
             audio_start: 0,
+            music_start_pending: None,
             sendspin_pairing_prompt: false,
         };
         // The rest of the C++ start(), in its order: every call below only queues commands to
@@ -673,7 +675,7 @@ impl Controller {
         );
         c.update_detection();
         c.apply_gains(); // a saved mute
-        c.on_bt(BtEvent::Changed);
+        c.on_bt(BtEvent::Changed { connection: None });
         c.update_ui();
         c.clock.play(ClockShot::Boot);
         if changed {
@@ -805,6 +807,16 @@ impl Controller {
                     self.update_speech_number();
                 }
             }
+            PlayerEvent::MusicStarted { id, order } => {
+                self.sendspin_ended_ms = None;
+                if self.music_start_pending == Some(id) {
+                    self.music_start_pending = None;
+                    if order > self.audio_start {
+                        self.bluetooth_yields_audio(order);
+                    }
+                }
+                self.publish_media();
+            }
             // HA media state follows playback (C++ Player::on_state hook).
             PlayerEvent::State(ch, s) => {
                 if ch == Channel::Music {
@@ -819,6 +831,9 @@ impl Controller {
                 self.publish_media();
             }
             PlayerEvent::Done { id, ok } => {
+                if self.music_start_pending == Some(id) {
+                    self.music_start_pending = None;
+                }
                 if let Some(p) = self.pending.remove(&id) {
                     self.play_done(p, ok);
                 }

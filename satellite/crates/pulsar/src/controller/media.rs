@@ -45,19 +45,33 @@ impl Controller {
         }
     }
 
-    fn bluetooth_yields_audio(&mut self, order: u64) {
+    pub(super) fn bluetooth_yields_audio(&mut self, order: u64) {
         self.audio_start = order;
         if let Some(bt) = &self.bt {
             bt.preempt_before(order);
         }
     }
 
-    pub(super) fn bluetooth_takes_audio(&self) {
+    pub(super) fn bluetooth_takes_audio(&mut self) {
         // Остановить также незавершённый запуск Music: его PLAYING может прийти позже.
-        self.player.stop(Channel::Music);
+        self.stop_local_music();
         if let Some(ss) = &self.sendspin {
             ss.pause_for_bluetooth();
         }
+    }
+
+    fn stop_local_music(&mut self) {
+        self.music_start_pending = None;
+        self.player.stop(Channel::Music);
+    }
+
+    pub(super) fn resume_local_music(&mut self) {
+        if self.music_start_pending.is_none()
+            && self.player.state(Channel::Music) == PlayState::Paused
+        {
+            self.bluetooth_yields_audio(pulsar_core::audio_start_order());
+        }
+        self.player.resume(Channel::Music);
     }
 
     pub(super) fn set_muted(&mut self, m: bool) {
@@ -172,11 +186,10 @@ impl Controller {
                 let id = self.player.play(Channel::Announce, vec![url]);
                 self.pending.insert(id, Pending::MediaAnnounce { seq });
             } else {
-                self.bluetooth_yields_audio(pulsar_core::audio_start_order());
                 if let Some(ss) = &self.sendspin {
                     ss.yield_to_local(); // HA media takes the speaker from Sendspin
                 }
-                self.player.play(Channel::Music, vec![url]);
+                self.music_start_pending = Some(self.player.play(Channel::Music, vec![url]));
             }
         }
         if let Some(v) = cmd.volume {
@@ -188,16 +201,13 @@ impl Controller {
             let music = || music_state;
             match c {
                 MediaCommand::Play => {
-                    if music() == PlayState::Paused {
-                        self.bluetooth_yields_audio(pulsar_core::audio_start_order());
-                    }
                     if ss_on
                         && music() == PlayState::Paused
                         && let Some(ss) = &self.sendspin
                     {
                         ss.yield_to_local();
                     }
-                    self.player.resume(Channel::Music);
+                    self.resume_local_music();
                 }
                 MediaCommand::Pause => {
                     if ss_on || matches!(music(), PlayState::Playing | PlayState::Loading) {
@@ -223,14 +233,11 @@ impl Controller {
                             ss.yield_to_local();
                         }
                     } else {
-                        if music() == PlayState::Paused {
-                            self.bluetooth_yields_audio(pulsar_core::audio_start_order());
-                        }
-                        self.player.resume(Channel::Music);
+                        self.resume_local_music();
                     }
                 }
                 MediaCommand::Stop => {
-                    self.player.stop(Channel::Music);
+                    self.stop_local_music();
                     if ss_on && let Some(ss) = &self.sendspin {
                         ss.yield_to_local();
                     }
@@ -262,8 +269,11 @@ impl Controller {
                     self.bluetooth_yields_audio(order);
                 }
                 // Music Assistant took over the speaker: the HA media channel yields to it.
-                if active && self.player.state(Channel::Music) != PlayState::Idle {
-                    self.player.stop(Channel::Music);
+                if active
+                    && (self.music_start_pending.is_some()
+                        || self.player.state(Channel::Music) != PlayState::Idle)
+                {
+                    self.stop_local_music();
                 }
                 // The HA media channel playing here took the speaker over (yield_to_local): not a
                 // pause in Music Assistant. on_player clears the stamp if its state comes later.

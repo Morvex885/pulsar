@@ -168,13 +168,21 @@ rollback() {
     trap 'rm -f pulsar.rb' EXIT
     rm -f pulsar.rb && cp -p pulsar.prev pulsar.rb && [ -x pulsar.rb ] || exit 1
     stop_service && bt_restore || exit 1
+    # Normalize any committed guard from a prior replacement before reusing its staging path.
+    if [ pulsar -ef pulsar.bt-blocked.next ]; then
+      mv -f pulsar.bt-blocked.next pulsar.bt-blocked || { "$D/ctl.sh" reload; exit 1; }
+    fi
     # Сохраняем текущий бинарь, не снимая его с рабочего пути до атомарной замены.
     if { [ pulsar -ef pulsar.bad ] || ln -f pulsar pulsar.bad; } &&
-      ln -f pulsar.rb pulsar.bt-blocked && [ pulsar.rb -ef pulsar.bt-blocked ] &&
+      rm -f pulsar.bt-blocked.next && ln pulsar.rb pulsar.bt-blocked.next &&
+      [ pulsar.rb -ef pulsar.bt-blocked.next ] &&
       mv -f pulsar.rb pulsar; then
+      # If promotion fails, the supervisor still honors the staged guard.
+      mv -f pulsar.bt-blocked.next pulsar.bt-blocked
       sync
       "$D/ctl.sh" reload
     else
+      rm -f pulsar.bt-blocked.next
       echo 'rollback: бинарь не заменён; перезапускаем текущий' >&2
       "$D/ctl.sh" reload
       exit 1

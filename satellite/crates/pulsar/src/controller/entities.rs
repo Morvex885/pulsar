@@ -574,15 +574,15 @@ impl Controller {
         }
     }
 
-    pub(super) fn on_bt(&mut self, BtEvent::Changed: BtEvent) {
+    pub(super) fn on_bt(&mut self, BtEvent::Changed { connection }: BtEvent) {
         let Some(bt) = &self.bt else { return };
         let state = bt.state();
         self.api.publish_switch(SwitchId::Bluetooth, state.enabled);
         self.api
             .publish_text_sensor(TextSensorId::Bluetooth, &state.status);
-        if self.bt_connection != state.connection {
-            self.bt_connection = state.connection;
-            let connected = state.connection.is_some();
+        if self.bt_connection != connection {
+            self.bt_connection = connection;
+            let connected = connection.is_some();
             self.leds.show_bt_link(connected);
             self.clock.play(if connected {
                 pulsar_core::ClockShot::BluetoothConnected
@@ -594,6 +594,7 @@ impl Controller {
         if state.admitted && self.bt_starts != state.starts {
             self.bt_starts = state.starts;
             if state.starts > self.audio_start {
+                let bt = bt.clone();
                 self.audio_start = state.starts;
                 self.bluetooth_takes_audio();
                 bt.admit(state.starts);

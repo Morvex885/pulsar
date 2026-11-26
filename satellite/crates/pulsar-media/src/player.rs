@@ -84,6 +84,11 @@ pub struct PlayId(pub u64);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlayerEvent {
     State(Channel, PlayState),
+    /// Первое состояние Playing запроса Music, с порядком фронта на потоке GLib.
+    MusicStarted {
+        id: PlayId,
+        order: u64,
+    },
     /// Начало вывода ANNOUNCE; id позволяет отбрасывать события заменённого ответа.
     Started {
         id: PlayId,
@@ -340,6 +345,7 @@ struct Chan {
     want_play: bool,
     buffering: bool,
     reached_playing: bool,
+    music_start_reported: bool,
     /// ANNOUNCE: the output item of the current url (0 = none).
     out_gen: u64,
     all_ok: bool,
@@ -366,6 +372,7 @@ impl Chan {
             want_play: false,
             buffering: false,
             reached_playing: false,
+            music_start_reported: false,
             out_gen: 0,
             all_ok: true,
             retries: 0,
@@ -405,7 +412,19 @@ impl Machine {
             return;
         }
         debug!("player: ch{} {} -> {}", ch.index(), prev.name(), s.name());
-        self.shared.send(PlayerEvent::State(ch, s));
+        let c = &mut self.chans[ch.index()];
+        let fresh_music =
+            ch == Channel::Music && s == PlayState::Playing && !c.music_start_reported;
+        let event = if fresh_music {
+            c.music_start_reported = true;
+            PlayerEvent::MusicStarted {
+                id: c.item,
+                order: pulsar_core::audio_start_order(),
+            }
+        } else {
+            PlayerEvent::State(ch, s)
+        };
+        self.shared.send(event);
     }
 
     fn loading_or_paused(&self, ch: Channel) -> PlayState {
@@ -718,6 +737,7 @@ impl Machine {
         c.item = id;
         c.active = true;
         c.want_play = true;
+        c.music_start_reported = false;
         c.all_ok = true;
         c.retries = 0;
         c.resume_ns = 0;
@@ -1115,7 +1135,7 @@ mod tests {
 
     use Channel::{Announce, Music};
     use PlayState::{Error as Failed, Idle, Loading, Paused, Playing};
-    use PlayerEvent::{Done, Started, State};
+    use PlayerEvent::{Done, MusicStarted, Started, State};
 
     fn unescape(s: &str) -> String {
         let mut out = String::new();
@@ -1461,8 +1481,12 @@ mod tests {
         assert_eq!(r.h.state(Music), Loading);
         r.state_changed(Music, GstState::Paused);
         assert!(r.events().is_empty());
+        let other_audio = pulsar_core::audio_start_order();
         r.state_changed(Music, GstState::Playing);
-        assert_eq!(r.events(), [State(Music, Playing)]);
+        assert!(matches!(
+            r.events().as_slice(),
+            [MusicStarted { id: started, order }] if *started == id && *order > other_audio
+        ));
         assert_eq!(r.h.state(Music), Playing);
         r.msg(Music, Msg::Eos);
         assert_eq!(r.calls(), ["ch0 Null"]);
@@ -1470,6 +1494,23 @@ mod tests {
         // Messages of an idle channel are ignored.
         r.msg(Music, Msg::Eos);
         assert!(r.events().is_empty());
+    }
+
+    #[test]
+    fn music_failing_before_playing_never_claims_the_audio_output() {
+        let mut r = Rig::new();
+        let id = r.h.play(Music, urls(&["/missing.mp3"]));
+        r.pump();
+        r.msg(Music, Msg::Error(err(None, None)));
+        assert_eq!(
+            r.events(),
+            [
+                State(Music, Loading),
+                State(Music, Failed),
+                State(Music, Idle),
+                Done { id, ok: false }
+            ]
+        );
     }
 
     #[test]
@@ -1603,14 +1644,14 @@ mod tests {
         assert_eq!(r.events(), [State(Music, Loading)]);
         r.state_changed(Music, GstState::Playing);
         r.msg(Music, Msg::Eos);
-        assert_eq!(
-            r.events(),
+        assert!(matches!(
+            r.events().as_slice(),
             [
-                State(Music, Playing),
+                MusicStarted { id: started, .. },
                 State(Music, Idle),
-                Done { id: b, ok: true }
-            ]
-        );
+                Done { id: ended, ok: true }
+            ] if *started == b && *ended == b
+        ));
     }
 
     #[test]
@@ -1727,7 +1768,7 @@ mod tests {
     #[test]
     fn buffering_holds_the_pipeline_and_reports_loading() {
         let mut r = Rig::new();
-        r.h.play(Music, urls(&["http://192.168.1.50/a.mp3"]));
+        let id = r.h.play(Music, urls(&["http://192.168.1.50/a.mp3"]));
         r.pump();
         r.calls();
         r.msg(Music, Msg::Buffering(10));
@@ -1737,7 +1778,10 @@ mod tests {
         r.msg(Music, Msg::Buffering(100));
         assert_eq!(r.calls(), ["ch0 Playing"]);
         r.state_changed(Music, GstState::Playing);
-        assert_eq!(r.events(), [State(Music, Loading), State(Music, Playing)]);
+        assert!(matches!(
+            r.events().as_slice(),
+            [State(Music, Loading), MusicStarted { id: started, .. }] if *started == id
+        ));
         r.msg(Music, Msg::Buffering(20));
         assert_eq!(r.calls(), ["ch0 Paused"]);
         assert_eq!(r.events(), [State(Music, Loading)]);

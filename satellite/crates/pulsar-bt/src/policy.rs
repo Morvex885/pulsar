@@ -18,6 +18,7 @@ pub(crate) struct Policy {
     pub starts: u64,
     pub admitted: bool,
     known: BTreeSet<String>,
+    pairing_window: Option<(Instant, Instant)>,
 }
 
 impl Policy {
@@ -36,13 +37,19 @@ impl Policy {
     pub fn set_enabled(&mut self, on: bool, now: Instant, paired: Option<BTreeSet<String>>) {
         self.enabled = on;
         if !on {
-            self.deadline = None;
+            self.close_pairing(now);
             self.release();
         } else if self.owner.is_none() {
             if let Some(paired) = paired {
                 self.known = paired;
             }
-            self.deadline = Some(now + PAIRING_TIME);
+            let first = self
+                .pairing_window
+                .filter(|&(_, end)| now < end)
+                .map_or(now, |(first, _)| first);
+            let end = now + PAIRING_TIME;
+            self.pairing_window = Some((first, end));
+            self.deadline = Some(end);
         }
     }
 
@@ -52,11 +59,23 @@ impl Policy {
         }
     }
 
-    pub fn observe_pairs(&mut self, paired: &BTreeSet<String>) {
-        if self.deadline.is_some() {
-            self.known.clone_from(paired);
-        } else {
-            self.known.retain(|p| paired.contains(p));
+    pub fn close_pairing(&mut self, now: Instant) {
+        self.deadline = None;
+        if let Some((_, end)) = &mut self.pairing_window {
+            *end = (*end).min(now);
+        }
+    }
+
+    pub fn observe_pairs(&mut self, mut paired: impl FnMut(&str) -> bool) {
+        self.known.retain(|path| paired(path));
+    }
+
+    pub fn observe_pair(&mut self, device: String, received: Instant) {
+        if self
+            .pairing_window
+            .is_some_and(|(first, end)| first <= received && received < end)
+        {
+            self.known.insert(device);
         }
     }
 
@@ -74,9 +93,9 @@ impl Policy {
             .map(|(device, _)| device)
     }
 
-    pub fn select(&mut self, path: String) {
+    pub fn select(&mut self, path: String, now: Instant) {
         self.owner = Some(path);
-        self.deadline = None;
+        self.close_pairing(now);
         self.new_generation();
         self.connection = Some(self.generation);
     }
@@ -100,11 +119,13 @@ impl Policy {
         phase: Option<Playback>,
         order: Option<u64>,
     ) {
-        if self.owner.is_none() || generation != self.generation || self.playback == phase {
+        if self.owner.is_none() || generation != self.generation {
             return;
         }
-        self.playback = phase;
-        self.admitted = false;
+        if self.playback != phase {
+            self.playback = phase;
+            self.admitted = false;
+        }
         // Смена источника статуса AVRCP → PCM не делает старый фронт новым.
         if phase == Some(Playback::Playing)
             && let Some(start) = order
@@ -143,8 +164,37 @@ mod tests {
         p.expire(now + Duration::from_secs(119));
         assert!(p.deadline.is_some());
         p.expire(now + PAIRING_TIME);
-        p.observe_pairs(&BTreeSet::from(["first".into(), "late".into()]));
+        p.observe_pairs(|path| matches!(path, "first" | "late"));
         assert!(p.permits("first"));
+        assert!(!p.permits("late"));
+    }
+
+    #[test]
+    fn pairing_uses_receive_time_even_after_window_expires() {
+        let now = Instant::now();
+        let end = now + PAIRING_TIME;
+        let mut p = Policy::restore(false, BTreeSet::new());
+        p.set_enabled(true, now, None);
+        p.expire(end);
+        p.observe_pair("early".into(), now - Duration::from_millis(1));
+        p.observe_pair("timely".into(), end - Duration::from_millis(1));
+        p.observe_pair("late".into(), end);
+        assert!(!p.permits("early"));
+        assert!(p.permits("timely"));
+        assert!(!p.permits("late"));
+    }
+
+    #[test]
+    fn explicit_close_still_counts_a_pair_received_before_close() {
+        let now = Instant::now();
+        let closed = now + Duration::from_secs(1);
+        let mut p = Policy::restore(true, BTreeSet::from(["first".into()]));
+        p.set_enabled(true, now, None);
+        p.select("first".into(), closed);
+        p.observe_pair("timely".into(), now);
+        p.observe_pair("late".into(), closed);
+        assert!(p.deadline.is_none());
+        assert!(p.permits("timely"));
         assert!(!p.permits("late"));
     }
 
@@ -154,7 +204,7 @@ mod tests {
         let mut p = Policy::restore(false, BTreeSet::from(["first".into()]));
         p.set_enabled(true, now, None);
         p.expire(now + PAIRING_TIME);
-        p.observe_pairs(&BTreeSet::from(["first".into(), "late".into()]));
+        p.observe_pairs(|path| matches!(path, "first" | "late"));
         assert!(p.permits("first"));
         assert!(!p.permits("late"));
     }
@@ -163,7 +213,7 @@ mod tests {
     fn preemption_needs_a_new_start_and_off_rejects_old_frames() {
         let known = BTreeSet::from(["first".into()]);
         let mut p = Policy::restore(true, known);
-        p.select("first".into());
+        p.select("first".into(), Instant::now());
         let generation = p.generation;
         let start = pulsar_core::audio_start_order();
         let local_start = pulsar_core::audio_start_order();
@@ -195,7 +245,7 @@ mod tests {
             p.choose([("second", 8), ("first", 7)].into_iter()),
             Some("first")
         );
-        p.select("first".into());
+        p.select("first".into(), Instant::now());
         p.observe_playback(p.generation, Some(Playback::Paused), None);
         assert_eq!(p.choose([("second", 5)].into_iter()), None);
         p.release();

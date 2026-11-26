@@ -14,10 +14,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 REAL_READLINK=$(command -v readlink)
+REAL_CP=$(command -v cp)
 REAL_SLEEP=$(command -v sleep)
 REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
-export BT_FIXTURE REAL_READLINK REAL_SLEEP REAL_MV REAL_STAT
+export BT_FIXTURE REAL_READLINK REAL_SLEEP REAL_MV REAL_STAT REAL_CP
 export PULSAR_DIR=$BT_FIXTURE/data PULSAR_LOG=$BT_FIXTURE/supervise.log PULSAR_Q=$BT_FIXTURE/bin/quasar
 export PULSAR_BT_OWNER=$BT_FIXTURE/owner PULSAR_BT_PROC=$BT_FIXTURE/proc PULSAR_BT_INIT=$BT_FIXTURE/bin/init
 export PULSAR_TAG=isolated PULSAR_LITE2=station.invalid
@@ -42,7 +43,9 @@ EOF
 cat > "$BT_FIXTURE/bin/stat" <<'EOF'
 #!/bin/sh
 # Simulate a different UID without depending on root/chown on the test host.
-if [ "${FOREIGN_OWNER:-0}" = 1 ] && [ "$1" = -c ] && [ "$3" = "$PULSAR_BT_OWNER" ]; then
+if [ "$1" = -c ] &&
+   { { [ "${FOREIGN_OWNER:-0}" = 1 ] && [ "$3" = "$PULSAR_BT_OWNER" ]; } ||
+     { [ "${FOREIGN_TEST_DIR:-0}" = 1 ] && [ "$3" = "$BT_FIXTURE/test" ]; }; }; then
   meta=$("$REAL_STAT" "$@") || exit 1
   case "$meta" in *:*) echo "-1:${meta#*:}" ;; *) echo -1 ;; esac
 else
@@ -57,6 +60,10 @@ prop=${8#string:}
 value=${9#variant:boolean:}
 printf '%s:%s\n' "$prop" "$value" >> "$BT_FIXTURE/events"
 if [ "$prop" = "${FAIL_FLAG-}" ] && { [ -z "${FAIL_VALUE-}" ] || [ "$value" = "$FAIL_VALUE" ]; }; then
+  if [ "${FAIL_FLAG_ONCE:-0}" = 1 ]; then
+    [ ! -e "$BT_FIXTURE/flag-failed" ] || exit 0
+    touch "$BT_FIXTURE/flag-failed"
+  fi
   exit 1
 fi
 EOF
@@ -68,6 +75,10 @@ p=$PULSAR_BT_PROC/101
 case "$1" in
   stop) [ "${FAIL_STOP:-0}" = 0 ] && rm -rf "$p" ;;
   start)
+    if [ "${FAIL_START_ONCE:-0}" = 1 ] && [ ! -e "$BT_FIXTURE/start-failed" ]; then
+      touch "$BT_FIXTURE/start-failed"
+      exit 1
+    fi
     [ "${FAIL_START:-0}" = 0 ] || exit 1
     [ "${NO_SPAWN:-0}" = 0 ] || exit 0
     mkdir -p "$p"
@@ -113,8 +124,8 @@ printf 'quasar:%s\n' "$1" >> "$BT_FIXTURE/events"
 EOF
 cat > "$BT_FIXTURE/bin/sleep" <<'EOF'
 #!/bin/sh
-# Ротация логов не должна крутиться без пауз. Дать тестовому процессу время запуститься.
-case "$1" in 60|2) exec "$REAL_SLEEP" 0.15 ;; 1) exec "$REAL_SLEEP" 0.01 ;; esac
+# A real handshake below, not this delay, proves the test process reached its ready state.
+case "$1" in 60|2) exec "$REAL_SLEEP" 0.15 ;; 1|3|6|12|24|30) exec "$REAL_SLEEP" 0.01 ;; esac
 EOF
 printf '#!/bin/sh\nexit 1\n' > "$BT_FIXTURE/bin/ipcs"
 cat > "$BT_FIXTURE/bin/setsid" <<'EOF'
@@ -126,7 +137,17 @@ EOF
 cat > "$BT_FIXTURE/bin/mv" <<'EOF'
 #!/bin/sh
 if [ "${FAIL_REPLACE:-0}" = 1 ] && [ "$*" = '-f pulsar.rb pulsar' ]; then exit 1; fi
+if [ "${FAIL_STATION_REPLACE:-0}" = 1 ]; then
+  case "$*" in '-f pulsar.new pulsar'|'-f .station-replace.'*'/pulsar pulsar') exit 1 ;; esac
+fi
 exec "$REAL_MV" "$@"
+EOF
+cat > "$BT_FIXTURE/bin/cp" <<'EOF'
+#!/bin/sh
+if [ "${FAIL_STATION_COPY:-0}" = 1 ]; then
+  case "$*" in '-p pulsar.orig .station-replace.'*) exit 1 ;; esac
+fi
+exec "$REAL_CP" "$@"
 EOF
 cat > "$BT_FIXTURE/bin/df" <<'EOF'
 #!/bin/sh
@@ -159,6 +180,19 @@ reject() { if "$@"; then fail "expected failure: $*"; fi; }
 expect() { [ "$(cat "$events")" = "$1" ] || fail "expected [$1]; got [$(cat "$events")]"; }
 marker() { (umask 077; printf '%s\n' "$1" > "$PULSAR_BT_OWNER"); }
 trace() { : > "$events"; }
+await_test_ready() {
+  i=0
+  while [ ! -f "$BT_FIXTURE/test-ready" ] && [ "$i" -lt 100 ]; do
+    "$REAL_SLEEP" 0.05
+    i=$((i + 1))
+  done
+  [ -f "$BT_FIXTURE/test-ready" ] || fail 'test daemon never became ready'
+  rm "$BT_FIXTURE/test-ready"
+}
+install_fixture() {
+  cp "$1" "$PULSAR_DIR/pulsar.new"
+  mv -f "$PULSAR_DIR/pulsar.new" "$PULSAR_DIR/pulsar"
+}
 
 # SSH-адрес из окружения имеет приоритет; без него читается только одна строка файла.
 mkdir -p "$XDG_CONFIG_HOME/pulsar/stations"
@@ -315,20 +349,12 @@ chmod +x "$PULSAR_DIR/pulsar" "$PULSAR_DIR/pulsar.prev" "$BT_FIXTURE/corrected"
 loops=$(for i in 1 2 3 4 5; do printf 'new:1\nDiscoverable:false\nPairable:false\n'; done)
 trace
 touch "$PULSAR_DIR/enabled"
-reject env FAIL_START=1 sh "$here/supervise.sh"
+FAIL_START_ONCE=1 sh "$here/supervise.sh"
 expect "init:stop
 $loops
 Pairable:true
 Discoverable:true
-init:start"
-[ -f "$PULSAR_BT_OWNER" ] && cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/new" || fail 'rollback ran after failed restore'
-trace
-sh "$here/supervise.sh"
-expect "Pairable:true
-Discoverable:true
 init:start
-init:stop
-$loops
 Pairable:true
 Discoverable:true
 init:start
@@ -371,12 +397,16 @@ trace
 ctl rollback
 expect 'supervisor:start'
 [ "$PULSAR_DIR/pulsar" -ef "$PULSAR_DIR/pulsar.bt-blocked" ]
+trace
+reject env FAIL_REPLACE=1 "$PULSAR_DIR/ctl.sh" rollback
+expect 'supervisor:start'
+[ "$PULSAR_DIR/pulsar" -ef "$PULSAR_DIR/pulsar.bt-blocked" ] ||
+  fail 'failed second rollback lost the current Bluetooth guard'
 rm "$BT_FIXTURE/supervisor-running"
 trace
 sh "$here/supervise.sh"
 expect 'manual-prev:0'
-cp "$BT_FIXTURE/before-manual" "$PULSAR_DIR/pulsar.new"
-mv "$PULSAR_DIR/pulsar.new" "$PULSAR_DIR/pulsar"
+install_fixture "$BT_FIXTURE/before-manual"
 trace
 touch "$PULSAR_DIR/enabled"
 PULSAR_BT_MANAGED=0 sh "$here/supervise.sh"
@@ -411,23 +441,18 @@ rm -f "$PULSAR_DIR/enabled"
 EOF
 chmod +x "$BT_FIXTURE/replacing" "$BT_FIXTURE/stable"
 for fail_flag in '' Pairable; do
-  cp "$BT_FIXTURE/replacing" "$PULSAR_DIR/pulsar"
+  install_fixture "$BT_FIXTURE/replacing"
   cp "$BT_FIXTURE/stable" "$BT_FIXTURE/stable.new"
   trace
   touch "$PULSAR_DIR/enabled"
   if [ -n "$fail_flag" ]; then
-    reject env FAIL_FLAG="$fail_flag" sh "$here/supervise.sh"
+    FAIL_FLAG="$fail_flag" FAIL_VALUE=true FAIL_FLAG_ONCE=1 sh "$here/supervise.sh"
     expect 'init:stop
 updated
 Discoverable:false
 Pairable:false
-Pairable:true'
-    [ -f "$PULSAR_BT_OWNER" ] && [ -f "$PULSAR_DIR/enabled" ] &&
-      cmp "$BT_FIXTURE/stable" "$PULSAR_DIR/pulsar" || fail 'failed handoff lost replacement or recovery state'
-    # A newly started supervisor must also complete the handoff before launching the binary.
-    trace
-    sh "$here/supervise.sh"
-    expect 'Pairable:true
+Pairable:true
+Pairable:true
 Discoverable:false
 init:start
 stable'
@@ -444,16 +469,61 @@ stable'
   fi
 done
 
+# A fresh supervisor restores unknown lineage, retries transient failures and
+# waits for the stock player before starting the replacement.
+install_fixture "$BT_FIXTURE/stable"
+"$PULSAR_BT_INIT" stop
+marker '1 0 1'
+rm "$BT_FIXTURE/flag-failed"
+trace
+touch "$PULSAR_DIR/enabled"
+FAIL_FLAG=Pairable FAIL_FLAG_ONCE=1 sh "$here/supervise.sh"
+expect 'Pairable:true
+Pairable:true
+Discoverable:false
+init:start
+stable'
+
+# A fresh supervisor around the same executable must not reopen the stock path.
+cat > "$BT_FIXTURE/same" <<'EOF'
+#!/bin/sh
+set -eu
+if [ ! -e "$PULSAR_BT_OWNER" ]; then
+  (umask 077; printf '1 0 1\n' > "$PULSAR_BT_OWNER")
+  "$PULSAR_BT_INIT" stop
+fi
+[ ! -e "$PULSAR_BT_PROC/101" ]
+printf 'same:%s\n' "$PULSAR_BT_MANAGED" >> "$BT_FIXTURE/events"
+rm "$PULSAR_DIR/enabled"
+EOF
+chmod +x "$BT_FIXTURE/same"
+install_fixture "$BT_FIXTURE/same"
+trace
+touch "$PULSAR_DIR/enabled"
+sh "$here/supervise.sh"
+expect 'init:stop
+same:1
+Discoverable:false
+Pairable:false'
+trace
+touch "$PULSAR_DIR/enabled"
+sh "$here/supervise.sh"
+expect 'same:1
+Discoverable:false
+Pairable:false'
+ctl bt-restore
+
 # Новый supervisor со старым ctl не даёт демону захватывать проигрыватель.
 mv "$PULSAR_DIR/ctl.sh" "$BT_FIXTURE/ctl-new"
 printf '#!/bin/sh\nexit 1\n' > "$PULSAR_DIR/ctl.sh"
 chmod +x "$PULSAR_DIR/ctl.sh"
-cat > "$PULSAR_DIR/pulsar" <<'EOF'
+cat > "$BT_FIXTURE/legacy" <<'EOF'
 #!/bin/sh
 printf 'legacy-ctl:%s\n' "$PULSAR_BT_MANAGED" >> "$BT_FIXTURE/events"
 rm -f "$PULSAR_DIR/enabled"
 EOF
-chmod +x "$PULSAR_DIR/pulsar"
+chmod +x "$BT_FIXTURE/legacy"
+install_fixture "$BT_FIXTURE/legacy"
 trace
 touch "$PULSAR_DIR/enabled"
 sh "$here/supervise.sh"
@@ -465,13 +535,17 @@ t=$BT_FIXTURE/test
 cp /bin/sh "$t/pulsar"
 cat > "$PULSAR_DIR/state.conf" <<'EOF'
 zigbee_role=pulsar-coordinator
+set -eu
 printf 'test:%s\n' "$PULSAR_BT_MANAGED" >> "$BT_FIXTURE/events"
 if [ "$PULSAR_BT_MANAGED" = 1 ]; then
+  [ -d "$PULSAR_BT_PROC/101" ]
   umask 077
   printf '1 0 1\n' > "$PULSAR_BT_OWNER.part"
   mv "$PULSAR_BT_OWNER.part" "$PULSAR_BT_OWNER"
   "$PULSAR_BT_INIT" stop
+  [ ! -e "$PULSAR_BT_PROC/101" ]
 fi
+: > "$BT_FIXTURE/test-ready"
 while :; do "$REAL_SLEEP" 0.1; done
 EOF
 touch "$PULSAR_DIR/zigbee-coordinator.ybl"
@@ -479,6 +553,7 @@ trace
 touch "$PULSAR_DIR/enabled"
 reject sh "$station" lite2 test-start --bt
 sh "$station" lite2 test-start
+await_test_ready
 sh "$station" lite2 test-stop
 expect 'test:0'
 [ ! -e "$t/bt-owner" ]
@@ -498,6 +573,20 @@ reject sh "$station" lite2 test-start --bt
   fail 'Bluetooth test changed state while Yandex was running'
 rm "$BT_FIXTURE/quasar-running"
 chmod 755 "$t"
+touch "$BT_FIXTURE/pulsar-running" "$BT_FIXTURE/supervisor-running"
+msg=$(sh "$station" lite2 stop 2>&1) && fail 'stop accepted a legacy test directory'
+case "$msg" in *'legacy test directory:'*) ;; *) fail "$msg" ;; esac
+msg=$(FOREIGN_TEST_DIR=1 sh "$station" lite2 stop 2>&1) && fail 'stop accepted a foreign test directory'
+case "$msg" in *'legacy test directory:'*) fail "$msg" ;; esac
+mv "$t" "$t.real"
+ln -s "$t.real" "$t"
+msg=$(sh "$station" lite2 stop 2>&1) && fail 'stop accepted a symlink test directory'
+case "$msg" in *'legacy test directory:'*) fail "$msg" ;; esac
+rm "$t"
+mv "$t.real" "$t"
+[ -f "$BT_FIXTURE/pulsar-running" ] && [ -f "$BT_FIXTURE/supervisor-running" ] ||
+  fail 'unsafe test directory stranded production'
+rm "$BT_FIXTURE/pulsar-running" "$BT_FIXTURE/supervisor-running"
 reject sh "$station" lite2 push "$PULSAR_DIR/ctl.sh"
 reject sh "$station" lite2 test-start --bt
 reject sh "$station" lite2 test-stop
@@ -508,6 +597,8 @@ expect ''
 marker '0 1 0'
 trace
 sh "$station" lite2 test-start --bt
+await_test_ready
+[ -f "$t/bt-owner" ] && [ ! -e "$PULSAR_BT_PROC/101" ] || fail 'test did not take Bluetooth ownership'
 [ "$(grep '^zigbee_role=' "$t/state.conf")" = 'zigbee_role=off' ]
 [ ! -e "$t/zigbee-coordinator.ybl" ]
 read -r p < "$t/pid"
@@ -534,6 +625,9 @@ cat > "$BT_FIXTURE/swap" <<'EOF'
 [ "$*" = --version ]
 EOF
 cp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-swap"
+cp "$BT_FIXTURE/stable" "$BT_FIXTURE/before-prev"
+cp "$BT_FIXTURE/before-prev" "$PULSAR_DIR/pulsar.prev"
+ln -f "$PULSAR_DIR/pulsar" "$PULSAR_DIR/pulsar.bt-blocked"
 trace
 sh "$station" lite2 stop
 expect 'Discoverable:false
@@ -541,6 +635,10 @@ Pairable:false'
 rm "$PULSAR_BT_OWNER"
 touch "$BT_FIXTURE/pulsar-running" "$BT_FIXTURE/supervisor-running"
 trace
+reject env FAIL_STATION_COPY=1 sh "$station" lite2 swap "$BT_FIXTURE/swap"
+expect ''
+[ -f "$BT_FIXTURE/pulsar-running" ] && [ -f "$BT_FIXTURE/supervisor-running" ] ||
+  fail 'swap stopped the service before staging its replacement'
 reject env LATE_ACQUIRE='0 1 1' FAIL_FLAG=Discoverable FAIL_VALUE=true sh "$station" lite2 swap "$BT_FIXTURE/swap"
 expect 'init:stop
 Discoverable:false
@@ -551,16 +649,26 @@ cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-swap"
 [ -f "$PULSAR_BT_OWNER" ] && [ ! -e "$BT_FIXTURE/pulsar-running" ] && [ ! -e "$BT_FIXTURE/supervisor-running" ] ||
   fail 'swap did not stop production and retain the late ownership marker'
 trace
-sh "$station" lite2 swap "$BT_FIXTURE/swap"
+reject env FAIL_STATION_REPLACE=1 sh "$station" lite2 swap "$BT_FIXTURE/swap"
 expect 'Discoverable:false
 Pairable:false
 Pairable:false
 Discoverable:true
 init:start
 supervisor:start'
+cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-swap"
+cmp "$PULSAR_DIR/pulsar.prev" "$BT_FIXTURE/before-prev"
+[ "$PULSAR_DIR/pulsar" -ef "$PULSAR_DIR/pulsar.bt-blocked" ]
+trace
+sh "$station" lite2 swap "$BT_FIXTURE/swap"
+expect 'supervisor:start'
 cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/swap"
 touch "$BT_FIXTURE/pulsar-running"
 trace
+reject env FAIL_STATION_COPY=1 sh "$station" lite2 restore
+expect ''
+[ -f "$BT_FIXTURE/pulsar-running" ] && [ -f "$BT_FIXTURE/supervisor-running" ] ||
+  fail 'restore stopped the service before staging its replacement'
 reject env LATE_ACQUIRE='1 0 1' FAIL_FLAG=Pairable FAIL_VALUE=true sh "$station" lite2 restore
 expect 'init:stop
 Discoverable:false
@@ -570,14 +678,24 @@ cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/swap"
 [ -f "$PULSAR_BT_OWNER" ] && [ -f "$PULSAR_DIR/pulsar.orig" ] ||
   fail 'failed restore discarded the late ownership marker or original backup'
 trace
-sh "$station" lite2 restore
+reject env FAIL_STATION_REPLACE=1 sh "$station" lite2 restore
 expect 'Discoverable:false
 Pairable:false
 Pairable:true
 Discoverable:false
 init:start
 supervisor:start'
+cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/swap"
+cmp "$PULSAR_DIR/pulsar.prev" "$BT_FIXTURE/before-swap"
+! [ "$PULSAR_DIR/pulsar" -ef "$PULSAR_DIR/pulsar.bt-blocked" ] ||
+  fail 'failed restore changed the current Bluetooth guard'
+trace
+sh "$station" lite2 restore
+expect 'supervisor:start'
 cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-swap"
+cmp "$PULSAR_DIR/pulsar.prev" "$BT_FIXTURE/before-prev"
+[ "$PULSAR_DIR/pulsar" -ef "$PULSAR_DIR/pulsar.bt-blocked" ] ||
+  fail 'station restore lost the original Bluetooth guard'
 [ ! -e "$PULSAR_BT_OWNER" ] && [ ! -e "$PULSAR_DIR/pulsar.orig" ] ||
   fail 'successful restore left ownership or backup pending'
 
