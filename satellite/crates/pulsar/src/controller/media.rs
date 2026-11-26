@@ -118,7 +118,7 @@ impl Controller {
         self.player.play(Channel::Announce, vec![sound]);
     }
 
-    pub(super) fn play_bluetooth_cue(&self) {
+    pub(super) fn play_bluetooth_cue(&self, connected: bool) {
         if self.st.muted
             || self.phase != logic::Phase::Idle
             || self.arbitrating
@@ -129,8 +129,9 @@ impl Controller {
         {
             return;
         }
-        // Джингл лежит в прошивке, на части моделей его может не быть.
-        let tone = format!("{SOUNDS}common/bluetooth_turning_on_jingle.opus");
+        // Джинглы лежат в прошивке, на части моделей их может не быть.
+        let direction = if connected { "on" } else { "off" };
+        let tone = format!("{SOUNDS}common/bluetooth_turning_{direction}_jingle.opus");
         if std::path::Path::new(&tone).is_file() {
             self.player.play(Channel::Announce, vec![tone]);
         }

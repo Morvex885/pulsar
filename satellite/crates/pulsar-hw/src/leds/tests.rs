@@ -184,7 +184,7 @@ fn bluetooth_connection_flashes_after_the_pairing_light_goes_dark() {
     c.frame(0);
     c.frame(FADE_MS);
     let start = FADE_MS + 1;
-    c.apply(Cmd::BtConnected, start);
+    c.apply(Cmd::BtLink(true), start);
     assert!(!c.frame(start));
     assert_eq!(&c.px[..3], &[0, 0, 0]);
     assert_eq!(c.next_expiry(start), Some(start + BT_CONNECTED_GAP_MS));
@@ -195,9 +195,21 @@ fn bluetooth_connection_flashes_after_the_pairing_light_goes_dark() {
     ui(&mut c, UiState::TimerRing, blue + 1);
     c.frame(blue + 1);
     assert_eq!(c.active_layer(blue + 1), Layer::Voice);
-    ui(&mut c, UiState::Idle, start + BT_CONNECTED_MS);
-    c.frame(start + BT_CONNECTED_MS);
-    assert_eq!(c.active_layer(start + BT_CONNECTED_MS), Layer::Off);
+    ui(&mut c, UiState::Idle, start + BT_LINK_MS);
+    c.frame(start + BT_LINK_MS);
+    assert_eq!(c.active_layer(start + BT_LINK_MS), Layer::Off);
+}
+
+#[test]
+fn bluetooth_disconnect_fades_immediately_and_does_not_reopen_pairing() {
+    let mut c = Compositor::new(3, 0, LedLayout::Ring);
+    c.apply(Cmd::BtLink(false), 0);
+    assert!(c.frame(0));
+    assert_eq!(&c.px[..3], &[0, 0, 204]);
+    assert!(c.frame(BT_LINK_MS / 2));
+    assert!((1..204).contains(&c.px[2]));
+    assert!(!c.frame(BT_LINK_MS));
+    assert!(c.px.iter().all(|&px| px == 0));
 }
 
 #[test]

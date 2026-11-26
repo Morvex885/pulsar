@@ -582,11 +582,14 @@ impl Controller {
             .publish_text_sensor(TextSensorId::Bluetooth, &state.status);
         if self.bt_connection != state.connection {
             self.bt_connection = state.connection;
-            if state.connection.is_some() {
-                self.leds.show_bt_connected();
-                self.clock.play(pulsar_core::ClockShot::BluetoothConnected);
-                self.play_bluetooth_cue();
-            }
+            let connected = state.connection.is_some();
+            self.leds.show_bt_link(connected);
+            self.clock.play(if connected {
+                pulsar_core::ClockShot::BluetoothConnected
+            } else {
+                pulsar_core::ClockShot::BluetoothDisconnected
+            });
+            self.play_bluetooth_cue(connected);
         }
         if self.bt_starts != state.starts {
             self.bt_starts = state.starts;

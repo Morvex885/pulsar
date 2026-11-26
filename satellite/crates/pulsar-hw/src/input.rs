@@ -538,7 +538,7 @@ impl Machine {
 
     fn mute_press(&mut self, e: &RawInputEvent) {
         // Используем время ядра, а не время чтения: несколько нажатий могут прийти одним пакетом.
-        let now = Duration::new(e.sec as _, e.usec as u32 * 1000);
+        let now = Duration::new(e.sec as _, (e.usec * 1000) as _);
         let count = match self.mute_series {
             Some((last, count)) => match now.checked_sub(last) {
                 Some(gap) if gap < MUTE_PRESS_MIN => return,

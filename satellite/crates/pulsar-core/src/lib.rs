@@ -81,4 +81,5 @@ pub enum ClockShot {
     Next,
     Previous,
     BluetoothConnected,
+    BluetoothDisconnected,
 }

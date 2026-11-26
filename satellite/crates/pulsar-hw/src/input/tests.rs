@@ -40,8 +40,8 @@ fn ev(type_: u16, code: u16, value: i32) -> RawInputEvent {
 }
 
 fn timed(mut event: RawInputEvent, ms: u32) -> RawInputEvent {
-    event.sec = (ms / 1000).into();
-    event.usec = ((ms % 1000) * 1000).into();
+    event.sec = (ms / 1000) as _;
+    event.usec = ((ms % 1000) * 1000) as _;
     event
 }
 

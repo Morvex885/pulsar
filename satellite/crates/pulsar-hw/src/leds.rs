@@ -57,7 +57,7 @@ const MAX_SCALE: f32 = 0.8;
 const VOLUME_SHOW_MS: i64 = 1500;
 const BT_PAIRING_TURN_MS: i64 = 1800;
 const BT_CONNECTED_GAP_MS: i64 = 150;
-const BT_CONNECTED_MS: i64 = 650;
+const BT_LINK_MS: i64 = 650;
 /// Crossfade between layers.
 const FADE_MS: i64 = 250;
 /// Longest time step of one frame (after an idle stretch).
@@ -289,7 +289,7 @@ enum Cmd {
     UiState(UiState),
     Muted(bool),
     BtPairing(bool),
-    BtConnected,
+    BtLink(bool),
     UserLight {
         on: bool,
         color: Rgb,
@@ -340,9 +340,9 @@ impl LedsHandle {
         self.send(Cmd::BtPairing(pairing));
     }
 
-    /// Подтверждение подключения, отдельное от постоянного синего фона сопряжения.
-    pub fn show_bt_connected(&self) {
-        self.send(Cmd::BtConnected);
+    /// Одноразовый сигнал подключения или отключения телефона.
+    pub fn show_bt_link(&self, connected: bool) {
+        self.send(Cmd::BtLink(connected));
     }
 
     /// User light (HA light entity). Changes fade over transition_ms (0 = cut).
@@ -858,7 +858,7 @@ enum Layer {
     User,
     Music,
     BtPairing,
-    BtConnected,
+    BtLink,
     Off,
 }
 
@@ -943,7 +943,7 @@ struct Compositor {
     muted: bool,
     mute_known: bool,
     bt_pairing: bool,
-    bt_connected_at: Option<i64>,
+    bt_link: Option<(i64, bool)>,
     // led_show
     show_on: bool,
     show_effect: String,
@@ -1016,7 +1016,7 @@ impl Compositor {
             muted: false,
             mute_known: false,
             bt_pairing: false,
-            bt_connected_at: None,
+            bt_link: None,
             show_on: false,
             show_effect: String::new(),
             show_col: Col::default(),
@@ -1094,9 +1094,11 @@ impl Compositor {
                 }
                 self.bt_pairing = pairing;
             }
-            Cmd::BtConnected => {
-                self.bt_pairing = false;
-                self.bt_connected_at = Some(now);
+            Cmd::BtLink(connected) => {
+                if connected {
+                    self.bt_pairing = false;
+                }
+                self.bt_link = Some((now, connected));
             }
             Cmd::UserLight {
                 on,
@@ -1396,14 +1398,19 @@ impl Compositor {
                     *pixel = blue * (1.5 - distance * 4.0).clamp(0.0, 1.0);
                 }
             }
-            Layer::BtConnected => {
-                if self
-                    .bt_connected_at
-                    .is_some_and(|at| now - at >= BT_CONNECTED_GAP_MS)
-                {
-                    ring.fill(fx::rgb(0, 0, 255));
+            Layer::BtLink => {
+                if let Some((at, connected)) = self.bt_link {
+                    animated = !connected;
+                    let elapsed = now - at;
+                    if connected {
+                        if elapsed >= BT_CONNECTED_GAP_MS {
+                            ring.fill(fx::rgb(0, 0, 255));
+                        }
+                    } else {
+                        let brightness = (1.0 - elapsed as f32 / BT_LINK_MS as f32).max(0.0);
+                        ring.fill(fx::rgb(0, 0, 255) * brightness);
+                    }
                 }
-                animated = false;
             }
             Layer::Off | Layer::None => animated = false,
         }
@@ -1433,8 +1440,8 @@ impl Compositor {
             Layer::Show
         } else if (self.short_ring || self.nlogo == 0) && self.muted && !self.is_panel() {
             Layer::Mute
-        } else if !self.muted && self.state == UiState::Idle && self.bt_connected_at.is_some() {
-            Layer::BtConnected
+        } else if !self.muted && self.state == UiState::Idle && self.bt_link.is_some() {
+            Layer::BtLink
         } else if self.user_on && self.user_bri > 0.0 {
             Layer::User
         } else if self.music_shown() {
@@ -1460,11 +1467,8 @@ impl Compositor {
         if self.show_on && now >= self.show_until {
             self.show_on = false;
         }
-        if self
-            .bt_connected_at
-            .is_some_and(|at| now - at >= BT_CONNECTED_MS)
-        {
-            self.bt_connected_at = None;
+        if self.bt_link.is_some_and(|(at, _)| now - at >= BT_LINK_MS) {
+            self.bt_link = None;
         }
     }
 
@@ -1477,9 +1481,11 @@ impl Compositor {
             }
         };
         take(self.volume_until);
-        if let Some(at) = self.bt_connected_at {
-            take(at + BT_CONNECTED_GAP_MS);
-            take(at + BT_CONNECTED_MS);
+        if let Some((at, connected)) = self.bt_link {
+            if connected {
+                take(at + BT_CONNECTED_GAP_MS);
+            }
+            take(at + BT_LINK_MS);
         }
         if self.state == UiState::Error {
             take(self.state_t0 + fx::ERROR_MS);
@@ -1531,10 +1537,10 @@ impl Compositor {
         {
             fade = Some(i64::from(self.user_transition));
         }
-        // Между постоянным синим и вспышкой нужна тёмная пауза, а не плавный переход.
+        // Сигнал соединения не должен плавно смешиваться с фоном или индикацией таймера.
         if (self.layer == Layer::BtPairing && lay != Layer::BtPairing)
-            || self.layer == Layer::BtConnected
-            || lay == Layer::BtConnected
+            || self.layer == Layer::BtLink
+            || lay == Layer::BtLink
         {
             fade = Some(0);
         }

@@ -109,6 +109,7 @@ fn shot_anim(s: ClockShot) -> Anim {
         ClockShot::Next => Anim::Next,
         ClockShot::Previous => Anim::Previous,
         ClockShot::BluetoothConnected => Anim::BluetoothConnected,
+        ClockShot::BluetoothDisconnected => Anim::BluetoothDisconnected,
     }
 }
 
