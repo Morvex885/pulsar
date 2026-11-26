@@ -5,7 +5,7 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 station=$here/../../tools/station.sh
 BT_FIXTURE=$(mktemp -d /tmp/pulsar-bt-test.XXXXXX)
 cleanup() {
-  touch "$BT_FIXTURE/stop-release"
+  touch "$BT_FIXTURE/stop-release" "$BT_FIXTURE/restore-release"
   touch "$BT_FIXTURE/register-release" "$BT_FIXTURE/exec-release"
   p=${test_pid_for_cleanup:-}
   if [ -s "$BT_FIXTURE/test/pid" ]; then read -r p < "$BT_FIXTURE/test/pid"; fi
@@ -75,6 +75,10 @@ case "$4" in --dest=:1.41|--dest=:1.42) ;; *) exit 2 ;; esac
 [ "$*" = "--system --print-reply --reply-timeout=2000 $4 /org/bluez/hci0 org.freedesktop.DBus.Properties.Set string:org.bluez.Adapter1 $8 $9" ]
 prop=${8#string:}
 value=${9#variant:boolean:}
+if [ -n "${CHECK_REGISTERED_STOP_PID:-}" ] &&
+   awk '{ sub(/^.*\) /, ""); exit ($1 == "Z" || $1 == "X") }' "/proc/$CHECK_REGISTERED_STOP_PID/stat" 2>/dev/null; then
+  exit 1
+fi
 printf '%s:%s\n' "$prop" "$value" >> "$BT_FIXTURE/events"
 if [ "${HOLD_RESTORE:-0}" = 1 ] && [ "$prop" = Pairable ]; then
   : > "$BT_FIXTURE/restore-held"
@@ -198,6 +202,7 @@ cat > "$BT_FIXTURE/bin/env" <<'EOF'
 #!/bin/sh
 if [ "${HOLD_TEST_EXEC:-0}" = 1 ] && [ "${1:-}" = PULSAR_PORT_OFFSET=10000 ]; then
   [ ! -e "/proc/$$/fd/9" ] || exit 1
+  [ ! -e "/proc/$$/fd/8" ] && flock -n "${PULSAR_BT_OWNER%/*}/.pulsar-bt-lock" true || exit 1
   touch "$BT_FIXTURE/exec-held"
   i=0
   while [ ! -e "$BT_FIXTURE/exec-release" ] && [ "$i" -lt 500 ]; do
@@ -209,6 +214,11 @@ exec "$REAL_ENV" "$@"
 EOF
 cat > "$BT_FIXTURE/bin/ipcs" <<'EOF'
 #!/bin/sh
+if [ "$1" = -m ] && [ -n "${CHECK_DMIX_AFTER_PID:-}" ]; then
+  if [ "$("$REAL_READLINK" "/proc/$CHECK_DMIX_AFTER_PID/exe" 2>/dev/null)" != "$BT_FIXTURE/test/pulsar" ]; then
+    echo 'dmix:clear' >> "$BT_FIXTURE/events"
+  fi
+fi
 if [ "${HOLD_TEST_STOP:-0}" = 1 ]; then
   touch "$BT_FIXTURE/stop-held"
   i=0
@@ -409,10 +419,32 @@ ctl bt-restore &
 second=$!
 : > "$BT_FIXTURE/restore-release"
 wait "$first"
-wait "$second"
+wait "$second" || ctl bt-restore
 expect 'Pairable:false
 Discoverable:true'
 [ ! -e "$PULSAR_BT_OWNER" ] || fail 'serialized restore left its snapshot'
+trace
+# Зарегистрированный ребёнок ещё не виден в pidof, но его нужно остановить до скрытия адаптера.
+(
+  "$REAL_SLEEP" 30 &
+  p=$!
+  trap 'kill "$p" 2>/dev/null || :' EXIT
+  started=$(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$p/stat")
+  (umask 077; printf '%s %s\n' "$p" "$((started + 1))" > "$PULSAR_DIR/.pulsar-daemon")
+  ctl reload --stop
+  kill -0 "$p" 2>/dev/null || fail 'stop signaled a reused production PID'
+  [ ! -e "$PULSAR_DIR/.pulsar-daemon" ] || fail 'stop left stale production registration'
+  expect ''
+  (umask 077; printf '%s %s\n' "$p" "$started" > "$PULSAR_DIR/.pulsar-daemon")
+  marker '0 1 0'
+  CHECK_REGISTERED_STOP_PID="$p" ctl reload --stop
+  [ ! -e "$PULSAR_DIR/.pulsar-daemon" ] || fail 'stop left production registration after child exit'
+  if wait "$p" 2>/dev/null; then fail 'registered production child was not stopped'; fi
+  trap - EXIT
+  expect 'Discoverable:false
+Pairable:false'
+  rm "$PULSAR_BT_OWNER"
+)
 trace
 # Пустой маркер без снимка не требует мутаций, подменённый маркер не читаем.
 ln -s "$events" "$PULSAR_BT_OWNER.pending"
@@ -460,7 +492,7 @@ rm "$BT_FIXTURE/bluez-owner" "$PULSAR_BT_OWNER"
 trace
 
 # Обычный рестарт не применяет снимок. Disable возвращает только исходные флаги/процесс.
-marker '0 1 0'
+marker 'v2 0 1 0'
 touch "$PULSAR_DIR/enabled" "$BT_FIXTURE/pulsar-running" "$BT_FIXTURE/supervisor-running"
 ctl restart
 expect ''
@@ -563,7 +595,7 @@ if [ "${1-}" = --version ]; then
   exit 0
 fi
 if [ ! -e "$PULSAR_BT_OWNER" ]; then
-  (umask 077; printf '1 1 1\n' > "$PULSAR_BT_OWNER") || exit 2
+  (umask 077; printf 'v2 1 1 1\n' > "$PULSAR_BT_OWNER") || exit 2
   "$PULSAR_BT_INIT" stop || exit 2
 fi
 printf 'new:%s\n' "$PULSAR_BT_MANAGED" >> "$BT_FIXTURE/events"
@@ -579,7 +611,8 @@ else
   touch "$BT_FIXTURE/prev-restarted"
 fi
 touch "$BT_FIXTURE/pulsar-running" "$BT_FIXTURE/supervisor-running"
-"$PULSAR_DIR/ctl.sh" restart
+"$PULSAR_DIR/ctl.sh" restart </dev/null >/dev/null 2>&1 &
+wait "$!"
 EOF
 cat > "$BT_FIXTURE/corrected" <<'EOF'
 #!/bin/sh
@@ -675,7 +708,7 @@ cat > "$BT_FIXTURE/replacing" <<'EOF'
 #!/bin/sh
 if [ "${1-}" = --version ]; then echo pulsar-bt-managed/1; exit 0; fi
 [ "$PULSAR_BT_MANAGED" = 1 ] || exit 2
-(umask 077; printf '1 0 1\n' > "$PULSAR_BT_OWNER") || exit 2
+(umask 077; printf 'v2 1 0 1\n' > "$PULSAR_BT_OWNER") || exit 2
 "$PULSAR_BT_INIT" stop || exit 2
 mv "$BT_FIXTURE/stable.new" "$PULSAR_DIR/pulsar" || exit 2
 printf 'updated\n' >> "$BT_FIXTURE/events"
@@ -745,7 +778,7 @@ cat > "$BT_FIXTURE/same" <<'EOF'
 set -eu
 if [ "${1-}" = --version ]; then echo pulsar-bt-managed/1; exit 0; fi
 if [ ! -e "$PULSAR_BT_OWNER" ]; then
-  (umask 077; printf '1 0 1\n' > "$PULSAR_BT_OWNER")
+  (umask 077; printf 'v2 1 0 1\n' > "$PULSAR_BT_OWNER")
   "$PULSAR_BT_INIT" stop
 fi
 [ ! -e "$PULSAR_BT_PROC/101" ]
@@ -854,7 +887,7 @@ printf 'test:%s\n' "$PULSAR_BT_MANAGED" >> "$BT_FIXTURE/events"
 if [ "$PULSAR_BT_MANAGED" = 1 ]; then
   [ -d "$PULSAR_BT_PROC/101" ]
   umask 077
-  printf '1 0 1\n' > "$PULSAR_BT_OWNER.part"
+  printf 'v2 1 0 1\n' > "$PULSAR_BT_OWNER.part"
   mv "$PULSAR_BT_OWNER.part" "$PULSAR_BT_OWNER"
   "$PULSAR_BT_INIT" stop
   [ ! -e "$PULSAR_BT_PROC/101" ]
@@ -876,7 +909,20 @@ grep -qx 'zigbee_role=pulsar-coordinator' "$t/state.conf"
 rm "$t/zigbee-coordinator.ybl"
 cp "$PULSAR_DIR/ctl.sh" "$t/ctl.sh"
 chmod +x "$t/ctl.sh"
-rm "$PULSAR_DIR/enabled" "$t/state.conf"
+rm "$t/state.conf"
+# Старый тестовый ctl не сможет безопасно восстановить новый снимок.
+mv "$t/ctl.sh" "$BT_FIXTURE/test-ctl-with-owner-lock"
+cat > "$t/ctl.sh" <<'EOF'
+#!/bin/sh
+[ "$*" = 'bt-restore --owner-lock' ] || exit 1
+printf '%s\n' pulsar-bt-owner-lock/1
+EOF
+chmod +x "$t/ctl.sh"
+msg=$(sh "$station" lite2 test-start --bt 2>&1) && fail 'accepted obsolete test ownership protocol'
+case "$msg" in *'needs a separately pushed satellite/deploy/ctl.sh'*) ;; *) fail "$msg" ;; esac
+[ ! -L "$t/bt-reserved" ] && [ ! -e "$t/state.conf" ] || fail 'obsolete test ctl acquired a reservation'
+mv "$BT_FIXTURE/test-ctl-with-owner-lock" "$t/ctl.sh"
+rm "$PULSAR_DIR/enabled"
 trace
 reject sh "$station" lite2 test-start --bt
 [ ! -e "$t/state.conf" ] && [ ! -e "$t/bt-owner" ] && [ ! -e "$t/pid" ] ||
@@ -931,7 +977,22 @@ reject env START_PROD_AFTER_TEST_RESERVES=1 sh "$station" lite2 test-start --bt
   fail 'test did not yield to a supervisor already starting'
 rm "$BT_FIXTURE/supervisor-running"
 expect ''
-# Один test-stop держит резерв даже после восстановления, пока идёт завершение.
+# Прямой производственный возврат не может пересечь публикацию резерва.
+rm -f "$BT_FIXTURE/restore-held" "$BT_FIXTURE/restore-release"
+marker '0 1 0'
+HOLD_RESTORE=1 ctl bt-restore &
+restoring=$!
+await_file "$BT_FIXTURE/restore-held"
+msg=$(sh "$station" lite2 test-start --bt 2>&1) && fail 'test-start allowed during production restore'
+case "$msg" in *'installed Bluetooth ownership lock unavailable'*) ;; *) fail "$msg" ;; esac
+[ ! -L "$t/bt-reserved" ] && [ ! -e "$t/test-launch" ] && [ ! -e "$t/state.conf" ] ||
+  fail 'test-start published state during production restore'
+touch "$BT_FIXTURE/restore-release"
+wait "$restoring"
+expect 'Pairable:false
+Discoverable:true'
+trace
+# Один test-stop держит резерв до завершения очистки.
 # Смерть управляющего shell не оставляет lock навсегда и не отпускает его,
 # пока дочерняя команда ещё выполняется.
 ln -s dead "$t/bt-reserved"
@@ -994,11 +1055,13 @@ reject sh "$station" lite2 start
   fail 'test-stop changed the reservation while the child could still exec'
 touch "$BT_FIXTURE/exec-release"
 await_test_ready
-sh "$station" lite2 test-stop
+read -r p < "$t/pid"
+CHECK_DMIX_AFTER_PID="$p" sh "$station" lite2 test-stop
 [ ! -L "$t/bt-reserved" ] && [ ! -L "$t/test-launch" ] && [ ! -e "$t/bt-owner" ] ||
   fail 'test-stop did not finish confirmed launch recovery'
 expect 'test:1
 init:stop
+dmix:clear
 Pairable:true
 Discoverable:false
 init:start'
@@ -1099,7 +1162,7 @@ reject env FAIL_STATION_COPY=1 sh "$station" lite2 swap "$BT_FIXTURE/swap"
 expect ''
 [ -f "$BT_FIXTURE/pulsar-running" ] && [ -f "$BT_FIXTURE/supervisor-running" ] ||
   fail 'swap stopped the service before staging its replacement'
-reject env LATE_ACQUIRE='0 1 1' FAIL_FLAG=Discoverable FAIL_VALUE=true sh "$station" lite2 swap "$BT_FIXTURE/swap"
+reject env LATE_ACQUIRE='v2 0 1 1' FAIL_FLAG=Discoverable FAIL_VALUE=true sh "$station" lite2 swap "$BT_FIXTURE/swap"
 expect 'init:stop
 Discoverable:false
 Pairable:false
@@ -1129,7 +1192,7 @@ reject env FAIL_STATION_COPY=1 sh "$station" lite2 restore
 expect ''
 [ -f "$BT_FIXTURE/pulsar-running" ] && [ -f "$BT_FIXTURE/supervisor-running" ] ||
   fail 'restore stopped the service before staging its replacement'
-reject env LATE_ACQUIRE='1 0 1' FAIL_FLAG=Pairable FAIL_VALUE=true sh "$station" lite2 restore
+reject env LATE_ACQUIRE='v2 1 0 1' FAIL_FLAG=Pairable FAIL_VALUE=true sh "$station" lite2 restore
 expect 'init:stop
 Discoverable:false
 Pairable:false
@@ -1351,7 +1414,7 @@ case "$exe" in "$PULSAR_DIR"/.pulsar-bt-executable.*/pulsar) ;; *) exit 2 ;; esa
 case " $("$REAL_PIDOF" pulsar) " in *" $FIXTURE_PINNED_PID "*) ;; *) exit 2 ;; esac
 if [ ! -e "$PULSAR_BT_OWNER" ]; then
   # Без подмены оставляем снимок для следующего запуска.
-  (umask 077; printf '1 0 1\n' > "$PULSAR_BT_OWNER")
+  (umask 077; printf 'v2 1 0 1\n' > "$PULSAR_BT_OWNER")
   "$PULSAR_BT_INIT" stop
   echo pinned:first >> "$BT_FIXTURE/events"
   if [ "$exe" -ef "$PULSAR_INSTALLED_BINARY" ]; then rm "$PULSAR_DIR/enabled"; fi

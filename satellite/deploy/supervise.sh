@@ -125,13 +125,14 @@ restore_bt() {
       say "Bluetooth restore failed; not starting another binary or the Yandex stack"
       return 1
     fi
-    # Старый ctl мог вернуть успех, не зная о новом маркере передачи.
-    if bt_exists "$restore_owner.pending" &&
-      { [ "$restore_owner" != "$bt_legacy" ] ||
-        [ "$(stat -c '%u' "$restore_owner.pending" 2>/dev/null)" = "$(id -u)" ]; }; then
-      say "Bluetooth restore left the pending marker in place"
-      return 1
-    fi
+    # Старый ctl мог вернуть успех, не зная о снимке или маркере передачи.
+    for marker in "$restore_owner" "$restore_owner.pending"; do
+      if bt_exists "$marker" &&
+        [ "$(stat -c '%u' "$marker" 2>/dev/null)" = "$(id -u)" ]; then
+        say "Bluetooth restore left an ownership marker in place"
+        return 1
+      fi
+    done
   fi
   return 0
 }
@@ -191,6 +192,36 @@ clear_dmix() {
   [ -z "$removed" ] || echo "=== alsa: removed stale dmix lock (${removed# }) $(date)" >> "$LOG"
 }
 
+# Запись находится в доверенном $D; starttime отличает ребёнка от повторно
+# использованного PID. Ребёнок не проходит до exec без этой записи.
+daemon_record=$D/.pulsar-daemon
+launch_lock=$D/.pulsar-launch-lock
+
+process_start() (
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  IFS= read -r ps_stat < "/proc/$1/stat" || return 1
+  set -- ${ps_stat##*) }
+  [ "$1" != Z ] && [ "$1" != X ] && [ -n "${20-}" ] && printf '%s\n' "${20}"
+)
+
+registered_daemon() {
+  [ -f "$daemon_record" ] &&
+    IFS=' ' read -r daemon_pid daemon_start daemon_extra < "$daemon_record" &&
+    [ -z "$daemon_extra" ] && [ -n "$daemon_start" ] &&
+    [ "$(process_start "$daemon_pid" 2>/dev/null)" = "$daemon_start" ]
+}
+
+launch_daemon() {
+  # Сбросить унаследованную блокировку родителя и дождаться регистрации.
+  exec 7>&-
+  exec 7>>"$launch_lock" && flock -x 7 || exit 1
+  IFS=' ' read -r child_pid _ < /proc/self/stat || exit 1
+  registered_daemon && [ "$daemon_pid" = "$child_pid" ] || exit 1
+  exec 7>&-
+  PULSAR_BT_MANAGED=$bt_managed PULSAR_BT_OWNER=$bt_owner PULSAR_INSTALLED_BINARY=$installed_binary \
+    exec "$launch" "$D/state.conf"
+}
+
 ( while sleep 60; do rotate; done ) &
 ROT=$!
 # busybox ash does not run an EXIT trap on SIGTERM: clean up in the signal traps themselves.
@@ -231,7 +262,13 @@ while [ -f "$D/enabled" ]; do
     if [ "$BIN" -ef "$bt_next" ]; then mv -f "$bt_next" "$bt_blocked"; fi
   else
     rm -f "$bt_blocked" "$bt_next"
-    if [ "$bt_allowed" = 1 ] && "$D/ctl.sh" bt-restore --check >/dev/null 2>&1; then
+    if [ "$bt_allowed" = 1 ] &&
+      bt_lock_protocol=$("$D/ctl.sh" bt-restore --owner-lock 2>/dev/null) &&
+      [ "$bt_lock_protocol" = pulsar-bt-owner-lock/2 ]; then
+      # Шестибайтный снимок умеет возвращать ctl без блокировки.
+      if [ "$(stat -c '%s' "$bt_owner" 2>/dev/null)" = 6 ]; then
+        wait_restore_bt || exit 0
+      fi
       if ! bt_pinned_now; then
         wait_restore_bt || exit 0
         remember_bt_executable || :
@@ -258,15 +295,40 @@ while [ -f "$D/enabled" ]; do
     # Появился другой бинарь — он получает собственную попытку отката.
     if [ "$swapped" = 1 ]; then swapped=0 fails=0 backoff=$BACKOFF_MIN; fi
   fi
-  [ "$inode" = "$(stat -Lc '%d:%i' "$BIN")" ] || continue
-  if [ "$bt_managed" = 1 ] && ! bt_pinned_now; then continue; fi
+  (umask 077; : >> "$launch_lock") || exit 1
+  exec 7>>"$launch_lock" || exit 1
+  if ! flock -xn 7; then
+    exec 7>&-
+    sleep 1
+    continue
+  fi
+  [ -f "$D/enabled" ] || exit 0
+  if [ "$inode" != "$(stat -Lc '%d:%i' "$BIN")" ] ||
+    { [ "$bt_managed" = 1 ] && ! bt_pinned_now; }; then
+    exec 7>&-
+    continue
+  fi
+  bt_test_clear || exit 1
+  if registered_daemon; then
+    say "pulsar is still running (pid $daemon_pid); not starting another instance"
+    exit 1
+  fi
   last_inode=$inode
   start_at=$(date)
   t0=$(uptime_s)
-  bt_test_clear || exit 1
   echo "=== start $start_at" >> "$LOG"
-  PULSAR_BT_MANAGED=$bt_managed PULSAR_BT_OWNER=$bt_owner PULSAR_INSTALLED_BINARY=$installed_binary \
-    "$launch" "$D/state.conf" >> "$LOG" 2>&1
+  launch_daemon >> "$LOG" 2>&1 &
+  child=$!
+  if ! child_start=$(process_start "$child" 2>/dev/null) ||
+    ! (umask 077; printf '%s %s\n' "$child" "$child_start" > "$daemon_record.tmp" &&
+      mv -f "$daemon_record.tmp" "$daemon_record"); then
+    kill -KILL "$child" 2>/dev/null
+    wait "$child"
+    say 'could not register pulsar child'
+    exit 1
+  fi
+  exec 7>&-
+  wait "$child"
   rc=$?
   up=$(($(uptime_s) - t0))
   echo "=== exit $rc after ${up}s $(date)" >> "$LOG"
@@ -274,7 +336,6 @@ while [ -f "$D/enabled" ]; do
     "$D/ctl.sh" bt-restore --hide >> "$LOG" 2>&1 ||
       say "Bluetooth pairing flags could not be closed after daemon exit"
   fi
-
   if [ $up -ge $LONG ]; then
     fails=0 swapped=0 backoff=$BACKOFF_MIN
     [ $rc -eq 0 ] && sleep 1 || sleep $backoff

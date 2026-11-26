@@ -12,6 +12,7 @@ const INIT: &str = "/etc/init.d/S53bluealsa-aplay";
 const PLAYER: &str = "/usr/bin/bluealsa-aplay";
 const LEGACY_MARKER: &str = "/tmp/pulsar-bt-owner";
 const TEST_MARKER: &str = "/tmp/pulsar-test/bt-owner";
+const LOCK_PROTOCOL: &[u8] = b"pulsar-bt-owner-lock/2\n";
 
 fn trusted_dir() -> PathBuf {
     std::env::var_os("PULSAR_DIR")
@@ -31,6 +32,11 @@ pub(crate) enum Ownership {
     Owned,
 }
 
+enum Snapshot {
+    Legacy,
+    LockAware,
+}
+
 impl Stock {
     pub fn load() -> io::Result<Option<(Self, Ownership)>> {
         if std::env::var("PULSAR_BT_MANAGED").as_deref() != Ok("1") {
@@ -41,26 +47,32 @@ impl Stock {
         };
         let marker = Arc::from(PathBuf::from(path));
         let stock = Self { marker };
-        // Старый production ctl.sh блокирует только $D; у отдельного
-        // тестового ctl.sh блокировка уже была рядом с тестовым снимком.
-        let path = stock.marker.as_ref();
-        let trusted = trusted_dir();
-        if path != Path::new(LEGACY_MARKER)
-            && path != Path::new(TEST_MARKER)
-            && path.with_file_name(".pulsar-bt-lock") != trusted.join(".pulsar-bt-lock")
-            && !std::process::Command::new(trusted.join("ctl.sh"))
-                .args(["bt-restore", "--owner-lock"])
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .output()
-                .is_ok_and(|out| out.status.success() && out.stdout == b"pulsar-bt-owner-lock/1\n")
-        {
-            return Err(io::Error::other(
-                "ctl.sh cannot lock the custom Bluetooth owner",
-            ));
-        }
+        stock.require_ctl(&stock.ctl_path())?;
         let state = stock.ownership()?;
         Ok(Some((stock, state)))
+    }
+
+    fn ctl_path(&self) -> PathBuf {
+        if self.marker.as_ref() == Path::new(TEST_MARKER) {
+            self.marker.with_file_name("ctl.sh")
+        } else {
+            trusted_dir().join("ctl.sh")
+        }
+    }
+
+    fn require_ctl(&self, ctl: &Path) -> io::Result<()> {
+        let out = std::process::Command::new(ctl)
+            .args(["bt-restore", "--owner-lock"])
+            .env("PULSAR_BT_OWNER", &*self.marker)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()?;
+        if !out.status.success() || out.stdout != LOCK_PROTOCOL {
+            return Err(io::Error::other(
+                "ctl.sh does not support Bluetooth owner locking",
+            ));
+        }
+        Ok(())
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -94,26 +106,37 @@ impl Stock {
         let stock = self.clone();
         let (lock, exe, running) = tokio::task::spawn_blocking(move || {
             let lock = stock.lock()?;
+            stock.require_ctl(&stock.ctl_path())?;
             let (exe, running) = Self::player_status()?;
             stock.record(flags, running)?;
             Ok::<_, io::Error>((lock, exe, running))
         })
         .await??;
-        self.confirm_take(Self::stop_if_running(&lock, exe, running))
+        self.confirm_take(&lock, Self::stop_if_running(&lock, exe, running))
             .await
     }
 
-    async fn confirm_take(&self, stopped: impl Future<Output = io::Result<()>>) -> io::Result<()> {
+    async fn confirm_take(
+        &self,
+        lock: &fs::File,
+        stopped: impl Future<Output = io::Result<()>>,
+    ) -> io::Result<()> {
         stopped.await?;
         let pending = self.pending_marker();
+        let lock = lock.try_clone()?;
         // Снимок без соседнего маркера означает подтверждённый захват.
-        tokio::task::spawn_blocking(move || fs::remove_file(pending)).await?
+        tokio::task::spawn_blocking(move || {
+            let _lock = lock;
+            fs::remove_file(pending)
+        })
+        .await?
     }
 
     pub async fn keep_stopped(&self) -> io::Result<()> {
         let stock = self.clone();
         let (lock, exe, running) = tokio::task::spawn_blocking(move || {
             let lock = stock.lock()?;
+            stock.require_ctl(&stock.ctl_path())?;
             if stock.ownership()? != Ownership::Owned {
                 return Err(io::Error::other("Bluetooth ownership no longer confirmed"));
             }
@@ -147,15 +170,13 @@ impl Stock {
     }
 
     pub async fn restore(&self) -> io::Result<()> {
-        let ctl = if self.marker.as_ref() == Path::new(TEST_MARKER) {
-            self.marker.with_file_name("ctl.sh")
-        } else {
-            trusted_dir().join("ctl.sh")
-        };
-        self.restore_with(&ctl).await
+        self.restore_with(&self.ctl_path()).await
     }
 
     async fn restore_with(&self, ctl: &Path) -> io::Result<()> {
+        let stock = self.clone();
+        let ctl_for_probe = ctl.to_owned();
+        tokio::task::spawn_blocking(move || stock.require_ctl(&ctl_for_probe)).await??;
         let mut cmd = Command::new(ctl);
         cmd.args(["bt-restore", "--self"])
             .env("PULSAR_BT_OWNER", &*self.marker)
@@ -169,13 +190,8 @@ impl Stock {
         let stock = self.clone();
         tokio::task::spawn_blocking(move || {
             let _lock = stock.lock()?;
-            if stock.snapshot_exists()? {
-                return Err(io::Error::other("stock restore left ownership snapshot"));
-            }
-            // Старый ctl.sh восстанавливает шестибайтный снимок, но не знает о .pending.
-            let pending = stock.pending_marker();
-            if private_marker(&pending, 0)?.is_some() {
-                fs::remove_file(pending)?;
+            if stock.ownership()? != Ownership::Vacant {
+                return Err(io::Error::other("stock restore left ownership markers"));
             }
             Ok(())
         })
@@ -189,30 +205,38 @@ impl Stock {
     }
 
     fn ownership(&self) -> io::Result<Ownership> {
-        let snapshot = self.snapshot_exists()?;
-        if private_marker(&self.pending_marker(), 0)?.is_some() {
-            Ok(Ownership::PendingRestore)
-        } else if snapshot {
-            Ok(Ownership::Owned)
-        } else {
-            Ok(Ownership::Vacant)
+        let snapshot = self.snapshot()?;
+        if private_marker(&self.pending_marker(), &[0])?.is_some() {
+            return Ok(Ownership::PendingRestore);
         }
+        // Старый ctl не должен прочитать снимок, пока новый init stop ещё работает.
+        Ok(match snapshot {
+            Some(Snapshot::Legacy) => Ownership::PendingRestore,
+            Some(Snapshot::LockAware) => Ownership::Owned,
+            None => Ownership::Vacant,
+        })
     }
 
-    fn snapshot_exists(&self) -> io::Result<bool> {
-        let Some(mut file) = private_marker(&self.marker, 6)? else {
-            return Ok(false);
+    fn snapshot(&self) -> io::Result<Option<Snapshot>> {
+        let Some(mut file) = private_marker(&self.marker, &[6, 9])? else {
+            return Ok(None);
         };
-        let mut bytes = [0; 6];
-        file.read_exact(&mut bytes)?;
+        let mut bytes = [0; 9];
+        file.read_exact(&mut bytes[..6])?;
+        let (format, flags) = if bytes.starts_with(b"v2 ") {
+            file.read_exact(&mut bytes[6..])?;
+            (Snapshot::LockAware, &bytes[3..])
+        } else {
+            (Snapshot::Legacy, &bytes[..6])
+        };
         if !matches!(
-            bytes,
+            flags,
             [b'0' | b'1', b' ', b'0' | b'1', b' ', b'0' | b'1', b'\n']
         ) || file.read(&mut [0])? != 0
         {
             return Err(io::Error::other("invalid Bluetooth owner snapshot"));
         }
-        Ok(true)
+        Ok(Some(format))
     }
 
     fn record(&self, [pairable, discoverable]: [bool; 2], running: bool) -> io::Result<()> {
@@ -243,7 +267,7 @@ impl Stock {
             .open(&tmp)?;
         let result = writeln!(
             file,
-            "{} {} {}",
+            "v2 {} {} {}",
             u8::from(pairable),
             u8::from(discoverable),
             u8::from(running)
@@ -278,7 +302,7 @@ impl Stock {
     }
 }
 
-fn private_marker(path: &Path, size: u64) -> io::Result<Option<fs::File>> {
+fn private_marker(path: &Path, sizes: &[u64]) -> io::Result<Option<fs::File>> {
     let file = match fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -292,7 +316,7 @@ fn private_marker(path: &Path, size: u64) -> io::Result<Option<fs::File>> {
     if !meta.is_file()
         || meta.uid() != fs::metadata("/proc/self")?.uid()
         || meta.mode() & 0o7777 != 0o600
-        || meta.len() != size
+        || !sizes.contains(&meta.len())
     {
         return Err(io::Error::other("invalid Bluetooth owner marker"));
     }
@@ -493,10 +517,12 @@ mod tests {
         .unwrap();
         fs::write(
             &ctl,
-            "#!/bin/sh\n[ \"$*\" = 'bt-restore --self' ] || exit 2\n\
-             [ \"$(cat \"$PULSAR_BT_OWNER\")\" = '1 0 1' ] || exit 2\n\
+            "#!/bin/sh\n\
+             if [ \"$*\" = 'bt-restore --owner-lock' ]; then printf 'pulsar-bt-owner-lock/2\\n'; exit; fi\n\
+             [ \"$*\" = 'bt-restore --self' ] || exit 2\n\
+             [ \"$(cat \"$PULSAR_BT_OWNER\")\" = 'v2 1 0 1' ] || exit 2\n\
              [ -f \"${0%/*}/adapter\" ] || exit 1\n\
-             touch \"${0%/*}/player\" && rm \"$PULSAR_BT_OWNER\"\n",
+             touch \"${0%/*}/player\" && rm \"$PULSAR_BT_OWNER\" \"$PULSAR_BT_OWNER.pending\"\n",
         )
         .unwrap();
         for script in [&init, &ctl] {
@@ -507,9 +533,10 @@ mod tests {
         let lock = stock.lock().unwrap();
         assert!(
             stock
-                .confirm_take(stop_player(&lock, init.to_str().unwrap(), async {
-                    Ok(player.exists())
-                }))
+                .confirm_take(
+                    &lock,
+                    stop_player(&lock, init.to_str().unwrap(), async { Ok(player.exists()) })
+                )
                 .await
                 .is_err()
         );
@@ -517,7 +544,7 @@ mod tests {
         assert!(!player.exists());
         assert!(stock.restore_with(&ctl).await.is_err());
         assert_eq!(stock.ownership().unwrap(), Ownership::PendingRestore);
-        assert!(stock.snapshot_exists().unwrap());
+        assert!(stock.snapshot().unwrap().is_some());
 
         fs::write(dir.join("adapter"), "").unwrap();
         assert!(stock.restore_with(&ctl).await.is_ok());
@@ -536,8 +563,10 @@ mod tests {
         assert_eq!(stock.ownership().unwrap(), Ownership::Vacant);
         stock.record([false, true], false).unwrap();
         assert_eq!(stock.ownership().unwrap(), Ownership::PendingRestore);
-        assert_eq!(fs::read(&stock.marker).unwrap(), b"0 1 0\n");
-        stock.confirm_take(async { Ok(()) }).await.unwrap();
+        assert_eq!(fs::read(&stock.marker).unwrap(), b"v2 0 1 0\n");
+        let lock = stock.lock().unwrap();
+        stock.confirm_take(&lock, async { Ok(()) }).await.unwrap();
+        drop(lock);
         assert_eq!(stock.ownership().unwrap(), Ownership::Owned);
 
         // Отдельный маркер переживает удаление снимка только во время отката.
@@ -577,7 +606,7 @@ mod tests {
         fs::set_permissions(snapshot, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(stock.record([false; 2], false).is_err());
         fs::set_permissions(snapshot, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(stock.ownership().unwrap(), Ownership::Owned);
+        assert_eq!(stock.ownership().unwrap(), Ownership::PendingRestore);
         assert!(stock.record([false; 2], false).is_err());
         assert_eq!(fs::read(snapshot).unwrap(), b"1 0 1\n");
         let target = dir.join("target");

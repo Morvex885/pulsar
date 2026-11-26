@@ -250,7 +250,7 @@ impl Pcm {
         self.raw.writei(buf, frames, self.frame_bytes)
     }
 
-    /// `buf` contains samples in S16LE representation.
+    /// `buf` содержит сэмплы формата S16LE.
     pub fn writei_s16(&mut self, buf: &[i16], frames: usize) -> Result<usize, i32> {
         self.raw.writei_s16(buf, frames, self.frame_bytes)
     }

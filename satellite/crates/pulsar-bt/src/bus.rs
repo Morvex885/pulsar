@@ -558,6 +558,21 @@ impl Bus {
         self.apply(signal)
     }
 
+    pub(super) fn queued(&self) -> usize {
+        self.signals.len() + usize::from(self.deferred.is_some())
+    }
+
+    pub(super) fn try_next(&mut self) -> Option<zbus::Result<Option<(String, Instant)>>> {
+        if self.signals.is_closed() {
+            return Some(Err(zbus::Error::InvalidReply));
+        }
+        let signal = self
+            .deferred
+            .take()
+            .or_else(|| self.signals.try_recv().ok())?;
+        Some(self.apply(signal))
+    }
+
     fn apply(&mut self, signal: Signal) -> zbus::Result<Option<(String, Instant)>> {
         let seq = signal.message.recv_position();
         match signal.kind {

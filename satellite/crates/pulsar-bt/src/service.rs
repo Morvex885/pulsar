@@ -501,7 +501,7 @@ impl Service {
         let mut armed = None;
         loop {
             if self.reconcile() {
-                self.avr(BtAction::Pause).await;
+                self.pause_if_still_displaced().await;
             }
             let deadline = [Some(self.retry_at), self.policy.deadline, self.pcm_retry_at]
                 .into_iter()
@@ -532,16 +532,8 @@ impl Service {
                     (old, result, bus.flags())
                 }, if self.bus.is_some() => {
                     let (old, result, flags) = res;
-                    match result {
-                        Ok(pair) if flags.is_some() => {
-                            if let Some((path, received)) = pair {
-                                self.policy.observe_pair(path, received);
-                            }
-                            if flags != old && flags != Some([self.visibility_open(); 2]) {
-                                self.retry_at = Instant::now();
-                            }
-                        }
-                        _ => self.lost_bus().await,
+                    if !result.is_ok_and(|pair| self.record_signal(old, flags, pair)) {
+                        self.lost_bus().await;
                     }
                 },
                 ev = pcm_rx.recv() => match ev {
@@ -553,6 +545,49 @@ impl Service {
         self.shared.pcm.signal_stop();
         if let Some(probe) = &mut self.probe {
             probe.wait_finished().await;
+        }
+    }
+
+    fn record_signal(
+        &mut self,
+        old: Option<[bool; 2]>,
+        flags: Option<[bool; 2]>,
+        pair: Option<(String, Instant)>,
+    ) -> bool {
+        if flags.is_none() {
+            return false;
+        }
+        if let Some((path, received)) = pair {
+            self.policy.observe_pair(path, received);
+        }
+        if flags != old && flags != Some([self.visibility_open(); 2]) {
+            self.retry_at = Instant::now();
+        }
+        true
+    }
+
+    async fn pause_if_still_displaced(&mut self) {
+        let generation = self.policy.generation;
+        // Пока актор ждал D-Bus, в очереди мог появиться новый Playing.
+        // Читаем только уже ожидающие сигналы, не задерживая другие команды.
+        let queued = self.bus.as_ref().map_or(0, Bus::queued);
+        for _ in 0..queued {
+            let Some(bus) = self.bus.as_mut() else {
+                return;
+            };
+            let old = bus.flags();
+            let Some(result) = bus.try_next() else {
+                break;
+            };
+            let flags = bus.flags();
+            if !result.is_ok_and(|pair| self.record_signal(old, flags, pair)) {
+                self.lost_bus().await;
+                return;
+            }
+            self.reconcile();
+        }
+        if self.policy.generation == generation && !self.policy.admitted {
+            self.avr(BtAction::Pause).await;
         }
     }
 
@@ -686,7 +721,6 @@ impl Service {
             if let Some(owner) = self.policy.owner.as_deref()
                 && (!self.policy.permits(owner) || selected(bus, &self.policy).is_none())
             {
-                self.remember_episode();
                 self.policy.release();
                 self.reset_session();
             }
@@ -715,7 +749,7 @@ impl Service {
                 }) {
                     self.frames = frames;
                 }
-                self.frames.start_floor = self.policy.starts;
+                self.frames.start_floor = self.policy.starts.max(self.shared.preempt_before.get());
                 self.policy.select(device.to_owned(), now);
             }
             if let Some(c) = selected(bus, &self.policy) {
@@ -1202,29 +1236,33 @@ mod tests {
 
     #[test]
     fn profile_reconnect_accepts_pcm_even_if_avrcp_kept_its_old_playing_order() {
-        let mut policy = selected_policy();
-        let mut frames = FrameActivity::default();
-        let playing = Some((Playback::Playing, Some(10)));
-        frames.observe_snapshot(&mut policy, playing, 1);
-        frames.start(15);
-        frames.observe_snapshot(&mut policy, playing, 1);
-        assert_eq!(policy.ready_start(true, 0), Some(10));
+        for stale in [Some(10), Some(16), None] {
+            let mut policy = selected_policy();
+            let mut frames = FrameActivity::default();
+            let playing = Some((Playback::Playing, Some(10)));
+            frames.observe_snapshot(&mut policy, playing, 1);
+            frames.start(15);
+            frames.observe_snapshot(&mut policy, playing, 1);
+            assert_eq!(policy.ready_start(true, 0), Some(10));
+            assert!(policy.preempt_before(18));
 
-        policy.release();
-        policy.select("phone".into(), Instant::now());
-        let mut frames = FrameActivity {
-            start_floor: policy.starts,
-            ..FrameActivity::default()
-        };
-        frames.observe_snapshot(&mut policy, playing, 1);
-        assert_eq!(policy.ready_start(true, 0), None);
-        frames.start(20);
-        frames.observe_snapshot(&mut policy, playing, 1);
-        assert_eq!(policy.ready_start(true, 0), Some(20));
-        assert_eq!(
-            frames.first_frame_decision(Some(20), Some(20), 0),
-            Some((20, true))
-        );
+            policy.release();
+            policy.select("phone".into(), Instant::now());
+            let mut frames = FrameActivity {
+                start_floor: 18,
+                ..FrameActivity::default()
+            };
+            let stale = stale.map(|order| (Playback::Playing, Some(order)));
+            frames.observe_snapshot(&mut policy, stale, 1);
+            assert_eq!(policy.ready_start(true, 18), None);
+            frames.start(20);
+            frames.observe_snapshot(&mut policy, stale, 1);
+            assert_eq!(policy.ready_start(true, 18), Some(20));
+            assert_eq!(
+                frames.first_frame_decision(Some(20), Some(20), 18),
+                Some((20, true))
+            );
+        }
     }
 
     #[test]

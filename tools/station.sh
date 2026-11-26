@@ -308,10 +308,21 @@ if [ "$bt" = 1 ]; then
       { echo 'Yandex mode or stack running: Bluetooth test refused' >&2; return 1; }
   }
   stock_stopped || exit 1
-  if ! "$T/ctl.sh" bt-restore --test-check >/dev/null 2>&1; then
-    echo 'Bluetooth test needs a separately pushed satellite/deploy/ctl.sh with bt-restore' >&2
+  if [ "$(PULSAR_BT_OWNER="$T/bt-owner" "$T/ctl.sh" bt-restore --owner-lock 2>/dev/null)" != pulsar-bt-owner-lock/2 ]; then
+    echo 'Bluetooth test needs a separately pushed satellite/deploy/ctl.sh with Bluetooth ownership locking' >&2
     exit 1
   fi
+  if ! production_lock=$("$D/ctl.sh" bt-restore --owner-lock-path 2>/dev/null) ||
+     [ -z "$production_lock" ]; then
+    echo 'Bluetooth test needs an installed ctl.sh with Bluetooth ownership locking' >&2
+    exit 1
+  fi
+  # Прямой bt-restore должен закончиться до публикации резерва.
+  saved_umask=$(umask) || exit 1
+  umask 077
+  exec 8>> "$production_lock" || exit 1
+  umask "$saved_umask" || exit 1
+  flock -n 8 || { echo 'installed Bluetooth ownership lock unavailable: retry after restore ends' >&2; exit 1; }
   # Одним ln публикуем резерв и PID начала запуска. test-stop не снимает
   # резерв, пока этот shell может ещё запустить процесс.
   started=$(test_process_start "$$") || exit 1
@@ -322,6 +333,7 @@ if [ "$bt" = 1 ]; then
   # Supervisor, появившийся до резерва, побеждает; появившийся после
   # увидит резерв сам. Не изменяем тестовый state.conf при отказе.
   production_stopped && stock_stopped || exit 1
+  exec 8>&-
 fi
 # api_key не копируется: тестовый экземпляр отдаёт plaintext API, ключ клиенту не нужен.
 if [ "$bt" = 1 ]; then set -- -e '^zigbee_role='; else set --; fi
@@ -389,7 +401,7 @@ EOF
   test-stop)
     own
     {
-      printf '%s\n' "$TEST_LOCK" "$TEST_DIR_CHECK"
+      printf '%s\n' "$TEST_LOCK" "$TEST_DIR_CHECK" 'clear_dmix() {' "$DMIX" '}'
       cat <<'EOF'
 T=$1
 test_lifecycle_lock "$2"
@@ -449,6 +461,8 @@ if [ -e "$T/pid" ] || [ -L "$T/test-launch" ] || [ "$reserved" = 1 ] || test_bt_
   done
   rm -f "$T/pid" "$T/.pid-launch" || exit 1
 fi
+# После выхода процесса, но до запуска штатного проигрывателя.
+clear_dmix
 if test_bt_pending; then
   if ! test_lifecycle_child "$T/ctl.sh" bt-restore --test; then
     echo 'test Bluetooth not restored: keep the test files, do not start the installed service' >&2
@@ -460,7 +474,7 @@ if test_bt_pending; then
   fi
 fi
 EOF
-      printf '%s\n' "$DMIX" 'rm -f "$T/test-launch" || exit 1' '[ "$reserved" = 0 ] || rm -f "$T/bt-reserved"'
+      printf '%s\n' 'rm -f "$T/test-launch" || exit 1' '[ "$reserved" = 0 ] || rm -f "$T/bt-reserved"'
     } | r sh -s -- "$T" "$D"
     echo stopped ;;
   test-log) r "$TEST_DIR_CHECK; test_dir_check '$T' && tail -n ${1:-50} $T/log" ;;

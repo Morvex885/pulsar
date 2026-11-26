@@ -153,19 +153,22 @@ impl Shared {
         }
     }
 
+    fn admitted_gain(&self, generation: u64, gate: u64) -> Option<[f32; CHANNELS]> {
+        let ctl = self.control.lock().unwrap();
+        (ctl.generation() == Some(generation) && ctl.gate == gate && ctl.admitted)
+            .then_some(ctl.gain)
+    }
+
     fn write_if_admitted<T>(
         &self,
         generation: u64,
         gate: u64,
         write: impl FnOnce([f32; CHANNELS]) -> T,
     ) -> Option<T> {
-        // Проверка и неблокирующая запись под одним замком: после отзыва старый
-        // поток уже не войдёт в writei. Открытие, ожидание и сброс ALSA — вне замка.
-        let ctl = self.control.lock().unwrap();
-        if ctl.generation() != Some(generation) || ctl.gate != gate || !ctl.admitted {
-            return None;
-        }
-        Some(write(ctl.gain))
+        // Единственный поток резервирует одну запись и снимок громкости под замком.
+        // Даже неблокирующий writei может застрять на семафоре dmix. Уже
+        // зарезервированную запись не прервать, но она не удерживает затвор.
+        self.admitted_gain(generation, gate).map(write)
     }
 }
 
@@ -638,7 +641,17 @@ fn write_frames(
         }) else {
             break;
         };
-        done += finish_io(output, result).map_err(|e| ("запись ALSA", e))?;
+        if let Ok(n) = result
+            && n != 0
+        {
+            done += n;
+        } else if shared.admitted_gain(generation, gate).is_some() {
+            finish_io(output, result).map_err(|e| ("запись ALSA", e))?;
+        } else {
+            // После отзыва не ждём и не восстанавливаем старый вывод:
+            // очередь сбросит transfer при смене затвора или session при выходе.
+            break;
+        }
     }
     Ok(done != 0)
 }
@@ -817,6 +830,48 @@ mod tests {
                 .is_some()
         );
         assert_eq!(sink, [[100, 0], [100, 100]]);
+    }
+
+    #[test]
+    fn bluetooth_pcm_preempts_while_reserved_write_is_blocked() {
+        let (worker, _) = Worker::new();
+        worker.start(5, String::new());
+        worker.set_admitted(true);
+        let shared = &worker.shared;
+        let (old_gate, _) = shared.gate(5).unwrap();
+        std::thread::scope(|scope| {
+            let (entered, in_write) = std::sync::mpsc::channel();
+            let (release, blocked) = std::sync::mpsc::channel();
+            let writer = scope.spawn(move || {
+                let written = shared.write_if_admitted(5, old_gate, |gain| {
+                    entered.send(()).unwrap();
+                    blocked.recv().unwrap();
+                    assert_eq!(gain, UNITY);
+                    1
+                });
+                assert_eq!(written, Some(1));
+                assert!(
+                    shared
+                        .write_if_admitted(5, old_gate, |_| panic!("запись после отзыва"))
+                        .is_none()
+                );
+            });
+            in_write.recv().unwrap();
+            // Подтверждение пришло из записи, которая не выйдет до release.
+            // try_lock ловит регрессию без зависания и таймаутов.
+            assert!(shared.control.try_lock().is_ok());
+            worker.set_station_gain(0.0);
+            worker.set_admitted(false);
+            worker.set_admitted(true);
+            let (new_gate, _) = shared.gate(5).unwrap();
+            assert_ne!(old_gate, new_gate);
+            release.send(()).unwrap();
+            writer.join().unwrap();
+            assert_eq!(
+                shared.write_if_admitted(5, new_gate, |gain| gain),
+                Some([0.0; CHANNELS])
+            );
+        });
     }
 
     #[test]
