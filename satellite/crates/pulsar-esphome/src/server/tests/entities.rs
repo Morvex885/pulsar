@@ -718,6 +718,10 @@ async fn wake_config_half_close_waits_for_ack_or_timeout() {
             p.subscribe_voice(true).await;
             assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(false));
             assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
+            next.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+            next.sync().await;
+            p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+            p.sync().await;
 
             let (eof_tx, eof_rx) = oneshot::channel();
             CLIENT_EOF.with(|slot| *slot.borrow_mut() = Some(eof_tx));
@@ -735,6 +739,8 @@ async fn wake_config_half_close_waits_for_ack_or_timeout() {
             assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
             h.voice_request_start("Алиса");
             next.expect(msg::VA_REQUEST).await;
+            h.publish_switch(SwitchId::WakeSound, false);
+            next.expect(msg::SWITCH_STATE).await;
             if ack {
                 h.set_active_wake_words(Some(request), vec!["yandex".into()], None);
             } else {
@@ -1211,13 +1217,19 @@ async fn eof_with_pending_batch_still_answers_everything() {
     local()
         .run_until(async {
             let (id, cfg) = selftest("now");
-            let (_h, _rx, port) = start_with(id, cfg);
+            let (_h, mut rx, port) = start_with(id, cfg);
             let mut p = Peer::connect(port).await;
             p.hello("eof").await;
+            event(&mut rx).await;
+            p.subscribe_voice(true).await;
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
             let mut req = Vec::new();
             for _ in 0..300 {
                 append_plain(&mut req, msg::LIST_ENTITIES_REQ, &[]);
             }
+            let mut ev = Writer::new();
+            ev.u32(1, 5, false);
+            append_plain(&mut req, msg::VA_EVENT_RESP, ev.data());
             p.write(&req).await;
             p.s.shutdown().await.unwrap();
             let mut done = 0;
@@ -1227,6 +1239,14 @@ async fn eof_with_pending_batch_still_answers_everything() {
                 }
             }
             assert_eq!(done, 300);
+            assert!(matches!(
+                event(&mut rx).await,
+                ApiEvent::VoiceEvent {
+                    event: VaEvent::IntentStart,
+                    ..
+                }
+            ));
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(false));
         })
         .await;
 }

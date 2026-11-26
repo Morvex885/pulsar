@@ -513,6 +513,10 @@ impl Client {
         }
     }
 
+    fn subscribes_states(&self) -> bool {
+        self.hello && self.states && self.read_end.is_none()
+    }
+
     fn backlog(&self) -> usize {
         self.wbuf.len() - self.woff
     }
@@ -688,10 +692,13 @@ impl Server {
         self.clients.iter().any(|c| c.hello)
     }
 
+    fn voice_owner(&self) -> Option<&Client> {
+        self.clients.iter().find(|c| c.hello && c.voice)
+    }
+
     fn voice_client(&self) -> Option<u64> {
-        self.clients
-            .iter()
-            .find(|c| c.hello && c.voice)
+        self.voice_owner()
+            .filter(|c| c.read_end.is_none())
             .map(|c| c.id)
     }
 
@@ -831,7 +838,7 @@ impl Server {
     /// hand-over.
     fn update_voice_owner(&mut self) {
         let want = voice_choice(self.clients.iter().map(Client::standing));
-        let cur = self.voice_client();
+        let cur = self.voice_owner().map(|c| c.id);
         if cur == want {
             return;
         }
@@ -914,13 +921,18 @@ impl Server {
         self.parse_input(id);
         self.batch = None;
         let Some(c) = self.client(id) else { return };
-        let lost_voice_owner = c.voice && end.is_some();
+        let lost_logs = end.is_some() && c.log_level != 0;
         if end.is_some() {
             c.read_end = end;
         }
-        let read_error = matches!(c.read_end, Some(ReadEnd::Error)) && !c.pending_input;
-        if lost_voice_owner {
-            // Сокет может ещё ждать ответа конфигурации, но больше не принимает события HA.
+        let drained = c.read_end.is_some() && !c.pending_input;
+        let read_error = drained && matches!(c.read_end, Some(ReadEnd::Error));
+        let lost_voice = drained && c.voice;
+        if lost_logs {
+            self.update_log_sink();
+        }
+        if lost_voice {
+            // Уже принятые события HA должны обработаться до смены голосового владельца.
             self.update_voice_owner();
         }
         self.flush(id);
@@ -1202,6 +1214,9 @@ impl Server {
                 s.close_client(id, "keepalive timeout");
                 return;
             }
+            if c.read_end.is_some() {
+                return;
+            }
             if idle > IDLE_PING && !c.ping_outstanding {
                 c.ping_outstanding = true;
                 s.send_msg(id, msg::PING_REQ, &Writer::new());
@@ -1257,7 +1272,7 @@ impl Server {
         let want = self
             .clients
             .iter()
-            .filter(|c| c.hello)
+            .filter(|c| c.hello && c.read_end.is_none())
             .map(|c| c.log_level)
             .max()
             .unwrap_or(0);
@@ -1279,7 +1294,7 @@ impl Server {
             w.str(3, &line.text, true);
             self.for_each_client(|s, id| {
                 if s.client(id)
-                    .is_some_and(|c| c.hello && c.log_level >= level)
+                    .is_some_and(|c| c.hello && c.read_end.is_none() && c.log_level >= level)
                 {
                     s.send_msg(id, msg::SUBSCRIBE_LOGS_RESP, &w);
                 }

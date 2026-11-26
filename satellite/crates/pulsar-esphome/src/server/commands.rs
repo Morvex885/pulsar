@@ -505,7 +505,7 @@ impl Server {
             transition_ms,
         });
         self.cache.light = st;
-        if self.clients.iter().any(|c| c.hello && c.states) {
+        if self.states_on() {
             self.send_light(None);
         }
     }
