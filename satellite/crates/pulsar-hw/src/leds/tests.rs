@@ -652,6 +652,8 @@ fn panel_mute_reversal_does_not_jump_under_volume() {
     assert_eq!(c.active_layer(475), Layer::Volume);
     assert_eq!(c.px[..84 * 3], before[..84 * 3]);
     assert_eq!(c.px[84 * 3..], [0; 12]);
+    c.frame(VOLUME_SHOW_MS);
+    assert_eq!(c.active_layer(VOLUME_SHOW_MS), Layer::Off);
 }
 
 #[tokio::test(start_paused = true)]
