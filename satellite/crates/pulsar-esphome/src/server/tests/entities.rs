@@ -1223,11 +1223,6 @@ async fn eof_with_pending_batch_still_answers_everything() {
             event(&mut rx).await;
             p.subscribe_voice(true).await;
             assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
-            let mut other = Peer::connect(port).await;
-            other.hello("other").await;
-            event(&mut rx).await;
-            // После ping первым в обходе сокетов будет владелец голоса.
-            other.sync().await;
             let mut req = Vec::new();
             for _ in 0..300 {
                 append_plain(&mut req, msg::LIST_ENTITIES_REQ, &[]);
@@ -1237,8 +1232,6 @@ async fn eof_with_pending_batch_still_answers_everything() {
             append_plain(&mut req, msg::VA_EVENT_RESP, ev.data());
             p.write(&req).await;
             p.s.shutdown().await.unwrap();
-            other.send(msg::DISCONNECT_REQ, &Writer::new()).await;
-            other.expect(msg::DISCONNECT_RESP).await;
             let mut done = 0;
             while let Some((t, _)) = p.recv().await {
                 if t == msg::LIST_DONE {
@@ -1256,6 +1249,88 @@ async fn eof_with_pending_batch_still_answers_everything() {
             assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(false));
         })
         .await;
+}
+
+#[tokio::test]
+async fn eof_batch_drains_voice_in_order_without_broadcasting_to_closed_peer() {
+    async fn subscribe(server: &mut Server, port: u16, name: &str) -> (u64, Peer) {
+        let mut p = Peer::connect(port).await;
+        let (stream, addr) = server.listener.accept().await.unwrap();
+        stream.writable().await.unwrap();
+        server.on_accept(stream, addr);
+        let id = server.next_client;
+        let mut hello = Writer::new();
+        hello.str(1, name, false);
+        let input = &mut server.client(id).unwrap().rbuf;
+        append_plain(input, msg::HELLO_REQ, hello.data());
+        append_plain(input, msg::SUBSCRIBE_STATES_REQ, &[]);
+        append_plain(input, msg::PING_REQ, &[]);
+        server.process(id, None);
+        while p.recv().await.expect("нет ответа на ping").0 != msg::PING_RESP {}
+        (id, p)
+    }
+
+    for unsubscribe in [false, true] {
+        let (id, cfg) = selftest("now");
+        let (mut s, handle) = bind_server(id, cfg).unwrap();
+        let mut rx = handle.events;
+        let (owner, mut p) = subscribe(&mut s, handle.port, "owner").await;
+        let (other, mut live) = subscribe(&mut s, handle.port, "other").await;
+        event(&mut rx).await;
+        event(&mut rx).await;
+
+        let mut wants_voice = Writer::new();
+        wants_voice.boolean(1, true, false);
+        append_plain(
+            &mut s.client(owner).unwrap().rbuf,
+            msg::SUBSCRIBE_VA_REQ,
+            wants_voice.data(),
+        );
+        s.process(owner, None);
+        assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
+
+        let input = &mut s.client(owner).unwrap().rbuf;
+        let light = kv(key::LIGHT_RING, |w| {
+            w.boolean(2, true, false);
+            w.boolean(3, true, false);
+        });
+        append_plain(input, msg::LIGHT_CMD, light.data());
+        append_plain(input, msg::PING_REQ, &[]);
+        for _ in 0..300 {
+            append_plain(input, msg::LIST_ENTITIES_REQ, &[]);
+        }
+        if unsubscribe {
+            append_plain(input, msg::SUBSCRIBE_VA_REQ, &[]);
+        }
+        let mut ev = Writer::new();
+        ev.u32(1, 5, false);
+        append_plain(input, msg::VA_EVENT_RESP, ev.data());
+
+        // Воспроизводим порядок проходов reactor, не полагаясь на порядок готовности TCP.
+        s.process(owner, Some(ReadEnd::Eof));
+        assert!(s.client(owner).unwrap().pending_input);
+        p.expect(msg::PING_RESP).await;
+        live.expect(msg::LIGHT_STATE).await;
+        assert!(matches!(event(&mut rx).await, ApiEvent::Light { .. }));
+        s.close_client(other, "connection closed by peer");
+        while s.client(owner).is_some_and(|c| c.pending_input) {
+            s.process(owner, None);
+        }
+
+        if !unsubscribe {
+            assert!(matches!(
+                event(&mut rx).await,
+                ApiEvent::VoiceEvent {
+                    event: VaEvent::IntentStart,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(false));
+        while let Ok(ev) = rx.try_recv() {
+            assert!(!matches!(ev, ApiEvent::VoiceEvent { .. }));
+        }
+    }
 }
 
 #[tokio::test]

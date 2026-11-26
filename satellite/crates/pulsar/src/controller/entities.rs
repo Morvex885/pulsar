@@ -418,7 +418,7 @@ impl Controller {
         self.wake_switch.requested(req, request);
     }
 
-    /// Без сохранённого выбора запоминаем первую загруженную модель; иначе выбор меняет только HA.
+    /// Запоминаем первую загруженную модель или применённый выбор HA, независимо от ACK.
     pub(super) fn on_wake_model(&mut self, req: Option<ModelId>, dir: &Path, ok: bool) {
         let id = dir
             .file_name()
@@ -429,9 +429,8 @@ impl Controller {
             warn!("wake word model did not load; active: {id:?}");
         }
         let request = self.wake_switch.answered(req);
-        if !id.is_empty()
-            && ((req.is_none() && !self.st.has_wake_word) || (request.is_some() && ok))
-        {
+        let save = req.map_or(!self.st.has_wake_word, |_| ok);
+        if save && !id.is_empty() {
             self.save_wake_word(&id);
         }
         self.active_wake_word.clone_from(&id);

@@ -215,7 +215,13 @@ pub(crate) struct Spawned {
 }
 
 /// Binds the port and starts the actor on the current `LocalSet`.
-pub(crate) fn spawn(id: DeviceIdentity, mut cfg: ApiConfig) -> Result<Spawned, String> {
+pub(crate) fn spawn(id: DeviceIdentity, cfg: ApiConfig) -> Result<Spawned, String> {
+    let (server, handle) = bind_server(id, cfg)?;
+    actors::spawn_actor("api", server.run());
+    Ok(handle)
+}
+
+fn bind_server(id: DeviceIdentity, mut cfg: ApiConfig) -> Result<(Server, Spawned), String> {
     let listener = bind(cfg.port)?;
     let port = listener.local_addr().map_or(cfg.port, |a| a.port());
     info!("api: listening on :{} as '{}'", cfg.port, id.name);
@@ -263,13 +269,15 @@ pub(crate) fn spawn(id: DeviceIdentity, mut cfg: ApiConfig) -> Result<Spawned, S
     };
     // Diagnostics for the first SubscribeStates; the Diag timer keeps them fresh.
     server.refresh_diagnostics(false);
-    actors::spawn_actor("api", server.run());
-    Ok(Spawned {
-        cmds: cmd_tx,
-        shared,
-        events: ev_rx,
-        port,
-    })
+    Ok((
+        server,
+        Spawned {
+            cmds: cmd_tx,
+            shared,
+            events: ev_rx,
+            port,
+        },
+    ))
 }
 
 fn bind(port: u16) -> Result<TcpListener, String> {
@@ -837,13 +845,15 @@ impl Server {
     /// Hands the pipeline to `voice_choice`'s client; events see false before true on every
     /// hand-over.
     fn update_voice_owner(&mut self) {
-        let owner = self.voice_owner();
-        // Закрытие другого клиента или новая подписка могут прийти между пачками после FIN.
-        if owner.is_some_and(|c| c.read_end.is_some() && c.pending_input) {
-            return;
-        }
-        let cur = owner.map(|c| c.id);
-        let want = voice_choice(self.clients.iter().map(Client::standing));
+        let cur = self.voice_owner().map(|c| c.id);
+        let want = voice_choice(self.clients.iter().map(|c| {
+            let mut standing = c.standing();
+            // FIN не меняет порядок уже принятых событий. Отписка, напротив, действует сразу.
+            if c.voice && (c.pending_input || self.batch == Some(c.id)) {
+                standing.voice_wanted = c.voice_wanted;
+            }
+            standing
+        }));
         if cur == want {
             return;
         }
@@ -921,24 +931,26 @@ impl Server {
     /// one flush at the end, or earlier once BATCH_FLUSH bytes are pending (so the backlog
     /// limits in flush still bound memory); parsing stops when the client is closed.
     fn process(&mut self, id: u64, end: Option<ReadEnd>) {
-        self.batch = Some(id);
-        self.batch_out = 0;
-        self.parse_input(id);
-        self.batch = None;
         let Some(c) = self.client(id) else { return };
         let lost_logs = end.is_some() && c.log_level != 0;
         if end.is_some() {
             c.read_end = end;
         }
-        let drained = c.read_end.is_some() && !c.pending_input;
-        let read_error = drained && matches!(c.read_end, Some(ReadEnd::Error));
-        let lost_voice = drained && c.voice;
         if lost_logs {
             self.update_log_sink();
         }
-        if lost_voice {
-            // Уже принятые события HA должны обработаться до смены голосового владельца.
-            self.update_voice_owner();
+        self.batch = Some(id);
+        self.batch_out = 0;
+        self.parse_input(id);
+        self.batch = None;
+        let Some(c) = self.client(id) else { return };
+        let drained = c.read_end.is_some() && !c.pending_input;
+        let read_error = drained && matches!(c.read_end, Some(ReadEnd::Error));
+        if drained {
+            c.rbuf = Vec::new();
+            if c.voice {
+                self.update_voice_owner();
+            }
         }
         self.flush(id);
         if read_error {
@@ -1157,6 +1169,7 @@ impl Server {
     }
 
     fn flush(&mut self, id: u64) {
+        let parsing = self.batch == Some(id);
         let Some(c) = self.client(id) else { return };
         while c.woff < c.wbuf.len() {
             match c.stream.try_write(&c.wbuf[c.woff..]) {
@@ -1195,6 +1208,7 @@ impl Server {
         if c.close_after_flush {
             self.close_client(id, "disconnect requested");
         } else if matches!(c.read_end, Some(ReadEnd::Eof))
+            && !parsing
             && !c.pending_input
             && c.wake_config_reads == 0
         {
