@@ -640,7 +640,7 @@ mod tests {
     }
 
     #[tokio::test]
-    fn bluetooth_revokes_sendspin_until_a_new_stream_starts() {
+    async fn bluetooth_revokes_sendspin_until_a_new_stream_starts() {
         let (ctx, mut rx) = ctx();
         let streaming = Rc::new(Cell::new(false));
         let mut core = Core {
