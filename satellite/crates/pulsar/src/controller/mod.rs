@@ -310,6 +310,9 @@ impl Controller {
             .collect::<Vec<_>>();
         let case_colors = pulsar_hw::case_colors();
         let dir = logic::state_dir(state_path.as_os_str());
+        // Offered only when the models are installed: a confirmed choice that cannot detect is
+        // worse than no choice at all, and the saved value must not outlive them.
+        let oww_ready = pulsar_audio::oww::available(Path::new(pulsar_audio::oww::DIR));
         let strings = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         let with_none = |l: Vec<String>| std::iter::once("None".to_owned()).chain(l).collect();
         // Opened before the entity list: the Clock auto brightness switch exists only when the
@@ -337,6 +340,11 @@ impl Controller {
                 })
                 .collect(),
             active_wake_words: vec![initial_wake_word],
+            wake_engines: if oww_ready {
+                strings(&["yandex", "oww"])
+            } else {
+                strings(&["yandex"])
+            },
             light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
             clock_faces: with_none(strings(pulsar_clock::face_names())),
             music_styles: strings(pulsar_hw::music_styles()),
@@ -406,6 +414,11 @@ impl Controller {
         st.volume = volume;
         // Changes made while starting are written like any other (StateFile, 1 s later).
         let mut changed = false;
+        if st.wake_engine == "oww" && !oww_ready {
+            warn!("wake engine oww is not installed here; using yandex");
+            st.wake_engine = "yandex".into();
+            changed = true;
+        }
         if migrated {
             info!(
                 "volume {:.3} from an earlier build -> {:.3}",
@@ -881,5 +894,7 @@ impl Controller {
 
     fn update_detection(&self) {
         self.mic.set_detection(!self.mic_muted());
+        // The engine choice is persisted; apply it on start and whenever detection is restored.
+        self.mic.set_oww(self.st.wake_engine == "oww");
     }
 }

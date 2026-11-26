@@ -12,6 +12,7 @@ light_g=5
 light_b=1
 light_effect=Rainbow=x
 wake_word=yandex
+wake_engine=yandex
 tz= MSK-3
 auto_update=1
 update_attempt=v9.9.9
