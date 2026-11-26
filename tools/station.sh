@@ -88,23 +88,36 @@ if [ -n "$r" ]; then echo "removed stale ALSA dmix lock (${r# })"; fi
 EOF
 )
 # Из /tmp запускаем код только из закрытого каталога текущего SSH-пользователя.
-TEST_DIR_CHECK="test_dir_check() {
-  if [ -d '$T' ] && [ ! -L '$T' ] && uid=\$(id -u); then
-    case \$(stat -c '%u:%a' '$T') in
-      \"\$uid:700\") return 0 ;;
-      \"\$uid:755\")
-        echo 'legacy test directory: if no test or Bluetooth recovery is pending, move $T to an unused name, keep it for inspection, and push fresh files' >&2 ;;
+TEST_DIR_CHECK=$(cat <<'EOF'
+test_dir_check() {
+  if [ -d "$1" ] && [ ! -L "$1" ] && uid=$(id -u); then
+    case $(stat -c '%u:%a' "$1") in
+      "$uid:700") return 0 ;;
+      "$uid:755")
+        echo "legacy test directory: if no test or Bluetooth recovery is pending, move $1 to an unused name, keep it for inspection, and push fresh files" >&2 ;;
     esac
   fi
   echo 'unsafe test directory: expected a private directory owned by the SSH user' >&2
   return 1
-}"
+}
+EOF
+)
 TEST_DIR_OPTIONAL="$TEST_DIR_CHECK
-  if [ -e '$T' ] || [ -L '$T' ]; then test_dir_check || exit 1; fi"
+  if [ -e '$T' ] || [ -L '$T' ]; then test_dir_check '$T' || exit 1; fi"
+# Один inode на весь жизненный цикл стенда. cleanup не удаляет его вместе с тестовыми файлами.
+# flock доступен на станциях и сам отпускает блокировку при гибели последнего владельца FD.
+TEST_LOCK=$(cat <<'EOF'
+test_lifecycle_lock() {
+  exec 9>> "$1/.station-test.lock" || exit 1
+  flock -n 9 || { echo 'test lifecycle lock unavailable: retry after the other command ends' >&2; exit 1; }
+}
+EOF
+)
 # Не запускать установленный сервис и не удалять стенд, пока не возвращён тестовый BT.
 TEST_BT_RESTORED="$TEST_DIR_OPTIONAL
   if [ -e '$T/bt-reserved' ] || [ -L '$T/bt-reserved' ] ||
-    [ -e '$T/bt-owner' ] || [ -L '$T/bt-owner' ]; then
+    [ -e '$T/bt-owner' ] || [ -L '$T/bt-owner' ] ||
+    [ -e '$T/bt-owner.pending' ] || [ -L '$T/bt-owner.pending' ]; then
     echo 'test Bluetooth not restored: run test-stop' >&2
     exit 1
   fi"
@@ -113,7 +126,8 @@ PROD_BT_CTL="'$D/ctl.sh' bt-restore --supported >/dev/null 2>&1 ||
   '$D/ctl.sh' bt-restore --check >/dev/null 2>&1"
 PROD_BT_RESTORE="boot=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 if [ -n \"\$boot\" ] &&
-  { [ -e '$D'/.pulsar-bt-owner.\"\$boot\" ] || [ -L '$D'/.pulsar-bt-owner.\"\$boot\" ]; } &&
+  { [ -e '$D'/.pulsar-bt-owner.\"\$boot\" ] || [ -L '$D'/.pulsar-bt-owner.\"\$boot\" ] ||
+    [ -e '$D'/.pulsar-bt-owner.\"\$boot\".pending ] || [ -L '$D'/.pulsar-bt-owner.\"\$boot\".pending ]; } &&
   ! '$D/ctl.sh' bt-restore --owner-path >/dev/null 2>&1; then
   echo 'installed ctl.sh cannot recover the current Bluetooth snapshot' >&2
   exit 1
@@ -121,10 +135,13 @@ fi
 if $PROD_BT_CTL; then
   '$D/ctl.sh' reload --stop && '$D/ctl.sh' bt-restore ||
     { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
-elif [ -L '$BT_OWNER' ] || [ -e '$BT_OWNER' ]; then
+else
   # Legacy ctl cannot recover a legitimate snapshot from a previously installed binary.
-  owner=\$(stat -c '%u' '$BT_OWNER') && uid=\$(id -u) && [ \"\$owner\" != \"\$uid\" ] ||
-    { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
+  for marker in '$BT_OWNER' '$BT_OWNER.pending'; do
+    [ -e \"\$marker\" ] || [ -L \"\$marker\" ] || continue
+    owner=\$(stat -c '%u' \"\$marker\") && uid=\$(id -u) && [ \"\$owner\" != \"\$uid\" ] ||
+      { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
+  done
 fi"
 # Prepare all file contents before stopping production. Keep the previous rollback slot
 # and the inode guard until both metadata changes and the final executable rename succeed.
@@ -196,7 +213,7 @@ case "$cmd" in
     own
     r "$TEST_DIR_CHECK
        if [ ! -e '$T' ] && [ ! -L '$T' ]; then (umask 077; mkdir '$T') || exit 1; fi
-       test_dir_check"
+       test_dir_check '$T'"
     for f; do b=$(basename "$f"); up "$f" "$T/$b"; done ;;
   test-start)
     case "$#:${1-}" in
@@ -205,23 +222,27 @@ case "$cmd" in
       *) usage ;;
     esac
     own
-    r "$TEST_DIR_CHECK; test_dir_check"
     # Один уровень для всех моделей: у Мини громкость программная, по той же шкале в дБ.
     vol=0.2
     # A quoted heredoc: no local shell expansion and no nested quotes in the remote command.
-    r sh -s -- "$T" "$D" "$vol" "$station" "$bt" <<'EOF'
+    {
+      printf '%s\n' "$TEST_LOCK" "$TEST_DIR_CHECK"
+      cat <<'EOF'
 T=$1
 D=$2
 vol=$3
 station=$4
 bt=$5
+test_lifecycle_lock "$D"
+test_dir_check "$T" || exit 1
 production_stopped() {
   ! pidof supervise.sh >/dev/null || { echo 'run stop first' >&2; return 1; }
   ! pidof pulsar >/dev/null || { echo 'pulsar still running: run stop or test-stop first' >&2; return 1; }
 }
 production_stopped || exit 1
 [ ! -e "$T/bt-reserved" ] && [ ! -L "$T/bt-reserved" ] &&
-  [ ! -e "$T/bt-owner" ] && [ ! -L "$T/bt-owner" ] ||
+  [ ! -e "$T/bt-owner" ] && [ ! -L "$T/bt-owner" ] &&
+  [ ! -e "$T/bt-owner.pending" ] && [ ! -L "$T/bt-owner.pending" ] ||
   { echo 'test Bluetooth not restored: run test-stop' >&2; exit 1; }
 [ -x "$T/pulsar" ] || { echo 'push pulsar first' >&2; exit 1; }
 if [ "$bt" = 1 ]; then
@@ -265,7 +286,7 @@ fi
 trap '' HUP
 trap - EXIT
 nohup env PULSAR_PORT_OFFSET=10000 PULSAR_BT_MANAGED="$bt" PULSAR_BT_OWNER="$T/bt-owner" \
-  ./pulsar "$T/state.conf" < /dev/null >> "$T/log" 2>&1 &
+  ./pulsar "$T/state.conf" 9>&- < /dev/null >> "$T/log" 2>&1 &
 p=$!
 if ! printf '%s\n' "$p" > "$T/pid"; then
   kill "$p" 2>/dev/null
@@ -276,13 +297,20 @@ sleep 2
 kill -0 "$p" && echo started ||
   { echo 'test pulsar exited: check test-log and run test-stop' >&2; exit 1; }
 EOF
+    } | r sh -s -- "$T" "$D" "$vol" "$station" "$bt"
     ;;
   test-stop)
     own
-    r "$TEST_DIR_OPTIONAL"
     {
+      printf '%s\n' "$TEST_LOCK" "$TEST_DIR_CHECK"
       cat <<'EOF'
 T=$1
+test_lifecycle_lock "$2"
+if [ -e "$T" ] || [ -L "$T" ]; then test_dir_check "$T" || exit 1; fi
+test_bt_pending() {
+  [ -e "$T/bt-owner" ] || [ -L "$T/bt-owner" ] ||
+    [ -e "$T/bt-owner.pending" ] || [ -L "$T/bt-owner.pending" ]
+}
 reserved=0
 if [ -e "$T/bt-reserved" ] || [ -L "$T/bt-reserved" ]; then reserved=1; fi
 if [ -L "$T/bt-reserved" ]; then
@@ -316,8 +344,7 @@ if [ -s "$T/pid" ]; then
     fi
   fi
 fi
-if [ -e "$T/pid" ] || [ "$reserved" = 1 ] ||
-  [ -e "$T/bt-owner" ] || [ -L "$T/bt-owner" ]; then
+if [ -e "$T/pid" ] || [ "$reserved" = 1 ] || test_bt_pending; then
   for exe in /proc/[0-9]*/exe; do
     p=${exe%/exe}
     p=${p##*/}
@@ -325,7 +352,7 @@ if [ -e "$T/pid" ] || [ "$reserved" = 1 ] ||
   done
   rm -f "$T/pid" || exit 1
 fi
-if [ -e "$T/bt-owner" ] || [ -L "$T/bt-owner" ]; then
+if test_bt_pending; then
   if ! "$T/ctl.sh" bt-restore --test; then
     echo 'test Bluetooth not restored: keep the test files, do not start the installed service' >&2
     exit 1
@@ -333,9 +360,9 @@ if [ -e "$T/bt-owner" ] || [ -L "$T/bt-owner" ]; then
 fi
 EOF
       printf '%s\n' "$DMIX" '[ "$reserved" = 0 ] || rm -f "$T/bt-reserved"'
-    } | r sh -s -- "$T"
+    } | r sh -s -- "$T" "$D"
     echo stopped ;;
-  test-log) r "$TEST_DIR_CHECK; test_dir_check && tail -n ${1:-50} $T/log" ;;
+  test-log) r "$TEST_DIR_CHECK; test_dir_check '$T' && tail -n ${1:-50} $T/log" ;;
   swap)
     [ $# -eq 1 ] || usage
     own
@@ -383,7 +410,9 @@ EOF
        if [ -f enabled ]; then ./ctl.sh restart; else ./ctl.sh enable; fi" ;;
   cleanup)
     own
-    r "$TEST_BT_RESTORED
+    r "$TEST_LOCK
+       test_lifecycle_lock '$D'
+       $TEST_BT_RESTORED
        if [ -f $T/pid ] && kill -0 \$(cat $T/pid) 2>/dev/null; then echo 'test instance running: test-stop first' >&2; exit 1; fi
        rm -rf $T || exit 1
        $DMIX" ;;

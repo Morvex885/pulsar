@@ -29,10 +29,18 @@ enum Req {
     Release,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    Closed,
+    Ready,
+    Reported,
+}
+
 struct Request {
     pending: Req,
     // Владелец выхода сохраняется и после применения запроса к ALSA.
     start: Option<u64>,
+    output: Output,
 }
 
 pub(crate) struct Sink {
@@ -109,6 +117,7 @@ impl Sink {
             req: Mutex::new(Request {
                 pending: Req::None,
                 start: None,
+                output: Output::Closed,
             }),
             req_gen: AtomicU32::new(0),
             applied_gen: AtomicU32::new(0),
@@ -137,6 +146,20 @@ impl Sink {
 
     pub(crate) fn owns_start(&self, order: u64) -> bool {
         lock(&self.req).start == Some(order)
+    }
+
+    pub(crate) fn take_ready_start(&self) -> Option<u64> {
+        let mut req = lock(&self.req);
+        if req.output != Output::Ready {
+            return None;
+        }
+        req.output = Output::Reported;
+        req.start
+    }
+
+    pub(crate) fn output_is_current(&self, order: u64) -> bool {
+        let req = lock(&self.req);
+        req.start == Some(order) && req.output != Output::Closed
     }
 
     /// Stream ended: drop what is queued and release the device so dmix is not held while idle.
@@ -215,7 +238,7 @@ impl Sink {
         if !io.active || bpf == 0 || self.applied_gen.load(SeqCst) != generation || self.pending() {
             return (length, 0, 0); // stale audio after stream end: discard
         }
-        if io.pcm.is_none() && !io.open() {
+        if io.pcm.is_none() && !self.open_output(generation, || io.open()) {
             // Device unavailable: discard rather than spin the task; the gap is reported as
             // played with the next timed report so the library's buffered-frames estimate stays
             // right.
@@ -303,6 +326,9 @@ impl Sink {
         io.frames_total += u64::from(frames_done);
         io.maybe_log_stats();
         let lost = io.pcm.is_none();
+        if lost {
+            self.set_output(generation, Output::Closed);
+        }
         if lost && frames_done == 0 {
             io.discarded = io.discarded.wrapping_add((length / bpf) as u32);
         }
@@ -317,6 +343,22 @@ impl Sink {
         (frames_done as usize * bpf, report, finish_us)
     }
 
+    fn open_output(&self, generation: u32, open: impl FnOnce() -> bool) -> bool {
+        if !open() {
+            return false;
+        }
+        self.set_output(generation, Output::Ready);
+        true
+    }
+
+    // Ни позднее открытие, ни ошибка старого PCM не меняют состояние нового запроса.
+    fn set_output(&self, generation: u32, output: Output) {
+        let mut req = lock(&self.req);
+        if self.req_gen.load(SeqCst) == generation && req.start.is_some() {
+            req.output = output;
+        }
+    }
+
     fn try_apply(&self) {
         let io = match self.io.try_lock() {
             Ok(io) => Some(io),
@@ -329,15 +371,20 @@ impl Sink {
     }
 
     fn record(&self, req: &mut Request, pending: Req, start: Option<u64>) {
-        *req = Request { pending, start };
+        *req = Request {
+            pending,
+            start,
+            output: Output::Closed,
+        };
         self.req_gen.fetch_add(1, SeqCst);
     }
 
     fn apply_pending(&self, io: &mut Io) {
-        let r = {
+        let (r, generation) = {
             let mut req = lock(&self.req);
-            self.applied_gen.store(self.req_gen.load(SeqCst), SeqCst);
-            std::mem::replace(&mut req.pending, Req::None)
+            let generation = self.req_gen.load(SeqCst);
+            self.applied_gen.store(generation, SeqCst);
+            (std::mem::replace(&mut req.pending, Req::None), generation)
         };
         match r {
             Req::None => {}
@@ -345,7 +392,13 @@ impl Sink {
                 rate,
                 channels,
                 bits,
-            } => io.configure(rate, channels, bits, self.target_gain()),
+            } => {
+                io.configure(rate, channels, bits, self.target_gain());
+                if io.pcm.is_some() {
+                    // PCM того же формата уже открыт и заново подготовлен.
+                    self.set_output(generation, Output::Ready);
+                }
+            }
             Req::Release => io.release(),
         }
     }
@@ -649,5 +702,51 @@ mod tests {
         sink.finish_request();
         assert!(sink.owns_start(latest));
         assert!(sink.accepts_audio());
+    }
+
+    #[test]
+    fn readiness_follows_only_a_successful_open_of_the_current_generation() {
+        let model = pulsar_core::model::model_from_dt_id(b"axg_s420_v03").unwrap();
+        let sink = Sink::new(model);
+        let first = sink.configure(48000, 2, 16);
+        let generation = sink.req_gen.load(SeqCst);
+        assert!(!sink.open_output(generation, || false));
+        assert_eq!(sink.take_ready_start(), None);
+        assert!(!sink.output_is_current(first));
+
+        assert!(sink.open_output(generation, || true));
+        assert_eq!(sink.take_ready_start(), Some(first));
+        assert_eq!(sink.take_ready_start(), None);
+        assert!(sink.output_is_current(first));
+        sink.set_output(generation, Output::Closed);
+        assert!(!sink.output_is_current(first));
+        assert!(sink.open_output(generation, || true));
+        assert_eq!(sink.take_ready_start(), Some(first));
+
+        assert!(sink.open_output(generation, || {
+            sink.release();
+            true
+        }));
+        assert_eq!(sink.take_ready_start(), None);
+        assert!(!sink.output_is_current(first));
+
+        let old = sink.configure(48000, 2, 16);
+        let generation = sink.req_gen.load(SeqCst);
+        let next = sink.configure(44100, 2, 16);
+        assert!(sink.open_output(generation, || true));
+        assert_eq!(sink.take_ready_start(), None);
+        assert!(!sink.output_is_current(old));
+        assert!(!sink.output_is_current(next));
+
+        let current = sink.req_gen.load(SeqCst);
+        assert!(sink.open_output(current, || true));
+        sink.set_output(generation, Output::Closed);
+        assert_eq!(sink.take_ready_start(), Some(next));
+    }
+
+    impl Sink {
+        pub(crate) fn test_open_output(&self, succeeded: bool) -> bool {
+            self.open_output(self.req_gen.load(SeqCst), || succeeded)
+        }
     }
 }

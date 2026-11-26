@@ -395,16 +395,22 @@ cd /data/pulsar && read -r boot < /proc/sys/kernel/random/boot_id &&
 
 ### Удаление
 
-Вернуть стек Яндекса, удалить `/data/pulsar` и скрипт автозапуска (корневую ФС нужно ненадолго
-перемонтировать на запись):
+Вернуть стек Яндекса, удалить скрипт автозапуска и только затем удалить `/data/pulsar`.
+Для удаления скрипта корневую ФС нужно ненадолго перемонтировать на запись:
 
 ```sh
-/data/pulsar/ctl.sh disable && rm -rf /data/pulsar &&
-  mount -o remount,rw / && { rm -f /etc/init.d/S99zpulsar; mount -o remount,ro /; }
+/data/pulsar/ctl.sh disable && mount -o remount,rw / &&
+  (
+    removed=0
+    rm -f /etc/init.d/S99zpulsar || removed=$?
+    mount -o remount,ro / && [ "$removed" -eq 0 ]
+  ) &&
+  rm -rf /data/pulsar
 ```
 
-Если `disable` сообщает об ошибке восстановления Bluetooth, не удаляйте `/data/pulsar`:
-устраните причину и повторите `disable`.
+Если `disable` сообщает об ошибке восстановления Bluetooth или не удалось удалить скрипт
+автозапуска и вернуть корневую ФС в режим чтения, `/data/pulsar` остаётся на месте. Устраните
+причину и повторите удаление.
 
 ## Music Assistant
 

@@ -32,7 +32,10 @@ pub(super) struct Worker {
     events: UnboundedSender<Event>,
 }
 
-pub(super) struct Probe(watch::Receiver<ProbeState>);
+pub(super) struct Probe {
+    status: watch::Receiver<ProbeState>,
+    cancelled: bool,
+}
 
 enum ProbeState {
     Pending,
@@ -104,6 +107,10 @@ impl Shared {
         }
     }
 
+    fn stopping(&self) -> bool {
+        self.control.lock().unwrap().shutdown
+    }
+
     fn next(&self) -> Option<(u64, String)> {
         let mut ctl = self.control.lock().unwrap();
         loop {
@@ -173,6 +180,19 @@ impl Worker {
     }
 
     pub(super) fn launch(&self, model: &'static Model) -> io::Result<Probe> {
+        self.launch_with(
+            move |shared| open_output_if(model, || !shared.stopping()).map(drop),
+            move |shared, events| run(model, shared, events),
+        )
+    }
+
+    fn launch_with(
+        &self,
+        probe: impl FnOnce(&Shared) -> Result<(), PcmError> + Send + 'static,
+        run: impl FnOnce(&Shared, &UnboundedSender<Event>) + Send + 'static,
+    ) -> io::Result<Probe> {
+        // Повторный запуск возможен только после выхода прежнего потока.
+        self.shared.control.lock().unwrap().shutdown = false;
         let (status_tx, status) = watch::channel(ProbeState::Pending);
         let shared = Arc::clone(&self.shared);
         let events = self.events.clone();
@@ -180,10 +200,17 @@ impl Worker {
             .name("bluetooth-pcm".into())
             .spawn(move || {
                 // Тот же выход и формат, что у сеанса. Закрываем PCM до ответа и не пишем звук.
-                match open_output(model).map(drop) {
+                if shared.stopping() {
+                    return;
+                }
+                let result = probe(&shared);
+                if shared.stopping() {
+                    return;
+                }
+                match result {
                     Ok(()) => {
                         status_tx.send_replace(ProbeState::Ready);
-                        run(model, &shared, &events);
+                        run(&shared, &events);
                     }
                     Err((op, errno)) => {
                         status_tx.send_replace(ProbeState::Failed(format!(
@@ -193,7 +220,10 @@ impl Worker {
                     }
                 }
             })?;
-        Ok(Probe(status))
+        Ok(Probe {
+            status,
+            cancelled: false,
+        })
     }
 
     pub(super) fn signal_stop(&self) {
@@ -287,16 +317,34 @@ impl Drop for Worker {
 }
 
 impl Probe {
+    pub(super) fn cancel(&mut self, worker: &Worker) {
+        self.cancelled = true;
+        worker.signal_stop();
+    }
+
+    pub(super) fn retire(mut self, worker: &Worker) {
+        self.cancel(worker);
+        // При отказе от Bluetooth актор сервиса не создаётся. Отдельный актор
+        // дожидается закрытия ALSA, но не задерживает инициализацию контроллера.
+        pulsar_core::actors::spawn_actor("bluetooth PCM shutdown", async move {
+            self.wait_finished().await;
+        });
+    }
+
     pub(super) fn finished(&self) -> bool {
-        self.0.has_changed().is_err()
+        self.status.has_changed().is_err()
     }
 
     pub(super) fn ready(&self) -> bool {
-        !self.finished() && matches!(*self.0.borrow(), ProbeState::Ready)
+        !self.cancelled && !self.finished() && matches!(*self.status.borrow(), ProbeState::Ready)
     }
 
     pub(super) async fn wait_ready(&mut self) -> io::Result<()> {
-        match self.0.wait_for(|s| !matches!(s, ProbeState::Pending)).await {
+        match self
+            .status
+            .wait_for(|s| !matches!(s, ProbeState::Pending))
+            .await
+        {
             Ok(state) => match &*state {
                 ProbeState::Ready => Ok(()),
                 ProbeState::Failed(reason) => Err(io::Error::other(reason.clone())),
@@ -307,7 +355,7 @@ impl Probe {
     }
 
     pub(super) async fn wait_finished(&mut self) {
-        while self.0.changed().await.is_ok() {}
+        while self.status.changed().await.is_ok() {}
     }
 }
 
@@ -363,10 +411,17 @@ fn configure(pcm: &mut Pcm, stream: Stream, context: &'static str) -> Result<(),
     result.map_err(|e| (context, e))
 }
 
-fn open_output(model: &Model) -> Result<Pcm, PcmError> {
+fn open_output_if(model: &Model, still_needed: impl Fn() -> bool) -> Result<Option<Pcm>, PcmError> {
+    if !still_needed() {
+        return Ok(None);
+    }
     let mut output = pulsar_alsa::open_playback_nonblock(model).map_err(|e| ("выход ALSA", e))?;
+    // Если отмена пришла во время snd_pcm_open, закрываем выход без настройки.
+    if !still_needed() {
+        return Ok(None);
+    }
     configure(&mut output, Stream::Playback, "формат выхода ALSA")?;
-    Ok(output)
+    Ok(Some(output))
 }
 
 fn session(
@@ -385,7 +440,9 @@ fn session(
     if shared.gate(generation).is_none() {
         return Ok(());
     }
-    let mut output = open_output(model)?;
+    let Some(mut output) = open_output_if(model, || shared.gate(generation).is_some())? else {
+        return Ok(());
+    };
     let result =
         if shared.gate(generation).is_some() && events.send(Event::Started(generation)).is_ok() {
             transfer(&mut capture, &mut output, shared, events, generation)
@@ -631,22 +688,41 @@ fn apply_gain(input: &[i16], output: &mut [i16], gain: [f32; CHANNELS]) {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn pcm_probe_deadline_does_not_discard_pending_worker() {
-        let (tx, rx) = watch::channel(ProbeState::Pending);
-        let mut probe = Probe(rx);
-        assert!(
-            tokio::time::timeout(Duration::ZERO, probe.wait_ready())
-                .await
-                .is_err()
-        );
-        assert!(!probe.ready());
-        assert!(!probe.finished());
-        tx.send_replace(ProbeState::Ready);
-        assert!(probe.wait_ready().await.is_ok());
-        assert!(probe.ready());
-        drop(tx);
-        assert!(probe.finished());
+    #[tokio::test(start_paused = true)]
+    async fn bluetooth_rejected_pcm_probe_is_cancelled_and_tracked_until_output_closes() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (worker, _) = Worker::new();
+                let (opened, started) = tokio::sync::oneshot::channel();
+                let (close, closing) = std::sync::mpsc::channel();
+                let (after_close, closed) = tokio::sync::oneshot::channel();
+                let mut probe = worker
+                    .launch_with(
+                        move |shared| {
+                            opened.send(()).unwrap();
+                            closing.recv().unwrap();
+                            after_close.send(shared.stopping()).unwrap();
+                            Ok(())
+                        },
+                        |_, _| panic!("cancelled probe must not run a session"),
+                    )
+                    .unwrap();
+                started.await.unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::ZERO, probe.wait_ready())
+                        .await
+                        .is_err()
+                );
+                let mut status = probe.status.clone();
+                probe.retire(&worker);
+                assert!(worker.shared.stopping());
+                assert!(!pulsar_core::actors::join_all(Duration::ZERO).await);
+
+                close.send(()).unwrap();
+                assert!(closed.await.unwrap());
+                assert!(status.changed().await.is_err());
+            })
+            .await;
     }
 
     #[test]

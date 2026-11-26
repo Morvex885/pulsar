@@ -5,6 +5,7 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 station=$here/../../tools/station.sh
 BT_FIXTURE=$(mktemp -d /tmp/pulsar-bt-test.XXXXXX)
 cleanup() {
+  touch "$BT_FIXTURE/stop-release"
   p=${test_pid_for_cleanup:-}
   if [ -s "$BT_FIXTURE/test/pid" ]; then read -r p < "$BT_FIXTURE/test/pid"; fi
   if [ -n "$p" ] && [ "$("$REAL_READLINK" "/proc/$p/exe" 2>/dev/null)" = "$BT_FIXTURE/test/pulsar" ]; then
@@ -21,8 +22,9 @@ REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_DATE=$(command -v date)
 REAL_PIDOF=$(command -v pidof)
+REAL_MKTEMP=$(command -v mktemp)
 export BT_FIXTURE REAL_READLINK REAL_SLEEP REAL_MV REAL_STAT REAL_CP
-export REAL_DATE REAL_PIDOF
+export REAL_DATE REAL_PIDOF REAL_MKTEMP
 export PULSAR_DIR=$BT_FIXTURE/data PULSAR_LOG=$BT_FIXTURE/supervise.log PULSAR_Q=$BT_FIXTURE/bin/quasar
 export PULSAR_BT_OWNER=$BT_FIXTURE/owner PULSAR_BT_PROC=$BT_FIXTURE/proc PULSAR_BT_INIT=$BT_FIXTURE/bin/init
 export PULSAR_TAG=isolated PULSAR_LITE2=station.invalid
@@ -145,7 +147,29 @@ cat > "$BT_FIXTURE/bin/sleep" <<'EOF'
 # A real handshake below, not this delay, proves the test process reached its ready state.
 case "$1" in 60|2) exec "$REAL_SLEEP" 0.15 ;; 1|3|6|12|24|30) exec "$REAL_SLEEP" 0.01 ;; esac
 EOF
-printf '#!/bin/sh\nexit 1\n' > "$BT_FIXTURE/bin/ipcs"
+cat > "$BT_FIXTURE/bin/ipcs" <<'EOF'
+#!/bin/sh
+if [ "${HOLD_TEST_STOP:-0}" = 1 ]; then
+  touch "$BT_FIXTURE/stop-held"
+  i=0
+  while [ ! -e "$BT_FIXTURE/stop-release" ] && [ "$i" -lt 1000 ]; do
+    "$REAL_SLEEP" 0.01
+    i=$((i + 1))
+  done
+fi
+exit 1
+EOF
+cat > "$BT_FIXTURE/bin/mktemp" <<'EOF'
+#!/bin/sh
+case "$*" in
+  "$PULSAR_DIR"/.bt-probe.*)
+    if [ "${FAIL_PROBE_TEMP:-0}" = 1 ] && [ ! -e "$BT_FIXTURE/probe-temp-failed" ]; then
+      touch "$BT_FIXTURE/probe-temp-failed"
+      exit 1
+    fi ;;
+esac
+exec "$REAL_MKTEMP" "$@"
+EOF
 cat > "$BT_FIXTURE/bin/date" <<'EOF'
 #!/bin/sh
 if [ "${SHADOW_AT_START:-0}" = 1 ] && [ -e "$BT_FIXTURE/late-replacement" ]; then
@@ -191,6 +215,7 @@ if [ "$1" = sh ]; then
     case "$arg" in /tmp/pulsar-test) arg=$BT_FIXTURE/test ;; /data/pulsar) arg=$PULSAR_DIR ;; esac
     set -- "$@" "$arg"
   done
+  if [ "${HOLD_TEST_STOP:-0}" = 1 ]; then printf '%s\n' "$$" > "$BT_FIXTURE/stop-shell"; fi
   exec "$@"
 fi
 cmd=$(printf '%s\n' "$1" | sed "s|/tmp/pulsar-agent.lock|$BT_FIXTURE/lock|g; s|/tmp/pulsar-test|$BT_FIXTURE/test|g; s|/data/pulsar|$PULSAR_DIR|g; s|/tmp/pulsar-bt-owner|$PULSAR_BT_OWNER|g")
@@ -209,13 +234,16 @@ reject() { if "$@"; then fail "expected failure: $*"; fi; }
 expect() { [ "$(cat "$events")" = "$1" ] || fail "expected [$1]; got [$(cat "$events")]"; }
 marker() { (umask 077; printf '%s\n' "$1" > "$PULSAR_BT_OWNER"); }
 trace() { : > "$events"; }
-await_test_ready() {
+await_file() {
   i=0
-  while [ ! -f "$BT_FIXTURE/test-ready" ] && [ "$i" -lt 100 ]; do
+  while [ ! -f "$1" ] && [ "$i" -lt 100 ]; do
     "$REAL_SLEEP" 0.05
     i=$((i + 1))
   done
-  [ -f "$BT_FIXTURE/test-ready" ] || fail 'test daemon never became ready'
+  [ -f "$1" ] || fail "not reached: $1"
+}
+await_test_ready() {
+  await_file "$BT_FIXTURE/test-ready"
   rm "$BT_FIXTURE/test-ready"
 }
 install_fixture() {
@@ -286,6 +314,18 @@ expect 'Pairable:false
 Discoverable:true'
 [ ! -e "$PULSAR_BT_OWNER" ] || fail 'unrelated processes blocked stock restoration'
 trace
+# Пустой маркер без снимка не требует мутаций, подменённый маркер не читаем.
+ln -s "$events" "$PULSAR_BT_OWNER.pending"
+marker '1 0 0'
+reject ctl bt-restore
+expect ''
+[ -f "$PULSAR_BT_OWNER" ] && [ -L "$PULSAR_BT_OWNER.pending" ] ||
+  fail 'restore touched a symlink pending marker'
+rm "$PULSAR_BT_OWNER" "$PULSAR_BT_OWNER.pending"
+(umask 077; : > "$PULSAR_BT_OWNER.pending")
+ctl bt-restore
+expect ''
+[ ! -e "$PULSAR_BT_OWNER.pending" ] || fail 'restore left an orphan pending marker'
 
 # Если имя BlueZ перешло другому процессу, обе записи адресованы прежнему
 # владельцу, а снимок остаётся до повторной попытки.
@@ -294,8 +334,8 @@ reject env TRACE_DBUS_ROUTES=1 SHIFT_BLUEZ_AT=Pairable "$PULSAR_DIR/ctl.sh" bt-r
 expect 'Pairable:true
 Discoverable:false'
 [ "$(cat "$BT_FIXTURE/dbus-routes")" = ':1.41:Pairable
-:1.41:Discoverable' ] && [ -f "$PULSAR_BT_OWNER" ] ||
-  fail 'restore mixed BlueZ owners or consumed the snapshot after an owner change'
+:1.41:Discoverable' ] && [ -f "$PULSAR_BT_OWNER" ] && [ -f "$PULSAR_BT_OWNER.pending" ] ||
+  fail 'restore mixed BlueZ owners or consumed the recovery state after an owner change'
 trace
 : > "$BT_FIXTURE/dbus-routes"
 TRACE_DBUS_ROUTES=1 ctl bt-restore
@@ -303,8 +343,8 @@ expect 'Pairable:true
 Discoverable:false
 init:start'
 [ "$(cat "$BT_FIXTURE/dbus-routes")" = ':1.42:Pairable
-:1.42:Discoverable' ] && [ ! -e "$PULSAR_BT_OWNER" ] ||
-  fail 'restore did not retry against the new BlueZ owner'
+:1.42:Discoverable' ] && [ ! -e "$PULSAR_BT_OWNER" ] && [ ! -e "$PULSAR_BT_OWNER.pending" ] ||
+  fail 'restore did not complete recovery against the new BlueZ owner'
 "$PULSAR_BT_INIT" stop
 rm "$BT_FIXTURE/bluez-owner"
 trace
@@ -475,6 +515,7 @@ rm -f "$PULSAR_DIR/enabled"
 EOF
 chmod +x "$PULSAR_DIR/pulsar.prev"
 cp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-manual"
+ln "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-manual-inode"
 touch "$PULSAR_DIR/enabled" "$BT_FIXTURE/supervisor-running" "$BT_FIXTURE/pulsar-running"
 marker '1 0 0'
 mv "$PULSAR_DIR/pulsar.prev" "$BT_FIXTURE/manual-prev"
@@ -486,9 +527,12 @@ expect ''
 mv "$BT_FIXTURE/manual-prev" "$PULSAR_DIR/pulsar.prev"
 reject env FAIL_FLAG=Discoverable "$PULSAR_DIR/ctl.sh" rollback
 expect 'Pairable:true
-Discoverable:false'
-[ ! -e "$BT_FIXTURE/supervisor-running" ] && [ -f "$PULSAR_BT_OWNER" ] &&
-  cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-manual" || fail 'manual rollback ran after failed restore'
+Discoverable:false
+supervisor:start'
+[ -f "$BT_FIXTURE/supervisor-running" ] && [ -f "$PULSAR_DIR/enabled" ] &&
+  [ -f "$PULSAR_BT_OWNER" ] && [ -f "$PULSAR_BT_OWNER.pending" ] &&
+  [ "$PULSAR_DIR/pulsar" -ef "$BT_FIXTURE/before-manual-inode" ] ||
+  fail 'failed manual restore stranded the service, lost recovery state or changed the inode'
 trace
 reject env FAIL_REPLACE=1 "$PULSAR_DIR/ctl.sh" rollback
 expect 'Pairable:true
@@ -623,7 +667,65 @@ supervise
 expect 'same:1
 Discoverable:false
 Pairable:false'
+# Тот же inode после неоконченного возврата всё равно ждёт штатный player.
+reject env FAIL_FLAG=Pairable "$PULSAR_DIR/ctl.sh" bt-restore
+trace
+touch "$PULSAR_DIR/enabled"
+supervise
+expect 'Pairable:true
+Discoverable:false
+init:start
+init:stop
+same:1
+Discoverable:false
+Pairable:false'
+[ ! -e "$PULSAR_BT_OWNER.pending" ] || fail 'supervisor left unfinished stock recovery pending'
 ctl bt-restore
+
+# Временная ошибка mktemp или самого запуска не должна отравить тот же inode.
+# Завершённый ответ старого бинаря, напротив, достаточно спросить один раз.
+cat > "$BT_FIXTURE/probe-retry" <<'EOF'
+#!/bin/sh
+if [ "${1-}" = --version ]; then
+  echo probe >> "$BT_FIXTURE/retry-probes"
+  if [ "${FAIL_PROBE_RUN:-0}" = 1 ] && [ ! -e "$BT_FIXTURE/probe-run-failed" ]; then
+    touch "$BT_FIXTURE/probe-run-failed"
+    echo 'pulsar legacy'
+    exit 1
+  fi
+  if [ "${PROBE_OLD:-0}" = 1 ]; then echo 'pulsar legacy'; else echo pulsar-bt-managed/1; fi
+  exit 0
+fi
+printf 'probe-launch:%s\n' "$PULSAR_BT_MANAGED" >> "$BT_FIXTURE/events"
+if [ "$PULSAR_BT_MANAGED" = 1 ] ||
+  { [ "${PROBE_OLD:-0}" = 1 ] && [ -e "$BT_FIXTURE/probe-old-launched" ]; }; then
+  rm "$PULSAR_DIR/enabled"
+fi
+touch "$BT_FIXTURE/probe-old-launched"
+exit 1
+EOF
+chmod +x "$BT_FIXTURE/probe-retry"
+for probe_failure in FAIL_PROBE_TEMP FAIL_PROBE_RUN PROBE_OLD; do
+  install_fixture "$BT_FIXTURE/probe-retry"
+  rm -f "$BT_FIXTURE/probe-old-launched"
+  : > "$BT_FIXTURE/retry-probes"
+  trace
+  touch "$PULSAR_DIR/enabled"
+  env "$probe_failure=1" "$PULSAR_DIR/supervise.sh"
+  if [ "$probe_failure" = PROBE_OLD ]; then
+    expect 'probe-launch:0
+probe-launch:0'
+  else
+    expect 'probe-launch:0
+probe-launch:1'
+  fi
+  if [ "$probe_failure" = FAIL_PROBE_RUN ]; then
+    [ "$(cat "$BT_FIXTURE/retry-probes")" = 'probe
+probe' ] || fail 'transient probe execution was cached'
+  else
+    [ "$(cat "$BT_FIXTURE/retry-probes")" = probe ] || fail 'expected exactly one completed probe'
+  fi
+done
 
 # Новый supervisor со старым ctl не даёт демону захватывать проигрыватель.
 mv "$PULSAR_DIR/ctl.sh" "$BT_FIXTURE/ctl-new"
@@ -729,6 +831,34 @@ reject env START_PROD_AFTER_TEST_RESERVES=1 sh "$station" lite2 test-start --bt
   fail 'test did not yield to a supervisor already starting'
 rm "$BT_FIXTURE/supervisor-running"
 expect ''
+# Один test-stop держит резерв даже после восстановления, пока идёт завершение.
+# Смерть управляющего shell не оставляет lock навсегда и не отпускает его,
+# пока дочерняя команда ещё выполняется.
+ln -s dead "$t/bt-reserved"
+HOLD_TEST_STOP=1 sh "$station" lite2 test-stop > "$BT_FIXTURE/stopping.log" 2>&1 &
+stopping=$!
+await_file "$BT_FIXTURE/stop-held"
+read -r stop_shell < "$BT_FIXTURE/stop-shell"
+expect_test_lock() {
+  msg=$(sh "$station" lite2 "$@" 2>&1) && fail "allowed concurrent $*"
+  case "$msg" in *'test lifecycle lock unavailable'*) ;; *) fail "$msg" ;; esac
+}
+expect_test_lock test-stop
+expect_test_lock test-start --bt
+expect_test_lock cleanup
+[ "$(readlink "$t/bt-reserved")" = dead ] || fail 'a competing command changed the reservation'
+kill -KILL "$stop_shell"
+expect_test_lock test-stop
+touch "$BT_FIXTURE/stop-release"
+if wait "$stopping"; then fail 'interrupted test-stop returned success'; fi
+i=0
+while ! flock -n "$PULSAR_DIR/.station-test.lock" true; do
+  [ "$i" -lt 100 ] || fail 'test lifecycle lock survived termination'
+  "$REAL_SLEEP" 0.01
+  i=$((i + 1))
+done
+sh "$station" lite2 test-stop
+[ ! -L "$t/bt-reserved" ] || fail 'repair did not clear the abandoned reservation'
 # Снимок старого теста защищён и восстанавливается даже без резерва.
 (umask 077; printf '0 0 0\n' > "$t/bt-owner")
 reject ctl bt-restore

@@ -163,6 +163,11 @@ impl Registry {
         })
     }
 
+    fn flags(&self) -> Option<[bool; 2]> {
+        let p = self.props(ADAPTER, ADAPTER_IFACE)?;
+        Some([prop(p, "Pairable")?, prop(p, "Discoverable")?])
+    }
+
     fn selection_before<'a>(
         &self,
         path: &'a str,
@@ -343,11 +348,50 @@ struct Signal {
     order: u64,
 }
 
+#[derive(Default)]
+struct StartupPairs {
+    known: BTreeSet<String>,
+    observed: HashMap<String, Instant>,
+}
+
+impl StartupPairs {
+    fn observe(&mut self, bluez: &Registry, pair: Option<(String, Instant)>) {
+        // Новая пара после снимка не считается известной до явного On.
+        // Удаление и повторное сопряжение того же пути тоже дают новую пару.
+        self.known.retain(|path| bluez.paired(path));
+        self.observed.retain(|path, _| bluez.paired(path));
+        if let Some((path, received)) = pair {
+            self.observed.insert(path, received);
+        }
+    }
+}
+
+type Progress = Option<(Sequence, bool)>;
+
+struct Startup {
+    progress: watch::Receiver<Progress>,
+    pairs: StartupPairs,
+}
+
+fn take_through(
+    signals: &mut mpsc::Receiver<Signal>,
+    deferred: &mut Option<Signal>,
+    in_barrier: impl FnOnce(&Signal) -> bool,
+) -> Option<Signal> {
+    let signal = deferred.take().or_else(|| signals.try_recv().ok())?;
+    if in_barrier(&signal) {
+        Some(signal)
+    } else {
+        *deferred = Some(signal);
+        None
+    }
+}
+
 async fn collect_signals(
     mut stream: impl futures_util::Stream<Item = zbus::Result<Message>> + Unpin,
     owners: Rc<Owners>,
     tx: mpsc::Sender<Signal>,
-    mut startup: Option<watch::Sender<Option<(Sequence, bool)>>>,
+    mut startup: Option<watch::Sender<Progress>>,
 ) {
     // Отмечаем сигналы независимо от ожидания исходящих вызовов актором.
     let mut owner_changed = false;
@@ -385,6 +429,8 @@ async fn collect_signals(
 
 pub(crate) struct Bus {
     signals: mpsc::Receiver<Signal>,
+    deferred: Option<Signal>,
+    startup: Option<Startup>,
     owners: Rc<Owners>,
     conn: Connection,
     bluez: Registry,
@@ -415,7 +461,7 @@ impl Bus {
             alsa: alsa_owner,
         });
         let (tx, signals) = mpsc::channel(256);
-        let (progress, mut startup) = watch::channel(None);
+        let (progress, startup) = watch::channel(None);
         actors::spawn_actor(
             "bluetooth D-Bus signals",
             collect_signals(stream, owners.clone(), tx, Some(progress)),
@@ -424,34 +470,66 @@ impl Bus {
             Registry::get(&conn, &owners.bluez.unique, "/"),
             Registry::get(&conn, &owners.alsa.unique, BLUEALSA_ROOT),
         )?;
-        let bus = Self {
+        let pairs = StartupPairs {
+            known: paired_paths(&bluez),
+            ..StartupPairs::default()
+        };
+        let mut bus = Self {
             conn,
             signals,
+            deferred: None,
+            startup: Some(Startup {
+                progress: startup,
+                pairs,
+            }),
             owners,
             bluez,
             alsa,
         };
-        if bus.flags().is_none() || !bus.has_sink().await? {
+        if !bus.has_sink().await? {
             return Err(zbus::Error::Failure("no incoming A2DP adapter".into()));
         }
+        bus.settle().await?;
+        Ok(bus)
+    }
+
+    pub async fn settle(&mut self) -> zbus::Result<()> {
         let (bluez, alsa) = tokio::try_join!(
-            Owner::get(&bus.conn, BLUEZ),
-            Owner::get(&bus.conn, BLUEALSA)
+            Owner::get(&self.conn, BLUEZ),
+            Owner::get(&self.conn, BLUEALSA)
         )?;
         let barrier = bluez.since.max(alsa.since);
         // Проверяем также краткую смену владельца с возвратом между снимками и проверкой.
-        let settled = startup
+        let startup = self.startup.as_mut().expect("startup not finished");
+        let changed = startup
+            .progress
             .wait_for(|progress| progress.is_some_and(|(seq, _)| seq >= barrier))
             .await
-            .map_err(|_| zbus::Error::InvalidReply)?;
-        if bluez.unique != bus.owners.bluez.unique
-            || alsa.unique != bus.owners.alsa.unique
-            || settled.is_some_and(|(_, changed)| changed)
-            || bus.signals.is_closed()
+            .map_err(|_| zbus::Error::InvalidReply)?
+            .is_some_and(|(_, changed)| changed);
+        if bluez.unique != self.owners.bluez.unique
+            || alsa.unique != self.owners.alsa.unique
+            || changed
+            || self.signals.is_closed()
         {
             return Err(owner_changed());
         }
-        Ok(bus)
+        // Барьер подтверждает постановку сигналов в очередь, но не их применение.
+        // Сигналы после него остаются в порядке приёма для обычного цикла.
+        while let Some(signal) = take_through(&mut self.signals, &mut self.deferred, |signal| {
+            signal.message.recv_position() <= barrier
+        }) {
+            self.apply(signal)?;
+        }
+        if self.flags().is_none() || self.signals.is_closed() {
+            return Err(zbus::Error::InvalidReply);
+        }
+        Ok(())
+    }
+
+    pub fn finish_startup(&mut self) -> (BTreeSet<String>, HashMap<String, Instant>) {
+        let pairs = self.startup.take().expect("startup not finished").pairs;
+        (pairs.known, pairs.observed)
     }
 
     async fn has_sink(&self) -> zbus::Result<bool> {
@@ -470,16 +548,31 @@ impl Bus {
     }
 
     pub async fn next(&mut self) -> zbus::Result<Option<(String, Instant)>> {
-        let signal = self.signals.recv().await.ok_or(zbus::Error::InvalidReply)?;
+        let signal = match self.deferred.take() {
+            Some(signal) => signal,
+            None => self.signals.recv().await.ok_or(zbus::Error::InvalidReply)?,
+        };
         if self.signals.is_closed() {
             return Err(zbus::Error::InvalidReply);
         }
+        self.apply(signal)
+    }
+
+    fn apply(&mut self, signal: Signal) -> zbus::Result<Option<(String, Instant)>> {
         let seq = signal.message.recv_position();
         match signal.kind {
-            SignalKind::Bluez if seq > self.bluez.baseline => Ok(self
-                .bluez
-                .apply(&signal.message, signal.order)?
-                .map(|path| (path, signal.received))),
+            SignalKind::Bluez if seq > self.bluez.baseline => {
+                let pair = self
+                    .bluez
+                    .apply(&signal.message, signal.order)?
+                    .map(|path| (path, signal.received));
+                if let Some(startup) = &mut self.startup {
+                    startup.pairs.observe(&self.bluez, pair);
+                    Ok(None)
+                } else {
+                    Ok(pair)
+                }
+            }
             SignalKind::Alsa if seq > self.alsa.baseline => {
                 self.alsa.apply(&signal.message, signal.order)?;
                 Ok(None)
@@ -494,17 +587,11 @@ impl Bus {
     }
 
     pub fn flags(&self) -> Option<[bool; 2]> {
-        let p = self.bluez.props(ADAPTER, ADAPTER_IFACE)?;
-        Some([prop(p, "Pairable")?, prop(p, "Discoverable")?])
+        self.bluez.flags()
     }
 
     pub fn paired(&self) -> BTreeSet<String> {
-        self.bluez
-            .objects
-            .keys()
-            .filter(|path| self.bluez.paired(path))
-            .cloned()
-            .collect()
+        paired_paths(&self.bluez)
     }
 
     pub fn is_paired(&self, path: &str) -> bool {
@@ -547,6 +634,15 @@ impl Bus {
         )
         .await
     }
+}
+
+fn paired_paths(bluez: &Registry) -> BTreeSet<String> {
+    bluez
+        .objects
+        .keys()
+        .filter(|path| bluez.paired(path))
+        .cloned()
+        .collect()
 }
 
 pub(crate) async fn close_pairing() -> zbus::Result<()> {
@@ -749,6 +845,100 @@ mod tests {
                 since: baseline,
             },
         })
+    }
+
+    #[test]
+    fn startup_barriers_keep_latest_flags_and_defer_later_signals_in_order() {
+        let device = "/org/bluez/hci0/dev_first";
+        let player = "/org/bluez/hci0/dev_first/player7";
+        let stamp = Instant::now();
+        let signal = |path: &str, interface, props, order| Signal {
+            message: Message::signal(path, PROPS, "PropertiesChanged")
+                .build(&(interface, props, Vec::<String>::new()))
+                .unwrap(),
+            kind: SignalKind::Bluez,
+            received: stamp + Duration::from_millis(order),
+            order,
+        };
+        let flags = |pairable: bool, discoverable: bool| {
+            Properties::from([
+                ("Pairable".into(), pairable.into()),
+                ("Discoverable".into(), discoverable.into()),
+            ])
+        };
+        let paired = |value: bool| Properties::from([("Paired".into(), value.into())]);
+        let status = |value: &'static str| {
+            Properties::from([("Status".into(), zbus::Str::from(value).into())])
+        };
+        let mut bluez = Registry {
+            baseline: Sequence::default(),
+            snapshot_order: 1,
+            playing_edges: HashMap::new(),
+            objects: HashMap::from([
+                (
+                    ADAPTER.into(),
+                    Interfaces::from([(ADAPTER_IFACE.into(), flags(true, true))]),
+                ),
+                (
+                    device.into(),
+                    Interfaces::from([(
+                        DEVICE.into(),
+                        Properties::from([
+                            (
+                                "Adapter".into(),
+                                ObjectPath::try_from(ADAPTER).unwrap().into(),
+                            ),
+                            ("Paired".into(), true.into()),
+                        ]),
+                    )]),
+                ),
+                (
+                    player.into(),
+                    Interfaces::from([(PLAYER.into(), status("paused"))]),
+                ),
+            ]),
+        };
+        let mut pairs = StartupPairs {
+            known: paired_paths(&bluez),
+            ..StartupPairs::default()
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        for event in [
+            signal(ADAPTER, ADAPTER_IFACE, flags(true, false), 2),
+            signal(device, DEVICE, paired(false), 3),
+            signal(device, DEVICE, paired(true), 4),
+            signal(player, PLAYER, status("playing"), 5),
+            signal(ADAPTER, ADAPTER_IFACE, flags(false, false), 6),
+            signal(ADAPTER, ADAPTER_IFACE, flags(true, true), 7),
+        ] {
+            assert!(tx.try_send(event).is_ok());
+        }
+        let mut deferred = None;
+        // Синтетические сообщения zbus не получают recv_position; в тестовой
+        // очереди номер приёма одновременно служит сквозным порядком события.
+        for (barrier, expected) in [(2, [true, false]), (6, [false, false])] {
+            while let Some(signal) =
+                take_through(&mut rx, &mut deferred, |signal| signal.order <= barrier)
+            {
+                let pair = bluez
+                    .apply(&signal.message, signal.order)
+                    .unwrap()
+                    .map(|path| (path, signal.received));
+                pairs.observe(&bluez, pair);
+            }
+            assert_eq!(bluez.flags(), Some(expected));
+        }
+        assert!(pairs.known.is_empty());
+        assert_eq!(
+            pairs.observed.get(device),
+            Some(&(stamp + Duration::from_millis(4)))
+        );
+        assert_eq!(bluez.playing_edges.get(player), Some(&5));
+        let later = deferred.take().unwrap();
+        assert_eq!(later.order, 7);
+        assert!(rx.try_recv().is_err());
+        bluez.apply(&later.message, later.order).unwrap();
+        assert_eq!(bluez.flags(), Some([true, true]));
     }
 
     #[tokio::test]

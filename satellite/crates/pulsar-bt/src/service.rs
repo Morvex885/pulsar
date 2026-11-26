@@ -12,7 +12,7 @@ use tokio::time::{Instant, timeout_at};
 use crate::bus::{Bus, Candidate, close_pairing};
 use crate::pcm::{Event as PcmEvent, Probe as PcmProbe, Worker};
 use crate::policy::Policy;
-use crate::stock::{Stock, plugin_present};
+use crate::stock::{Ownership, Stock, plugin_present};
 use crate::{BtAction, Playback};
 
 const PROBE: Duration = Duration::from_secs(2);
@@ -117,7 +117,7 @@ pub async fn spawn(
     enabled: bool,
 ) -> Option<(BtHandle, UnboundedReceiver<BtEvent>)> {
     let deadline = Instant::now() + PROBE;
-    let (stock, owned) = match tokio::task::spawn_blocking(Stock::load).await {
+    let (stock, ownership) = match tokio::task::spawn_blocking(Stock::load).await {
         Ok(Ok(station)) => station?,
         Ok(Err(e)) => {
             warn!("bluetooth: cannot verify stock ownership: {e}");
@@ -128,38 +128,64 @@ pub async fn spawn(
             return None;
         }
     };
-    let bus = connect_bus(deadline).await;
+    if ownership == Ownership::PendingRestore {
+        actors::spawn_actor("bluetooth stock restore", retry_stock_restore(stock));
+        return None;
+    }
+    let owned = ownership == Ownership::Owned;
+    let mut bus = connect_bus(deadline).await;
     let (pcm, pcm_rx) = Worker::new();
     let mut probe = None;
-    let mut verified = false;
     pcm.set_station_gain(0.0);
     if bus.is_some() && Instant::now() < deadline {
         match pcm.launch(model) {
             Ok(mut launched) => {
                 match timeout_at(deadline, launched.wait_ready()).await {
-                    Ok(Ok(())) => verified = true,
-                    Ok(Err(e)) => warn!("bluetooth: cannot verify PCM output: {e}"),
-                    Err(_) => warn!("bluetooth: PCM output probe timed out"),
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        warn!("bluetooth: cannot verify PCM output: {e}");
+                        launched.cancel(&pcm);
+                    }
+                    Err(_) => {
+                        warn!("bluetooth: PCM output probe timed out");
+                        launched.cancel(&pcm);
+                    }
                 }
-                // После таймаута сохраняем тот же поток, пока он сам не выйдет.
+                // В том числе отменённый поток жив до возврата из ALSA.
                 probe = Some(launched);
             }
             Err(e) => warn!("bluetooth: cannot start PCM worker: {e}"),
         }
     }
     if !owned {
-        let flags = bus.as_ref()?.flags()?;
-        if !verified || !probe.as_ref().is_some_and(PcmProbe::ready) {
+        let flags = if probe.as_ref().is_some_and(PcmProbe::ready) {
+            match bus.as_mut() {
+                Some(bus) => stock_flags(bus, deadline).await,
+                None => None,
+            }
+        } else {
+            None
+        };
+        let Some(flags) = flags else {
+            if let Some(probe) = probe {
+                probe.retire(&pcm);
+            }
             return None;
-        }
+        };
         if let Err(e) = stock.take(flags).await {
             warn!("bluetooth: cannot take stock player: {e}");
+            if let Some(probe) = probe {
+                probe.retire(&pcm);
+            }
             // Init-скрипт мог остановить player прежде, чем вернуть ошибку.
             actors::spawn_actor("bluetooth stock restore", retry_stock_restore(stock));
             return None;
         }
     }
-    let policy = Policy::restore(enabled, bus.as_ref().map(Bus::paired).unwrap_or_default());
+    let mut policy = Policy::restore(enabled, Default::default());
+    if let Some(bus) = &mut bus {
+        seed_startup_pairs(bus, &mut policy, false);
+    }
     let (events, ev_rx) = unbounded_channel();
     let (cmds, cmd_rx) = unbounded_channel();
     let shared = Rc::new(Shared {
@@ -194,6 +220,40 @@ pub async fn spawn(
     svc.publish();
     actors::spawn_actor("bluetooth", svc.run(cmd_rx, pcm_rx));
     Some((BtHandle { shared, cmds }, ev_rx))
+}
+
+async fn stock_flags(bus: &mut Bus, deadline: Instant) -> Option<[bool; 2]> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    // За время проверки PCM адаптер мог измениться. Снимок отката должен
+    // учитывать и эти сигналы, не продлевая общий срок проверки возможностей.
+    match timeout_at(deadline, bus.settle()).await {
+        Ok(Ok(())) => bus.flags(),
+        Ok(Err(e)) => {
+            warn!(
+                "bluetooth: cannot refresh stock adapter flags: {}",
+                error_name(&e)
+            );
+            None
+        }
+        Err(_) => {
+            warn!("bluetooth: stock adapter flags probe timed out");
+            None
+        }
+    }
+}
+
+fn seed_startup_pairs(bus: &mut Bus, policy: &mut Policy, seeded: bool) {
+    let (known, observed) = bus.finish_startup();
+    if seeded {
+        policy.observe_pairs(|path| known.contains(path));
+    } else {
+        policy.seed_known(known);
+    }
+    for (path, received) in observed {
+        policy.observe_pair(path, received);
+    }
 }
 
 async fn connect_bus(deadline: Instant) -> Option<Bus> {
@@ -750,11 +810,9 @@ impl Service {
             return;
         }
         let Some(bus) = &self.bus else {
-            if let Some(bus) = connect_bus(Instant::now() + PROBE).await {
-                if !self.seeded_pairs {
-                    self.policy.seed_known(bus.paired());
-                    self.seeded_pairs = true;
-                }
+            if let Some(mut bus) = connect_bus(Instant::now() + PROBE).await {
+                seed_startup_pairs(&mut bus, &mut self.policy, self.seeded_pairs);
+                self.seeded_pairs = true;
                 self.bus = Some(bus);
                 self.visibility_target = None;
                 self.retry_at = Instant::now();

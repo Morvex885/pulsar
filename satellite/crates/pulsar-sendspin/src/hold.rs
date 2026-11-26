@@ -36,8 +36,13 @@ impl StreamHold {
         }
     }
 
-    pub(crate) fn start(&mut self, timers: &mut Timers<Key>) {
+    // Новый StreamStart сбрасывает только старое состояние группы. До готовности PCM
+    // отложенный конец предыдущего потока должен сработать как обычно.
+    pub(crate) fn starting(&mut self) {
         self.group_stopped = false;
+    }
+
+    pub(crate) fn ready(&mut self, timers: &mut Timers<Key>) {
         timers.cancel(Key::StreamEnd);
         self.streaming.set(true);
     }
@@ -98,6 +103,11 @@ mod tests {
             }
         }
 
+        fn start(&mut self) {
+            self.hold.starting();
+            self.hold.ready(&mut self.timers);
+        }
+
         /// What the actor does when the timer fires: None if nothing fires within `within`.
         async fn fire(&mut self, within: Duration) -> Option<bool> {
             match timeout(within, self.timers.next()).await {
@@ -111,7 +121,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn end_without_stopped_is_held_one_second() {
         let mut r = Rig::new();
-        r.hold.start(&mut r.timers);
+        r.start();
         assert!(r.streaming.get());
         let t0 = Instant::now();
         assert!(!r.hold.end(&mut r.timers, true));
@@ -127,10 +137,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn restart_within_10_ms_keeps_streaming() {
         let mut r = Rig::new();
-        r.hold.start(&mut r.timers);
+        r.start();
         assert!(!r.hold.end(&mut r.timers, true));
         advance(Duration::from_millis(10)).await;
-        r.hold.start(&mut r.timers);
+        r.start();
         assert!(r.streaming.get());
         assert_eq!(r.fire(Duration::from_secs(5)).await, None);
         assert!(r.streaming.get());
@@ -144,7 +154,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stopped_before_end_ends_at_once() {
         let mut r = Rig::new();
-        r.hold.start(&mut r.timers);
+        r.start();
         // "playing" changes nothing; "stopped" without a held end only marks the group.
         assert!(!r.hold.group(true, &mut r.timers));
         assert!(!r.hold.group(false, &mut r.timers));
@@ -157,7 +167,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stopped_after_end_finishes_the_hold() {
         let mut r = Rig::new();
-        r.hold.start(&mut r.timers);
+        r.start();
         assert!(!r.hold.end(&mut r.timers, true));
         advance(Duration::from_millis(300)).await;
         assert!(r.streaming.get());
@@ -170,7 +180,7 @@ mod tests {
     async fn new_stream_clears_stopped() {
         let mut r = Rig::new();
         assert!(!r.hold.group(false, &mut r.timers));
-        r.hold.start(&mut r.timers);
+        r.start();
         // The stop belonged to the previous stream: this end is held.
         assert!(!r.hold.end(&mut r.timers, true));
         assert_eq!(r.fire(Duration::from_secs(5)).await, Some(true));
@@ -179,14 +189,14 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn disconnect_ends_a_held_stream_at_once() {
         let mut r = Rig::new();
-        r.hold.start(&mut r.timers);
+        r.start();
         assert!(!r.hold.end(&mut r.timers, true));
         advance(Duration::from_millis(100)).await;
         assert!(r.hold.finish(&mut r.timers));
         assert!(!r.streaming.get());
         assert_eq!(r.fire(Duration::from_secs(5)).await, None);
         // Disconnect while streaming (no end yet) also ends it; idle: nothing.
-        r.hold.start(&mut r.timers);
+        r.start();
         assert!(r.hold.finish(&mut r.timers));
         assert!(!r.hold.finish(&mut r.timers));
     }
@@ -194,7 +204,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn teardown_does_not_hold() {
         let mut r = Rig::new();
-        r.hold.start(&mut r.timers);
+        r.start();
         assert!(r.hold.end(&mut r.timers, false));
         assert!(!r.streaming.get());
     }

@@ -10,12 +10,20 @@ use tokio::process::Command;
 const INIT: &str = "/etc/init.d/S53bluealsa-aplay";
 const PLAYER: &str = "/usr/bin/bluealsa-aplay";
 
+#[derive(Clone)]
 pub(crate) struct Stock {
     marker: Arc<Path>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Ownership {
+    Vacant,
+    PendingRestore,
+    Owned,
+}
+
 impl Stock {
-    pub fn load() -> io::Result<Option<(Self, bool)>> {
+    pub fn load() -> io::Result<Option<(Self, Ownership)>> {
         if std::env::var("PULSAR_BT_MANAGED").as_deref() != Ok("1") {
             return Ok(None);
         }
@@ -24,19 +32,26 @@ impl Stock {
         };
         let marker = Arc::from(PathBuf::from(path));
         let stock = Self { marker };
-        let owned = stock.snapshot_exists()?;
-        Ok(Some((stock, owned)))
+        let state = stock.ownership()?;
+        Ok(Some((stock, state)))
     }
 
     pub async fn take(&self, flags: [bool; 2]) -> io::Result<()> {
-        let marker = Arc::clone(&self.marker);
+        let stock = self.clone();
         let (exe, running) = tokio::task::spawn_blocking(move || {
             let (exe, running) = Self::player_status()?;
-            Self { marker }.record(flags, running)?;
+            stock.record(flags, running)?;
             Ok::<_, io::Error>((exe, running))
         })
         .await??;
-        Self::stop_if_running(exe, running).await
+        self.confirm_take(Self::stop_if_running(exe, running)).await
+    }
+
+    async fn confirm_take(&self, stopped: impl Future<Output = io::Result<()>>) -> io::Result<()> {
+        stopped.await?;
+        let pending = self.pending_marker();
+        // Снимок без соседнего маркера означает подтверждённый захват.
+        tokio::task::spawn_blocking(move || fs::remove_file(pending)).await?
     }
 
     pub async fn keep_stopped(&self) -> io::Result<()> {
@@ -78,28 +93,42 @@ impl Stock {
         if !status.success() {
             return Err(io::Error::other("stock restore failed"));
         }
-        Ok(())
+        let stock = self.clone();
+        tokio::task::spawn_blocking(move || {
+            if stock.snapshot_exists()? {
+                return Err(io::Error::other("stock restore left ownership snapshot"));
+            }
+            // Старый ctl.sh восстанавливает шестибайтный снимок, но не знает о .pending.
+            let pending = stock.pending_marker();
+            if private_marker(&pending, 0)?.is_some() {
+                fs::remove_file(pending)?;
+            }
+            Ok(())
+        })
+        .await?
+    }
+
+    fn pending_marker(&self) -> PathBuf {
+        let mut path = self.marker.as_os_str().to_owned();
+        path.push(".pending");
+        path.into()
+    }
+
+    fn ownership(&self) -> io::Result<Ownership> {
+        let snapshot = self.snapshot_exists()?;
+        if private_marker(&self.pending_marker(), 0)?.is_some() {
+            Ok(Ownership::PendingRestore)
+        } else if snapshot {
+            Ok(Ownership::Owned)
+        } else {
+            Ok(Ownership::Vacant)
+        }
     }
 
     fn snapshot_exists(&self) -> io::Result<bool> {
-        let mut file = match fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&self.marker)
-        {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(e),
+        let Some(mut file) = private_marker(&self.marker, 6)? else {
+            return Ok(false);
         };
-        let meta = file.metadata()?;
-        let invalid = || io::Error::other("invalid Bluetooth owner marker");
-        if !meta.is_file()
-            || meta.uid() != fs::metadata("/proc/self")?.uid()
-            || meta.mode() & 0o7777 != 0o600
-            || meta.len() != 6
-        {
-            return Err(invalid());
-        }
         let mut bytes = [0; 6];
         file.read_exact(&mut bytes)?;
         if !matches!(
@@ -107,15 +136,26 @@ impl Stock {
             [b'0' | b'1', b' ', b'0' | b'1', b' ', b'0' | b'1', b'\n']
         ) || file.read(&mut [0])? != 0
         {
-            return Err(invalid());
+            return Err(io::Error::other("invalid Bluetooth owner snapshot"));
         }
         Ok(true)
     }
 
     fn record(&self, [pairable, discoverable]: [bool; 2], running: bool) -> io::Result<()> {
-        if self.snapshot_exists()? {
-            return Ok(());
+        if self.ownership()? != Ownership::Vacant {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Bluetooth owner marker exists",
+            ));
         }
+        // Сначала .pending, затем снимок, затем первая мутация. После сбоя между
+        // этими шагами снимка либо нет, либо его можно только восстановить.
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(self.pending_marker())?
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
         let mut tmp = self.marker.as_os_str().to_owned();
         tmp.push(format!(".{}", std::process::id()));
         let tmp = PathBuf::from(tmp);
@@ -134,10 +174,7 @@ impl Stock {
         .and_then(|()| file.set_permissions(fs::Permissions::from_mode(0o600)))
         .and_then(|()| fs::hard_link(&tmp, &self.marker));
         let _ = fs::remove_file(tmp);
-        match result {
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && self.snapshot_exists()? => Ok(()),
-            other => other,
-        }
+        result
     }
 
     fn running(exe: &Path) -> io::Result<bool> {
@@ -162,6 +199,27 @@ impl Stock {
         }
         Ok(false)
     }
+}
+
+fn private_marker(path: &Path, size: u64) -> io::Result<Option<fs::File>> {
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file()
+        || meta.uid() != fs::metadata("/proc/self")?.uid()
+        || meta.mode() & 0o7777 != 0o600
+        || meta.len() != size
+    {
+        return Err(io::Error::other("invalid Bluetooth owner marker"));
+    }
+    Ok(Some(file))
 }
 
 pub(crate) fn plugin_present() -> bool {
@@ -301,19 +359,56 @@ mod tests {
             fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
         }
         stock.record([true, false], true).unwrap();
+        assert_eq!(stock.ownership().unwrap(), Ownership::PendingRestore);
         assert!(
-            stop_player(init.to_str().unwrap(), async { Ok(player.exists()) })
+            stock
+                .confirm_take(stop_player(init.to_str().unwrap(), async {
+                    Ok(player.exists())
+                }))
                 .await
                 .is_err()
         );
         assert!(!player.exists());
         assert!(stock.restore().await.is_err());
+        assert_eq!(stock.ownership().unwrap(), Ownership::PendingRestore);
         assert!(stock.snapshot_exists().unwrap());
 
         fs::write(dir.join("adapter"), "").unwrap();
         assert!(stock.restore().await.is_ok());
         assert!(player.exists());
-        assert!(!stock.snapshot_exists().unwrap());
+        assert_eq!(stock.ownership().unwrap(), Ownership::Vacant);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn takeover_is_not_adopted_until_stop_is_confirmed() {
+        let dir = test_dir("takeover");
+        let stock = Stock {
+            marker: Arc::from(dir.join("owner")),
+        };
+        let pending = stock.pending_marker();
+        assert_eq!(stock.ownership().unwrap(), Ownership::Vacant);
+        stock.record([false, true], false).unwrap();
+        assert_eq!(stock.ownership().unwrap(), Ownership::PendingRestore);
+        assert_eq!(fs::read(&stock.marker).unwrap(), b"0 1 0\n");
+        stock.confirm_take(async { Ok(()) }).await.unwrap();
+        assert_eq!(stock.ownership().unwrap(), Ownership::Owned);
+
+        // Отдельный маркер переживает удаление снимка только во время отката.
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&pending)
+            .unwrap();
+        assert_eq!(stock.ownership().unwrap(), Ownership::PendingRestore);
+        fs::remove_file(&stock.marker).unwrap();
+        assert_eq!(stock.ownership().unwrap(), Ownership::PendingRestore);
+        fs::remove_file(&pending).unwrap();
+        std::os::unix::fs::symlink(&stock.marker, &pending).unwrap();
+        assert!(stock.ownership().is_err());
+        assert!(stock.record([true; 2], false).is_err());
+        assert!(!stock.marker.exists());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -336,7 +431,8 @@ mod tests {
         fs::set_permissions(snapshot, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(stock.record([false; 2], false).is_err());
         fs::set_permissions(snapshot, fs::Permissions::from_mode(0o600)).unwrap();
-        stock.record([false; 2], false).unwrap();
+        assert_eq!(stock.ownership().unwrap(), Ownership::Owned);
+        assert!(stock.record([false; 2], false).is_err());
         assert_eq!(fs::read(snapshot).unwrap(), b"1 0 1\n");
         let target = dir.join("target");
         fs::rename(snapshot, &target).unwrap();

@@ -60,14 +60,15 @@ esac
 
 bt_blocked_now() { [ "$BIN" -ef "$bt_blocked" ] || [ "$BIN" -ef "$bt_next" ]; }
 bt_pinned_now() { [ ! -L "$bt_executable" ] && [ "$BIN" -ef "$bt_executable" ]; }
-bt_pending() { [ -e "$bt_owner" ] || [ -L "$bt_owner" ]; }
+bt_exists() { [ -e "$1" ] || [ -L "$1" ]; }
+bt_pending() { [ -n "$bt_owner" ] && { bt_exists "$bt_owner" || bt_exists "$bt_owner.pending"; }; }
 
 bt_test_clear() {
   # Проверяем здесь, даже если установленная ctl.sh ещё не знает о тестовом снимке.
   bt_test_dir=/tmp/pulsar-test
   [ -d "$bt_test_dir" ] && [ ! -L "$bt_test_dir" ] &&
-    { [ -e "$bt_test_dir/bt-reserved" ] || [ -L "$bt_test_dir/bt-reserved" ] ||
-      [ -e "$bt_test_dir/bt-owner" ] || [ -L "$bt_test_dir/bt-owner" ]; } &&
+    { bt_exists "$bt_test_dir/bt-reserved" || bt_exists "$bt_test_dir/bt-owner" ||
+      bt_exists "$bt_test_dir/bt-owner.pending"; } &&
     bt_test_uid=$(id -u) &&
     [ "$(stat -c '%u:%a' "$bt_test_dir" 2>/dev/null)" = "$bt_test_uid:700" ] || return 0
   say 'Bluetooth тестового экземпляра не восстановлен: выполните test-stop'
@@ -83,7 +84,7 @@ remember_bt_executable() {
   if [ -z "${PULSAR_BT_OWNER:-}" ]; then
     # Новый boot_id не должен применять флаги от предыдущей загрузки.
     for old in "$D"/.pulsar-bt-owner.*; do
-      [ "$old" = "$bt_owner" ] || rm -f "$old" || return 1
+      [ "$old" = "$bt_owner" ] || [ "$old" = "$bt_owner.pending" ] || rm -f "$old" || return 1
     done
   fi
   for old in "$D"/.pulsar-bt-executable.*; do
@@ -97,26 +98,38 @@ remember_bt_executable() {
 }
 
 bt_protocol_supported() {
-  probe_inode=$(stat -Lc '%d:%i' "$bt_executable") || return 1
+  probe_inode=$(stat -Lc '%d:%i' "$bt_executable") || return 2
   if [ "$probe_inode" != "$bt_protocol_inode" ]; then
-    bt_protocol_inode=$probe_inode bt_protocol=0
     # Первый аргумент --version безопасен и для старого демона.
-    probe_output=$(mktemp "$D/.bt-probe.XXXXXX") || return 1
-    if "$bt_executable" --version --supervisor-protocol > "$probe_output" 2>/dev/null &&
-      printf 'pulsar-bt-managed/1\n' | cmp -s "$probe_output" - &&
-      [ "$probe_inode" = "$(stat -Lc '%d:%i' "$bt_executable")" ]; then
-      bt_protocol=1
+    probe_output=$(mktemp "$D/.bt-probe.XXXXXX") || return 2
+    probe_result=2
+    if "$bt_executable" --version --supervisor-protocol > "$probe_output" 2>/dev/null; then
+      if printf 'pulsar-bt-managed/1\n' | cmp -s "$probe_output" -; then
+        probe_result=0
+      elif awk 'NR == 1 && /^pulsar [^[:space:]]+$/ { version = 1 }
+        END { exit !(NR == 1 && version) }' "$probe_output"; then
+        probe_result=1
+      fi
     fi
-    rm -f "$probe_output"
+    rm -f "$probe_output" || return 2
+    [ "$probe_result" != 2 ] && [ "$probe_inode" = "$(stat -Lc '%d:%i' "$bt_executable")" ] || return 2
+    bt_protocol_inode=$probe_inode bt_protocol=$probe_result
   fi
-  [ "$bt_protocol" = 1 ]
+  return "$bt_protocol"
 }
 
 restore_bt() {
   restore_owner=${1:-$bt_owner}
-  if [ -e "$restore_owner" ] || [ -L "$restore_owner" ]; then
+  if [ -n "$restore_owner" ] && { bt_exists "$restore_owner" || bt_exists "$restore_owner.pending"; }; then
     if ! PULSAR_BT_OWNER=$restore_owner "$D/ctl.sh" bt-restore >> "$LOG" 2>&1; then
       say "Bluetooth restore failed; not starting another binary or the Yandex stack"
+      return 1
+    fi
+    # Старый ctl мог вернуть успех, не зная о новом маркере передачи.
+    if bt_exists "$restore_owner.pending" &&
+      { [ "$restore_owner" != "$bt_legacy" ] ||
+        [ "$(stat -c '%u' "$restore_owner.pending" 2>/dev/null)" = "$(id -u)" ]; }; then
+      say "Bluetooth restore left the pending marker in place"
       return 1
     fi
   fi
@@ -187,7 +200,9 @@ trap 'kill $ROT 2>/dev/null' EXIT
 fails=0 swapped=0 backoff=$BACKOFF_MIN last_inode= bt_protocol_inode= bt_protocol=
 bt_test_clear || exit 1
 if [ -z "${PULSAR_BT_OWNER:-}" ] &&
-  [ "$(stat -c '%u' "$bt_legacy" 2>/dev/null)" = "$(id -u)" ]; then
+  uid=$(id -u) &&
+  { [ "$(stat -c '%u' "$bt_legacy" 2>/dev/null)" = "$uid" ] ||
+    [ "$(stat -c '%u' "$bt_legacy.pending" 2>/dev/null)" = "$uid" ]; }; then
   # Старый снимок не связан с новым путём и не должен пережить новый захват.
   wait_restore_bt "$bt_legacy" || exit 0
 fi
@@ -197,6 +212,7 @@ if [ -z "$bt_owner" ] && [ -n "$boot_id" ]; then
 fi
 while [ -f "$D/enabled" ]; do
   bt_test_clear || exit 1
+  if [ -n "$bt_owner" ] && bt_exists "$bt_owner.pending"; then wait_restore_bt || exit 0; fi
   rotate
   if [ ! -x "$BIN" ]; then
     say "$BIN missing or not executable"
@@ -220,14 +236,22 @@ while [ -f "$D/enabled" ]; do
         wait_restore_bt || exit 0
         remember_bt_executable || :
       fi
-      if bt_pinned_now && bt_protocol_supported; then
-        bt_managed=1
-        # Рабочий путь могут заменить после последней сверки inode. Старый
-        # демон, напротив, запускаем только по нему: его обновление читает /proc/self/exe.
-        launch=$bt_executable installed_binary=$BIN
-      else
-        wait_restore_bt || exit 0
-      fi
+      protocol=1
+      if bt_pinned_now; then bt_protocol_supported; protocol=$?; fi
+      case "$protocol" in
+        0)
+          bt_managed=1
+          # Рабочий путь могут заменить после последней сверки inode. Старый
+          # демон, напротив, запускаем только по нему: его обновление читает /proc/self/exe.
+          launch=$bt_executable installed_binary=$BIN
+          ;;
+        1) wait_restore_bt || exit 0 ;;
+        2)
+          # Сбой пробы не доказывает несовместимость: не возвращаем захваченный
+          # player и не запускаем демон без BT поверх существующего снимка.
+          if bt_pending; then sleep "$BACKOFF_MIN"; continue; fi
+          ;;
+      esac
     else
       wait_restore_bt || exit 0
     fi
@@ -246,7 +270,7 @@ while [ -f "$D/enabled" ]; do
   rc=$?
   up=$(($(uptime_s) - t0))
   echo "=== exit $rc after ${up}s $(date)" >> "$LOG"
-  if bt_pending; then
+  if bt_pending && ! bt_exists "$bt_owner.pending"; then
     "$D/ctl.sh" bt-restore --hide >> "$LOG" 2>&1 ||
       say "Bluetooth pairing flags could not be closed after daemon exit"
   fi

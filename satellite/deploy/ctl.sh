@@ -27,7 +27,8 @@ bt_test_clear() {
   # Как в tools/station.sh: проверяем только закрытый каталог нашего UID.
   bt_test_dir_trusted || return 0
   [ -e "$bt_test_dir/bt-reserved" ] || [ -L "$bt_test_dir/bt-reserved" ] ||
-    [ -e "$bt_test_owner" ] || [ -L "$bt_test_owner" ] || return 0
+    [ -e "$bt_test_owner" ] || [ -L "$bt_test_owner" ] ||
+    [ -e "$bt_test_owner.pending" ] || [ -L "$bt_test_owner.pending" ] || return 0
   echo 'Bluetooth тестового экземпляра не восстановлен: выполните test-stop' >&2
   return 1
 }
@@ -222,10 +223,36 @@ bt_hide() {
   [ "$bt_ok" = 0 ] && bt_same_bluez
 }
 
+bt_restore_pending() {
+  [ ! -L "$bt_pending" ] && [ -f "$bt_pending" ] &&
+    [ "$(stat -c '%u:%a:%s' "$bt_pending" 2>/dev/null)" = "$bt_uid:600:0" ] ||
+    bt_error 'некорректный файл незавершённой передачи'
+}
+
 bt_restore() {
   bt_read_owner || return 1
-  [ -n "$bt_flags" ] || return 0
+  bt_pending=$bt_owner.pending
+  if [ "$bt_owner" = "$bt_legacy" ]; then
+    # В общем /tmp не создаём новый маркер и не трогаем чужие файлы.
+    if { [ ! -e "$bt_pending" ] && [ ! -L "$bt_pending" ]; } ||
+      { bt_meta=$(stat -c '%u' "$bt_pending" 2>/dev/null) && [ "$bt_meta" != "$(id -u)" ]; }; then
+      bt_pending=
+    fi
+  fi
+  if [ -z "$bt_flags" ]; then
+    [ -n "$bt_pending" ] && { [ -e "$bt_pending" ] || [ -L "$bt_pending" ]; } || return 0
+    bt_uid=$(id -u) || return 1
+    bt_restore_pending && bt_stopped "${1-}" && rm -f "$bt_pending"
+    return
+  fi
   bt_stopped "${1-}" || return 1
+  if [ -n "$bt_pending" ]; then
+    if [ "$bt_owner" != "$bt_legacy" ] && [ ! -e "$bt_pending" ] && [ ! -L "$bt_pending" ]; then
+      (umask 077; set -C; : > "$bt_pending") ||
+        { bt_error 'не удалось отметить незавершённый возврат'; return 1; }
+    fi
+    bt_restore_pending || return 1
+  fi
 
   # Пространство пути подменяется только для изолированной проверки протокола.
   bt_init=${PULSAR_BT_INIT:-/etc/init.d/S53bluealsa-aplay}
@@ -240,7 +267,8 @@ bt_restore() {
     bt_restore_flag Discoverable "${bt_discover%% *}" || return 1
   if [ "${bt_flags##* }" = 1 ] && ! bt_player_running; then
     bt_same_bluez || return 1
-    "$bt_init" start || { bt_error 'init-скрипт не запустил bluealsa-aplay'; return 1; }
+    # Не передаём lock тестового стенда штатному демону.
+    "$bt_init" start 9>&- || { bt_error 'init-скрипт не запустил bluealsa-aplay'; return 1; }
     bt_wait=0
     while ! bt_player_running; do
       [ "$bt_wait" -lt 3 ] || { bt_error 'процесс bluealsa-aplay не появился'; return 1; }
@@ -250,7 +278,9 @@ bt_restore() {
   fi
   # В том числе если BlueZ сменился, пока поднимался штатный player.
   bt_same_bluez || return 1
-  rm -f "$bt_owner" || bt_error 'не удалось удалить снимок'
+  # При остановке между удалениями остаётся безопасный пустой маркер.
+  rm -f "$bt_owner" && { [ -z "$bt_pending" ] || rm -f "$bt_pending"; } ||
+    bt_error 'не удалось завершить возврат владения'
 }
 
 rollback() {
@@ -259,7 +289,14 @@ rollback() {
     # Пока копия не готова, рабочую службу не останавливаем.
     trap 'rm -f pulsar.rb' EXIT
     rm -f pulsar.rb && cp -p pulsar.prev pulsar.rb && [ -x pulsar.rb ] || exit 1
-    stop_service && bt_for_owners bt_restore || exit 1
+    stop_service || exit 1
+    if ! bt_for_owners bt_restore; then
+      # Бинарь ещё не заменён. Supervisor повторит незавершённый возврат.
+      if [ -f "$D/enabled" ]; then
+        start_supervisor || echo 'rollback: supervisor did not start' >&2
+      fi
+      exit 1
+    fi
     # Перед повторным использованием временного пути закрепляем действующий запрет захвата.
     if [ pulsar -ef pulsar.bt-blocked.next ]; then
       mv -f pulsar.bt-blocked.next pulsar.bt-blocked || { "$D/ctl.sh" reload; exit 1; }
