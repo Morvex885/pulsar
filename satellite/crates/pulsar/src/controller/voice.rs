@@ -16,6 +16,13 @@ use super::{
     Controller, LISTEN_TIMEOUT_MS, PROCESS_TIMEOUT_MS, Pending, SOUNDS, TIMER_RING_MAX_MS, Tk,
 };
 
+enum PipelineStart {
+    Button,
+    Automatic,
+    WakeWord,
+    Arbitrated(String),
+}
+
 impl Controller {
     fn arbitration_on(&self) -> bool {
         self.st.nearest_answers && self.arbiter.ok()
@@ -54,7 +61,7 @@ impl Controller {
                         && !self.timer_ringing
                         && !self.mic_muted()
                     {
-                        self.start_pipeline("", false, Vec::new());
+                        self.start_pipeline(PipelineStart::Automatic, Vec::new());
                     }
                     self.end_announce();
                 }
@@ -128,12 +135,14 @@ impl Controller {
         }
         // Without the HA pipeline this station could win and stay silent: it does not take part.
         if !self.arbitration_on() || !self.api.voice_subscribed() {
-            return self.answer_wake(phrase, preroll);
+            return self.answer_wake(PipelineStart::WakeWord, preroll);
         }
         self.arbitrating = true;
         // A station that lost the previous wake word may win this one.
         self.commands_blocked_until_ms = 0;
-        self.arb_phrase = phrase.to_owned();
+        self.arb_phrase.clear();
+        self.arb_phrase
+            .push_str(logic::wake_word_phrase(&self.active_wake_word));
         self.arb_level = level_db;
         self.arb_audio = preroll;
         self.arb_command.clear();
@@ -146,7 +155,7 @@ impl Controller {
         );
     }
 
-    fn answer_wake(&mut self, phrase: &str, preroll: Vec<i16>) {
+    fn answer_wake(&mut self, start: PipelineStart, preroll: Vec<i16>) {
         if self.timer_ringing {
             return self.stop_timer_ring();
         }
@@ -156,7 +165,7 @@ impl Controller {
         if self.phase == Phase::Speaking || self.announcing {
             self.interrupt_speech(); // barge-in: cut the answer short
         }
-        self.start_pipeline(phrase, true, preroll);
+        self.start_pipeline(start, preroll);
     }
 
     pub(super) fn arbitration_done(&mut self, won: bool, best: &Claim, peers: usize) {
@@ -187,8 +196,8 @@ impl Controller {
         }
         // Capture keeps streaming into the new dialog: switching it off here could drop the
         // chunk between the preroll and live audio.
-        let phrase = self.arb_phrase.clone();
-        self.answer_wake(&phrase, audio);
+        let phrase = std::mem::take(&mut self.arb_phrase);
+        self.answer_wake(PipelineStart::Arbitrated(phrase), audio);
         if self.phase != Phase::Listening {
             self.mic.set_streaming(false); // no dialog started (e.g. HA gone)
         }
@@ -211,7 +220,7 @@ impl Controller {
     // ---------------- pipeline ----------------
 
     /// The only way into LISTENING (the watchdog bounds it).
-    pub(super) fn start_pipeline(&mut self, phrase: &str, explicit: bool, preroll: Vec<i16>) {
+    fn start_pipeline(&mut self, start: PipelineStart, preroll: Vec<i16>) {
         if self.mic_muted() {
             return;
         }
@@ -224,6 +233,12 @@ impl Controller {
             self.timers.set(Tk::UiAfterNotSubscribed, 1500);
             return;
         }
+        let explicit = !matches!(start, PipelineStart::Automatic);
+        let phrase = match start {
+            PipelineStart::WakeWord => logic::wake_word_phrase(&self.active_wake_word).to_owned(),
+            PipelineStart::Arbitrated(phrase) => phrase,
+            PipelineStart::Button | PipelineStart::Automatic => String::new(),
+        };
         info!("starting voice pipeline (wake='{phrase}')");
         self.commands_blocked_until_ms = 0;
         self.phase = Phase::Listening;
@@ -448,7 +463,7 @@ impl Controller {
         ) {
             // Продолжение слушает, пока часы дочитывают предыдущий ответ.
             let display = std::mem::take(&mut self.speech_display);
-            self.start_pipeline("", false, Vec::new());
+            self.start_pipeline(PipelineStart::Automatic, Vec::new());
             self.speech_display = display;
             self.speech_display.followup();
             self.update_speech_number();
@@ -607,7 +622,7 @@ impl Controller {
             self.interrupt_speech();
             return self.finish_interaction();
         }
-        self.start_pipeline("", true, Vec::new());
+        self.start_pipeline(PipelineStart::Button, Vec::new());
     }
 
     // ---------------- announcements ----------------

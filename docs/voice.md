@@ -11,6 +11,9 @@ pulsar, и протокол арбитража wake word между станци
   `VoiceAssistantConfigurationRequest` без ожидания отдельного подтверждения. Активное слово для
   селектора берётся из ответа; таймаут чтения — 5 с
   ([HA 2026.11.1](https://github.com/home-assistant/core/blob/2026.11.1/homeassistant/components/esphome/assist_satellite.py#L222-L268)).
+- При выборе слота Assist HA сравнивает `wake_word_phrase` из `VoiceAssistantRequest` с подписью
+  в селекторе: регистр и написание должны совпадать
+  ([HA 2026.11.1](https://github.com/home-assistant/core/blob/2026.11.1/homeassistant/components/esphome/assist_satellite.py#L573-L590)).
 - В событиях pipeline нет id run. Если наш новый `voice_request_start` заменяет идущий run
   (barge-in), HA сначала шлёт оставшиеся события заменённого run, включая его RUN_END, и только
   потом RUN_START нового. RUN_END до RUN_START, когда никакой run не заменялся, значит, что HA

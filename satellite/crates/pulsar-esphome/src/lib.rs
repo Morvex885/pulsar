@@ -75,12 +75,12 @@ impl ApiHandle {
     /// phrase means started by the button or to continue a conversation. Returns the run id
     /// (1, 2, …) that `VoiceStartFailed` and `VoiceAudioOverflow` carry when they happen
     /// during this run.
-    pub fn voice_request_start(&self, wake_word_phrase: &str) -> u64 {
+    pub fn voice_request_start(&self, wake_word_phrase: impl Into<String>) -> u64 {
         let run = self.shared.run_seq.get() + 1;
         self.shared.run_seq.set(run);
         self.send(Cmd::VoiceRequestStart {
             run,
-            phrase: wake_word_phrase.to_owned(),
+            phrase: wake_word_phrase.into(),
         });
         run
     }

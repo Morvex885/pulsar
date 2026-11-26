@@ -726,13 +726,13 @@ pub fn initial_wake_words<'a>(
     only.into_iter().chain(rest.iter().map(String::as_str))
 }
 
-/// Для неизвестной модели подписью остаётся её ID.
-pub fn wake_word_phrase(id: &str) -> String {
+/// См. docs/voice.md, «Голосовой ассистент HA (ESPHome)».
+pub fn wake_word_phrase(id: &str) -> &str {
     match id {
-        "alisa" => "Алиса".into(),
-        "yandex" => "Яндекс".into(),
-        "yasmina" => "Yasmina".into(),
-        other => other.to_owned(),
+        "alisa" => "Алиса",
+        "yandex" => "Яндекс",
+        "yasmina" => "Yasmina",
+        other => other,
     }
 }
 

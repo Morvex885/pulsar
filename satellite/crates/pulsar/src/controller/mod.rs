@@ -37,7 +37,7 @@ const SOUNDS: &str = "/system/vendor/quasar/sounds/";
 
 fn wake_word_info(id: String) -> WakeWordInfo {
     WakeWordInfo {
-        phrase: logic::wake_word_phrase(&id),
+        phrase: logic::wake_word_phrase(&id).to_owned(),
         id,
         languages: vec!["ru".into()],
     }
