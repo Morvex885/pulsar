@@ -6,7 +6,7 @@ fn lum(c: Col) -> f32 {
 
 fn contour_leds() -> Vec<usize> {
     (0..PANEL_LEDS)
-        .filter(|&i| on_contour(&geo(i)) > 0.5)
+        .filter(|&i| GEOMETRY[i].contour > 0.5)
         .collect()
 }
 
@@ -82,7 +82,7 @@ fn thinking_arc_goes_around_the_contour() {
         let i = (0..PANEL_LEDS)
             .max_by(|&a, &b| lum(out[a]).total_cmp(&lum(out[b])))
             .unwrap();
-        geo(i).dy
+        GEOMETRY[i].dy
     };
     assert!(brightest(0) < 0.0);
     assert!(brightest(750) > 0.0);
@@ -97,9 +97,9 @@ fn volume_fills_from_the_left() {
             .into_iter()
             .filter(|&i| {
                 if left {
-                    geo(i).dx < -3.5
+                    GEOMETRY[i].dx < -3.5
                 } else {
-                    geo(i).dx > 3.5
+                    GEOMETRY[i].dx > 3.5
                 }
             })
             .map(|i| lum(out[i]))
@@ -115,7 +115,7 @@ fn mute_sweep_starts_at_the_top() {
     let lit: Vec<f32> = contour_leds()
         .into_iter()
         .filter(|&i| lum(out[i]) > 0.1)
-        .map(|i| geo(i).dy)
+        .map(|i| GEOMETRY[i].dy)
         .collect();
     assert!(!lit.is_empty());
     assert!(lit.iter().all(|&dy| dy < 0.0), "{lit:?}");
@@ -139,7 +139,7 @@ fn mute_off_sweep_starts_at_the_bottom() {
     let lit: Vec<f32> = contour_leds()
         .into_iter()
         .filter(|&i| lum(out[i]) > 0.1)
-        .map(|i| geo(i).dy)
+        .map(|i| GEOMETRY[i].dy)
         .collect();
     assert!(!lit.is_empty());
     assert!(lit.iter().all(|&dy| dy > 0.0), "{lit:?}");
@@ -153,7 +153,7 @@ fn timer_started_shrinks_to_the_top_and_ends_dark() {
         contour_leds()
             .into_iter()
             .filter(|&i| lum(out[i]) > 0.1)
-            .map(|i| geo(i).dy)
+            .map(|i| GEOMETRY[i].dy)
             .collect::<Vec<f32>>()
     };
     assert_eq!(lit_dy(0).len(), 14);
@@ -176,7 +176,7 @@ fn listening_rises_from_the_bottom() {
     voice(fx::Voice::Listening, 100, &mut out);
     let lit: Vec<f32> = (0..PANEL_LEDS)
         .filter(|&i| lum(out[i]) > 0.05)
-        .map(|i| geo(i).dy)
+        .map(|i| GEOMETRY[i].dy)
         .collect();
     assert!(!lit.is_empty());
     assert!(lit.iter().all(|&dy| dy > 0.0), "{lit:?}");
@@ -212,7 +212,7 @@ fn spectrum_bass_lights_the_middle_columns() {
     // Горят только столбики басов, в середине; полосы без звука тёмные.
     let on = lit(&out);
     assert!(!on.is_empty());
-    assert!(on.iter().all(|&i| geo(i).dx.abs() < 0.5), "{on:?}");
+    assert!(on.iter().all(|&i| GEOMETRY[i].dx.abs() < 0.5), "{on:?}");
     let silent = fx::MusicInput {
         bands: [0.0; 8],
         loudness: 0.0,
@@ -290,10 +290,12 @@ fn disco_and_polar_follow_the_ring_by_angle() {
         let top = contour_leds()
             .into_iter()
             .min_by(|&a, &b| {
-                (geo(a).dx.abs() + geo(a).dy).total_cmp(&(geo(b).dx.abs() + geo(b).dy))
+                let a = GEOMETRY[a];
+                let b = GEOMETRY[b];
+                (a.dx.abs() + a.dy).total_cmp(&(b.dx.abs() + b.dy))
             })
             .unwrap();
-        assert!(geo(top).dy < 0.0);
+        assert!(GEOMETRY[top].dy < 0.0);
         let want = lum(ring[0]);
         assert!(
             (lum(out[top]) - want).abs() <= 0.5 * want + 0.05,
@@ -360,7 +362,7 @@ fn spectrum_bass_and_treble_columns_start_together() {
     // Слабый звук во всех полосах: в каждой полосе горит хотя бы один светодиод.
     for band in 0..8 {
         let any = (0..PANEL_LEDS)
-            .filter(|&i| (geo(i).dx.abs().round() as usize).min(7) == band)
+            .filter(|&i| (GEOMETRY[i].dx.abs().round() as usize).min(7) == band)
             .any(|i| lum(out[i]) > 0.05);
         assert!(any, "band {band} dark");
     }

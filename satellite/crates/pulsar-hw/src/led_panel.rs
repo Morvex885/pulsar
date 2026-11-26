@@ -16,6 +16,8 @@
 //! `out` — светодиоды панели (84 или 88 с логотипом). `t` у состояний и разовых сигналов — мс от
 //! их начала, как у `led_fx::voice`; у светомузыки — фаза в секундах, как у `led_fx::music`.
 
+use std::sync::LazyLock;
+
 use crate::led_fx::{self as fx, Col, PANEL_XY};
 pub(crate) use crate::led_fx::{PANEL_LEDS, PANEL_LOGO_LEDS};
 
@@ -28,6 +30,10 @@ const PI: f32 = std::f32::consts::PI;
 const TAU: f32 = std::f32::consts::TAU;
 /// Длина контура, в тех же единицах.
 const PERIMETER: f32 = 4.0 * HALF + TAU * RAD;
+// Столбцы контура неравномерны: громкость заполняет пары по их порядку, а не по x.
+const VOLUME_COLS: [f32; 7] = [-5.0, -4.0, -2.0, 0.0, 2.0, 4.0, 5.0];
+const SPECTRUM_BANDS: usize = 8;
+const VIRTUAL_RING: usize = 24;
 
 // Фиолетовый — между кольцевыми VIOLET и VIOLET_SMALL `led_fx`: на панели под рассеивателем
 // кольцевой оттенок смотрится синее и холоднее. Красный и зелёный — кольцевые (`led_fx`).
@@ -36,29 +42,78 @@ const VIOLET: u32 = 0x5a12ff;
 const MUTE_LOGO: u32 = 0x500000;
 
 /// Геометрия одного светодиода относительно контура.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct Geo {
+    #[cfg(test)]
     dx: f32,
     dy: f32,
-    /// Расстояние со знаком до контура: < 0 внутри, > 0 снаружи.
-    sd: f32,
     /// Положение ближайшей точки контура, доля обхода 0..1 по часовой стрелке от верхней
     /// середины.
     s: f32,
+    contour: f32,
+    halo: f32,
+    from_top: f32,
+    pulse_dist: f32,
+    volume_rank: f32,
+    band: usize,
+    band_offset: f32,
+    ring_at: [usize; 2],
+    ring_frac: f32,
+    ring_weight: f32,
 }
 
-fn geo(i: usize) -> Geo {
-    let (col, row) = PANEL_XY[i];
-    let dx = f32::from(col) - CX;
-    let dy = f32::from(row) - CY;
-    let sd = (dx.abs() - HALF).max(0.0).hypot(dy) - RAD;
-    Geo {
-        dx,
-        dy,
-        sd,
-        s: contour_pos(dx, dy) / PERIMETER,
+static GEOMETRY: LazyLock<[Geo; PANEL_LEDS]> = LazyLock::new(|| {
+    let mut base = [f32::MAX; SPECTRUM_BANDS];
+    let mut points = std::array::from_fn(|i| {
+        let (col, row) = PANEL_XY[i];
+        let dx = f32::from(col) - CX;
+        let dy = f32::from(row) - CY;
+        let sd = (dx.abs() - HALF).max(0.0).hypot(dy) - RAD;
+        let s = contour_pos(dx, dy) / PERIMETER;
+        let contour = 1.0 - fx::smoothstep(0.45, 0.95, sd.abs());
+        let halo = if sd <= 0.6 {
+            0.0
+        } else {
+            1.0 - fx::smoothstep(0.75, 2.4, sd)
+        };
+        let volume_rank = if contour > 0.0 {
+            VOLUME_COLS
+                .iter()
+                .position(|&x| (dx - x).abs() < 0.5)
+                .expect("светодиод контура вне столбцов громкости") as f32
+        } else {
+            0.0
+        };
+        let band = (dx.abs().round() as usize).min(SPECTRUM_BANDS - 1);
+        base[band] = base[band].min(dy.abs());
+        // Угол с поправкой на вытянутость панели; 0 — вверх.
+        let a = (dx / 1.6).atan2(-dy).rem_euclid(TAU) / TAU * VIRTUAL_RING as f32;
+        let whole = a.floor();
+        let i0 = whole as usize % VIRTUAL_RING;
+        Geo {
+            #[cfg(test)]
+            dx,
+            dy,
+            s,
+            contour,
+            halo,
+            from_top: sdist(s, 0.0),
+            // Весь контур на расстоянии 0, иначе в тишине он светится пятнами.
+            pulse_dist: sd * (1.0 - contour),
+            volume_rank,
+            band,
+            band_offset: 0.0,
+            ring_at: [i0, (i0 + 1) % VIRTUAL_RING],
+            ring_frac: a - whole,
+            ring_weight: 1.0 - fx::smoothstep(0.6, 3.6, sd),
+        }
+    });
+    // В шахматной сетке ближайший к средней линии светодиод у каждой полосы свой.
+    for g in &mut points {
+        g.band_offset = g.dy.abs() - base[g.band];
     }
-}
+    points
+});
 
 /// Длина дуги контура от верхней середины по часовой стрелке (y растёт вниз) до точки контура,
 /// ближайшей к (dx, dy).
@@ -85,20 +140,6 @@ fn contour_pos(dx: f32, dy: f32) -> f32 {
     }
 }
 
-/// Вес «на контуре»: 1 на ряду светодиодов контура, 0 через ряд.
-fn on_contour(g: &Geo) -> f32 {
-    1.0 - fx::smoothstep(0.45, 0.95, g.sd.abs())
-}
-
-/// Вес ореола: ряд снаружи контура, дальше гаснет.
-fn halo(g: &Geo) -> f32 {
-    if g.sd <= 0.6 {
-        0.0
-    } else {
-        1.0 - fx::smoothstep(0.75, 2.4, g.sd)
-    }
-}
-
 /// Круговое расстояние между долями обхода.
 fn sdist(a: f32, b: f32) -> f32 {
     let d = (a - b).rem_euclid(1.0);
@@ -107,8 +148,8 @@ fn sdist(a: f32, b: f32) -> f32 {
 
 /// `f` для каждого светодиода панели; логотип и всё дальше — тёмные.
 fn each(out: &mut [Col], mut f: impl FnMut(&Geo) -> Col) {
-    for (i, o) in out.iter_mut().take(PANEL_LEDS).enumerate() {
-        *o = f(&geo(i));
+    for (o, g) in out.iter_mut().zip(GEOMETRY.iter()) {
+        *o = f(g);
     }
     for o in out.iter_mut().skip(PANEL_LEDS) {
         *o = Col::default();
@@ -130,26 +171,26 @@ pub fn voice(v: fx::Voice, t: i64, out: &mut [Col]) {
             // Контур поднимается снизу за 450 мс, затем спокойно дышит (100 % ↔ 65 %, 2,2 с),
             // ореол — глубже.
             const RISE: f32 = 450.0;
-            each(out, |g| {
-                let c = on_contour(g);
-                let h = halo(g);
-                if ft < RISE {
-                    // Фронт идёт снизу вверх и к концу уходит за верхний ряд ореола; вес ореола —
-                    // как в начале дыхания, чтобы на стыке не было скачка.
-                    let front = 4.8 - 9.8 * ft / RISE;
+            if ft < RISE {
+                // Фронт уходит за верхний ряд ореола; его вес совпадает с началом дыхания.
+                let front = 4.8 - 9.8 * ft / RISE;
+                each(out, |g| {
                     let k = fx::smoothstep(front - 0.8, front + 0.8, g.dy);
-                    return fx::stock(VIOLET, k * (c + 0.35 * h));
-                }
+                    fx::stock(VIOLET, k * (g.contour + 0.35 * g.halo))
+                });
+            } else {
                 let b = swell(ft - RISE, 2200.0);
-                fx::stock(VIOLET, c * (0.35 * b + 0.65) + h * 0.35 * b)
-            });
+                let contour_gain = 0.35 * b + 0.65;
+                each(out, |g| {
+                    fx::stock(VIOLET, g.contour * contour_gain + g.halo * 0.35 * b)
+                });
+            }
         }
         fx::Voice::Thinking => {
             // Дуга из ~4 светодиодов с мягким хвостом обходит контур за 1,5 с.
             let head = (t % 1500) as f32 / 1500.0;
             each(out, |g| {
-                let c = on_contour(g);
-                if c <= 0.0 {
+                if g.contour <= 0.0 {
                     return Col::default();
                 }
                 let behind = (head - g.s).rem_euclid(1.0) * PERIMETER;
@@ -159,23 +200,21 @@ pub fn voice(v: fx::Voice, t: i64, out: &mut [Col]) {
                 } else {
                     1.0 - fx::smoothstep(0.0, 1.4, ahead)
                 };
-                fx::stock(VIOLET, c * k)
+                fx::stock(VIOLET, g.contour * k)
             });
         }
         fx::Voice::Speaking => {
             // Ровный контур, яркость чуть колышется; по ореолу медленно бежит мягкая волна.
             let base = 0.12 * (TAU * ft / 1300.0).sin() + 0.88;
             each(out, |g| {
-                let c = on_contour(g);
-                let h = halo(g);
                 let w = 0.5 * (TAU * (g.s * 2.0 - ft / 1800.0)).sin() + 0.5;
-                fx::stock(VIOLET, c * base + h * 0.45 * w * w)
+                fx::stock(VIOLET, g.contour * base + g.halo * 0.45 * w * w)
             });
         }
         fx::Voice::Error => {
             // Три вспышки контура, тайминг кольцевой Error.
             let k = fx::error_k(t);
-            each(out, |g| fx::stock(fx::ERROR_RED, k * on_contour(g)));
+            each(out, |g| fx::stock(fx::ERROR_RED, k * g.contour));
         }
         fx::Voice::TimerRing => {
             // Зелёный контур и широкий ореол дышат с периодом 2,4 с.
@@ -183,7 +222,7 @@ pub fn voice(v: fx::Voice, t: i64, out: &mut [Col]) {
             each(out, |g| {
                 fx::stock(
                     fx::TIMER_GREEN,
-                    (0.75 * b + 0.25) * on_contour(g) + 0.5 * b * halo(g),
+                    (0.75 * b + 0.25) * g.contour + 0.5 * b * g.halo,
                 )
             });
         }
@@ -207,21 +246,13 @@ fn volume_colour(v: f32) -> Col {
 pub fn volume(v: f32, out: &mut [Col]) {
     let v = fx::clamp01(v);
     let col = volume_colour(v);
-    // Столбцы контура слева направо. Заполнение идёт по номеру столбца, а не по x: столбцы
-    // стоят неравномерно, и по x на круглых значениях громкости соседняя пара горела вполсилы.
-    // Громкость 0 — ни одного светодиода, 1 — все.
-    const COLS: [f32; 7] = [-5.0, -4.0, -2.0, 0.0, 2.0, 4.0, 5.0];
+    let columns = v * VOLUME_COLS.len() as f32;
     each(out, |g| {
-        let c = on_contour(g);
-        if c <= 0.0 {
+        if g.contour <= 0.0 {
             return Col::default();
         }
-        let rank = COLS
-            .iter()
-            .position(|&x| (g.dx - x).abs() < 0.5)
-            .unwrap_or(0);
-        let k = fx::clamp01(v * COLS.len() as f32 - rank as f32);
-        col * (c * (0.9 * k + 0.1))
+        let k = fx::clamp01(columns - g.volume_rank);
+        col * (g.contour * (0.9 * k + 0.1))
     });
 }
 
@@ -229,12 +260,11 @@ pub fn volume(v: f32, out: &mut [Col]) {
 pub fn timer_started(t: i64, out: &mut [Col]) {
     let left = 1.0 - t.min(fx::TIMER_STARTED_MS) as f32 / fx::TIMER_STARTED_MS as f32;
     let fade = (left * 15.0).min(1.0);
+    // Дальше половины обхода на ширину края, как у `mute_sweep`: в начале контур замкнут.
+    let reach = left * 0.53;
     each(out, |g| {
-        let d = sdist(g.s, 0.0);
-        // Дальше половины обхода на ширину края, как у `mute_sweep`: в начале контур замкнут.
-        let reach = left * 0.53;
-        let k = fx::smoothstep(reach + 0.03, reach - 0.03, d);
-        fx::stock(fx::TIMER_START_GREEN, on_contour(g) * k * fade)
+        let k = fx::smoothstep(reach + 0.03, reach - 0.03, g.from_top);
+        fx::stock(fx::TIMER_START_GREEN, g.contour * k * fade)
     });
 }
 
@@ -251,12 +281,9 @@ pub fn mute_sweep(on: bool, t: i64, out: &mut [Col]) {
         1.0
     };
     each(out, |g| {
-        let mut d = sdist(g.s, 0.0);
-        if !on {
-            d = 0.5 - d;
-        }
+        let d = if on { g.from_top } else { 0.5 - g.from_top };
         let k = fx::smoothstep(reach + 0.04, reach - 0.04, d);
-        fx::stock(fx::MUTE_RED, on_contour(g) * k * tail)
+        fx::stock(fx::MUTE_RED, g.contour * k * tail)
     });
 }
 
@@ -271,58 +298,43 @@ pub fn mute_logo() -> Col {
 /// Светомузыка по геометрии панели. Disco и Polar кольцевые по природе: их рисует
 /// `led_fx::music` на виртуальном кольце, а сюда они попадают по углу вокруг логотипа.
 pub fn music(s: fx::Style, st: &fx::MusicState, inp: &fx::MusicInput, t: f64, out: &mut [Col]) {
-    let hue = fx::palette(t);
-    let loud = fx::clamp01(inp.loudness);
     match s {
         fx::Style::Spectrum => {
             // Столбики от средней линии вверх и вниз: басы в середине, высокие частоты по краям.
-            let b = &inp.bands;
-            // Столбик каждой полосы растёт от её ближайшего к средней линии светодиода: в шахматной
-            // сетке он у разных полос на разной высоте, и от общей линии басы загорались бы позже.
-            let mut base = [f32::MAX; 8];
-            for i in 0..PANEL_LEDS {
-                let g = geo(i);
-                let band = (g.dx.abs().round() as usize).min(7);
-                base[band] = base[band].min(g.dy.abs());
-            }
-            each(out, |g| {
-                let band = (g.dx.abs().round() as usize).min(7);
-                let lvl = fx::clamp01(b[band]);
+            let hue = fx::palette(t);
+            let bands = std::array::from_fn::<_, SPECTRUM_BANDS, _>(|band| {
+                let lvl = fx::clamp01(inp.bands[band]);
                 let reach = lvl * 6.6;
-                // Без звука в полосе — темно: у края столбика иначе остаётся полуяркость.
-                let k = fx::smoothstep(reach + 0.6, reach - 0.6, g.dy.abs() - base[band])
-                    * fx::smoothstep(0.0, 0.05, lvl);
-                fx::hsv(
+                // У края остаётся полуяркость; этот множитель гасит полосу в тишине.
+                let gain = fx::smoothstep(0.0, 0.05, lvl);
+                let color = fx::hsv(
                     ((25.0 * band as f32 + hue) / 360.0) % 1.0,
                     1.0,
                     lvl.max(0.2),
-                ) * k
+                );
+                (reach, gain, color)
+            });
+            each(out, |g| {
+                let (reach, gain, color) = bands[g.band];
+                let k = fx::smoothstep(reach + 0.6, reach - 0.6, g.band_offset) * gain;
+                color * k
             });
         }
         fx::Style::Pulse => {
             // Стадион, разрастающийся от контура с громкостью; на долю — короткая подсветка.
+            let loud = fx::clamp01(inp.loudness);
             let v = (0.3 * inp.flash + 0.85 * loud + 0.15).min(1.0);
             // До дальних углов панели (до контура ~4,7) на полной громкости.
             let reach = loud * 5.1;
-            let col = fx::hsv(hue / 360.0, 0.9, v);
-            // Весь ряд контура — расстояние 0: у части его светодиодов `sd` чуть больше нуля, и
-            // в тишине контур светился бы пятнами.
-            each(out, |g| {
-                let d = g.sd * (1.0 - on_contour(g));
-                col * fx::smoothstep(reach + 0.7, reach - 0.3, d)
-            });
+            let col = fx::hsv(fx::palette(t) / 360.0, 0.9, v);
+            each(out, |g| col * fx::smoothstep(reach + 0.7, reach - 0.3, g.pulse_dist));
         }
         fx::Style::Disco | fx::Style::Polar => {
-            const RING: usize = 24;
-            let mut ring = [Col::default(); RING];
+            let mut ring = [Col::default(); VIRTUAL_RING];
             fx::music(s, st, inp, t, &mut ring);
             each(out, |g| {
-                // Угол вокруг центра с поправкой на вытянутость панели; 0 — вверх.
-                let a = (g.dx / 1.6).atan2(-g.dy).rem_euclid(TAU) / TAU * RING as f32;
-                let i0 = a.floor() as usize % RING;
-                let f = a - a.floor();
-                let c = fx::lerp(ring[i0], ring[(i0 + 1) % RING], f);
-                c * (1.0 - fx::smoothstep(0.6, 3.6, g.sd))
+                let [a, b] = g.ring_at;
+                fx::lerp(ring[a], ring[b], g.ring_frac) * g.ring_weight
             });
         }
     }
