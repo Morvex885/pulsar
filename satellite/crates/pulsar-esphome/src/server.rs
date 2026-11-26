@@ -209,22 +209,17 @@ pub(crate) struct Spawned {
     pub cmds: UnboundedSender<Cmd>,
     pub shared: Rc<Shared>,
     pub events: UnboundedReceiver<ApiEvent>,
-    /// The bound port (the configured one, or the kernel's choice for port 0).
-    #[cfg_attr(not(test), expect(dead_code, reason = "tests bind port 0"))]
-    pub port: u16,
 }
 
-/// Binds the port and starts the actor on the current `LocalSet`.
-pub(crate) fn spawn(id: DeviceIdentity, cfg: ApiConfig) -> Result<Spawned, String> {
-    let (server, handle) = bind_server(id, cfg)?;
+pub(crate) fn spawn(id: DeviceIdentity, cfg: ApiConfig, listener: ApiListener) -> Spawned {
+    let (server, handle) = new_server(id, cfg, listener);
     actors::spawn_actor("api", server.run());
-    Ok(handle)
+    handle
 }
 
-fn bind_server(id: DeviceIdentity, mut cfg: ApiConfig) -> Result<(Server, Spawned), String> {
-    let listener = bind(cfg.port)?;
-    let port = listener.local_addr().map_or(cfg.port, |a| a.port());
-    info!("api: listening on :{} as '{}'", cfg.port, id.name);
+fn new_server(id: DeviceIdentity, mut cfg: ApiConfig, listener: ApiListener) -> (Server, Spawned) {
+    let ApiListener { socket, port } = listener;
+    info!("api: listening on :{port} as '{}'", id.name);
     // An empty path means "no encryption", as in the C++ configuration.
     cfg.key_path = cfg.key_path.filter(|p| !p.as_os_str().is_empty());
     let key = key::load_key(cfg.key_path.as_deref());
@@ -246,7 +241,7 @@ fn bind_server(id: DeviceIdentity, mut cfg: ApiConfig) -> Result<(Server, Spawne
         shared: shared.clone(),
         events: ev_tx,
         cmds: cmd_rx,
-        listener,
+        listener: socket,
         timers,
         log_notify: Arc::new(Notify::new()),
         clients: Vec::new(),
@@ -269,18 +264,31 @@ fn bind_server(id: DeviceIdentity, mut cfg: ApiConfig) -> Result<(Server, Spawne
     };
     // Diagnostics for the first SubscribeStates; the Diag timer keeps them fresh.
     server.refresh_diagnostics(false);
-    Ok((
+    (
         server,
         Spawned {
             cmds: cmd_tx,
             shared,
             events: ev_rx,
-            port,
         },
-    ))
+    )
 }
 
-fn bind(port: u16) -> Result<TcpListener, String> {
+/// Сокет уже слушает; передача в `spawn` не требует повторной привязки.
+pub struct ApiListener {
+    socket: TcpListener,
+    port: u16,
+}
+
+impl ApiListener {
+    /// Фактический порт, в том числе при привязке к порту 0.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+/// Открывает порт на всех интерфейсах IPv4 до запуска API-актора.
+pub fn bind(port: u16) -> Result<ApiListener, String> {
     let fail = |m: String| {
         error!("{m}");
         m
@@ -295,8 +303,13 @@ fn bind(port: u16) -> Result<TcpListener, String> {
             os_error_text(&e)
         )));
     }
-    TcpListener::from_std(sock.into())
-        .map_err(|e| fail(format!("api: socket: {}", os_error_text(&e))))
+    let socket = TcpListener::from_std(sock.into())
+        .map_err(|e| fail(format!("api: socket: {}", os_error_text(&e))))?;
+    let port = socket
+        .local_addr()
+        .map_err(|e| fail(format!("api: bound address: {}", os_error_text(&e))))?
+        .port();
+    Ok(ApiListener { socket, port })
 }
 
 /// "aabbccddeeff", as ESPHome puts it in mDNS TXT and the Noise server hello.

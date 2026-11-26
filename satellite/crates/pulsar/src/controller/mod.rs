@@ -351,7 +351,9 @@ impl Controller {
                 None
             }
         };
-        // Наличие Bluetooth-сущностей решается до публикации списка API.
+        // Занятый порт должен остановить запуск до захвата штатного Bluetooth-плеера.
+        // Сокет остаётся у нас до формирования списка сущностей.
+        let api_listener = pulsar_esphome::bind(ports.api)?;
         let (bt, bt_rx) = match pulsar_bt::probe(model).await {
             Ok(probe) => {
                 let (handle, rx) = pulsar_bt::spawn(model, st.bluetooth_enabled, probe);
@@ -364,7 +366,6 @@ impl Controller {
         };
         let bluetooth = bt.is_some();
         let cfg = ApiConfig {
-            port: ports.api,
             wake_words: wake_names.into_iter().map(wake_word_info).collect(),
             active_wake_words: Vec::new(),
             light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
@@ -390,10 +391,7 @@ impl Controller {
             key_path: Some(logic::in_dir(&dir, "api_key")),
             has_auto_brightness: lux_rx.is_some(),
         };
-        // The C++ server bound its port last (ApiServer::start); here the bind comes first, so
-        // a failure exits before the hardware starts. Nothing reaches the server before `run`.
-        let (api, api_rx) = pulsar_esphome::spawn(id.clone(), cfg)
-            .map_err(|_| "ESPHome API server failed to start".to_owned())?;
+        let (api, api_rx) = pulsar_esphome::spawn(id.clone(), cfg, api_listener);
         let (player, player_rx) = pulsar_media::spawn(model);
         let (arbiter, arbiter_rx) = arbiter::spawn(id.name.clone(), ports.arbiter);
 

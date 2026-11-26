@@ -37,8 +37,6 @@ pub struct WakeWordInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApiConfig {
-    /// 6053.
-    pub port: u16,
     /// Wake words available on the device.
     pub wake_words: Vec<WakeWordInfo>,
     /// Initially active ids.
@@ -85,7 +83,6 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         Self {
-            port: 6053,
             wake_words: Vec::new(),
             active_wake_words: Vec::new(),
             light_effects: Vec::new(),

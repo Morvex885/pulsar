@@ -431,6 +431,12 @@ impl FrameActivity {
                 _ => return,
             }
         }
+        // Исходный Paused может быть устаревшим; только пауза после Playing
+        // отделяет новый старт от продолжения переоткрытого потока.
+        if policy.playback == Some(Playback::Playing) && matches!(avr, Some((Playback::Paused, _)))
+        {
+            self.enable_continuation = None;
+        }
         let first = self.start.take();
         let continuation = first.and_then(|_| self.enable_continuation.take());
         let (phase, order) = match (avr, first) {
@@ -1236,6 +1242,7 @@ mod tests {
             let mut frames = previous.reopen_after_enable("phone", 30, 0).unwrap();
             policy.release();
             policy.select("phone".into(), Instant::now());
+            frames.observe(&mut policy, paused);
             if playing_before_pcm {
                 frames.observe(&mut policy, playing);
                 assert_eq!(policy.ready_start(true, 40), None);
@@ -1245,6 +1252,21 @@ mod tests {
             assert_eq!(policy.ready_start(true, 0), Some(30));
             assert_eq!(policy.ready_start(true, 40), None);
         }
+    }
+
+    #[test]
+    fn avrcp_pause_before_first_frame_separates_a_fresh_start() {
+        let mut policy = selected_policy();
+        let mut frames = FrameActivity {
+            enable_continuation: Some(30),
+            ..FrameActivity::default()
+        };
+        frames.observe(&mut policy, Some((Playback::Playing, Some(35))));
+        frames.observe(&mut policy, Some((Playback::Paused, None)));
+        frames.observe(&mut policy, Some((Playback::Playing, Some(60))));
+        frames.start(65);
+        frames.observe(&mut policy, Some((Playback::Playing, Some(60))));
+        assert_eq!(policy.ready_start(true, 40), Some(60));
     }
 
     #[test]

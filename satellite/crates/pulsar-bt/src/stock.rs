@@ -380,7 +380,7 @@ fn plugin_registered(config: &Path, confdir: &Path, etc_alsa: &Path) -> bool {
                 .strip_prefix("bluealsa")
                 .is_some_and(|tail| {
                     tail.is_empty()
-                        || tail.starts_with('{')
+                        || tail.starts_with(['{', '='])
                         || tail.starts_with(char::is_whitespace)
                 })
         })
@@ -474,6 +474,12 @@ mod tests {
         fs::write(
             confdir.join("conf.d/20-bluealsa.conf"),
             "pcm.!bluealsa{ type plug }\n",
+        )
+        .unwrap();
+        assert!(plugin_registered(&config, &confdir, &etc_alsa));
+        fs::write(
+            confdir.join("conf.d/20-bluealsa.conf"),
+            "pcm.bluealsa={ type plug }\n",
         )
         .unwrap();
         assert!(plugin_registered(&config, &confdir, &etc_alsa));

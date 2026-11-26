@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use pulsar_esphome::{ApiConfig, ApiEvent, DeviceIdentity, spawn};
+use pulsar_esphome::{ApiConfig, ApiEvent, DeviceIdentity, bind, spawn};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -107,22 +107,16 @@ impl Client {
 #[tokio::test]
 async fn subscribed_clients_get_log_lines_at_their_level() {
     pulsar_core::init_logger();
-    let port = std::net::TcpListener::bind("0.0.0.0:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let listener = bind(0).unwrap();
+    let port = listener.port();
     let id = DeviceIdentity {
         name: "pulsar-test".into(),
         ..DeviceIdentity::default()
     };
-    let cfg = ApiConfig {
-        port,
-        ..ApiConfig::default()
-    };
+    let cfg = ApiConfig::default();
     tokio::task::LocalSet::new()
         .run_until(async {
-            let (h, mut rx) = spawn(id, cfg).unwrap();
+            let (h, mut rx) = spawn(id, cfg, listener);
             let mut debug = Client::connect(port).await;
             debug.hello().await;
             debug.subscribe_logs(5).await;

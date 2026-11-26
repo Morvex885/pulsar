@@ -512,8 +512,9 @@ case "$1" in
     bt_test_clear || exit 1
     stop_service || exit 1
     if [ "${2-}" = --stop ]; then
-      service_locked bt_for_owners bt_hide
-      exit $?
+      # 75: остановка подтверждена, не удалось только скрыть окно Bluetooth.
+      service_locked bt_for_owners bt_hide && exit 0
+      exit 75
     fi
     if [ -f "$D/enabled" ] && [ -x "$D/supervise.sh" ]; then
       # Новый supervisor дождётся возврата владения или перезапустит демон для

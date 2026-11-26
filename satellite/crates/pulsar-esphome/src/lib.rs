@@ -18,23 +18,24 @@ use std::rc::Rc;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+pub use server::{ApiListener, bind};
 use server::{Cmd, Publish, Shared};
 pub use types::*;
 
-/// Binds the API port (all IPv4 interfaces), reads the encryption key and starts the server
-/// actor on the current `LocalSet`. Err (already logged) when the port cannot be bound.
+/// Читает ключ и запускает API-актор на текущем `LocalSet` с уже открытым сокетом.
 pub fn spawn(
     id: DeviceIdentity,
     cfg: ApiConfig,
-) -> Result<(ApiHandle, UnboundedReceiver<ApiEvent>), String> {
-    let s = server::spawn(id, cfg)?;
-    Ok((
+    listener: ApiListener,
+) -> (ApiHandle, UnboundedReceiver<ApiEvent>) {
+    let s = server::spawn(id, cfg, listener);
+    (
         ApiHandle {
             cmds: s.cmds,
             shared: s.shared,
         },
         s.events,
-    ))
+    )
 }
 
 /// Commands to the server actor; the server stops (DisconnectRequest to every client, port

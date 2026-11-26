@@ -35,7 +35,6 @@ fn identity() -> DeviceIdentity {
 
 fn config(key_path: Option<PathBuf>) -> ApiConfig {
     ApiConfig {
-        port: 0,
         key_path,
         ..ApiConfig::default()
     }
@@ -43,12 +42,14 @@ fn config(key_path: Option<PathBuf>) -> ApiConfig {
 
 /// Server on an ephemeral port.
 fn start(key_path: Option<PathBuf>) -> (ApiHandle, UnboundedReceiver<ApiEvent>, u16) {
-    let s = spawn(identity(), config(key_path)).unwrap();
+    let listener = bind(0).unwrap();
+    let port = listener.port();
+    let s = spawn(identity(), config(key_path), listener);
     let handle = ApiHandle {
         cmds: s.cmds,
         shared: s.shared,
     };
-    (handle, s.events, s.port)
+    (handle, s.events, port)
 }
 
 async fn event(rx: &mut UnboundedReceiver<ApiEvent>) -> ApiEvent {
@@ -964,11 +965,7 @@ async fn bind_failure_is_an_error() {
         .run_until(async {
             let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
             let port = taken.local_addr().unwrap().port();
-            let cfg = ApiConfig {
-                port,
-                ..ApiConfig::default()
-            };
-            let err = spawn(identity(), cfg).err().unwrap();
+            let err = bind(port).err().unwrap();
             assert!(
                 err.starts_with(&format!("api: bind/listen :{port}: ")),
                 "{err}"

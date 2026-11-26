@@ -1246,6 +1246,18 @@ reject env FAIL_STATION_COPY=1 sh "$station" lite2 swap "$BT_FIXTURE/swap"
 expect ''
 [ -f "$BT_FIXTURE/pulsar-running" ] && [ -f "$BT_FIXTURE/supervisor-running" ] ||
   fail 'swap stopped the service before staging its replacement'
+marker 'v2 0 1 0'
+reject env FAIL_FLAG=Discoverable FAIL_VALUE=false sh "$station" lite2 swap "$BT_FIXTURE/swap"
+expect 'Discoverable:false
+Pairable:false
+supervisor:start'
+cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-swap"
+cmp "$PULSAR_DIR/pulsar.prev" "$BT_FIXTURE/before-prev"
+[ "$(cat "$PULSAR_BT_OWNER")" = 'v2 0 1 0' ] && [ -f "$BT_FIXTURE/supervisor-running" ] ||
+  fail 'failed hide did not restart the supervisor with the original state'
+rm "$PULSAR_BT_OWNER"
+touch "$BT_FIXTURE/pulsar-running"
+trace
 reject env LATE_ACQUIRE='v2 0 1 1' FAIL_FLAG=Discoverable FAIL_VALUE=true sh "$station" lite2 swap "$BT_FIXTURE/swap"
 expect 'init:stop
 Discoverable:false

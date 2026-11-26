@@ -27,7 +27,6 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         compilation_time: compilation_time.into(),
     };
     let cfg = ApiConfig {
-        port: 0,
         wake_words: vec![ww("alisa", "Алиса"), ww("yandex", "Яндекс")],
         active_wake_words: s(&["alisa"]),
         light_effects: s(&["Rainbow", "Pulse"]),
@@ -77,12 +76,14 @@ fn publish_selftest_states(h: &ApiHandle) {
 }
 
 fn start_with(id: DeviceIdentity, cfg: ApiConfig) -> (ApiHandle, UnboundedReceiver<ApiEvent>, u16) {
-    let s = spawn(id, cfg).unwrap();
+    let listener = bind(0).unwrap();
+    let port = listener.port();
+    let s = spawn(id, cfg, listener);
     let h = ApiHandle {
         cmds: s.cmds,
         shared: s.shared,
     };
-    (h, s.events, s.port)
+    (h, s.events, port)
 }
 
 /// Message type and fixed32 key of a state message (field 1), for the masked comparison.
@@ -1398,14 +1399,16 @@ async fn eof_batch_drains_voice_in_order_without_broadcasting_to_closed_peer() {
 
     for (already_subscribed, unsubscribe) in [(true, false), (true, true), (false, false)] {
         let (id, cfg) = selftest("now");
-        let (mut s, handle) = bind_server(id, cfg).unwrap();
+        let listener = bind(0).unwrap();
+        let port = listener.port();
+        let (mut s, handle) = new_server(id, cfg, listener);
         let mut rx = handle.events;
         let api = ApiHandle {
             cmds: handle.cmds,
             shared: handle.shared,
         };
-        let (owner, mut p) = subscribe(&mut s, handle.port, "owner").await;
-        let (other, mut live) = subscribe(&mut s, handle.port, "other").await;
+        let (owner, mut p) = subscribe(&mut s, port, "owner").await;
+        let (other, mut live) = subscribe(&mut s, port, "other").await;
         event(&mut rx).await;
         event(&mut rx).await;
 
