@@ -23,6 +23,8 @@ pub enum Anim {
     Pause,
     Next,
     Previous,
+    BluetoothConnected,
+    BluetoothDisconnected,
 }
 
 const A: usize = 0;
@@ -188,6 +190,7 @@ pub fn duration_ms(a: Anim) -> i64 {
         Anim::Boot => 4880,
         Anim::Pause => 2200,
         Anim::Next | Anim::Previous => 1500,
+        Anim::BluetoothConnected | Anim::BluetoothDisconnected => 1000,
     }
 }
 
@@ -253,6 +256,20 @@ pub fn render(a: Anim, t: i64) -> Frame {
             let cols = if a == Anim::Next { NEXT } else { PREV };
             for (c, col) in (0..).zip(cols) {
                 bar(&mut f, col, sweep_column(c, t));
+            }
+        }
+        Anim::BluetoothConnected | Anim::BluetoothDisconnected => {
+            // При отключении символы исчезают в порядке, обратном появлению.
+            let on = a == Anim::BluetoothConnected;
+            if on || t < 700 {
+                for s in [C, D, E, F, G] {
+                    f.seg[1][s] = 255;
+                }
+            }
+            if (on && t >= 120) || (!on && t < 440) {
+                for s in [D, E, F, G] {
+                    f.seg[2][s] = 255;
+                }
             }
         }
     }

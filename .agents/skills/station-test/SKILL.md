@@ -12,9 +12,8 @@ description: >-
 
 ## 1. Допуск
 
-- Адрес станции и метка работы берутся из окружения: `PULSAR_MIDI`, `PULSAR_LITE2` или
-  `PULSAR_MINI` и `PULSAR_TAG`; адреса в репозиторий не писать. Нет переменной — статус
-  `заблокирован: нет PULSAR_<X>` (`docs/stations.md`, пункт «Адреса»), дальше не идти.
+- SSH-назначение берётся из окружения или локального файла — см. `docs/stations.md`, пункт
+  «Адреса». Если назначения нет, дальше не идти. Метка работы — `PULSAR_TAG`.
 - `tools/station.sh` знает только `midi|lite2|mini`. Для Лайт, Мини 2, Мини 3, Мини 3 Про и Станции
   2 (модель уже поддержана) цели в нём нет: сначала добавить её (сам скрипт, перечни целей в этом
   skill и пункт «Громкость» в `docs/stations.md`; ключ dmix модели — `add-station-model`, п. 2,
@@ -54,8 +53,8 @@ description: >-
 
 `make -C satellite ARCH=<arch> tools` → `satellite/build/<arch>/tools/<name>`
 (`AGENTS.md`, «Сборка и проверки»); список — `docs/architecture.md`, «Workspace». `push` файла в
-`/tmp/pulsar-test/`, запуск — `ssh "$PULSAR_<X>" /tmp/pulsar-test/<name> …` (то же ssh-назначение,
-что у `station.sh`; команды запуска в нём нет). Утилиты со звуком — п. 6.
+`/tmp/pulsar-test/`, запуск — `ssh "$host" /tmp/pulsar-test/<name> …`, где `host` — то же
+SSH-назначение из переменной или файла, что использует `station.sh`. Утилиты со звуком — п. 6.
 
 ## 6. Звук
 

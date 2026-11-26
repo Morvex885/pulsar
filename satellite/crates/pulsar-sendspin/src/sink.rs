@@ -29,9 +29,23 @@ enum Req {
     Release,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    Closed,
+    Ready,
+    Reported,
+}
+
+struct Request {
+    pending: Req,
+    // Владелец выхода сохраняется и после применения запроса к ALSA.
+    start: Option<u64>,
+    output: Output,
+}
+
 pub(crate) struct Sink {
     io: Mutex<Io>,
-    req: Mutex<Req>,
+    req: Mutex<Request>,
     req_gen: AtomicU32,
     applied_gen: AtomicU32,
     /// f32 bits of the duck gain the output ramps to, 0..1.
@@ -44,6 +58,7 @@ struct Io {
     model: &'static Model,
     pcm: Option<Pcm>,
     active: bool,
+    output_ready: bool,
     want_rate: u32,
     rate: u32,
     want_channels: u8,
@@ -79,6 +94,7 @@ impl Sink {
                 model,
                 pcm: None,
                 active: false,
+                output_ready: false,
                 want_rate: 0,
                 rate: 0,
                 want_channels: 0,
@@ -100,24 +116,75 @@ impl Sink {
                 prev_played: 0,
                 stats_us: 0,
             }),
-            req: Mutex::new(Req::None),
+            req: Mutex::new(Request {
+                pending: Req::None,
+                start: None,
+                output: Output::Closed,
+            }),
             req_gen: AtomicU32::new(0),
             applied_gen: AtomicU32::new(0),
             target_gain: AtomicU32::new(1.0f32.to_bits()),
         }
     }
 
-    pub(crate) fn configure(&self, rate: u32, channels: u8, bits: u8) {
-        self.request(Req::Configure {
-            rate,
-            channels,
-            bits,
-        });
+    pub(crate) fn configure(&self, rate: u32, channels: u8, bits: u8) -> u64 {
+        let order = {
+            let mut req = lock(&self.req);
+            let order = pulsar_core::audio_start_order();
+            self.record(
+                &mut req,
+                Req::Configure {
+                    rate,
+                    channels,
+                    bits,
+                },
+                Some(order),
+            );
+            order
+        };
+        self.try_apply();
+        order
+    }
+
+    pub(crate) fn owns_start(&self, order: u64) -> bool {
+        lock(&self.req).start == Some(order)
+    }
+
+    pub(crate) fn take_ready_start(&self) -> Option<u64> {
+        let mut req = lock(&self.req);
+        if req.output != Output::Ready {
+            return None;
+        }
+        req.output = Output::Reported;
+        req.start
+    }
+
+    pub(crate) fn output_is_current(&self, order: u64) -> bool {
+        let req = lock(&self.req);
+        req.start == Some(order) && req.output != Output::Closed
     }
 
     /// Stream ended: drop what is queued and release the device so dmix is not held while idle.
     pub(crate) fn release(&self) {
-        self.request(Req::Release);
+        self.record(&mut lock(&self.req), Req::Release, None);
+        self.try_apply();
+    }
+
+    /// Закрывает допуск синхронно; сам PCM закроет sync task или `finish_request`.
+    pub(crate) fn revoke_before(&self, order: u64) -> bool {
+        let mut req = lock(&self.req);
+        if !req.start.is_some_and(|start| start < order) {
+            return false;
+        }
+        self.record(&mut req, Req::Release, None);
+        true
+    }
+
+    /// Вызывается вне LocalSet, если новых записей может не быть.
+    pub(crate) fn finish_request(&self) {
+        if self.pending() {
+            self.apply_pending(&mut lock(&self.io));
+        }
     }
 
     pub(crate) fn set_gain(&self, g: f32) {
@@ -149,12 +216,11 @@ impl Sink {
 
     /// Sync task: (bytes consumed, frames played to report, their finish time in µs).
     pub(crate) fn write(&self, data: &[u8], timeout_ms: u32) -> (usize, u32, i64) {
-        let r = self.write_once(data, timeout_ms);
+        let generation = self.req_gen.load(SeqCst);
+        let r = self.write_once(data, timeout_ms, generation);
         // A request that arrived while `io` was held (request()'s try_lock failed) must not wait
         // for the next write: a release may be the last event, and the device would stay open.
-        if self.pending() {
-            self.apply_pending(&mut lock(&self.io));
-        }
+        self.finish_request();
         r
     }
 
@@ -162,7 +228,7 @@ impl Sink {
         self.req_gen.load(SeqCst) != self.applied_gen.load(SeqCst)
     }
 
-    fn write_once(&self, data: &[u8], timeout_ms: u32) -> (usize, u32, i64) {
+    fn write_once(&self, data: &[u8], timeout_ms: u32, generation: u32) -> (usize, u32, i64) {
         let length = data.len();
         let deadline = now_us() + i64::from(timeout_ms) * 1000;
         let mut frames_done: u32 = 0;
@@ -171,7 +237,7 @@ impl Sink {
         let mut io = lock(&self.io);
         self.apply_pending(&mut io);
         let bpf = usize::from(io.want_channels) * usize::from(io.want_bits / 8);
-        if !io.active || bpf == 0 {
+        if !io.active || bpf == 0 || self.applied_gen.load(SeqCst) != generation || self.pending() {
             return (length, 0, 0); // stale audio after stream end: discard
         }
         if io.pcm.is_none() && !io.open() {
@@ -191,6 +257,9 @@ impl Sink {
 
         let mut first = true;
         while (frames_done as usize) < frames_total {
+            if self.pending() {
+                break;
+            }
             let Some(pcm) = io.pcm.as_mut() else { break };
             if !first && now_us() >= deadline {
                 break;
@@ -215,16 +284,13 @@ impl Sink {
                 {
                     break;
                 }
-                if self.pending() {
-                    // Stream restarted / ended: this audio is stale.
-                    io.scratch = scratch;
-                    self.apply_pending(&mut io);
-                    return (length, 0, 0);
-                }
                 continue;
             }
             let done = frames_done as usize;
             let chunk = (frames_total - done).min(avail);
+            if self.pending() {
+                break;
+            }
             match pcm.writei(&src[done * bpf..], chunk) {
                 Ok(w) => frames_done += w as u32,
                 Err(e) => {
@@ -235,6 +301,11 @@ impl Sink {
             }
         }
         io.scratch = scratch;
+        if self.pending() {
+            // Буфер относится к отозванному потоку, не переносить остаток в новый.
+            self.apply_pending(&mut io);
+            return (length, 0, 0);
+        }
         // Commit the ramp by the frames actually written; an unwritten tail is presented again.
         io.gain = gain::ramp_end_gain(io.gain, self.target_gain(), io.rate, frames_done);
 
@@ -257,6 +328,7 @@ impl Sink {
         io.frames_total += u64::from(frames_done);
         io.maybe_log_stats();
         let lost = io.pcm.is_none();
+        self.update_output_after_write(&mut io, generation, frames_done, lost);
         if lost && frames_done == 0 {
             io.discarded = io.discarded.wrapping_add((length / bpf) as u32);
         }
@@ -271,12 +343,23 @@ impl Sink {
         (frames_done as usize * bpf, report, finish_us)
     }
 
-    fn request(&self, r: Req) {
-        {
-            let mut req = lock(&self.req);
-            *req = r;
-            self.req_gen.fetch_add(1, SeqCst);
+    fn update_output_after_write(&self, io: &mut Io, generation: u32, written: u32, lost: bool) {
+        if written == 0 && !lost {
+            return;
         }
+        // Даже переиспользованный PCM подтверждает запуск только после записи кадров.
+        // Блокировка нужна лишь при изменении готовности, не на каждой записи.
+        let ready = !lost;
+        if std::mem::replace(&mut io.output_ready, ready) == ready {
+            return;
+        }
+        let mut req = lock(&self.req);
+        if self.req_gen.load(SeqCst) == generation && req.start.is_some() {
+            req.output = if ready { Output::Ready } else { Output::Closed };
+        }
+    }
+
+    fn try_apply(&self) {
         let io = match self.io.try_lock() {
             Ok(io) => Some(io),
             Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
@@ -287,11 +370,20 @@ impl Sink {
         }
     }
 
+    fn record(&self, req: &mut Request, pending: Req, start: Option<u64>) {
+        *req = Request {
+            pending,
+            start,
+            output: Output::Closed,
+        };
+        self.req_gen.fetch_add(1, SeqCst);
+    }
+
     fn apply_pending(&self, io: &mut Io) {
         let r = {
             let mut req = lock(&self.req);
             self.applied_gen.store(self.req_gen.load(SeqCst), SeqCst);
-            std::mem::replace(&mut *req, Req::None)
+            std::mem::replace(&mut req.pending, Req::None)
         };
         match r {
             Req::None => {}
@@ -332,6 +424,7 @@ impl Io {
         self.want_channels = channels;
         self.want_bits = bits;
         self.active = true;
+        self.output_ready = false;
         self.open_failed_logged = false;
         self.next_open_us = 0;
         self.discarded = 0;
@@ -340,6 +433,7 @@ impl Io {
 
     fn release(&mut self) {
         self.active = false;
+        self.output_ready = false;
         if let Some(pcm) = self.pcm.as_mut() {
             let secs = if self.rate != 0 {
                 self.frames_total as f64 / f64::from(self.rate)
@@ -565,5 +659,88 @@ fn hw_step(step: &'static str) -> &'static str {
         "any" => "hw_params_any",
         "access" | "format" | "channels" | "rate" => step,
         _ => "hw_params",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preemption_invalidates_only_the_older_write_generation() {
+        let model = pulsar_core::model::model_from_dt_id(b"axg_s420_v03").unwrap();
+        let sink = Sink::new(model);
+        let first = sink.configure(48000, 2, 16);
+        let old = sink.req_gen.load(SeqCst);
+        let local = pulsar_core::audio_start_order();
+
+        let io = lock(&sink.io);
+        assert!(!sink.revoke_before(first));
+        assert!(!sink.pending());
+        assert!(sink.revoke_before(local));
+        assert!(sink.pending());
+        drop(io);
+        sink.finish_request();
+        assert!(!sink.accepts_audio());
+
+        let next = sink.configure(48000, 2, 16);
+        assert!(!sink.revoke_before(local));
+        assert!(sink.owns_start(next));
+        assert_eq!(sink.write_once(&[1; 4], 0, old), (4, 0, 0));
+        assert!(sink.accepts_audio());
+
+        // Пока задача синхронизации ещё пишет в кольцо, configure заменяет отложенный release.
+        let io = lock(&sink.io);
+        assert!(sink.revoke_before(pulsar_core::audio_start_order()));
+        let latest = sink.configure(48000, 2, 16);
+        drop(io);
+        sink.finish_request();
+        assert!(sink.owns_start(latest));
+        assert!(sink.accepts_audio());
+    }
+
+    #[test]
+    fn readiness_requires_written_frames_from_the_current_generation() {
+        let model = pulsar_core::model::model_from_dt_id(b"axg_s420_v03").unwrap();
+        let sink = Sink::new(model);
+        let first = sink.configure(48000, 2, 16);
+        sink.test_write_result(0, true);
+        sink.test_write_result(0, false);
+        assert_eq!(sink.take_ready_start(), None);
+        assert!(!sink.output_is_current(first));
+
+        sink.test_write_result(1, false);
+        assert_eq!(sink.take_ready_start(), Some(first));
+        sink.test_write_result(1, false);
+        assert_eq!(sink.take_ready_start(), None);
+        assert!(sink.output_is_current(first));
+
+        // Настройка того же формата может прийти, пока предыдущая запись держит io.
+        sink.test_write_result(0, true);
+        let old = sink.req_gen.load(SeqCst);
+        let mut io = lock(&sink.io);
+        let next = sink.configure(48000, 2, 16);
+        sink.update_output_after_write(&mut io, old, 1, false);
+        assert_eq!(sink.take_ready_start(), None);
+        drop(io);
+        sink.finish_request();
+        sink.test_write_result(0, false);
+        assert!(!sink.output_is_current(next));
+        sink.test_write_result(1, false);
+        assert_eq!(sink.take_ready_start(), Some(next));
+
+        sink.test_write_result(0, true);
+        assert!(!sink.output_is_current(next));
+        sink.test_write_result(0, false);
+        assert_eq!(sink.take_ready_start(), None);
+        sink.test_write_result(1, false);
+        assert_eq!(sink.take_ready_start(), Some(next));
+    }
+
+    impl Sink {
+        pub(crate) fn test_write_result(&self, written: u32, lost: bool) {
+            let mut io = lock(&self.io);
+            self.update_output_after_write(&mut io, self.req_gen.load(SeqCst), written, lost);
+        }
     }
 }

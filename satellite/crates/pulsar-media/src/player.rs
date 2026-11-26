@@ -84,6 +84,11 @@ pub struct PlayId(pub u64);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlayerEvent {
     State(Channel, PlayState),
+    /// Подтверждённый старт или возобновление Music, с порядком фронта на потоке GLib.
+    MusicStarted {
+        id: PlayId,
+        order: u64,
+    },
     /// Начало вывода ANNOUNCE; id позволяет отбрасывать события заменённого ответа.
     Started {
         id: PlayId,
@@ -281,12 +286,18 @@ pub(crate) trait Backend: Send {
     fn music_playing(&mut self);
 }
 
+struct PendingPlay {
+    id: PlayId,
+    // Для Music: порядок запроса до первого Playing, затем последний фактический старт.
+    order: u64,
+}
+
 /// State shared by the handle (runtime thread) and the GLib thread.
 pub(crate) struct Shared {
     /// PlayState per channel; written by the GLib thread only, before the State event.
     states: [AtomicU8; 2],
     /// Per channel: the play() whose Done is still owed.
-    pending: Mutex<[Option<PlayId>; 2]>,
+    pending: Mutex<[Option<PendingPlay>; 2]>,
     events: UnboundedSender<PlayerEvent>,
 }
 
@@ -312,16 +323,54 @@ impl Shared {
     /// which gets Done(false) now.
     fn supersede(&self, ch: Channel, new: Option<PlayId>) {
         let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let new = new.map(|id| PendingPlay {
+            id,
+            order: if ch == Channel::Music {
+                pulsar_core::audio_start_order()
+            } else {
+                0
+            },
+        });
         if let Some(old) = std::mem::replace(&mut p[ch.index()], new) {
-            self.send(PlayerEvent::Done { id: old, ok: false });
+            self.send(PlayerEvent::Done {
+                id: old.id,
+                ok: false,
+            });
         }
+    }
+
+    fn music_started(&self, id: PlayId) {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let event = if let Some(play) = &mut pending[Channel::Music.index()]
+            && play.id == id
+        {
+            play.order = pulsar_core::audio_start_order();
+            PlayerEvent::MusicStarted {
+                id,
+                order: play.order,
+            }
+        } else {
+            PlayerEvent::State(Channel::Music, PlayState::Playing)
+        };
+        self.states[Channel::Music.index()].store(PlayState::Playing as u8, Ordering::Relaxed);
+        self.send(event);
+    }
+
+    fn cancel_music_before(&self, order: u64) -> Option<PlayId> {
+        // Фронт GLib и отмена запроса используют один замок, не порядок доставки событий.
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let music = &mut pending[Channel::Music.index()];
+        let id = music.as_ref().filter(|play| play.order < order)?.id;
+        *music = None;
+        self.send(PlayerEvent::Done { id, ok: false });
+        Some(id)
     }
 
     /// Delivers the result of list `id` unless a later play() / stop() superseded it meanwhile
     /// (that call already delivered false).
     fn complete(&self, ch: Channel, id: PlayId, ok: bool) {
         let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        if p[ch.index()] == Some(id) {
+        if p[ch.index()].as_ref().is_some_and(|play| play.id == id) {
             p[ch.index()] = None;
             self.send(PlayerEvent::Done { id, ok });
         }
@@ -340,6 +389,7 @@ struct Chan {
     want_play: bool,
     buffering: bool,
     reached_playing: bool,
+    music_start_reported: bool,
     /// ANNOUNCE: the output item of the current url (0 = none).
     out_gen: u64,
     all_ok: bool,
@@ -366,6 +416,7 @@ impl Chan {
             want_play: false,
             buffering: false,
             reached_playing: false,
+            music_start_reported: false,
             out_gen: 0,
             all_ok: true,
             retries: 0,
@@ -399,13 +450,19 @@ impl Machine {
     }
 
     fn set_state(&mut self, ch: Channel, s: PlayState) {
-        let prev =
-            PlayState::from_u8(self.shared.states[ch.index()].swap(s as u8, Ordering::Relaxed));
+        let prev = self.shared.state(ch);
         if prev == s {
             return;
         }
         debug!("player: ch{} {} -> {}", ch.index(), prev.name(), s.name());
-        self.shared.send(PlayerEvent::State(ch, s));
+        let c = &mut self.chans[ch.index()];
+        if ch == Channel::Music && s == PlayState::Playing && !c.music_start_reported {
+            c.music_start_reported = true;
+            self.shared.music_started(c.item);
+        } else {
+            self.shared.states[ch.index()].store(s as u8, Ordering::Relaxed);
+            self.shared.send(PlayerEvent::State(ch, s));
+        }
     }
 
     fn loading_or_paused(&self, ch: Channel) -> PlayState {
@@ -718,6 +775,7 @@ impl Machine {
         c.item = id;
         c.active = true;
         c.want_play = true;
+        c.music_start_reported = false;
         c.all_ok = true;
         c.retries = 0;
         c.resume_ns = 0;
@@ -740,11 +798,8 @@ impl Machine {
             return;
         }
         c.want_play = true;
+        c.music_start_reported = false;
         self.apply_target_state(ch);
-        let c = &self.chans[ch.index()];
-        if c.reached_playing && !c.buffering {
-            self.set_state(ch, PlayState::Playing);
-        }
     }
 
     fn stop(&mut self, ch: Channel) {
@@ -974,7 +1029,6 @@ fn start(shared: &Arc<Shared>, model: &'static Model) -> Option<GlibThread> {
         return None;
     }
     let api = gst::load()?;
-    gst::set_ssl_cert_file();
     // Process-global: alsa-lib messages go to the debug log.
     pulsar_alsa::quiet_error_handler();
     if !gst::init(api) {
@@ -1095,6 +1149,15 @@ impl PlayerHandle {
         self.invoke(move |m| m.stop(ch));
     }
 
+    /// Синхронно отменяет запрос Music, только если его фронт старше `order`.
+    /// До первого Playing учитывает порядок запроса. Выход останавливается асинхронно в GLib.
+    pub fn stop_music_before(&self, order: u64) -> Option<PlayId> {
+        let id = self.inner.shared.cancel_music_before(order)?;
+        // Следующий Play с этого handle встанет в очередь уже после остановки.
+        self.invoke(|m| m.stop(Channel::Music));
+        Some(id)
+    }
+
     /// Changed by the GLib thread only: right after a command it still reports the state from
     /// before it.
     pub fn state(&self, ch: Channel) -> PlayState {
@@ -1116,7 +1179,7 @@ mod tests {
 
     use Channel::{Announce, Music};
     use PlayState::{Error as Failed, Idle, Loading, Paused, Playing};
-    use PlayerEvent::{Done, Started, State};
+    use PlayerEvent::{Done, MusicStarted, Started, State};
 
     fn unescape(s: &str) -> String {
         let mut out = String::new();
@@ -1462,8 +1525,12 @@ mod tests {
         assert_eq!(r.h.state(Music), Loading);
         r.state_changed(Music, GstState::Paused);
         assert!(r.events().is_empty());
+        let other_audio = pulsar_core::audio_start_order();
         r.state_changed(Music, GstState::Playing);
-        assert_eq!(r.events(), [State(Music, Playing)]);
+        assert!(matches!(
+            r.events().as_slice(),
+            [MusicStarted { id: started, order }] if *started == id && *order > other_audio
+        ));
         assert_eq!(r.h.state(Music), Playing);
         r.msg(Music, Msg::Eos);
         assert_eq!(r.calls(), ["ch0 Null"]);
@@ -1471,6 +1538,80 @@ mod tests {
         // Messages of an idle channel are ignored.
         r.msg(Music, Msg::Eos);
         assert!(r.events().is_empty());
+    }
+
+    #[test]
+    fn bluetooth_takeover_keeps_newer_playing_even_if_its_event_is_unread() {
+        let mut r = Rig::new();
+        let id = r.h.play(Music, urls(&["/a.mp3"]));
+        r.pump();
+        r.events();
+        r.calls();
+        let other = pulsar_core::audio_start_order();
+        r.state_changed(Music, GstState::Playing);
+
+        // Фронт другого источника доставлен раньше MusicStarted, но произошёл раньше.
+        assert_eq!(r.h.stop_music_before(other), None);
+        r.pump();
+        assert_eq!(r.h.state(Music), Playing);
+        assert!(r.calls().is_empty());
+        assert!(matches!(
+            r.events().as_slice(),
+            [MusicStarted { id: started, order }] if *started == id && *order > other
+        ));
+        assert_eq!(r.h.stop_music_before(other), None);
+
+        let newer = pulsar_core::audio_start_order();
+        assert_eq!(r.h.stop_music_before(newer), Some(id));
+        r.pump();
+        assert_eq!(r.events(), [Done { id, ok: false }, State(Music, Idle)]);
+    }
+
+    #[test]
+    fn bluetooth_takeover_compares_the_replacement_request_until_playing() {
+        let mut r = Rig::new();
+        let old = r.h.play(Music, urls(&["/a.mp3"]));
+        r.pump();
+        r.state_changed(Music, GstState::Playing);
+        r.events();
+        let other = pulsar_core::audio_start_order();
+        let new = r.h.play(Music, urls(&["/b.mp3"]));
+
+        assert_eq!(r.h.state(Music), Playing);
+        assert_eq!(r.h.stop_music_before(other), None);
+        assert_eq!(r.events(), [Done { id: old, ok: false }]);
+        r.pump();
+        assert_eq!(r.events(), [State(Music, Loading)]);
+
+        let newer = pulsar_core::audio_start_order();
+        assert_eq!(r.h.stop_music_before(newer), Some(new));
+        r.state_changed(Music, GstState::Playing);
+        r.pump();
+        assert_eq!(
+            r.events(),
+            [
+                Done { id: new, ok: false },
+                State(Music, Playing),
+                State(Music, Idle),
+            ]
+        );
+    }
+
+    #[test]
+    fn music_failing_before_playing_never_claims_the_audio_output() {
+        let mut r = Rig::new();
+        let id = r.h.play(Music, urls(&["/missing.mp3"]));
+        r.pump();
+        r.msg(Music, Msg::Error(err(None, None)));
+        assert_eq!(
+            r.events(),
+            [
+                State(Music, Loading),
+                State(Music, Failed),
+                State(Music, Idle),
+                Done { id, ok: false }
+            ]
+        );
     }
 
     #[test]
@@ -1604,14 +1745,14 @@ mod tests {
         assert_eq!(r.events(), [State(Music, Loading)]);
         r.state_changed(Music, GstState::Playing);
         r.msg(Music, Msg::Eos);
-        assert_eq!(
-            r.events(),
+        assert!(matches!(
+            r.events().as_slice(),
             [
-                State(Music, Playing),
+                MusicStarted { id: started, .. },
                 State(Music, Idle),
-                Done { id: b, ok: true }
-            ]
-        );
+                Done { id: ended, ok: true }
+            ] if *started == b && *ended == b
+        ));
     }
 
     #[test]
@@ -1684,7 +1825,7 @@ mod tests {
         r.pump();
         assert!(r.events().is_empty());
         assert!(r.calls().is_empty());
-        r.h.play(Music, urls(&["/a.mp3"]));
+        let id = r.h.play(Music, urls(&["/a.mp3"]));
         r.pump();
         r.state_changed(Music, GstState::Playing);
         r.events();
@@ -1696,10 +1837,38 @@ mod tests {
         r.h.pause(Music);
         r.pump();
         assert!(r.calls().is_empty());
+        let other = pulsar_core::audio_start_order();
         r.h.resume(Music);
         r.pump();
         assert_eq!(r.calls(), ["ch0 Playing"]);
-        assert_eq!(r.events(), [State(Music, Playing)]);
+        assert!(r.events().is_empty());
+        assert_eq!(r.h.state(Music), Paused);
+        r.state_changed(Music, GstState::Playing);
+        assert_eq!(r.h.stop_music_before(other), None);
+        assert!(matches!(
+            r.events().as_slice(),
+            [MusicStarted { id: resumed, order }] if *resumed == id && *order > other
+        ));
+    }
+
+    #[test]
+    fn bluetooth_is_not_preempted_by_resume_queued_after_stop() {
+        let mut r = Rig::new();
+        let id = r.h.play(Music, urls(&["/a.mp3"]));
+        r.pump();
+        r.state_changed(Music, GstState::Playing);
+        r.h.pause(Music);
+        r.pump();
+        r.events();
+        r.calls();
+
+        r.h.stop(Music);
+        assert_eq!(r.h.state(Music), Paused);
+        r.h.resume(Music);
+        r.pump();
+        r.state_changed(Music, GstState::Playing);
+        assert_eq!(r.calls(), ["ch0 Null"]);
+        assert_eq!(r.events(), [Done { id, ok: false }, State(Music, Idle)]);
     }
 
     #[test]
@@ -1728,7 +1897,7 @@ mod tests {
     #[test]
     fn buffering_holds_the_pipeline_and_reports_loading() {
         let mut r = Rig::new();
-        r.h.play(Music, urls(&["http://192.168.1.50/a.mp3"]));
+        let id = r.h.play(Music, urls(&["http://192.168.1.50/a.mp3"]));
         r.pump();
         r.calls();
         r.msg(Music, Msg::Buffering(10));
@@ -1738,7 +1907,10 @@ mod tests {
         r.msg(Music, Msg::Buffering(100));
         assert_eq!(r.calls(), ["ch0 Playing"]);
         r.state_changed(Music, GstState::Playing);
-        assert_eq!(r.events(), [State(Music, Loading), State(Music, Playing)]);
+        assert!(matches!(
+            r.events().as_slice(),
+            [State(Music, Loading), MusicStarted { id: started, .. }] if *started == id
+        ));
         r.msg(Music, Msg::Buffering(20));
         assert_eq!(r.calls(), ["ch0 Paused"]);
         assert_eq!(r.events(), [State(Music, Loading)]);

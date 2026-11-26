@@ -1,48 +1,199 @@
 #!/bin/sh
-# pulsar control: enable | disable | restart | reload | status | log | api-key
+# pulsar control: enable | disable | restart | reload | rollback | status | log | api-key | bt-restore
 #   enable  - stop the Yandex stack, run pulsar now and on every boot
 #   disable - stop pulsar, start the Yandex stack again (also after reboot)
 #   reload  - restart the supervisor and the daemon (after supervise.sh was replaced); never starts
 #             the Yandex stack
+#   rollback - установить .prev после возврата штатного Bluetooth.
 #   api-key [base64|clear] - ESPHome Noise key ($D/api_key, base64 of 32 bytes, mode 0600): no
 #             argument shows whether one is set; a value sets it, `clear` removes it; both restart.
 #             recent Home Assistant (mid-2026+) provisions a key automatically over the API on first
 #             connect; setting or clearing a different key by hand makes HA ask to re-authenticate.
 #             A corrupt file makes the daemon fail closed, hence the validation below.
+#   bt-restore - вернуть флаги адаптера и штатный player после остановки pulsar.
 D=${PULSAR_DIR:-/data/pulsar}
 Q=${PULSAR_Q:-/system/vendor/quasar/q}
+bt_legacy=/tmp/pulsar-bt-owner
+bt_test_dir=/tmp/pulsar-test
+
+bt_test_owner=$bt_test_dir/bt-owner
+
+bt_test_dir_trusted() {
+  [ -d "$bt_test_dir" ] && [ ! -L "$bt_test_dir" ] &&
+    bt_test_uid=$(id -u) && [ "$(stat -c '%u:%a' "$bt_test_dir" 2>/dev/null)" = "$bt_test_uid:700" ]
+}
+
+bt_test_clear() {
+  # Как в tools/station.sh: проверяем только закрытый каталог нашего UID.
+  bt_test_dir_trusted || return 0
+  [ -e "$bt_test_dir/bt-reserved" ] || [ -L "$bt_test_dir/bt-reserved" ] ||
+    [ -e "$bt_test_owner" ] || [ -L "$bt_test_owner" ] ||
+    [ -e "$bt_test_owner.pending" ] || [ -L "$bt_test_owner.pending" ] || return 0
+  echo 'Bluetooth тестового экземпляра не восстановлен: выполните test-stop' >&2
+  return 1
+}
+
+bt_test_ctl() {
+  if [ "$0" != "$bt_test_dir/ctl.sh" ] || ! bt_test_dir_trusted; then
+    echo 'bt-restore: требуется отдельный ctl.sh в закрытом тестовом каталоге' >&2
+    return 1
+  fi
+  bt_owner=$bt_test_owner
+}
+
+bt_owner_path() {
+  if [ -n "${PULSAR_BT_OWNER:-}" ]; then
+    printf '%s\n' "$PULSAR_BT_OWNER"
+    return
+  fi
+  IFS= read -r bt_boot < /proc/sys/kernel/random/boot_id || return 1
+  case "$bt_boot" in ''|*[!0-9a-f-]*) return 1 ;; esac
+  printf '%s/.pulsar-bt-owner.%s\n' "$D" "$bt_boot"
+}
+
+bt_owner_lock_path() {
+  command -v flock >/dev/null 2>&1 || return 1
+  bt_lock_dir=$D
+  case "${PULSAR_BT_OWNER:-$bt_legacy}" in
+    "$bt_legacy") ;;
+    */*) bt_lock_dir=${PULSAR_BT_OWNER%/*}; bt_lock_dir=${bt_lock_dir:-/} ;;
+    *) bt_lock_dir=. ;;
+  esac
+  if [ "${PULSAR_BT_OWNER:-}" = "$bt_test_owner" ]; then
+    bt_test_ctl || return 1
+  fi
+  [ -d "$bt_lock_dir" ] && [ ! -L "$bt_lock_dir" ] && [ -w "$bt_lock_dir" ] || return 1
+  bt_lock=$bt_lock_dir/.pulsar-bt-lock
+  if [ -e "$bt_lock" ] || [ -L "$bt_lock" ]; then
+    [ ! -L "$bt_lock" ] && [ -f "$bt_lock" ] &&
+      [ "$(stat -c '%u:%a' "$bt_lock")" = "$(id -u):600" ] || return 1
+  fi
+  printf '%s\n' "$bt_lock"
+}
+
+bt_owner_lock_capable() {
+  command -v dbus-send >/dev/null 2>&1 && bt_owner_lock_path >/dev/null || return 1
+  [ "${PULSAR_BT_OWNER:-}" = "$bt_test_owner" ] || bt_test_clear
+}
+
+# Снимок нельзя прочитать до блокировки: другой возврат мог уже его заменить.
+bt_locked() (
+  bt_lock=$1
+  shift
+  umask 077
+  exec 8>>"$bt_lock" || return 1
+  flock -x 8 || return 1
+  "$@"
+)
+
+bt_for_owners() {
+  [ "${PULSAR_BT_OWNER:-}" != "$bt_test_owner" ] || return 1
+  if command -v flock >/dev/null 2>&1; then
+    bt_lock=$(bt_owner_lock_path) || return 1
+    bt_locked "$bt_lock" bt_for_owners_locked "$@"
+  else
+    bt_for_owners_locked bt_no_lock
+  fi
+}
+
+bt_no_lock() {
+  # Без flock новый захват запрещён, но станции без снимка не нужен возврат.
+  bt_lock_uid=$(id -u) || return 1
+  if [ "$(stat -c '%u' "$bt_owner" 2>/dev/null)" = "$bt_lock_uid" ] ||
+    [ "$(stat -c '%u' "$bt_owner.pending" 2>/dev/null)" = "$bt_lock_uid" ]; then
+    bt_error 'для возврата владения нужен flock'
+  fi
+}
+
+bt_for_owners_locked() {
+  bt_test_clear || return 1
+  if [ -z "${PULSAR_BT_OWNER:-}" ]; then
+    bt_owner=$bt_legacy
+    "$@" || return 1
+  fi
+  bt_owner=$(bt_owner_path) || return 0
+  "$@"
+}
+
+service_lock() (
+  service_flock=$1
+  shift
+  # Для неуправляемой станции без flock нет снимка нового протокола.
+  if ! command -v flock >/dev/null 2>&1; then "$@"; return; fi
+  umask 077
+  exec 7>>"$D/.pulsar-launch-lock" && flock "$service_flock" 7 || return 1
+  "$@"
+)
+
+service_locked() { service_lock -x "$@"; }
+service_try_locked() { service_lock -xn "$@"; }
+
+process_start() (
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  IFS= read -r ps_stat < "/proc/$1/stat" || return 1
+  # После comm, который сам может содержать пробелы и скобки, идут поля 3–22.
+  set -- ${ps_stat##*) }
+  [ "$1" != Z ] && [ "$1" != X ] && [ -n "${20-}" ] && printf '%s\n' "${20}"
+)
+
+registered_daemon() {
+  [ -f "$D/.pulsar-daemon" ] &&
+    IFS=' ' read -r daemon_pid daemon_start daemon_extra < "$D/.pulsar-daemon" &&
+    [ -z "$daemon_extra" ] && [ -n "$daemon_start" ] &&
+    [ "$(process_start "$daemon_pid" 2>/dev/null)" = "$daemon_start" ]
+}
+
+daemon_running() {
+  registered_daemon || pidof pulsar >/dev/null 2>&1
+}
+
+signal_daemon() {
+  if registered_daemon; then kill "-$1" "$daemon_pid" 2>/dev/null; fi
+  # Совместимость с уже запущенным старым supervisor.
+  if pidof pulsar >/dev/null 2>&1; then
+    if [ "$1" = KILL ]; then killall -9 pulsar 2>/dev/null
+    else killall pulsar 2>/dev/null; fi
+  fi
+}
 
 # SIGTERM, wait up to 10 s for the process to go, then SIGKILL. Returns 1 if it is still there.
 stop_daemon() {
-  pidof pulsar >/dev/null 2>&1 || return 0
-  killall pulsar 2>/dev/null
+  daemon_running || return 0
+  signal_daemon TERM
   i=0
-  while [ $i -lt 10 ] && pidof pulsar >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
-  if pidof pulsar >/dev/null 2>&1; then
+  while [ $i -lt 10 ] && daemon_running; do sleep 1; i=$((i + 1)); done
+  if daemon_running; then
     echo "did not exit in 10 s, killing"
-    killall -9 pulsar 2>/dev/null
+    signal_daemon KILL
     i=0
-    while [ $i -lt 5 ] && pidof pulsar >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
+    while [ $i -lt 5 ] && daemon_running; do sleep 1; i=$((i + 1)); done
   fi
-  ! pidof pulsar >/dev/null 2>&1
+  ! daemon_running
 }
+
+restart_daemon() { service_locked stop_daemon; }
 
 # Starts supervise.sh unless one runs; waits until it does. Ignores SIGHUP: when called through
 # `adb shell`, the session ends right after this script and would otherwise kill it before setsid().
-start_supervisor() {
+start_supervisor() { service_locked start_supervisor_locked; }
+
+start_supervisor_locked() {
+  [ -f "$D/enabled" ] || return 1
+  bt_test_clear || return 1
   pidof supervise.sh >/dev/null 2>&1 && return 0
-  (trap '' HUP; exec setsid "$D/supervise.sh" </dev/null >/dev/null 2>&1) &
+  (trap '' HUP; exec setsid "$D/supervise.sh" 7>&- </dev/null >/dev/null 2>&1) &
   i=0
   while [ $i -lt 3 ] && ! pidof supervise.sh >/dev/null 2>&1; do
     sleep 1
     i=$((i + 1))
   done
+  pidof supervise.sh >/dev/null 2>&1
 }
 
 # After stopping the daemon: the supervisor restarts it; start one if `enabled` but none runs.
 restarted() {
   if [ -f "$D/enabled" ] && [ -x "$D/supervise.sh" ] && ! pidof supervise.sh >/dev/null 2>&1; then
-    start_supervisor
+    start_supervisor || { echo 'supervisor did not start' >&2; return 1; }
     echo "no supervisor was running, started one"
   else
     echo "supervisor restarts it in ~1 s"
@@ -60,7 +211,259 @@ wait_supervisors_gone() {
   i=0
   while [ $i -lt 5 ] && pidof supervise.sh >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
   pidof supervise.sh >/dev/null 2>&1 && { killall -9 supervise.sh 2>/dev/null; sleep 1; }
-  return 0
+  ! pidof supervise.sh >/dev/null 2>&1
+}
+
+stop_service() {
+  service_locked stop_service_locked
+}
+
+stop_service_locked() {
+  stop_supervisors
+  stop_daemon || { echo "pulsar did not exit" >&2; return 1; }
+  wait_supervisors_gone || { echo "supervisor is still running" >&2; return 1; }
+  # Старый supervisor не регистрирует ребёнка и не берёт блокировку запуска.
+  stop_daemon || { echo "pulsar did not exit" >&2; return 1; }
+  rm -f "$D/.pulsar-daemon"
+}
+
+bt_error() { echo "bt-restore: $* (снимок сохранён в $bt_owner)" >&2; return 1; }
+
+bt_effective_uid() { awk '$1 == "Uid:" { print $3; exit }' "$1/status" 2>/dev/null; }
+
+bt_player_running() {
+  # Штатный init-скрипт сверяет и exe (-x), и имя процесса (-n), а не только pidfile.
+  for bt_pid in "$bt_proc"/[0-9]*; do
+    { IFS= read -r bt_comm < "$bt_pid/comm"; } 2>/dev/null || continue
+    [ "$bt_comm" = bluealsa-aplay ] &&
+      [ "$(readlink "$bt_pid/exe" 2>/dev/null)" = "$bt_player" ] &&
+      [ "$(bt_effective_uid "$bt_pid")" = "$bt_uid" ] &&
+      return 0
+  done
+  return 1
+}
+
+bt_bluez_owner() {
+  bt_reply=$(dbus-send --system --print-reply --reply-timeout=2000 --dest=org.freedesktop.DBus \
+    /org/freedesktop/DBus org.freedesktop.DBus.GetNameOwner string:org.bluez) || return 1
+  printf '%s\n' "$bt_reply" | awk '
+    $1 == "string" && NF == 2 && $2 ~ /^":[0-9]+(\.[0-9]+)+"$/ {
+      owner = substr($2, 2, length($2) - 2); count++
+    }
+    END { if (count == 1) print owner; else exit 1 }
+  '
+}
+
+bt_pin_bluez() {
+  bt_bluez=$(bt_bluez_owner) || bt_error 'не удалось определить владельца org.bluez'
+}
+
+bt_same_bluez() {
+  [ "$(bt_bluez_owner)" = "$bt_bluez" ] || bt_error 'владелец org.bluez сменился или недоступен'
+}
+
+bt_restore_flag() {
+  bt_value=false
+  [ "$2" = 0 ] || bt_value=true
+  dbus-send --system --print-reply --reply-timeout=2000 "--dest=$bt_bluez" /org/bluez/hci0 \
+    org.freedesktop.DBus.Properties.Set string:org.bluez.Adapter1 "string:$1" \
+    "variant:boolean:$bt_value" >/dev/null || bt_error "не удалось вернуть $1"
+}
+
+bt_read_owner() {
+  bt_flags=
+  [ -L "$bt_owner" ] || [ -e "$bt_owner" ] || return 0
+  bt_uid=$(id -u) || return 1
+  if ! bt_meta=$(stat -c '%u:%a:%s' "$bt_owner" 2>/dev/null); then
+    [ ! -L "$bt_owner" ] && [ ! -e "$bt_owner" ] && return 0
+    bt_error 'не удалось проверить файл снимка'
+    return 1
+  fi
+  # Чужой объект по старому пути в /tmp не мог появиться при нашем захвате.
+  if [ "${bt_meta%%:*}" != "$bt_uid" ]; then
+    [ "$bt_owner" != "$bt_test_owner" ] || { bt_error 'чужой файл тестового снимка'; return 1; }
+    return 0
+  fi
+  [ ! -L "$bt_owner" ] && [ -f "$bt_owner" ] &&
+    { [ "$bt_meta" = "$bt_uid:600:6" ] || [ "$bt_meta" = "$bt_uid:600:9" ]; } ||
+    { bt_error 'некорректный файл снимка'; return 1; }
+  # Точка сохраняет перевод строки при подстановке; читаем не более девяти байт.
+  bt_flags=$(head -c 9 "$bt_owner" && printf .) || return 1
+  case "$bt_meta:$bt_flags" in
+    "$bt_uid:600:9:v2 "[01]' '[01]' '[01]'
+.') bt_flags=${bt_flags#v2 }; bt_flags=${bt_flags%??} ;;
+    "$bt_uid:600:6:"[01]' '[01]' '[01]'
+.') bt_flags=${bt_flags%??} ;;
+    *) bt_error 'некорректный формат снимка'; return 1 ;;
+  esac
+}
+
+bt_stopped() {
+  bt_proc=${PULSAR_BT_PROC:-/proc}
+  bt_pids= bt_test_exe=
+  if [ "${bt_owner##*/}" = bt-owner ]; then bt_test_exe=${bt_owner%/*}/pulsar; fi
+  bt_candidates=$(pidof pulsar)
+  if [ "$bt_owner" != "$bt_test_owner" ] && registered_daemon; then
+    # PID известен и до exec, когда exe и имя ещё принадлежат оболочке.
+    if [ "${1-}" != --self ] || [ "$daemon_pid" != "$PPID" ]; then
+      bt_error 'pulsar ещё работает'
+      return 1
+    fi
+  fi
+  for bt_pid in $bt_candidates; do
+    case "$bt_pid" in ''|*[!0-9]*) continue ;; esac
+    [ "$(bt_effective_uid "$bt_proc/$bt_pid")" = "$bt_uid" ] || continue
+    bt_exe=$(readlink "$bt_proc/$bt_pid/exe" 2>/dev/null) || continue
+    case "${bt_exe%' (deleted)'}" in
+      "$D/pulsar"|"$D"/.pulsar-bt-executable.*/pulsar|"$bt_test_exe") ;;
+      *) continue ;;
+    esac
+    bt_pids=${bt_pids:+$bt_pids }$bt_pid
+  done
+  if [ "${1-}" = --self ]; then
+    [ "$bt_pids" = "$PPID" ] || { bt_error 'запрос не от единственного процесса pulsar'; return 1; }
+  elif [ -n "$bt_pids" ]; then
+    bt_error 'pulsar ещё работает'
+    return 1
+  fi
+}
+
+bt_hide() {
+  bt_read_owner || return 1
+  [ -n "$bt_flags" ] || return 0
+  bt_stopped || return 1
+  # Обе записи должны попасть в один экземпляр BlueZ, даже если имя перехватили.
+  bt_pin_bluez || return 1
+  bt_ok=0
+  bt_restore_flag Discoverable 0 || bt_ok=1
+  bt_restore_flag Pairable 0 || bt_ok=1
+  [ "$bt_ok" = 0 ] && bt_same_bluez
+}
+
+bt_restore_pending() {
+  [ ! -L "$bt_pending" ] && [ -f "$bt_pending" ] &&
+    [ "$(stat -c '%u:%a:%s' "$bt_pending" 2>/dev/null)" = "$bt_uid:600:0" ] ||
+    bt_error 'некорректный файл незавершённой передачи'
+}
+
+# Те же ключи и проверка клиентов, что в supervise.sh перед запуском Pulsar.
+clear_dmix() {
+  segs=$(ipcs -m 2>/dev/null) || return 0
+  busy=0
+  for k in 400 401 8e5 8e6; do
+    n=$(printf '%s\n' "$segs" | awk -v k="0x00000$k" '$1 == k { print $6; exit }')
+    if [ "$n" = 0 ]; then ipcrm -M "0x$k" || return 1
+    elif [ -n "$n" ]; then busy=1
+    fi
+  done
+  for k in 400 8e5; do
+    if [ "$busy" = 0 ] && ipcs -s 2>/dev/null | awk -v k="0x00000$k" '$1 == k { f = 1 } END { exit !f }'; then
+      ipcrm -S "0x$k" || return 1
+    fi
+  done
+}
+
+bt_restore() {
+  bt_read_owner || return 1
+  bt_pending=$bt_owner.pending
+  if [ "$bt_owner" = "$bt_legacy" ]; then
+    # В общем /tmp не создаём новый маркер и не трогаем чужие файлы.
+    if { [ ! -e "$bt_pending" ] && [ ! -L "$bt_pending" ]; } ||
+      { bt_meta=$(stat -c '%u' "$bt_pending" 2>/dev/null) && [ "$bt_meta" != "$(id -u)" ]; }; then
+      bt_pending=
+    fi
+  fi
+  if [ -z "$bt_flags" ]; then
+    [ -n "$bt_pending" ] && { [ -e "$bt_pending" ] || [ -L "$bt_pending" ]; } || return 0
+    bt_uid=$(id -u) || return 1
+    bt_restore_pending && bt_stopped "${1-}" && rm -f "$bt_pending"
+    return
+  fi
+  bt_stopped "${1-}" || return 1
+  if [ -n "$bt_pending" ]; then
+    if [ "$bt_owner" != "$bt_legacy" ] && [ ! -e "$bt_pending" ] && [ ! -L "$bt_pending" ]; then
+      (umask 077; set -C; : > "$bt_pending") ||
+        { bt_error 'не удалось отметить незавершённый возврат'; return 1; }
+    fi
+    bt_restore_pending || return 1
+  fi
+
+  # Пространство пути подменяется только для изолированной проверки протокола.
+  bt_init=${PULSAR_BT_INIT:-/etc/init.d/S53bluealsa-aplay}
+  if [ "${bt_flags##* }" = 1 ]; then
+    bt_player=$(readlink -f /usr/bin/bluealsa-aplay) &&
+      [ -x "$bt_player" ] && [ -x "$bt_init" ] && [ -d "$bt_proc" ] ||
+      { bt_error 'штатный bluealsa-aplay недоступен'; return 1; }
+  fi
+  bt_discover=${bt_flags#* }
+  bt_pin_bluez &&
+    bt_restore_flag Pairable "${bt_flags%% *}" &&
+    bt_restore_flag Discoverable "${bt_discover%% *}" || return 1
+  if [ "${bt_flags##* }" = 1 ] && ! bt_player_running; then
+    if [ "${1-}" != --self ] && [ "$bt_owner" != "$bt_test_owner" ]; then
+      clear_dmix || { bt_error 'не удалось очистить зависший dmix'; return 1; }
+    fi
+    bt_same_bluez || return 1
+    # Init-скрипт не должен передать блокировки запущенному проигрывателю.
+    "$bt_init" start 7>&- 8>&- 9>&- || { bt_error 'init-скрипт не запустил bluealsa-aplay'; return 1; }
+    bt_wait=0
+    while ! bt_player_running; do
+      [ "$bt_wait" -lt 3 ] || { bt_error 'процесс bluealsa-aplay не появился'; return 1; }
+      sleep 1
+      bt_wait=$((bt_wait + 1))
+    done
+  fi
+  # В том числе если BlueZ сменился, пока поднимался штатный player.
+  bt_same_bluez || return 1
+  # При остановке между удалениями остаётся безопасный пустой маркер.
+  rm -f "$bt_owner" && { [ -z "$bt_pending" ] || rm -f "$bt_pending"; } ||
+    bt_error 'не удалось завершить возврат владения'
+}
+
+rollback_resume() {
+  [ ! -f "$D/enabled" ] || start_supervisor_locked ||
+    { echo 'rollback: supervisor did not start' >&2; return 1; }
+}
+
+rollback_locked() (
+  cd "$D" || exit 1
+  # Пока копия не готова, рабочую службу не останавливаем.
+  rb=$(mktemp .pulsar-rollback.XXXXXX) || exit 1
+  trap 'rm -f "$rb"' EXIT
+  cp -p pulsar.prev "$rb" && [ -x "$rb" ] || exit 1
+  stop_service_locked || exit 1
+  if ! bt_for_owners bt_restore; then
+    # Бинарь ещё не заменён. Supervisor повторит незавершённый возврат.
+    rollback_resume
+    exit 1
+  fi
+  # Перед повторным использованием временного пути закрепляем действующий запрет захвата.
+  if [ pulsar -ef pulsar.bt-blocked.next ]; then
+    mv -f pulsar.bt-blocked.next pulsar.bt-blocked || { rollback_resume; exit 1; }
+  fi
+  # Сохраняем текущий бинарь, не снимая его с рабочего пути до атомарной замены.
+  if { [ pulsar -ef pulsar.bad ] || ln -f pulsar pulsar.bad; } &&
+    rm -f pulsar.bt-blocked.next && ln "$rb" pulsar.bt-blocked.next &&
+    [ "$rb" -ef pulsar.bt-blocked.next ] &&
+    mv -f "$rb" pulsar; then
+    # Пока запрет не перенесён на постоянный путь, supervisor учтёт временный.
+    mv -f pulsar.bt-blocked.next pulsar.bt-blocked
+    sync
+    rollback_resume || exit 1
+    if [ -f "$D/enabled" ]; then echo "supervisor reloaded"
+    else echo "supervisor stopped (not enabled)"; fi
+  else
+    rm -f pulsar.bt-blocked.next
+    echo 'rollback: бинарь не заменён; перезапускаем текущий' >&2
+    rollback_resume
+    exit 1
+  fi
+)
+
+rollback() {
+  command -v flock >/dev/null 2>&1 ||
+    { echo 'rollback: требуется flock для безопасной замены бинаря' >&2; return 1; }
+  service_try_locked rollback_locked
 }
 
 valid_key() { # 44 base64 chars (32 bytes + one '='), and 32 bytes when a decoder exists
@@ -76,28 +479,28 @@ valid_key() { # 44 base64 chars (32 bytes + one '='), and 32 bytes when a decode
 
 case "$1" in
   enable)
+    bt_test_clear || exit 1
     if [ ! -x "$D/pulsar" ] || [ ! -x "$D/supervise.sh" ]; then
       echo "$D/pulsar or supervise.sh missing or not executable, nothing changed" >&2
       exit 1
     fi
     touch "$D/enabled"
     $Q stop >/dev/null 2>&1
-    start_supervisor
+    start_supervisor || { echo 'supervisor did not start' >&2; exit 1; }
     echo "enabled"
     ;;
   disable)
+    bt_test_clear || exit 1
     rm -f "$D/enabled"
-    stop_supervisors
-    if ! stop_daemon; then
-      echo "pulsar is still running, Yandex stack not started" >&2
-      exit 1
-    fi
-    wait_supervisors_gone
-    pidof quasar_launcher2 >/dev/null 2>&1 || $Q start >/dev/null 2>&1
+    stop_service || exit 1
+    service_locked bt_for_owners bt_restore || exit 1
+    bt_test_clear || exit 1
+    pidof quasar_launcher2 >/dev/null 2>&1 || "$Q" start >/dev/null 2>&1 || exit 1
     echo "disabled, Yandex stack started"
     ;;
   restart)
-    if stop_daemon; then
+    bt_test_clear || exit 1
+    if restart_daemon; then
       restarted
     else
       echo "pulsar did not exit" >&2
@@ -105,15 +508,29 @@ case "$1" in
     fi
     ;;
   reload)
-    stop_supervisors
-    stop_daemon || { echo "pulsar did not exit" >&2; exit 1; }
-    wait_supervisors_gone
+    case "$#:${2-}" in 1:|2:--stop) ;; *) exit 2 ;; esac
+    bt_test_clear || exit 1
+    stop_service || exit 1
+    if [ "${2-}" = --stop ]; then
+      # 75: остановка подтверждена, не удалось только скрыть окно Bluetooth.
+      service_locked bt_for_owners bt_hide && exit 0
+      exit 75
+    fi
     if [ -f "$D/enabled" ] && [ -x "$D/supervise.sh" ]; then
-      start_supervisor
+      # Новый supervisor дождётся возврата владения или перезапустит демон для
+      # восстановления BlueZ. Ошибка закрытия окна не должна оставить сервис выключенным.
+      service_locked bt_for_owners bt_hide || echo 'Bluetooth hide failed; restarting the supervisor to recover' >&2
+      start_supervisor || { echo 'supervisor did not start' >&2; exit 1; }
       echo "supervisor reloaded"
     else
+      service_locked bt_for_owners bt_hide || exit 1
       echo "supervisor stopped (not enabled)"
     fi
+    ;;
+  rollback)
+    [ "$#" -eq 1 ] || exit 2
+    bt_test_clear || exit 1
+    rollback
     ;;
   status)
     [ -f "$D/enabled" ] && echo "mode: pulsar" || echo "mode: yandex"
@@ -129,23 +546,49 @@ case "$1" in
         [ -s "$D/api_key" ] && echo "api key: set" || echo "api key: not set (plaintext API)"
         ;;
       clear)
+        bt_test_clear || exit 1
         rm -f "$D/api_key"
         echo "api key removed"
-        stop_daemon || { echo "pulsar did not exit" >&2; exit 1; }
+        restart_daemon || { echo "pulsar did not exit" >&2; exit 1; }
         restarted
         ;;
       *)
         valid_key "$2" || { echo "not a base64 encoding of 32 bytes (44 characters), nothing changed" >&2; exit 1; }
+        bt_test_clear || exit 1
         (umask 077; printf '%s' "$2" > "$D/api_key.tmp") && chmod 600 "$D/api_key.tmp" && mv "$D/api_key.tmp" "$D/api_key" \
           || { rm -f "$D/api_key.tmp"; echo "cannot write $D/api_key" >&2; exit 1; }
         echo "api key set"
-        stop_daemon || { echo "pulsar did not exit" >&2; exit 1; }
+        restart_daemon || { echo "pulsar did not exit" >&2; exit 1; }
         restarted
         ;;
     esac
     ;;
+  bt-restore)
+    case "$#:${2-}" in
+      1:) service_try_locked bt_for_owners bt_restore ;;
+      2:--self)
+        if [ "${PULSAR_BT_OWNER:-}" = "$bt_test_owner" ]; then
+          bt_test_ctl && bt_lock=$(bt_owner_lock_path) && bt_locked "$bt_lock" bt_restore --self
+        else
+          bt_for_owners bt_restore --self
+        fi ;;
+      2:--test-check)
+        PULSAR_BT_OWNER=$bt_test_owner bt_owner_lock_capable ;;
+      2:--test)
+        PULSAR_BT_OWNER=$bt_test_owner
+        bt_test_ctl && bt_lock=$(bt_owner_lock_path) && bt_locked "$bt_lock" bt_restore ;;
+      2:--hide) service_try_locked bt_for_owners bt_hide ;;
+      2:--owner-path) bt_owner_path ;;
+      2:--supported) : ;;
+      2:--owner-lock-path) bt_owner_lock_path ;;
+      2:--owner-lock)
+        bt_owner_lock_capable && printf '%s\n' pulsar-bt-owner-lock/2 ;;
+      2:--check) bt_owner_lock_capable ;;
+      *) exit 2 ;;
+    esac
+    ;;
   *)
-    echo "usage: $0 enable|disable|restart|reload|status|log [lines]|api-key [base64|clear]"
+    echo "usage: $0 enable|disable|restart|reload [--stop]|rollback|status|log [lines]|api-key [base64|clear]|bt-restore"
     exit 1
     ;;
 esac

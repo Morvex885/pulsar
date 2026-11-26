@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use log::{debug, error, info, warn};
 use pulsar_audio::FrontendEvent;
+use pulsar_bt::{BtEvent, BtHandle};
 use pulsar_core::model::Model;
 use pulsar_core::{ClockShot, Timers, UiState, now_ms};
 use pulsar_esphome::{ApiConfig, ApiEvent, ApiHandle, WakeWordInfo};
@@ -130,6 +131,7 @@ struct Rx {
     lux: Option<UnboundedReceiver<f32>>,
     sendspin: Option<UnboundedReceiver<SendspinEvent>>,
     zigbee: Option<UnboundedReceiver<ZigbeeEvent>>,
+    bt: Option<UnboundedReceiver<BtEvent>>,
     updater: Option<UnboundedReceiver<UpdateEvent>>,
 }
 
@@ -148,6 +150,7 @@ pub struct Controller {
     // the chunk in progress), inside the teardown watchdog that main arms before the drop.
     sendspin: Option<SendspinHandle>,
     zigbee: Option<ZigbeeHandle>,
+    bt: Option<BtHandle>,
     updater: UpdaterHandle,
     arbiter: ArbiterHandle,
     /// Held only: the input actor runs while its handle exists.
@@ -186,6 +189,7 @@ pub struct Controller {
     // Wake arbitration: the window between our claim and the decision. Microphone audio and a
     // command word heard in it are held until the decision.
     arbitrating: bool,
+    arb_captures_voice: bool,
     /// Our claim being decided; forgotten on cancel (a `Decided` already queued then still
     /// arrives and is ignored).
     arb_claim: Option<u64>,
@@ -195,6 +199,7 @@ pub struct Controller {
     arb_command: String,
     /// Another station answers the wake word just heard.
     commands_blocked_until_ms: i64,
+    bt_voice_until_ms: i64,
     run: RunBinding,
     /// voice_request_stop already sent for this dialog's run.
     stop_sent: bool,
@@ -250,6 +255,11 @@ pub struct Controller {
     install_version: String,
     /// Last Zigbee status line published.
     zigbee_status: String,
+    bt_starts: u64,
+    bt_connection: Option<u64>,
+    audio_start: u64,
+    // Один id действует и для первого Playing, и для подтверждённых Resume.
+    music_play_id: Option<PlayId>,
     sendspin_pairing_prompt: bool,
 }
 
@@ -286,7 +296,7 @@ fn light_rgb(l: &pulsar_esphome::LightState) -> Rgb {
 impl Controller {
     /// Loads the settings and starts every service. Err (to be logged by the caller, exit 1):
     /// an invalid `PULSAR_PORT_OFFSET`, or the API server could not bind its port.
-    pub fn start(model: &'static Model, state_path: PathBuf) -> Result<Controller, String> {
+    pub async fn start(model: &'static Model, state_path: PathBuf) -> Result<Controller, String> {
         // Before anything starts: a SIGTERM during the start-up still ends the daemon cleanly.
         let term = signal(SignalKind::terminate()).map_err(|e| format!("signals: {e}"))?;
         let int = signal(SignalKind::interrupt()).map_err(|e| format!("signals: {e}"))?;
@@ -341,8 +351,21 @@ impl Controller {
                 None
             }
         };
+        // Занятый порт должен остановить запуск до захвата штатного Bluetooth-плеера.
+        // Сокет остаётся у нас до формирования списка сущностей.
+        let api_listener = pulsar_esphome::bind(ports.api)?;
+        let (bt, bt_rx) = match pulsar_bt::probe(model).await {
+            Ok(probe) => {
+                let (handle, rx) = pulsar_bt::spawn(model, st.bluetooth_enabled, probe);
+                (Some(handle), Some(rx))
+            }
+            Err(reason) => {
+                warn!("bluetooth: unavailable until Pulsar restarts: {reason}");
+                (None, None)
+            }
+        };
+        let bluetooth = bt.is_some();
         let cfg = ApiConfig {
-            port: ports.api,
             wake_words: wake_names.into_iter().map(wake_word_info).collect(),
             active_wake_words: Vec::new(),
             light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
@@ -359,6 +382,7 @@ impl Controller {
                     .map(|r| r.label.to_owned())
                     .collect()
             },
+            bluetooth,
             has_clock: model.has_clock || pulsar_clock::panel_present(model),
             has_lux: model.has_lux || lux_rx.is_some(),
             has_hw_mic_mute: !model.mute_input.is_empty() || model.mute_gpio != 0,
@@ -367,12 +391,7 @@ impl Controller {
             key_path: Some(logic::in_dir(&dir, "api_key")),
             has_auto_brightness: lux_rx.is_some(),
         };
-        // The C++ server bound its port last (ApiServer::start); here the bind comes first, so
-        // a failure exits before the hardware starts. Nothing reaches the server before `run`.
-        let (api, api_rx) = pulsar_esphome::spawn(id.clone(), cfg)
-            .map_err(|_| "ESPHome API server failed to start".to_owned())?;
-        // Before any other thread exists: the player's spawn sets SSL_CERT_FILE (set_var), which
-        // C code on another thread could be reading.
+        let (api, api_rx) = pulsar_esphome::spawn(id.clone(), cfg, api_listener);
         let (player, player_rx) = pulsar_media::spawn(model);
         let (arbiter, arbiter_rx) = arbiter::spawn(id.name.clone(), ports.arbiter);
 
@@ -558,6 +577,7 @@ impl Controller {
         let mut c = Controller {
             sendspin,
             zigbee,
+            bt,
             updater,
             arbiter,
             _input: input,
@@ -577,6 +597,7 @@ impl Controller {
                 lux: lux_rx,
                 sendspin: sendspin_rx,
                 zigbee: zigbee_rx,
+                bt: bt_rx,
                 updater: Some(updater_rx),
             },
             term,
@@ -597,12 +618,14 @@ impl Controller {
             active_wake_word: String::new(),
             unlisted_wake_word,
             arbitrating: false,
+            arb_captures_voice: false,
             arb_claim: None,
             arb_phrase: String::new(),
             arb_level: -100.0,
             arb_audio: Vec::new(),
             arb_command: String::new(),
             commands_blocked_until_ms: 0,
+            bt_voice_until_ms: 0,
             run: RunBinding::default(),
             stop_sent: false,
             voice_run: 0,
@@ -640,6 +663,10 @@ impl Controller {
             install_id: None,
             install_version: String::new(),
             zigbee_status: String::new(),
+            bt_starts: 0,
+            bt_connection: None,
+            audio_start: 0,
+            music_play_id: None,
             sendspin_pairing_prompt: false,
         };
         // The rest of the C++ start(), in its order: every call below only queues commands to
@@ -655,6 +682,7 @@ impl Controller {
         );
         c.update_detection();
         c.apply_gains(); // a saved mute
+        c.on_bt(BtEvent::Changed { connection: None });
         c.update_ui();
         c.clock.play(ClockShot::Boot);
         if changed {
@@ -720,6 +748,10 @@ impl Controller {
                     Some(ev) => self.on_zigbee(ev),
                     None => self.rx.zigbee = None,
                 },
+                ev = recv(&mut self.rx.bt) => match ev {
+                    Some(ev) => self.on_bt(ev),
+                    None => self.rx.bt = None,
+                },
                 ev = recv(&mut self.rx.updater) => match ev {
                     Some(ev) => self.on_updater(ev),
                     None => self.rx.updater = None,
@@ -782,6 +814,15 @@ impl Controller {
                     self.update_speech_number();
                 }
             }
+            PlayerEvent::MusicStarted { id, order } => {
+                if self.music_play_id == Some(id) {
+                    self.sendspin_ended_ms = None;
+                    if order > self.audio_start {
+                        self.local_music_takes_audio(order);
+                    }
+                }
+                self.publish_media();
+            }
             // HA media state follows playback (C++ Player::on_state hook).
             PlayerEvent::State(ch, s) => {
                 if ch == Channel::Music {
@@ -796,6 +837,9 @@ impl Controller {
                 self.publish_media();
             }
             PlayerEvent::Done { id, ok } => {
+                if self.music_play_id == Some(id) {
+                    self.music_play_id = None;
+                }
                 if let Some(p) = self.pending.remove(&id) {
                     self.play_done(p, ok);
                 }
@@ -825,7 +869,7 @@ impl Controller {
                 }
                 if self.phase == Phase::Listening {
                     self.api.voice_send_audio(pcm);
-                } else if self.arbitrating {
+                } else if self.arbitrating && self.arb_captures_voice {
                     // The request goes on with what was said right after the wake word.
                     self.arb_audio.extend_from_slice(&pcm);
                 }
@@ -879,6 +923,8 @@ impl Controller {
 
     fn update_ui(&mut self) {
         self.leds.set_muted(self.mic_muted());
+        self.leds
+            .set_bt_pairing(self.bt.as_ref().is_some_and(|b| b.state().pairing));
         self.update_commands();
         let s = if self.timer_ringing {
             UiState::TimerRing
@@ -887,7 +933,7 @@ impl Controller {
                 Phase::Listening => UiState::Listening,
                 Phase::Processing => UiState::Thinking,
                 Phase::Speaking => UiState::Speaking,
-                Phase::Idle if self.arbitrating => UiState::Listening,
+                Phase::Idle if self.arbitrating && self.arb_captures_voice => UiState::Listening,
                 Phase::Idle if self.announcing => UiState::Speaking,
                 Phase::Idle => UiState::Idle,
             }

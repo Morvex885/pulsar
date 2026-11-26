@@ -28,6 +28,22 @@
 - В GStreamer прошивки 0.369 нет декодера MP3; стоковые earcons — в `.opus`
   (`common/volume_sound.opus` [inference: наличие файла на станции не подтверждено]).
 
+## Bluetooth
+
+Замер на своей станции 2026-11-23 (прошивка `0.369.1.46…20261013.299`), pulsar активен.
+Контракты режима — [bluetooth.md](bluetooth.md); железо чипа — вики.
+
+- Стек прошивки живёт под pulsar (init-скрипты `S51bluetoothd`–`S54default-bluez-agent`
+  стека quasar не трогают): `hciattach` поднимает `/sys/class/bluetooth/hci0`, дальше
+  BlueZ 5.70, bluealsa 4.1.1 с `-p a2dp-sink -p a2dp-source -p hfp-ag`, `bluealsa-aplay`
+  (поток на ALSA `default`), `just-works-bluez-agent` (сопряжение без PIN). В `main.conf`
+  вендором включены `DiscoverableTimeout=0`, `AlwaysPairable=true`, `FastConnectable=true`,
+  `JustWorksRepairing=always`.
+- Видимость для нового сопряжения задаёт `org.bluez.Adapter1.Discoverable`: по set адаптер за
+  секунду уходит в PSCAN/ISCAN («Yandex.Mini2» виден для сопряжения), обратно — исчезает;
+  перезапуск не нужен. Микрофонный захват (hw:0,1) не затронут, выход общий через dmix:
+  wake word и локальные команды работают, пока телефон играет.
+
 ## Светодиоды и часы
 
 - Часы: по `quasar.cfg` (`/leds/clock`) двоеточие — `PLUS1`+`PLUS2`, `DEGREE` и `MINUS` погашены.

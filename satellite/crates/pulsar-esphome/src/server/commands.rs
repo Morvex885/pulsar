@@ -225,10 +225,17 @@ impl Server {
 
     fn on_switch_cmd(&mut self, r: &mut Reader<'_>) {
         let (mut k, mut state) = (0, false);
+        let mut bt_valid = true;
         while let Some(f) = r.next() {
             match f.num {
-                1 => k = f.u32(),
-                2 => state = f.boolean(),
+                1 => {
+                    k = f.u32();
+                    bt_valid &= f.wt == WireType::Fixed32;
+                }
+                2 => {
+                    state = f.boolean();
+                    bt_valid &= f.wt == WireType::Varint;
+                }
                 _ => {}
             }
         }
@@ -242,8 +249,12 @@ impl Server {
             key::SW_VOICE_INDICATION => SwitchId::VoiceIndication,
             key::SW_WAKE_SOUND => SwitchId::WakeSound,
             key::SW_CLOCK_COLON_BLINK => SwitchId::ClockColonBlink,
+            key::SW_BLUETOOTH => SwitchId::Bluetooth,
             _ => return,
         };
+        if id == SwitchId::Bluetooth && (!self.cfg.bluetooth || !bt_valid || r.error()) {
+            return;
+        }
         self.emit(ApiEvent::Switch(id, state));
     }
 
@@ -355,36 +366,60 @@ impl Server {
         // Only the first three are kept: no action takes more, and the count decides.
         let mut args: Vec<Arg<'_>> = Vec::with_capacity(3);
         let mut n_args = 0usize;
+        let mut bt_valid = true;
         while let Some(f) = r.next() {
             if f.num == 1 {
                 k = f.u32();
+                bt_valid &= f.wt == WireType::Fixed32;
             }
             // 3/4 call_id / return_response: actions declare no response.
             if f.num != 2 {
                 continue;
             }
+            bt_valid &= f.wt == WireType::Len;
             let mut a = Arg { s: &[], i: 0 };
             let mut ar = Reader::new(f.data);
             while let Some(af) = ar.next() {
                 match af.num {
-                    4 => a.s = af.data,
+                    4 => {
+                        a.s = af.data;
+                        bt_valid &= af.wt == WireType::Len;
+                    }
                     5 => a.i = zigzag32(af.v),
                     2 => a.i = af.v as u32 as i32, // legacy_int
                     _ => {}
                 }
             }
+            bt_valid &= !ar.error();
             n_args += 1;
             if args.len() < 3 {
                 args.push(a);
             }
         }
-        let want = if k == key::ACTION_LED_SHOW { 3 } else { 2 };
+        let want = match k {
+            key::ACTION_LED_SHOW => 3,
+            key::ACTION_BT => 1,
+            _ => 2,
+        };
         if !matches!(
             k,
-            key::ACTION_CLOCK_TEXT | key::ACTION_CLOCK_FACE | key::ACTION_LED_SHOW
+            key::ACTION_CLOCK_TEXT | key::ACTION_CLOCK_FACE | key::ACTION_LED_SHOW | key::ACTION_BT
         ) || n_args != want
         {
             warn!("api: bad action call key={k} args={n_args}");
+            return;
+        }
+        if k == key::ACTION_BT {
+            if self.cfg.bluetooth
+                && bt_valid
+                && !r.error()
+                && let Ok(action) = std::str::from_utf8(args[0].s)
+                && !action.is_empty()
+            {
+                self.emit(ApiEvent::Bt {
+                    action: action.to_owned(),
+                });
+            }
             return;
         }
         if k == key::ACTION_LED_SHOW {

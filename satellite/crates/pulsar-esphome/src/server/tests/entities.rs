@@ -27,7 +27,6 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         compilation_time: compilation_time.into(),
     };
     let cfg = ApiConfig {
-        port: 0,
         wake_words: vec![ww("alisa", "Алиса"), ww("yandex", "Яндекс")],
         active_wake_words: s(&["alisa"]),
         light_effects: s(&["Rainbow", "Pulse"]),
@@ -37,6 +36,7 @@ fn selftest(compilation_time: &str) -> (DeviceIdentity, ApiConfig) {
         clock_music_styles: s(&["Off", "Levels"]),
         clock_formats: s(&["24h", "12h"]),
         zigbee_modes: s(&["Coordinator", "Router"]),
+        bluetooth: false, // golden-дампе соответствия C++ selftest: BT-сущностей в нём нет
         led_layout: Default::default(),
         has_clock: true,
         has_lux: true,
@@ -76,12 +76,14 @@ fn publish_selftest_states(h: &ApiHandle) {
 }
 
 fn start_with(id: DeviceIdentity, cfg: ApiConfig) -> (ApiHandle, UnboundedReceiver<ApiEvent>, u16) {
-    let s = spawn(id, cfg).unwrap();
+    let listener = bind(0).unwrap();
+    let port = listener.port();
+    let s = spawn(id, cfg, listener);
     let h = ApiHandle {
         cmds: s.cmds,
         shared: s.shared,
     };
-    (h, s.events, s.port)
+    (h, s.events, port)
 }
 
 /// Message type and fixed32 key of a state message (field 1), for the masked comparison.
@@ -444,6 +446,18 @@ async fn commands_are_validated_like_cxx() {
                     key::ACTION_LED_SHOW,
                     &[s("Pulse"), s("red"), (None, Some(3), None)],
                 ),
+            )
+            .await;
+            // Действие `bt` с верными аргументами, но адаптера нет в selftest-конфиге — сервер
+            // его не объявляет и команды дропает.
+            c.send(
+                msg::EXECUTE_SERVICE_REQ,
+                action(key::ACTION_BT, &[s("pause")]),
+            )
+            .await;
+            c.send(
+                msg::EXECUTE_SERVICE_REQ,
+                action(key::ACTION_BT, &[s("a"), s("b")]),
             )
             .await;
             c.send(msg::EXECUTE_SERVICE_REQ, action(999, &[s("a"), s("b")]))
@@ -971,6 +985,122 @@ async fn states_go_to_subscribers_and_zigbee_entities_need_modes() {
 }
 
 #[tokio::test]
+async fn bluetooth_entities_are_gated_on_the_adapter_and_round_trip() {
+    local()
+        .run_until(async {
+            // selftest-конфиг (`bluetooth: false`): нет ни состояний, ни команд.
+            let (id, cfg) = selftest("now");
+            let (h, mut rx, port) = start_with(id, cfg);
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            event(&mut rx).await;
+            p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+            p.sync().await;
+            h.publish_switch(SwitchId::Bluetooth, true);
+            h.publish_text_sensor(TextSensorId::Bluetooth, "off");
+            assert!(p.sync().await.is_empty());
+            p.send(
+                msg::SWITCH_CMD,
+                &kv(key::SW_BLUETOOTH, |w| w.boolean(2, true, false)),
+            )
+            .await;
+            let mut a = Writer::new();
+            a.fixed32(1, key::ACTION_BT, true);
+            let mut arg = Writer::new();
+            arg.str(4, "pause", true);
+            a.msg(2, &arg);
+            p.send(msg::EXECUTE_SERVICE_REQ, &a).await;
+            assert!(drain(&mut p, &mut rx).await.is_empty());
+
+            // С адаптером: сущности в списке, команды и публикация состояний, replay новому
+            // подписчику.
+            let (id, mut cfg) = selftest("now");
+            cfg.bluetooth = true;
+            let (h, mut rx, port) = start_with(id, cfg);
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            event(&mut rx).await;
+            p.send(msg::LIST_ENTITIES_REQ, &Writer::new()).await;
+            let mut keys = Vec::new();
+            loop {
+                let (t, m) = p.recv().await.unwrap();
+                if t == msg::LIST_DONE {
+                    break;
+                }
+                keys.push(field(&m, 2).unwrap().u32());
+            }
+            assert!(keys.contains(&key::SW_BLUETOOTH));
+            assert!(keys.contains(&key::TEXT_BLUETOOTH));
+            assert!(keys.contains(&key::ACTION_BT));
+            p.send(
+                msg::SWITCH_CMD,
+                &kv(key::SW_BLUETOOTH, |w| w.boolean(2, true, false)),
+            )
+            .await;
+            assert_eq!(
+                event(&mut rx).await,
+                ApiEvent::Switch(SwitchId::Bluetooth, true)
+            );
+            p.send(msg::EXECUTE_SERVICE_REQ, &a).await;
+            assert_eq!(
+                event(&mut rx).await,
+                ApiEvent::Bt {
+                    action: "pause".into()
+                }
+            );
+            // Ошибка в конце внешнего поля или вложенного аргумента не применяет команду.
+            let good = kv(key::SW_BLUETOOTH, |w| w.boolean(2, true, false));
+            let mut broken = good.data().to_vec();
+            broken.push(0x80);
+            let mut frame = Vec::new();
+            append_plain(&mut frame, msg::SWITCH_CMD, &broken);
+            p.write(&frame).await;
+            p.send(msg::SWITCH_CMD, &kv(key::SW_BLUETOOTH, |_| {}))
+                .await;
+            assert_eq!(
+                event(&mut rx).await,
+                ApiEvent::Switch(SwitchId::Bluetooth, false)
+            );
+            let mut broken_arg = arg.data().to_vec();
+            broken_arg.push(0x80);
+            let mut cmd = Writer::new();
+            cmd.fixed32(1, key::ACTION_BT, true);
+            cmd.bytes(2, &broken_arg, true);
+            p.send(msg::EXECUTE_SERVICE_REQ, &cmd).await;
+            assert!(drain(&mut p, &mut rx).await.is_empty());
+            p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+            // сливаем начальный дамп закэшированных состояний — ниже проверяем только публикации
+            p.sync().await;
+            h.publish_switch(SwitchId::Bluetooth, true);
+            h.publish_text_sensor(TextSensorId::Bluetooth, "ready");
+            let got = p.sync().await;
+            assert_eq!(got.len(), 2, "{got:?}");
+            assert_eq!(got[0].0, msg::SWITCH_STATE);
+            assert_eq!(state_key(&got[0].1), Some(key::SW_BLUETOOTH));
+            assert!(field(&got[0].1, 2).unwrap().boolean());
+            assert_eq!(state_key(&got[1].1), Some(key::TEXT_BLUETOOTH));
+            assert_eq!(field(&got[1].1, 2).unwrap().str(), "ready");
+            // Новый подписчик получает закэшированные значения.
+            let mut p2 = Peer::connect(port).await;
+            p2.hello("HA2").await;
+            event(&mut rx).await;
+            p2.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+            let replay = p2.sync().await;
+            let sw = replay
+                .iter()
+                .find(|(_, m)| state_key(m) == Some(key::SW_BLUETOOTH))
+                .unwrap();
+            assert!(field(&sw.1, 2).unwrap().boolean());
+            let tx = replay
+                .iter()
+                .find(|(_, m)| state_key(m) == Some(key::TEXT_BLUETOOTH))
+                .unwrap();
+            assert_eq!(field(&tx.1, 2).unwrap().str(), "ready");
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn mini_has_no_clock_lux_mute_case_or_button_entities() {
     local()
         .run_until(async {
@@ -1269,14 +1399,16 @@ async fn eof_batch_drains_voice_in_order_without_broadcasting_to_closed_peer() {
 
     for (already_subscribed, unsubscribe) in [(true, false), (true, true), (false, false)] {
         let (id, cfg) = selftest("now");
-        let (mut s, handle) = bind_server(id, cfg).unwrap();
+        let listener = bind(0).unwrap();
+        let port = listener.port();
+        let (mut s, handle) = new_server(id, cfg, listener);
         let mut rx = handle.events;
         let api = ApiHandle {
             cmds: handle.cmds,
             shared: handle.shared,
         };
-        let (owner, mut p) = subscribe(&mut s, handle.port, "owner").await;
-        let (other, mut live) = subscribe(&mut s, handle.port, "other").await;
+        let (owner, mut p) = subscribe(&mut s, port, "owner").await;
+        let (other, mut live) = subscribe(&mut s, port, "other").await;
         event(&mut rx).await;
         event(&mut rx).await;
 

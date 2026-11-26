@@ -34,6 +34,7 @@ Assistant через ESPHome Native API, Music Assistant через Sendspin, н
 | голос: HA voice assistant, стоковый maind, арбитраж | [docs/voice.md](docs/voice.md) | — |
 | железо: указатель моделей и вики, библиотеки Яндекса, новая модель; факты модели — `docs/<модель>.md` | [docs/hardware.md](docs/hardware.md) | `add-station-model` |
 | Zigbee (Миди), прошивки `radio/` | [docs/zigbee.md](docs/zigbee.md) | `zigbee-radio` |
+| Bluetooth-колонка: статус, канал dbus, AVRCP | [docs/bluetooth.md](docs/bluetooth.md) | — |
 | сборка, CI, установщик, супервизор, обновления, релиз, падение | [docs/development.md](docs/development.md) | `release`, `crash-decode` |
 | тесты на станциях | [docs/stations.md](docs/stations.md) | `station-test` |
 | поведение для пользователя | [README.md](README.md) | — |

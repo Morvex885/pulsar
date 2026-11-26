@@ -22,6 +22,14 @@ use pulsar_core::Timers;
 use pulsar_media::{Channel, Mixer, PlayId, PlayState, PlayerEvent, spawn};
 use tokio::signal::unix::{SignalKind, signal};
 
+#[allow(unsafe_code)]
+mod sys {
+    pub(super) fn init_media_env() {
+        // SAFETY: main вызывает это до загрузки библиотек, запуска рантайма и потоков.
+        unsafe { pulsar_media::set_ssl_cert_file() };
+    }
+}
+
 const MASTER: &str = "Master Playback Volume";
 /// Mixer scale: the port's cap for test sounds.
 const MAX_TEST_VOLUME: f32 = 0.2;
@@ -202,6 +210,15 @@ impl Probe {
                 println!("[{:6.2}] state {name} -> {}", self.ts(), sname(s));
                 return Step::Continue;
             }
+            PlayerEvent::MusicStarted { .. } => {
+                self.saw_state = true;
+                println!(
+                    "[{:6.2}] state MUSIC -> {}",
+                    self.ts(),
+                    sname(PlayState::Playing)
+                );
+                return Step::Continue;
+            }
             PlayerEvent::Started { .. } => return Step::Continue,
             PlayerEvent::Done { id, ok } => (Some(id), u8::from(ok)),
         };
@@ -243,6 +260,7 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    sys::init_media_env();
     pulsar_core::init_logger();
     pulsar_core::add_own_target(module_path!());
     let t0 = pulsar_core::now_ms();

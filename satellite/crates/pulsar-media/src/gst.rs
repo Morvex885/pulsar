@@ -312,18 +312,18 @@ fn load_api() -> Option<Api> {
     }
 }
 
-/// Points OpenSSL (souphttpsrc's TLS backend, below) at the system CA bundle unless the
-/// environment already names one.
-pub(crate) fn set_ssl_cert_file() {
+/// Указывает OpenSSL (TLS для souphttpsrc) системный CA bundle, если путь не задан.
+///
+/// # Safety
+/// Вызывать до запуска любых потоков, которые могут прочитать окружение.
+pub unsafe fn set_ssl_cert_file() {
     // SAFETY: NUL-terminated path.
     if unsafe { libc::access(CA_BUNDLE.as_ptr(), libc::R_OK) } != 0
         || std::env::var_os("SSL_CERT_FILE").is_some()
     {
         return;
     }
-    // SAFETY: std's environment lock covers Rust readers. C code reading the environment
-    // (getenv) on another thread at this moment would race; the daemon calls
-    // pulsar_media::spawn() before it starts any other service thread, so none exists yet.
+    // SAFETY: вызывающий гарантирует отсутствие одновременных обращений к окружению.
     unsafe {
         std::env::set_var(
             "SSL_CERT_FILE",

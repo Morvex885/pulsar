@@ -23,6 +23,8 @@
 //! Action: Short при отпускании раньше 800 мс, Long сразу, как только кнопку продержали 800 мс.
 //! Volume*: Short при нажатии, при удержании дольше 500 мс — автоповтор каждые 200 мс, не дольше
 //! 10 с.
+//! Четыре физических нажатия mute через evdev открывают окно Bluetooth. Опрос GPIO
+//! для жеста не годится: между чтениями могут пропасть переходы.
 //! Пропавшие устройства (ENODEV) ищутся заново каждые 3 с; SYN_DROPPED запускает пересинхронизацию
 //! состояния (кроме кнопки без фиксации: пропущенное нажатие не восстановить).
 
@@ -33,6 +35,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::FileExt as _;
 use std::path::Path;
 use std::rc::Rc;
+use std::time::Duration;
 
 use log::{debug, error, info, warn};
 use pulsar_core::Timers;
@@ -52,6 +55,7 @@ const SYN_DROPPED: u16 = 3;
 const SW_MUTE_DEVICE: u16 = 0x0e;
 const KEY_VOLUMEDOWN: u16 = 114;
 const KEY_VOLUMEUP: u16 = 115;
+const KEY_PLAYPAUSE: u16 = 164;
 
 const LONG_PRESS_MS: u64 = 800;
 const REPEAT_DELAY_MS: u64 = 500;
@@ -67,6 +71,8 @@ const GPIO_POLL_MS: u64 = 100;
 // closer than 300 ms to the previous one are dropped.
 const MIN_ACTION_PRESS_MS: i64 = 56;
 const MIN_ACTION_GAP_MS: i64 = 300;
+const MUTE_PRESS_MIN: Duration = Duration::from_millis(50);
+const MUTE_PRESS_MAX: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
@@ -91,6 +97,10 @@ pub enum InputEvent {
     /// Momentary mute button that does not latch the microphone itself (the Mini's KEY_MUTE):
     /// the controller toggles its software mute.
     MuteToggle,
+    /// Четыре последовательных физических нажатия mute.
+    BluetoothPairing,
+    /// Нажатие выделенной кнопки воспроизведения, если её отдаёт evdev.
+    PlayPause,
 }
 
 /// Keeps the input actor alive; the actor stops when the last clone is dropped.
@@ -317,6 +327,7 @@ struct Machine {
     mute_is_switch: bool,
     /// Неизвестно до чтения положения и после потери аппаратного переключателя.
     mute_position: Option<bool>,
+    mute_series: Option<(Duration, u8)>,
     /// Press time; None = not pressed.
     action_down: Option<i64>,
     last_action_ms: Option<i64>,
@@ -356,6 +367,7 @@ impl Machine {
             },
             mute_is_switch: mute_dev_is_switch(model),
             mute_position: None,
+            mute_series: None,
             action_down: None,
             last_action_ms: None,
             action_long_sent: false,
@@ -524,7 +536,27 @@ impl Machine {
         }
     }
 
+    fn mute_press(&mut self, e: &RawInputEvent) {
+        // Используем время ядра, а не время чтения: несколько нажатий могут прийти одним пакетом.
+        let now = Duration::new(e.sec as _, (e.usec * 1000) as _);
+        let count = match self.mute_series {
+            Some((last, count)) => match now.checked_sub(last) {
+                Some(gap) if gap < MUTE_PRESS_MIN => return,
+                Some(gap) if gap <= MUTE_PRESS_MAX => count + 1,
+                _ => 1,
+            },
+            None => 1,
+        };
+        self.mute_series = if count == 4 {
+            let _ = self.tx.send(InputEvent::BluetoothPairing);
+            None
+        } else {
+            Some((now, count))
+        };
+    }
+
     fn read_mute_state(&mut self, bits: io::Result<SwBits>, notify: bool) -> io::Result<()> {
+        self.mute_series = None;
         let bits = bits.inspect_err(|e| warn!("input: EVIOCGSW: {}", crate::errstr(e)))?;
         self.set_mute_position(Some(test_bit(&bits, SW_MUTE_DEVICE)), notify);
         Ok(())
@@ -569,6 +601,7 @@ impl Machine {
             if e.type_ == EV_SYN {
                 if e.code == SYN_DROPPED {
                     warn!("input: events dropped on fd {fd}, resyncing");
+                    self.mute_series = None;
                     self.set_dropped(dev, true);
                     if dev == Dev::Mute && self.mute_is_switch {
                         self.set_mute_position(None, true);
@@ -592,15 +625,26 @@ impl Machine {
             }
             match e.type_ {
                 EV_KEY if self.mute_key != 0 && e.code == self.mute_key => {
-                    // 2 — автоповтор, 0 — отпускание; ни то ни другое не меняет mute.
+                    // Считается только нажатие: 2 — автоповтор, 0 — отпускание.
                     if dev == self.mute_key_dev && e.value == 1 {
                         info!("input: mute button");
                         let _ = self.tx.send(InputEvent::MuteToggle);
+                        self.mute_press(e);
+                    }
+                }
+                EV_KEY if dev == Dev::Keys && e.code == KEY_PLAYPAUSE => {
+                    if e.value == 1 {
+                        let _ = self.tx.send(InputEvent::PlayPause);
                     }
                 }
                 EV_KEY if dev == Dev::Keys => self.on_key(e.code, e.value),
                 EV_SW if dev == Dev::Mute && self.mute_is_switch && e.code == SW_MUTE_DEVICE => {
-                    self.set_mute_position(Some(e.value != 0), true);
+                    let muted = e.value != 0;
+                    let press = matches!(e.value, 0 | 1) && self.mute_position == Some(!muted);
+                    self.set_mute_position(Some(muted), true);
+                    if press {
+                        self.mute_press(e);
+                    }
                 }
                 _ => {}
             }
@@ -650,6 +694,7 @@ impl Devices {
 
     /// Drops a device for the reopen timer; keys still held will never be released.
     fn close(&mut self, dev: Dev, m: &mut Machine) {
+        m.mute_series = None;
         match dev {
             Dev::Keys => {
                 m.release_all();
@@ -725,6 +770,7 @@ impl Devices {
                     crate::errstr(&e)
                 );
                 self.mute_gpio = None;
+                m.mute_series = None;
                 m.set_mute_position(None, true);
                 self.update_availability();
                 m.disarm(Tick::MuteGpio);
@@ -792,7 +838,7 @@ enum Read {
     Now,
 }
 
-/// Reads everything `dev` has (until EAGAIN); a read error closes it for the reopen timer.
+/// Читает до EAGAIN. При EOF или ошибке закрывает устройство до следующего поиска.
 fn drain(m: &mut Machine, devs: &mut Devices, dev: Dev, buf: &mut [RawInputEvent], how: Read) {
     loop {
         let Some(fd) = devs.get(dev) else { return };

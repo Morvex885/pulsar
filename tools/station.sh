@@ -3,15 +3,38 @@
 # PULSAR_TAG: free-form tag of the work holding the lock (one word, no spaces).
 set -eu
 usage() {
-  echo "usage: PULSAR_TAG=<tag> $0 midi|lite2|mini lock MINUTES|unlock|break-lock|stop|start|push FILE...|test-start|test-stop|test-log [N]|swap BINARY|restore|cleanup|status|log [N]" >&2
+  echo "usage: PULSAR_TAG=<tag> $0 midi|lite2|mini lock MINUTES|unlock|break-lock|stop|start|push FILE...|test-start [--bt]|test-stop|test-log [N]|swap BINARY|restore|cleanup|status|log [N]" >&2
   exit 2
 }
 [ $# -ge 2 ] || usage
 case "$1" in
-  midi) H=${PULSAR_MIDI:?PULSAR_MIDI is not set} ;;
-  lite2) H=${PULSAR_LITE2:?PULSAR_LITE2 is not set} ;;
-  mini) H=${PULSAR_MINI:?PULSAR_MINI is not set} ;;
+  midi) var=PULSAR_MIDI; H=${PULSAR_MIDI-} ;;
+  lite2) var=PULSAR_LITE2; H=${PULSAR_LITE2-} ;;
+  mini) var=PULSAR_MINI; H=${PULSAR_MINI-} ;;
   *) usage ;;
+esac
+if [ -z "$H" ]; then
+  if [ -n "${XDG_CONFIG_HOME:-${HOME:-}}" ]; then
+    file=${XDG_CONFIG_HOME:-$HOME/.config}/pulsar/stations/$1
+    if [ -f "$file" ] && [ -r "$file" ]; then
+      {
+        IFS= read -r H || :
+        if IFS= read -r extra || [ -n "$extra" ]; then
+          echo "заблокирован: в $file ожидается одна строка с SSH-назначением" >&2
+          exit 2
+        fi
+      } < "$file"
+    fi
+  fi
+  if [ -z "$H" ]; then
+    echo "заблокирован: нет $var и локального SSH-назначения для $1" >&2
+    exit 2
+  fi
+fi
+case "$H" in
+  -*|*[[:space:]]*)
+    echo "заблокирован: некорректное SSH-назначение для $1" >&2
+    exit 2 ;;
 esac
 station=$1
 cmd=$2
@@ -19,26 +42,59 @@ shift 2
 L=/tmp/pulsar-agent.lock
 T=/tmp/pulsar-test
 D=/data/pulsar
+BT_OWNER=/tmp/pulsar-bt-owner
 r() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$H" "$@"; }
-# up SRC DEST: upload to DEST.part, verify size and sha256 against SRC, then rename to DEST (mode 755).
+# Имя файла передаётся в команду SSH, содержимое — без преобразований через stdin.
+shell_quote() {
+  word=$1
+  printf "'"
+  while case "$word" in *"'"*) true ;; *) false ;; esac; do
+    printf '%s' "${word%%\'*}" "'\\''"
+    word=${word#*\'}
+  done
+  printf "%s'" "$word"
+}
 up() {
-  src=$1 dest=$2
-  size=$(wc -c < "$src" | tr -d ' ')
-  if command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum "$src" | cut -d' ' -f1)
-  else sum=$(shasum -a 256 "$src" | cut -d' ' -f1); fi
-  if ! r "cat > '$dest.part'" < "$src"; then
-    r "rm -f '$dest.part'" || true; echo "upload of $src failed" >&2; exit 1
+  src=$1 dir=$2 name=$3
+  prepare= check=
+  if [ "$dir" = "$T" ]; then
+    prepare="$TEST_LOCK
+      test_lifecycle_lock '$D'
+      $TEST_DIR_CHECK
+      if [ ! -e \"\$dir\" ] && [ ! -L \"\$dir\" ]; then (umask 077; mkdir \"\$dir\") || exit 1; fi
+      test_dir_check \"\$dir\" || exit 1"
+    check='test_dir_check . || exit 1
+      parent=$(cd -P "${dir%/*}" && pwd -P) || exit 1
+      [ "$(pwd -P)" = "$parent/${dir##*/}" ] || exit 1'
   fi
-  got=$(r "s=\$(wc -c < '$dest.part' | tr -d ' '); h=none
-    if command -v sha256sum >/dev/null 2>&1; then h=\$(sha256sum '$dest.part' | cut -d' ' -f1); fi
-    echo \$s \$h") || got=
-  set -- $got
-  if [ "${1:-}" != "$size" ] || { [ "${2:-}" != none ] && [ "${2:-}" != "$sum" ]; }; then
-    r "rm -f '$dest.part'" || true
-    echo "transfer of $src corrupted: local $size bytes sha256 $sum, station ${1:-?} bytes sha256 ${2:-?}" >&2; exit 1
-  fi
-  [ "${2:-}" != none ] || echo "warning: no sha256sum on station, only size verified for $src" >&2
-  r "chmod 755 '$dest.part' && mv '$dest.part' '$dest'"
+  size=$(wc -c < "$src") || return 1
+  if command -v sha256sum >/dev/null 2>&1; then hash=$(sha256sum < "$src") || return 1
+  else hash=$(shasum -a 256 < "$src") || return 1; fi
+  hash=${hash%% *}
+  r "dir='$dir'
+    $prepare
+    cd -P \"\$dir\" || exit 1
+    $check
+    dest=$(shell_quote "./$name")
+    [ ! -d \"\$dest\" ] || exit 1
+    tmp=\$(mktemp ./.upload.XXXXXX) || exit 1
+    trap 'rm -f \"\$tmp\"' EXIT
+    cat > \"\$tmp\" || exit 1
+    got=\$(wc -c < \"\$tmp\") || exit 1
+    if [ \"\$got\" -ne '$size' ]; then
+      echo \"transfer corrupted: expected $size bytes, got \$got\" >&2
+      exit 1
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+      got=\$(sha256sum < \"\$tmp\") || exit 1
+      if [ \"\${got%% *}\" != '$hash' ]; then
+        echo 'transfer corrupted: SHA-256 mismatch' >&2
+        exit 1
+      fi
+    else
+      echo 'warning: no sha256sum on station, only size verified' >&2
+    fi
+    chmod 755 \"\$tmp\" && mv -f \"\$tmp\" \"\$dest\"" < "$src"
 }
 # State-changing commands run only under this tag's own lock.
 own() {
@@ -63,6 +119,137 @@ done
 if [ -n "$r" ]; then echo "removed stale ALSA dmix lock (${r# })"; fi
 EOF
 )
+# Из /tmp запускаем код только из закрытого каталога текущего SSH-пользователя.
+TEST_DIR_CHECK=$(cat <<'EOF'
+test_dir_check() {
+  if [ -d "$1" ] && [ ! -L "$1" ] && uid=$(id -u); then
+    case $(stat -c '%u:%a' "$1") in
+      "$uid:700") return 0 ;;
+      "$uid:755")
+        echo "legacy test directory: if no test or Bluetooth recovery is pending, move $1 to an unused name, keep it for inspection, and push fresh files" >&2 ;;
+    esac
+  fi
+  echo 'unsafe test directory: expected a private directory owned by the SSH user' >&2
+  return 1
+}
+EOF
+)
+TEST_DIR_OPTIONAL="$TEST_DIR_CHECK
+  if [ -e '$T' ] || [ -L '$T' ]; then test_dir_check '$T' || exit 1; fi"
+# Один inode на весь жизненный цикл стенда. cleanup не удаляет его вместе с тестовыми файлами.
+# flock доступен на станциях и сам отпускает блокировку при гибели последнего владельца FD.
+TEST_LOCK=$(cat <<'EOF'
+test_lifecycle_lock() {
+  exec 9>> "$1/.station-test.lock" || exit 1
+  flock -n 9 || { echo 'test lifecycle lock unavailable: retry after the other command ends' >&2; exit 1; }
+}
+# Обёртка удерживает блокировку до возврата ctl, не передавая её демонам.
+test_lifecycle_child() (
+  "$@" 9>&-
+  exit $?
+)
+# Поле starttime отличает повторно использованный PID; зомби уже не запустит код.
+test_process_start() {
+  awk '{ sub(/^.*\) /, ""); if ($1 != "Z" && $1 != "X") print $20 }' "/proc/$1/stat" 2>/dev/null
+}
+EOF
+)
+# Не запускать установленный сервис и не удалять стенд, пока не возвращён тестовый BT.
+TEST_BT_RESTORED="$TEST_DIR_OPTIONAL
+  if [ -e '$T/bt-reserved' ] || [ -L '$T/bt-reserved' ] ||
+    [ -e '$T/bt-owner' ] || [ -L '$T/bt-owner' ] ||
+    [ -e '$T/bt-owner.pending' ] || [ -L '$T/bt-owner.pending' ]; then
+    echo 'test Bluetooth not restored: run test-stop' >&2
+    exit 1
+  fi
+  if [ -e '$T/test-launch' ] || [ -L '$T/test-launch' ]; then
+    echo 'test launch not cleared: run test-stop' >&2
+    exit 1
+  fi"
+TEST_HANDOFF="$TEST_LOCK
+  test_lifecycle_lock '$D'
+  $TEST_BT_RESTORED"
+# Сначала остановить обоих: работающий pulsar ещё может записать снимок и захватить player.
+PROD_BT_CTL="'$D/ctl.sh' bt-restore --supported >/dev/null 2>&1 ||
+  '$D/ctl.sh' bt-restore --check >/dev/null 2>&1"
+PROD_BT_RESTORE="
+resume_installed() {
+  if [ -f '$D/enabled' ]; then
+    test_lifecycle_child '$D/ctl.sh' restart || echo 'installed supervisor did not restart' >&2
+  fi
+}
+if $PROD_BT_CTL; then
+  '$D/ctl.sh' reload --stop || {
+    stop_status=\$?
+    # ctl подтверждает остановку кодом 75, если не удалось только скрыть окно.
+    if [ \"\$stop_status\" -eq 75 ]; then
+      echo 'installed Bluetooth window not hidden; leaving binaries untouched' >&2
+      resume_installed
+    else
+      echo 'installed service did not stop cleanly; leaving binaries untouched' >&2
+    fi
+    exit \"\$stop_status\"
+  }
+  if ! test_lifecycle_child '$D/ctl.sh' bt-restore; then
+    echo 'installed Bluetooth not restored; leaving binaries untouched' >&2
+    resume_installed
+    exit 1
+  fi
+fi
+# Старый ctl может сообщить об успехе, не восстановив один из путей снимка.
+reject_bt_marker() {
+  echo \"installed Bluetooth snapshot still present: \$1; use the current ctl.sh to recover it; leaving binaries untouched\" >&2
+  exit 1
+}
+IFS= read -r boot < /proc/sys/kernel/random/boot_id ||
+  { echo 'cannot identify current Bluetooth snapshot; leaving binaries untouched' >&2; exit 1; }
+case \"\$boot\" in ''|*[!0-9a-f-]*)
+  echo 'invalid boot id; leaving binaries untouched' >&2; exit 1 ;;
+esac
+for owner in '$D'/.pulsar-bt-owner.\"\$boot\" \"\${PULSAR_BT_OWNER:-}\"; do
+  [ -n \"\$owner\" ] || continue
+  for marker in \"\$owner\" \"\$owner.pending\"; do
+    if [ -e \"\$marker\" ] || [ -L \"\$marker\" ]; then reject_bt_marker \"\$marker\"; fi
+  done
+done
+uid=\$(id -u) || exit 1
+for marker in '$BT_OWNER' '$BT_OWNER.pending'; do
+  [ -e \"\$marker\" ] || [ -L \"\$marker\" ] || continue
+  owner=\$(stat -c '%u' \"\$marker\") && [ \"\$owner\" != \"\$uid\" ] || reject_bt_marker \"\$marker\"
+done"
+# Готовим файлы до остановки сервиса. Сохраняем прежний слот отката и защиту
+# по inode, пока не обновлены метаданные и не переименован исполняемый файл.
+PROD_REPLACE="stage_replace() {
+  stage=\$(mktemp -d .station-replace.XXXXXX) || exit 1
+  trap 'rm -rf -- \"\$stage\"' EXIT
+  [ ! -e pulsar.prev ] || ln pulsar.prev \"\$stage/prev.old\" || exit 1
+}
+stage_guard() {
+  [ -f \"\$stage/guard\" ] || return 0
+  if [ pulsar -ef pulsar.bt-blocked.next ]; then
+    mv -f pulsar.bt-blocked.next pulsar.bt-blocked || return 1
+  fi
+  mv -f \"\$stage/guard\" pulsar.bt-blocked.next
+}
+replace_pulsar() {
+  prev_changed=0
+  if { if [ -f \"\$stage/prev\" ]; then mv -f \"\$stage/prev\" pulsar.prev; else rm -f pulsar.prev; fi; } &&
+     { prev_changed=1; stage_guard; } &&
+     mv -f \"\$1\" pulsar; then
+    if [ pulsar -ef pulsar.bt-blocked.next ]; then
+      mv -f pulsar.bt-blocked.next pulsar.bt-blocked
+    fi
+    return 0
+  fi
+  echo 'replacement failed; keeping the installed binary' >&2
+  if ! [ pulsar -ef pulsar.bt-blocked.next ]; then rm -f pulsar.bt-blocked.next; fi
+  if [ \"\$prev_changed\" = 1 ]; then
+    if [ -f \"\$stage/prev.old\" ]; then mv -f \"\$stage/prev.old\" pulsar.prev
+    else rm -f pulsar.prev; fi || echo 'could not restore the previous rollback binary' >&2
+  fi
+  [ ! -f enabled ] || test_lifecycle_child ./ctl.sh restart
+  exit 1
+}"
 case "$cmd" in
   lock)
     [ $# -eq 1 ] || usage
@@ -81,78 +268,290 @@ case "$cmd" in
   stop)
     own
     r "[ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
-       killall supervise.sh 2>/dev/null; killall pulsar 2>/dev/null
-       i=0; while [ \$i -lt 10 ] && pidof pulsar >/dev/null; do sleep 1; i=\$((i+1)); done
-       pidof pulsar >/dev/null && killall -9 pulsar
-       i=0; while [ \$i -lt 5 ] && pidof supervise.sh >/dev/null; do sleep 1; i=\$((i+1)); done
-       pidof supervise.sh >/dev/null && killall -9 supervise.sh
-       sleep 1
+       $TEST_HANDOFF
+       if $PROD_BT_CTL; then
+         '$D/ctl.sh' reload --stop || exit 1
+       else
+         killall supervise.sh 2>/dev/null; killall pulsar 2>/dev/null
+         i=0; while [ \$i -lt 10 ] && pidof pulsar >/dev/null; do sleep 1; i=\$((i+1)); done
+         pidof pulsar >/dev/null && killall -9 pulsar
+         i=0; while [ \$i -lt 5 ] && pidof supervise.sh >/dev/null; do sleep 1; i=\$((i+1)); done
+         pidof supervise.sh >/dev/null && killall -9 supervise.sh
+         sleep 1
+       fi
        $DMIX
        ! pidof pulsar supervise.sh >/dev/null && echo stopped" ;;
-  start) own; r "$D/ctl.sh reload" ;;
+  start)
+    own
+    r "$TEST_HANDOFF
+       test_lifecycle_child '$D/ctl.sh' reload" ;;
   push)
     [ $# -ge 1 ] || usage
-    own; r "mkdir -p $T"
-    for f; do b=$(basename "$f"); up "$f" "$T/$b"; done ;;
+    own
+    for f; do up "$f" "$T" "${f##*/}"; done ;;
   test-start)
+    case "$#:${1-}" in
+      0:) bt=0 ;;
+      1:--bt) bt=1 ;;
+      *) usage ;;
+    esac
     own
     # Один уровень для всех моделей: у Мини громкость программная, по той же шкале в дБ.
     vol=0.2
     # A quoted heredoc: no local shell expansion and no nested quotes in the remote command.
-    r sh -s -- "$T" "$D" "$vol" "$station" <<'EOF'
+    {
+      printf '%s\n' "$TEST_LOCK" "$TEST_DIR_CHECK"
+      cat <<'EOF'
 T=$1
 D=$2
 vol=$3
 station=$4
-! pidof supervise.sh >/dev/null || { echo 'run stop first' >&2; exit 1; }
+bt=$5
+test_lifecycle_lock "$D"
+test_dir_check "$T" || exit 1
+production_stopped() {
+  ! pidof supervise.sh >/dev/null || { echo 'run stop first' >&2; return 1; }
+  ! pidof pulsar >/dev/null || { echo 'pulsar still running: run stop or test-stop first' >&2; return 1; }
+}
+production_stopped || exit 1
+[ ! -e "$T/bt-reserved" ] && [ ! -L "$T/bt-reserved" ] &&
+  [ ! -e "$T/bt-owner" ] && [ ! -L "$T/bt-owner" ] &&
+  [ ! -e "$T/bt-owner.pending" ] && [ ! -L "$T/bt-owner.pending" ] ||
+  { echo 'test Bluetooth not restored: run test-stop' >&2; exit 1; }
+[ ! -e "$T/test-launch" ] && [ ! -L "$T/test-launch" ] ||
+  { echo 'test launch not cleared: run test-stop' >&2; exit 1; }
 [ -x "$T/pulsar" ] || { echo 'push pulsar first' >&2; exit 1; }
+if [ "$bt" = 1 ]; then
+  stock_stopped() {
+    [ -f "$D/enabled" ] && ! pidof quasar_launcher2 maind >/dev/null ||
+      { echo 'Yandex mode or stack running: Bluetooth test refused' >&2; return 1; }
+  }
+  stock_stopped || exit 1
+  if [ "$(PULSAR_BT_OWNER="$T/bt-owner" "$T/ctl.sh" bt-restore --owner-lock 2>/dev/null)" != pulsar-bt-owner-lock/2 ]; then
+    echo 'Bluetooth test needs a separately pushed satellite/deploy/ctl.sh with Bluetooth ownership locking' >&2
+    exit 1
+  fi
+  if ! production_lock=$("$D/ctl.sh" bt-restore --owner-lock-path 2>/dev/null) ||
+     [ -z "$production_lock" ]; then
+    echo 'Bluetooth test needs an installed ctl.sh with Bluetooth ownership locking' >&2
+    exit 1
+  fi
+  # Прямой bt-restore должен закончиться до публикации резерва.
+  saved_umask=$(umask) || exit 1
+  umask 077
+  exec 8>> "$production_lock" || exit 1
+  umask "$saved_umask" || exit 1
+  flock -n 8 || { echo 'installed Bluetooth ownership lock unavailable: retry after restore ends' >&2; exit 1; }
+  # Одним ln публикуем резерв и PID начала запуска. test-stop не снимает
+  # резерв, пока этот shell может ещё запустить процесс.
+  started=$(test_process_start "$$") || exit 1
+  [ -n "$started" ] || exit 1
+  ln -s "$$:$started" "$T/bt-reserved" ||
+    { echo 'test Bluetooth already reserved: run test-stop' >&2; exit 1; }
+  trap 'rm -f "$T/bt-reserved"' EXIT
+  # Supervisor, появившийся до резерва, побеждает; появившийся после
+  # увидит резерв сам. Не изменяем тестовый state.conf при отказе.
+  production_stopped && stock_stopped || exit 1
+  exec 8>&-
+fi
 # api_key не копируется: тестовый экземпляр отдаёт plaintext API, ключ клиенту не нужен.
+if [ "$bt" = 1 ]; then set -- -e '^zigbee_role='; else set --; fi
 grep -v -e '^volume=' -e '^volume2=' -e '^volume_curve=' -e '^muted=' -e '^auto_update=' -e '^update_attempt=' \
-  "$D/state.conf" > "$T/state.conf" 2>/dev/null || true
-printf 'volume2=%s\nmuted=0\nauto_update=0\n' "$vol" >> "$T/state.conf"
-for z in "$D"/zigbee-*.ybl; do [ -f "$z" ] && cp "$z" "$T/"; done
+  "$@" "$D/state.conf" > "$T/state.conf" 2>/dev/null || true
+printf 'volume2=%s\nmuted=0\nauto_update=0\n' "$vol" >> "$T/state.conf" || exit 1
+if [ "$bt" = 1 ]; then
+  # Миди не должна открывать радио или применять его образ в Bluetooth-тесте.
+  printf 'zigbee_role=off\n' >> "$T/state.conf" || exit 1
+else
+  for z in "$D"/zigbee-*.ybl; do [ -f "$z" ] && cp "$z" "$T/"; done
+fi
 cd "$T" || exit 1
 if [ "$station" = mini ]; then
   [ -f "$D/asound.conf" ] || { echo 'Mini needs /data/pulsar/asound.conf (satellite/deploy/asound.conf)' >&2; exit 1; }
 fi
-nohup env PULSAR_PORT_OFFSET=10000 ./pulsar "$T/state.conf" < /dev/null >> "$T/log" 2>&1 &
-echo $! > "$T/pid"
-sleep 2
-kill -0 "$(cat "$T/pid")" && echo started
+rm -f "$T/pid" || exit 1
+# После этой точки резерв снимает только test-stop, даже если запуск оборвётся.
+trap '' HUP
+trap - EXIT
+launch=$(cat <<'LAUNCH'
+T=$1
+bt=$2
+starter=$3
+# Отдельный shell знает свой PID. Унаследованный fd защищает и промежуток
+# до регистрации, если управляющий shell уже погиб.
+started=$(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$$/stat") || exit 1
+[ -n "$started" ] && ln -s "$$:$started" "$T/test-launch" || exit 1
+i=0
+while ! { IFS= read -r ack < "$T/pid" && [ "$ack" = "$$" ]; } 2>/dev/null; do
+  [ "$i" -lt 5 ] && kill -0 "$starter" 2>/dev/null || exit 1
+  sleep 1
+  i=$((i + 1))
+done
+# Допуск подтверждён. До exec test-stop защищает записанная идентичность,
+# а самому демону блокировка больше не нужна.
+exec 9>&-
+exec env PULSAR_PORT_OFFSET=10000 PULSAR_BT_MANAGED="$bt" PULSAR_BT_OWNER="$T/bt-owner" \
+  ./pulsar "$T/state.conf"
+LAUNCH
+) || exit 1
+sh -c "$launch" pulsar-test-launch "$T" "$bt" "$$" < /dev/null >> "$T/log" 2>&1 &
+p=$!
+i=0
+while [ ! -L "$T/test-launch" ] && kill -0 "$p" 2>/dev/null && [ "$i" -lt 5 ]; do
+  sleep 1 9>&-
+  i=$((i + 1))
+done
+started=$(test_process_start "$p")
+if [ -z "$started" ] || [ "$(readlink "$T/test-launch")" != "$p:$started" ] ||
+   ! { printf '%s\n' "$p" > "$T/.pid-launch" && mv -f "$T/.pid-launch" "$T/pid"; }; then
+  echo 'could not confirm test launch: check test-log and run test-stop' >&2
+  exit 1
+fi
+sleep 2 9>&-
+if [ "$(readlink "/proc/$p/exe" 2>/dev/null)" = "$T/pulsar" ]; then
+  echo started
+else
+  echo 'test pulsar not running: check test-log and run test-stop' >&2
+  exit 1
+fi
 EOF
+    } | r sh -s -- "$T" "$D" "$vol" "$station" "$bt"
     ;;
   test-stop)
     own
-    r "p=\$(cat $T/pid) || exit 1; kill \$p 2>/dev/null
-       i=0; while [ \$i -lt 10 ] && kill -0 \$p 2>/dev/null; do sleep 1; i=\$((i+1)); done
-       kill -0 \$p 2>/dev/null && kill -9 \$p; rm -f $T/pid
-       $DMIX
-       echo stopped" ;;
-  test-log) r "tail -n ${1:-50} $T/log" ;;
+    {
+      printf '%s\n' "$TEST_LOCK" "$TEST_DIR_CHECK" 'clear_dmix() {' "$DMIX" '}'
+      cat <<'EOF'
+T=$1
+test_lifecycle_lock "$2"
+if [ -e "$T" ] || [ -L "$T" ]; then test_dir_check "$T" || exit 1; fi
+test_bt_pending() {
+  [ -e "$T/bt-owner" ] || [ -L "$T/bt-owner" ] ||
+    [ -e "$T/bt-owner.pending" ] || [ -L "$T/bt-owner.pending" ]
+}
+reserved=0
+if [ -e "$T/bt-reserved" ] || [ -L "$T/bt-reserved" ]; then reserved=1; fi
+if [ -L "$T/bt-reserved" ]; then
+  starter=$(readlink "$T/bt-reserved") || exit 1
+  owner=${starter%%:*}
+  case "$owner" in ''|*[!0-9]*) ;; *)
+    if [ "$starter" = "$owner:$(test_process_start "$owner")" ]; then
+      echo 'test-start is still launching the daemon' >&2
+      exit 1
+    fi ;;
+  esac
+fi
+test_running() {
+  case "$(readlink "/proc/$p/exe" 2>/dev/null)" in
+    "$T/pulsar"|"$T/pulsar (deleted)") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+if [ -e "$T/test-launch" ] || [ -L "$T/test-launch" ]; then
+  launch=$(readlink "$T/test-launch") || exit 1
+  p=${launch%%:*}
+  case "$p" in ''|*[!0-9]*) ;; *)
+    if [ "$launch" = "$p:$(test_process_start "$p")" ] && ! test_running; then
+      echo 'test-start child has not executed the daemon yet: retry test-stop' >&2
+      exit 1
+    fi ;;
+  esac
+fi
+
+if [ -s "$T/pid" ]; then
+  if ! IFS= read -r p < "$T/pid"; then p=; fi
+  case "$p" in ''|*[!0-9]*) p=0 ;; esac
+  if [ "$p" -gt 1 ] 2>/dev/null && test_running; then
+    kill "$p" 2>/dev/null
+    i=0
+    while [ "$i" -lt 10 ] && test_running; do sleep 1; i=$((i + 1)); done
+    if test_running; then
+      kill -KILL "$p" 2>/dev/null
+      i=0
+      while [ "$i" -lt 5 ] && test_running; do sleep 1; i=$((i + 1)); done
+    fi
+  fi
+fi
+if [ -e "$T/pid" ] || [ -L "$T/test-launch" ] || [ "$reserved" = 1 ] || test_bt_pending; then
+  for exe in /proc/[0-9]*/exe; do
+    p=${exe%/exe}
+    p=${p##*/}
+    ! test_running || { echo 'test pulsar still running, Bluetooth not restored' >&2; exit 1; }
+  done
+  rm -f "$T/pid" "$T/.pid-launch" || exit 1
+fi
+# После выхода процесса, но до запуска штатного проигрывателя.
+clear_dmix
+if test_bt_pending; then
+  if ! test_lifecycle_child "$T/ctl.sh" bt-restore --test; then
+    echo 'test Bluetooth not restored: keep the test files, do not start the installed service' >&2
+    exit 1
+  fi
+  if test_bt_pending; then
+    echo 'test Bluetooth not restored: push the current satellite/deploy/ctl.sh and retry test-stop; do not start the installed service' >&2
+    exit 1
+  fi
+fi
+EOF
+      printf '%s\n' 'rm -f "$T/test-launch" || exit 1' '[ "$reserved" = 0 ] || rm -f "$T/bt-reserved"'
+    } | r sh -s -- "$T" "$D"
+    echo stopped ;;
+  test-log) r "$TEST_DIR_CHECK; test_dir_check '$T' && tail -n ${1:-50} $T/log" ;;
   swap)
     [ $# -eq 1 ] || usage
     own
     # The installed binary is kept as pulsar.orig and serves as .prev meanwhile, so a rollback by
     # supervise.sh lands on it; the owner's .prev waits in pulsar.prev.orig.
     # df -P: busybox `df -k` переносит строку при длинном имени устройства.
-    r "[ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
+    r "$TEST_HANDOFF
+       [ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
        [ \$(df -Pk $D | awk 'NR==2 {print \$4}') -gt 30000 ] || { echo 'less than 30 MB free in $D' >&2; exit 1; }
-       cd $D && { [ -f pulsar.orig ] || cp -p pulsar pulsar.orig; } \
-         && { [ ! -f pulsar.prev ] || [ -f pulsar.prev.orig ] || cp -p pulsar.prev pulsar.prev.orig; }"
-    up "$1" "$D/pulsar.new"
-    r "cd $D && ./pulsar.new --version && cp -p pulsar.orig pulsar.prev \
-       && mv pulsar.new pulsar && sync && ./ctl.sh restart" ;;
+       cd $D || exit 1
+       if [ ! -f pulsar.orig ]; then
+         $PROD_REPLACE
+         stage_replace
+         ln pulsar \"\$stage/orig\" && rm -f pulsar.orig.bt-blocked pulsar.prev.orig || exit 1
+         if [ \"\$stage/orig\" -ef pulsar.bt-blocked ] || [ \"\$stage/orig\" -ef pulsar.bt-blocked.next ]; then
+           ln \"\$stage/orig\" pulsar.orig.bt-blocked || exit 1
+         fi
+         if [ -f \"\$stage/prev.old\" ]; then ln \"\$stage/prev.old\" pulsar.prev.orig || exit 1; fi
+         mv \"\$stage/orig\" pulsar.orig
+       fi"
+    upload=$(r "cd '$D' && umask 077 && mktemp .station-upload.XXXXXX") || exit 1
+    upload_arg=$(shell_quote "$upload")
+    discard_upload() { r "cd '$D' && rm -f -- $upload_arg"; }
+    trap discard_upload EXIT
+    up "$1" "$D" "$upload"
+    r "$TEST_HANDOFF
+       cd $D && ./$upload_arg --version || exit 1
+       $PROD_REPLACE
+       stage_replace
+       cp -p pulsar.orig \"\$stage/prev\" || exit 1
+       $PROD_BT_RESTORE
+       replace_pulsar $upload_arg
+       sync && test_lifecycle_child ./ctl.sh restart" ;;
   restore)
     own
     # Если после краш-цикла supervise.sh удалил enabled (give_back), станцию возвращает ctl.sh enable.
-    r "cd $D && [ -f pulsar.orig ] || { echo 'no pulsar.orig' >&2; exit 1; }
-       cd $D && cp -p pulsar.orig pulsar.tmp && mv pulsar.tmp pulsar && rm -f pulsar.orig || exit 1
-       if [ -f pulsar.prev.orig ]; then mv pulsar.prev.orig pulsar.prev; fi
+    r "$TEST_HANDOFF
+       cd $D && [ -f pulsar.orig ] || { echo 'no pulsar.orig' >&2; exit 1; }
+       $PROD_REPLACE
+       stage_replace
+       cp -p pulsar.orig \"\$stage/pulsar\" || exit 1
+       if [ -f pulsar.prev.orig ]; then ln pulsar.prev.orig \"\$stage/prev\" || exit 1; fi
+       if [ pulsar.orig -ef pulsar.orig.bt-blocked ]; then ln \"\$stage/pulsar\" \"\$stage/guard\" || exit 1; fi
+       $PROD_BT_RESTORE
+       replace_pulsar \"\$stage/pulsar\"
+       rm -f pulsar.orig pulsar.orig.bt-blocked pulsar.prev.orig ||
+         echo 'restored the binary but could not remove swap backups' >&2
        sync
-       if [ -f enabled ]; then ./ctl.sh restart; else ./ctl.sh enable; fi" ;;
+       if [ -f enabled ]; then test_lifecycle_child ./ctl.sh restart; else test_lifecycle_child ./ctl.sh enable; fi" ;;
   cleanup)
     own
-    r "if [ -f $T/pid ] && kill -0 \$(cat $T/pid) 2>/dev/null; then echo 'test instance running: test-stop first' >&2; exit 1; fi
+    r "$TEST_LOCK
+       test_lifecycle_lock '$D'
+       $TEST_BT_RESTORED
+       if [ -f $T/pid ] && kill -0 \$(cat $T/pid) 2>/dev/null; then echo 'test instance running: test-stop first' >&2; exit 1; fi
        rm -rf $T || exit 1
        $DMIX" ;;
   status) r "$D/ctl.sh status; ls -l $D; df -Pk $D; cat $L/owner 2>/dev/null || echo 'no lock'" ;;

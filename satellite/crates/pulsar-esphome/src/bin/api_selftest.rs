@@ -27,7 +27,7 @@ use pulsar_core::actors;
 use pulsar_esphome::{
     ApiConfig, ApiEvent, ApiHandle, BinarySensorId, ButtonId, DeviceIdentity, EventId, LightState,
     MediaCommand, MediaState, NumberId, SelectId, SensorId, SwitchId, TextId, TextSensorId,
-    WakeWordInfo, spawn,
+    WakeWordInfo, bind, spawn,
 };
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::time::{Instant, interval_at, sleep_until};
@@ -185,6 +185,7 @@ impl Echo {
                 color,
                 seconds,
             } => println!("HOOK led_show '{effect}' '{color}' {seconds}"),
+            ApiEvent::Bt { action } => println!("HOOK bt '{action}'"),
             ApiEvent::Time { epoch, posix_tz } => {
                 println!("HOOK time epoch={epoch} tz='{posix_tz}'")
             }
@@ -294,7 +295,6 @@ async fn run(port: u16, name: String, run_s: i64, key_path: Option<PathBuf>) -> 
     };
     let strings = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect();
     let cfg = ApiConfig {
-        port,
         wake_words: vec![ww("alisa", "Алиса"), ww("yandex", "Яндекс")],
         active_wake_words: strings(&["alisa"]),
         light_effects: strings(&["Rainbow", "Pulse"]),
@@ -304,6 +304,7 @@ async fn run(port: u16, name: String, run_s: i64, key_path: Option<PathBuf>) -> 
         clock_music_styles: strings(&["Off", "Levels"]),
         clock_formats: strings(&["24h", "12h"]),
         zigbee_modes: strings(&["Coordinator", "Router"]),
+        bluetooth: false, // selftest живёт и на хосте, где BT-адаптера нет
         has_clock: true,
         has_lux: true,
         has_hw_mic_mute: true,
@@ -312,9 +313,10 @@ async fn run(port: u16, name: String, run_s: i64, key_path: Option<PathBuf>) -> 
         led_layout: Default::default(),
         key_path,
     };
-    let Ok((api, mut events)) = spawn(id, cfg) else {
+    let Ok(listener) = bind(port) else {
         return ExitCode::from(1);
     };
+    let (api, mut events) = spawn(id, cfg, listener);
     api.publish_media(MediaState::Idle, 0.5, false);
     api.publish_switch(SwitchId::Microphones, true);
     api.publish_switch(SwitchId::Clock, true);

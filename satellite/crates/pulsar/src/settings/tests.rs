@@ -4,8 +4,8 @@
 // затем `save`. С тех пор правились руками: `clock_auto_brightness` (после `clock_music`);
 // `followup_duration_s` (10); `clock_format` (12h в load_odd.in, bogus → 24h в load_edge.in);
 // `command_start_offset_ms` (0); `clock_spoken_numbers` (0); `mic_gain_db` (0);
-// `wake_sound` (1); `clock_colon_blink` (1, последним). `wake_preroll` (бывший переключатель)
-// больше не пишется и не читается; в load_odd.in остался как неизвестный ключ.
+// `wake_sound` (1); `clock_colon_blink` (1); `bluetooth_enabled` (0). `wake_preroll` (бывший
+// переключатель) больше не пишется и не читается; в load_odd.in остался как неизвестный ключ.
 // В load_edge.in нет выбранной фразы: в load_edge.out больше нет строки `wake_word=alisa`.
 
 use super::*;
@@ -14,6 +14,17 @@ const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/settings/")
 
 fn golden(name: &str) -> Vec<u8> {
     std::fs::read(format!("{DIR}{name}")).unwrap()
+}
+
+#[test]
+fn bluetooth_persists_permission_and_rejects_invalid_values() {
+    let mut settings = Settings::default();
+    settings.parse(b"bluetooth_enabled=1\n");
+    let mut restored = Settings::default();
+    restored.parse(settings.serialize().as_bytes());
+    assert!(restored.bluetooth_enabled);
+    restored.parse(b"bluetooth_enabled=true\n");
+    assert!(!restored.bluetooth_enabled);
 }
 
 /// As the harness read its arguments (strtof).

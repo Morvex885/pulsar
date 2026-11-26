@@ -65,8 +65,8 @@ pub enum Transport {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SendspinEvent {
-    /// A stream started (true) / ended (false); see `SendspinHandle::streaming`.
-    Stream(bool),
+    /// Начало (`Some` с порядком фронта) или конец (`None`) потока; см. `SendspinHandle::streaming`.
+    Stream(Option<u64>),
     /// The server set the player volume, 0..1.
     Volume(f32),
     /// The server set the player mute.

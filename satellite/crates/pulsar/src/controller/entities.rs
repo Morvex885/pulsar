@@ -3,6 +3,7 @@
 
 use log::{error, info, warn};
 use pulsar_audio::ModelId;
+use pulsar_bt::{BtAction, BtEvent};
 use pulsar_core::now_ms;
 use pulsar_esphome::{
     ActionId, ApiEvent, BinarySensorId, ButtonId, EventId, LightState, NumberId, SelectId,
@@ -48,6 +49,7 @@ impl Controller {
                 color,
                 seconds,
             } => self.on_led_show(effect, &color, seconds),
+            ApiEvent::Bt { action } => self.on_bt_action(&action),
             ApiEvent::Time { epoch, posix_tz } => self.on_time(epoch, &posix_tz),
             ApiEvent::Restart => self.on_restart(),
             ApiEvent::VoiceStartFailed { run } => self.on_voice_start_failed(run),
@@ -103,6 +105,11 @@ impl Controller {
             );
             // Not through the "zigbee: …" dedup of Changed: its cache stays as it is.
             api.publish_text_sensor(TextSensorId::Zigbee, &z.status());
+        }
+        if let Some(bt) = &self.bt {
+            let state = bt.state();
+            api.publish_switch(SwitchId::Bluetooth, state.enabled);
+            api.publish_text_sensor(TextSensorId::Bluetooth, &state.status);
         }
         api.publish_light(&self.st.light);
         if self.last_lux_published >= 0.0 {
@@ -193,6 +200,7 @@ impl Controller {
                 self.leds.set_voice_indication(state);
                 self.clock.set_voice_indication(state);
             }
+            SwitchId::Bluetooth => return self.set_bluetooth(state),
         }
         self.api.publish_switch(id, state);
         self.persist();
@@ -452,6 +460,8 @@ impl Controller {
 
     pub(super) fn on_input(&mut self, ev: InputEvent) {
         match ev {
+            InputEvent::BluetoothPairing => self.set_bluetooth(true),
+            InputEvent::PlayPause => self.bluetooth_play_pause_button(),
             InputEvent::Mute(m) | InputEvent::MuteSync(m) => {
                 if m {
                     self.cancel_arbitration();
@@ -564,6 +574,60 @@ impl Controller {
         }
     }
 
+    pub(super) fn on_bt(&mut self, BtEvent::Changed { connection }: BtEvent) {
+        let Some(bt) = &self.bt else { return };
+        let state = bt.state();
+        self.api.publish_switch(SwitchId::Bluetooth, state.enabled);
+        self.api
+            .publish_text_sensor(TextSensorId::Bluetooth, &state.status);
+        if self.bt_connection != connection {
+            self.bt_connection = connection;
+            let connected = connection.is_some();
+            self.leds.show_bt_link(connected);
+            self.clock.play(if connected {
+                pulsar_core::ClockShot::BluetoothConnected
+            } else {
+                pulsar_core::ClockShot::BluetoothDisconnected
+            });
+            self.play_bluetooth_cue(connected);
+        }
+        if state.admitted && self.bt_starts != state.starts {
+            self.bt_starts = state.starts;
+            if state.starts > self.audio_start {
+                let bt = bt.clone();
+                self.audio_start = state.starts;
+                self.bluetooth_takes_audio();
+                bt.admit(state.starts);
+            } else {
+                bt.preempt_before(self.audio_start);
+            }
+        }
+        self.update_ui();
+    }
+
+    pub(super) fn set_bluetooth(&mut self, enabled: bool) {
+        let Some(bt) = &self.bt else { return };
+        bt.set_enabled(enabled);
+        if self.st.bluetooth_enabled != enabled {
+            self.st.bluetooth_enabled = enabled;
+            let _ = self.persist_now();
+        }
+    }
+
+    /// Аргумент "action" действия `bt`: on|off — тот же режим, что switch; остальное — AVRCP
+    /// подключённому источнику.
+    fn on_bt_action(&mut self, action: &str) {
+        match action {
+            "on" => self.set_bluetooth(true),
+            "off" => self.set_bluetooth(false),
+            _ => match (self.bt.as_ref(), BtAction::parse(action)) {
+                (Some(bt), Some(a)) => bt.avr(a),
+                (_, None) => warn!("bluetooth: unknown action"),
+                (None, _) => {}
+            },
+        }
+    }
+
     // ---------------- updates ----------------
 
     pub(super) fn publish_update(&self) {
@@ -600,6 +664,7 @@ impl Controller {
             self.timer_ringing,
             self.player.state(Channel::Music),
             self.sendspin_streaming(),
+            self.bt.as_ref().is_some_and(|bt| bt.playing()),
             self.zigbee_flashing(),
         )
     }
@@ -630,11 +695,29 @@ impl Controller {
             warn!("update: not while the Zigbee radio is being written");
             return;
         }
-        let Ok(exe) = std::fs::read_link("/proc/self/exe") else {
-            error!("update: cannot find the running binary");
-            return;
+        let binary = if let Some(path) =
+            std::env::var_os("PULSAR_INSTALLED_BINARY").filter(|path| !path.is_empty())
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            // Супервизор может запустить бинарь через жёсткую ссылку, пока установщик
+            // меняет рабочий путь. Со старого inode обновление запускать нельзя.
+            let same_inode = std::fs::metadata("/proc/self/exe").and_then(|running| {
+                let installed = std::fs::metadata(&path)?;
+                Ok((installed.dev(), installed.ino()) == (running.dev(), running.ino()))
+            });
+            if !matches!(same_inode, Ok(true)) {
+                warn!("update: installed binary no longer matches the running binary");
+                return;
+            }
+            std::path::PathBuf::from(path)
+        } else {
+            let Ok(exe) = std::fs::read_link("/proc/self/exe") else {
+                error!("update: cannot find the running binary");
+                return;
+            };
+            std::path::PathBuf::from(logic::strip_deleted(exe.as_os_str()))
         };
-        let binary = std::path::PathBuf::from(logic::strip_deleted(exe.as_os_str()));
         let Some(r) = self.release.clone() else {
             return;
         };

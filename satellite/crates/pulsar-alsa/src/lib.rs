@@ -250,6 +250,11 @@ impl Pcm {
         self.raw.writei(buf, frames, self.frame_bytes)
     }
 
+    /// `buf` содержит сэмплы формата S16LE.
+    pub fn writei_s16(&mut self, buf: &[i16], frames: usize) -> Result<usize, i32> {
+        self.raw.writei_s16(buf, frames, self.frame_bytes)
+    }
+
     /// true = ready, false = timeout.
     pub fn wait(&mut self, timeout_ms: i32) -> Result<bool, i32> {
         let rc = self.raw.wait(timeout_ms);
@@ -287,8 +292,17 @@ pub fn enable_output(model: &Model) {
 /// GStreamer, instead calls [`enable_output`] before it starts the pipeline and again when the
 /// pipeline reports PLAYING (the device is open by then).
 pub fn open_playback(model: &Model) -> Result<Pcm, i32> {
+    open_playback_with_mode(model, false)
+}
+
+/// Открывает тот же выход модели и включает усилитель, не блокируя чтение и запись кадров.
+pub fn open_playback_nonblock(model: &Model) -> Result<Pcm, i32> {
+    open_playback_with_mode(model, true)
+}
+
+fn open_playback_with_mode(model: &Model, nonblock: bool) -> Result<Pcm, i32> {
     enable_output(model);
-    let pcm = Pcm::open(model.playback_pcm, Stream::Playback, false)?;
+    let pcm = Pcm::open(model.playback_pcm, Stream::Playback, nonblock)?;
     enable_output(model);
     Ok(pcm)
 }

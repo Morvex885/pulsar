@@ -186,6 +186,49 @@ fn command_words() {
 }
 
 #[test]
+fn bluetooth_voice_commands_require_the_exact_phrase_and_wake() {
+    for (phrase, on) in [("включи блютуз", true), ("выключи блютуз", false)]
+    {
+        let command = VoiceCommand::Bluetooth(on);
+        assert_eq!(command_of(phrase), Some(command));
+        assert!(command_allowed(command, true, false, false, false));
+        assert!(!command_allowed(command, false, false, false, false));
+        assert!(!command_allowed(command, false, false, true, true));
+        assert!(!command_allowed(command, false, true, true, true));
+    }
+    for phrase in ["блютуз", "включи bluetooth", "выключи блютуз пожалуйста"]
+    {
+        assert_eq!(command_of(phrase), None);
+    }
+}
+
+#[test]
+fn bluetooth_voice_window_is_single_use_and_separate_from_ha_dialog() {
+    let bt = Some(VoiceCommand::Bluetooth(true));
+    let now = COMMAND_AFTER_WAKE_MS - 1;
+    let mut until = 0;
+    assert!(!command_wake(bt, true, &mut until, now));
+    until = COMMAND_AFTER_WAKE_MS;
+    assert!(command_wake(bt, false, &mut until, now));
+    assert!(!command_wake(bt, false, &mut until, now));
+    until = COMMAND_AFTER_WAKE_MS;
+    assert!(!command_wake(bt, false, &mut until, COMMAND_AFTER_WAKE_MS));
+
+    for other in [Some(VoiceCommand::Resume), None] {
+        until = COMMAND_AFTER_WAKE_MS;
+        assert!(!command_wake(other, false, &mut until, now));
+        assert!(!command_wake(bt, false, &mut until, now));
+    }
+
+    let pause = VoiceCommand::Pause;
+    until = COMMAND_AFTER_WAKE_MS;
+    let wake = command_wake(Some(pause), false, &mut until, now);
+    assert!(command_allowed(pause, wake, false, false, true));
+    assert!(!command_allowed(pause, wake, false, false, false));
+    assert!(!command_wake(bt, false, &mut until, now));
+}
+
+#[test]
 fn stt_stop_words() {
     for text in [
         "стоп",
@@ -429,7 +472,7 @@ fn volume_click_gating() {
 
 #[test]
 fn idle_and_auto_update() {
-    let idle = |phase, a, r, m, ss, z| idle_for_update(phase, a, r, m, ss, z);
+    let idle = |phase, a, r, m, ss, z| idle_for_update(phase, a, r, m, ss, false, z);
     assert!(idle(
         Phase::Idle,
         false,
@@ -501,6 +544,15 @@ fn idle_and_auto_update() {
         PlayState::Idle,
         false,
         true
+    ));
+    assert!(!idle_for_update(
+        Phase::Idle,
+        false,
+        false,
+        PlayState::Idle,
+        false,
+        true,
+        false
     ));
 
     use AutoUpdate::*;

@@ -27,8 +27,8 @@ description: >-
 
 Радио держит либо демон, либо тестовый экземпляр, либо `zigbee_probe`: перед ним — `stop` и, если
 запускали, `test-stop`. Утилиту и образ отправить командой `push` (попадут в `/tmp/pulsar-test/`),
-запуск — `ssh "$PULSAR_MIDI" /tmp/pulsar-test/zigbee_probe …` (то же ssh-назначение, что у
-`station.sh`).
+запуск — `ssh "$host" /tmp/pulsar-test/zigbee_probe …`, где `host` — то же SSH-назначение Миди
+из переменной или файла, что использует `station.sh`.
 
 ## 3. Чтение
 

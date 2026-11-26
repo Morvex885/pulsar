@@ -44,14 +44,24 @@ fn arm_teardown_watchdog(status: i32) {
 }
 
 fn main() -> ExitCode {
-    let arg = std::env::args_os().nth(1);
+    let mut args = std::env::args_os().skip(1);
+    let arg = args.next();
     if arg.as_deref() == Some(OsStr::new("--version")) {
+        if args.next().as_deref() == Some(OsStr::new("--supervisor-protocol"))
+            && args.next().is_none()
+        {
+            return match writeln!(std::io::stdout(), "pulsar-bt-managed/1") {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => ExitCode::FAILURE,
+            };
+        }
         // println! would panic (abort) on a closed pipe.
         let _ = writeln!(std::io::stdout(), "pulsar {VERSION}");
         return ExitCode::SUCCESS;
     }
     // The controller persists its settings there.
     let state = arg.map_or_else(|| PathBuf::from(DEFAULT_STATE), PathBuf::from);
+    sys::init_media_env();
 
     pulsar_core::init_logger();
     crash::install();
@@ -74,7 +84,7 @@ fn main() -> ExitCode {
     };
     let local = tokio::task::LocalSet::new();
     let status = local.block_on(&rt, async {
-        let mut ctl = match Controller::start(model, state) {
+        let mut ctl = match Controller::start(model, state).await {
             Ok(c) => c,
             Err(e) => {
                 error!("{e}");

@@ -601,6 +601,17 @@ impl RawPcm {
         sframes(n)
     }
 
+    pub(crate) fn writei_s16(
+        &mut self,
+        buf: &[i16],
+        frames: usize,
+        frame_bytes: usize,
+    ) -> Result<usize, i32> {
+        // SAFETY: у i16 нет заполнения, срез байтов занимает ту же инициализированную память.
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast(), size_of_val(buf)) };
+        self.writei(bytes, frames, frame_bytes)
+    }
+
     pub(crate) fn wait(&mut self, timeout_ms: i32) -> i32 {
         // SAFETY: see impl comment.
         unsafe { (self.lib.pcm_wait)(self.pcm.as_ptr(), timeout_ms) }
