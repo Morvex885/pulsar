@@ -310,11 +310,30 @@ fn panel_shows_steady_mute_on_the_logo_only() {
     }
 }
 
+fn play_panel_bass(c: &mut Compositor) {
+    c.apply(Cmd::MusicStyle("Spectrum".into()), 0);
+    c.apply(Cmd::MediaPlaying(true), 0);
+    let mut music = MusicFrame::default();
+    music.bands[0] = 0.8;
+    c.apply(Cmd::Music(music, true), 0);
+}
+
+fn assert_panel_bass_is_visible(c: &Compositor) {
+    let (pixels, _) = c.px.as_chunks::<3>();
+    let mut lit = false;
+    for (i, px) in pixels[..84].iter().enumerate() {
+        if *px != [0; 3] {
+            assert_eq!(fx::PANEL_XY[i].0, 7, "LED {i}");
+            lit = true;
+        }
+    }
+    assert!(lit, "бас должен зажигать центральный столбец");
+}
+
 #[test]
 fn panel_logo_stays_dark_in_voice_states_and_music() {
     let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
-    c.apply(Cmd::MusicStyle("Spectrum".into()), 0);
-    c.apply(Cmd::MediaPlaying(true), 0);
+    play_panel_bass(&mut c);
     for (t, s) in [
         (0, UiState::Idle),
         (2000, UiState::Listening),
@@ -324,6 +343,9 @@ fn panel_logo_stays_dark_in_voice_states_and_music() {
         c.apply(Cmd::UiState(s), t);
         for dt in [0, 400, 900, 1500] {
             c.frame(t + dt);
+            if s == UiState::Idle && dt == 400 {
+                assert_panel_bass_is_visible(&c);
+            }
             assert!(c.px[84 * 3..].iter().all(|&v| v == 0), "{s:?} +{dt}");
         }
     }
@@ -346,13 +368,13 @@ fn panel_logo_stays_dark_in_volume_and_one_shots() {
 #[test]
 fn panel_mute_logo_stays_red_over_voice_and_music() {
     let mut c = Compositor::new(88, 0, LedLayout::Station2Panel);
-    c.apply(Cmd::MusicStyle("Spectrum".into()), 0);
-    c.apply(Cmd::MediaPlaying(true), 0);
+    play_panel_bass(&mut c);
     c.apply(Cmd::Muted(true), 0);
     let red = to_px(crate::led_panel::mute_logo(), c.dim(), None);
     c.frame(0);
-    c.frame(1000);
-    assert_eq!(c.active_layer(1000), Layer::Music);
+    c.frame(400);
+    assert_eq!(c.active_layer(400), Layer::Music);
+    assert_panel_bass_is_visible(&c);
     for i in 84..88 {
         assert_eq!(&c.px[i * 3..i * 3 + 3], &red, "music, logo LED {i}");
     }
