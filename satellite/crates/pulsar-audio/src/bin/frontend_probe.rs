@@ -6,8 +6,8 @@
 //! Без --commands работает только спотер wake word (демон запускает и командный, если микрофон не
 //! выключен). --record пишет первые <seconds> сырого захвата (все каналы, S16) в WAV для
 //! ww_offline. Звук не воспроизводится.
-//! --wake: id модели активации или путь к каталогу (со `/`); несколько — кандидаты по порядку,
-//! как при старте демона. --switch: смена модели через <seconds> (`set_model`).
+//! --wake: id модели активации или путь к каталогу (со `/`); несколько — кандидаты по порядку.
+//! --switch: смена модели через <seconds> (`set_model`).
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -301,7 +301,7 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
                     loudness = f.loudness;
                 }
                 Some(FrontendEvent::WakeModel { dir, ok, .. }) => {
-                    wake_started.get_or_insert(ok);
+                    wake_started.get_or_insert(!dir.as_os_str().is_empty());
                     out!("t={:6.2}s WAKE_MODEL {} ok={ok}", secs(start), dir.display());
                 }
                 None => break,

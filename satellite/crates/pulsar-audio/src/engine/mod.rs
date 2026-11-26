@@ -272,7 +272,7 @@ impl From<Metadata> for FileVersion {
 
 type ModelVersion = [Option<FileVersion>; TRACKED_MODEL_FILES];
 
-fn model_version(dir: &Path) -> Result<Option<ModelVersion>, &'static str> {
+fn model_version(dir: &Path) -> Result<ModelVersion, (&'static str, std::io::Error)> {
     let mut path = PathBuf::with_capacity(dir.as_os_str().len() + 1 + MODEL_FILES[0].len());
     path.push(dir);
     let mut metadata = |file: &str| {
@@ -283,17 +283,20 @@ fn model_version(dir: &Path) -> Result<Option<ModelVersion>, &'static str> {
     };
     let mut version = [None; TRACKED_MODEL_FILES];
     for (stamp, file) in version.iter_mut().zip(MODEL_FILES) {
-        let m = metadata(file).ok().filter(Metadata::is_file).ok_or(file)?;
+        let m = metadata(file).map_err(|e| (file, e))?;
+        if !m.is_file() {
+            return Err((file, ErrorKind::InvalidData.into()));
+        }
         *stamp = Some(m.into());
     }
     for (stamp, file) in version[MODEL_FILES.len()..].iter_mut().zip(AUX_MODEL_FILES) {
         match metadata(file) {
             Ok(m) => *stamp = Some(m.into()),
             Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(_) => return Ok(None),
+            Err(e) => return Err((file, e)),
         }
     }
-    Ok(Some(version))
+    Ok(version)
 }
 
 /// One spotter of the daemon with its channel layout.
@@ -334,13 +337,12 @@ impl Slot {
         // см. docs/hardware.md, «Библиотеки Яндекса (C API)»
         let version = match model_version(dir) {
             Ok(version) => version,
-            Err(f) => {
-                self.rejected.remove(dir);
-                error!("{} spotter: no {f} in {}", self.what, dir.display());
+            Err((file, e)) => {
+                error!("{} spotter: {}: {e}", self.what, dir.join(file).display());
                 return None;
             }
         };
-        if version.is_some() && self.rejected.get(dir) == version.as_ref() {
+        if self.rejected.get(dir) == Some(&version) {
             return None;
         }
         self.rejected.remove(dir);
@@ -350,9 +352,7 @@ impl Slot {
                 error!("spotter_conf_read {}: {e}", dir.display());
                 // Ошибку прошивки нельзя освободить. Запоминаем отказ только если файлы не
                 // поменялись за время чтения; иначе неизвестно, какую версию отвергла библиотека.
-                if let Some(version) = version
-                    && model_version(dir) == Ok(Some(version))
-                {
+                if model_version(dir).is_ok_and(|current| current == version) {
                     self.rejected.insert(dir.to_path_buf(), version);
                 }
                 None
@@ -417,7 +417,7 @@ impl Slot {
         // При известном отказе не уничтожаем рабочий спотер ради заведомо неудачной смены.
         if self.sp.is_some()
             && let Some(version) = self.rejected.get(dir)
-            && model_version(dir) == Ok(Some(*version))
+            && model_version(dir).is_ok_and(|current| current == *version)
         {
             return false;
         }
@@ -797,21 +797,17 @@ mod tests {
     }
 
     #[test]
-    fn rejection_is_not_cached_if_model_changes_during_read() {
-        let fixture = ModelFixture::new("changed-during-read");
+    fn config_read_waits_until_model_metadata_can_be_checked() {
+        let fixture = ModelFixture::new("invalid-metadata");
         let dir = fixture.model("alisa");
+        let aux = dir.join("lda.mat");
+        std::os::unix::fs::symlink("lda.mat", &aux).unwrap();
         let mut slot = Slot::new("wake word", true);
         assert_eq!(
-            slot.read_model_conf::<()>(&dir, || {
-                fs::write(dir.join("lda.mat"), b"added").unwrap();
-                Err(ConfReadError::Rejected("bad model".into()))
-            }),
+            slot.read_model_conf::<()>(&dir, || panic!("версия модели неизвестна")),
             None
         );
-        assert_eq!(
-            slot.read_model_conf::<()>(&dir, || Err(ConfReadError::NoConfig)),
-            None
-        );
+        fs::remove_file(aux).unwrap();
         assert_eq!(slot.read_model_conf(&dir, || Ok(())), Some(()));
     }
 

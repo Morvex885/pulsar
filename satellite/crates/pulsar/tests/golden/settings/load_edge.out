@@ -11,7 +11,6 @@ light_r=1
 light_g=1
 light_b=inf
 light_effect=
-wake_word=alisa
 tz=MSK-3
 auto_update=0
 update_attempt=

@@ -26,7 +26,7 @@ use tokio::time::Instant;
 use crate::frame::{self, EncryptError, HandshakeError, NOISE_PROTOCOL, Noise, NoiseFrame, Plain};
 use crate::key::{self, Key, SetKey, os_error_text};
 use crate::proto::{Reader, WireType, Writer, zigzag32};
-use crate::types::{ApiConfig, ApiEvent, DeviceIdentity};
+use crate::types::{ApiConfig, ApiEvent, DeviceIdentity, WakeWordInfo};
 
 /// API version announced in HelloResponse. 1.15 = DeviceCapabilitiesRequest/Response supported.
 const API_MAJOR: u32 = 1;
@@ -200,6 +200,7 @@ pub(crate) enum Cmd {
     SetActiveWakeWords {
         request: Option<u64>,
         ids: Vec<String>,
+        recovered: Option<WakeWordInfo>,
     },
     Publish(Publish),
 }
@@ -503,7 +504,11 @@ impl Client {
             id: self.id,
             hello: self.hello,
             voice: self.voice,
-            voice_wanted: self.voice_wanted,
+            voice_wanted: if self.read_end.is_none() {
+                self.voice_wanted
+            } else {
+                0
+            },
             last_rx: self.last_rx,
         }
     }
@@ -909,10 +914,15 @@ impl Server {
         self.parse_input(id);
         self.batch = None;
         let Some(c) = self.client(id) else { return };
+        let lost_voice_owner = c.voice && end.is_some();
         if end.is_some() {
             c.read_end = end;
         }
         let read_error = matches!(c.read_end, Some(ReadEnd::Error)) && !c.pending_input;
+        if lost_voice_owner {
+            // Сокет может ещё ждать ответа конфигурации, но больше не принимает события HA.
+            self.update_voice_owner();
+        }
         self.flush(id);
         if read_error {
             self.close_client(id, "connection closed by peer");
@@ -1454,7 +1464,16 @@ impl Server {
             Cmd::VoiceAnnounceFinished(success) | Cmd::VoiceAnswerFinished(success) => {
                 self.voice_announce_finished(success);
             }
-            Cmd::SetActiveWakeWords { request, ids } => {
+            Cmd::SetActiveWakeWords {
+                request,
+                ids,
+                recovered,
+            } => {
+                if let Some(word) = recovered
+                    && !self.cfg.wake_words.iter().any(|known| known.id == word.id)
+                {
+                    self.cfg.wake_words.push(word);
+                }
                 self.cfg.active_wake_words = ids;
                 if request.is_some() && request == self.pending_wake_request {
                     self.timers.cancel(Timer::WakeConfig);

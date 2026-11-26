@@ -35,6 +35,14 @@ const MODELS: &str = "/system/vendor/quasar/spotter_models/activation/";
 const COMMAND_MODEL: &str = "/system/vendor/quasar/spotter_models/command";
 const SOUNDS: &str = "/system/vendor/quasar/sounds/";
 
+fn wake_word_info(id: String) -> WakeWordInfo {
+    WakeWordInfo {
+        phrase: logic::wake_word_phrase(&id),
+        id,
+        languages: vec!["ru".into()],
+    }
+}
+
 const DUCK_GAIN: f32 = 0.15;
 const TIMER_RING_MAX_MS: i64 = 15 * 60 * 1000;
 // Longest wait for the next pipeline event before the dialog is given up locally. HA's voice
@@ -167,6 +175,7 @@ pub struct Controller {
     error_shown: bool,
     wake_switch: logic::WakeSwitch,
     active_wake_word: String,
+    unlisted_wake_word: Option<WakeWordInfo>,
     // Wake arbitration: the window between our claim and the decision. Microphone audio and a
     // command word heard in it are held until the decision.
     arbitrating: bool,
@@ -300,13 +309,13 @@ impl Controller {
         );
         let wake_names = logic::wake_word_names(Path::new(MODELS), &st.wake_word);
         let saved = st.has_wake_word.then_some(st.wake_word.as_str());
-        let initial = logic::initial_wake_word(saved, &wake_names);
-        let wake_dirs = initial.into_iter().map(model_dir).collect();
-        if !st.has_wake_word
-            && let Some(id) = initial
-        {
-            st.wake_word = id.to_owned();
-        }
+        let initial = logic::initial_wake_words(saved, &wake_names);
+        let unlisted_wake_word = initial
+            .clone()
+            .next()
+            .filter(|id| !wake_names.iter().any(|known| known == id))
+            .map(|id| wake_word_info(id.to_owned()));
+        let wake_dirs = initial.map(model_dir).collect();
         let case_colors = pulsar_hw::case_colors();
         let dir = logic::state_dir(state_path.as_os_str());
         let strings = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -327,14 +336,7 @@ impl Controller {
         };
         let cfg = ApiConfig {
             port: ports.api,
-            wake_words: wake_names
-                .into_iter()
-                .map(|id| WakeWordInfo {
-                    phrase: logic::wake_word_phrase(&id),
-                    id,
-                    languages: vec!["ru".into()],
-                })
-                .collect(),
+            wake_words: wake_names.into_iter().map(wake_word_info).collect(),
             active_wake_words: Vec::new(),
             light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
             clock_faces: with_none(strings(pulsar_clock::face_names())),
@@ -585,6 +587,7 @@ impl Controller {
             error_shown: false,
             wake_switch: logic::WakeSwitch::default(),
             active_wake_word: String::new(),
+            unlisted_wake_word,
             arbitrating: false,
             arb_claim: None,
             arb_phrase: String::new(),

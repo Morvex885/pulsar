@@ -702,12 +702,17 @@ impl WakeSwitch {
     }
 }
 
-/// Новый экземпляр выбирает умолчание из прошивки; сохранённое слово нельзя подменять.
-pub fn initial_wake_word<'a>(saved: Option<&'a str>, available: &'a [String]) -> Option<&'a str> {
-    match saved {
-        Some(id) => wake_word_id_ok(id).then_some(id),
-        None => Some(available.first().map_or("alisa", String::as_str)),
-    }
+/// Без сохранённого выбора перебираем модели прошивки, иначе пробуем только выбранную.
+pub fn initial_wake_words<'a>(
+    saved: Option<&'a str>,
+    available: &'a [String],
+) -> impl Iterator<Item = &'a str> + Clone {
+    let (only, rest) = match saved {
+        Some(id) => (wake_word_id_ok(id).then_some(id), &[][..]),
+        None if available.is_empty() => (Some("alisa"), &[][..]),
+        None => (None, available),
+    };
+    only.into_iter().chain(rest.iter().map(String::as_str))
 }
 
 /// Для неизвестной модели подписью остаётся её ID.

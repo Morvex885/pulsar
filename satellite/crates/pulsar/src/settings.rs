@@ -52,7 +52,7 @@ pub struct Settings {
     /// User ring light.
     pub light: LightState,
     pub wake_word: String,
-    /// В файле был ключ `wake_word=`; при его отсутствии выбираем модель для новой установки.
+    /// Фраза была сохранена или выбрана; до этого `wake_word=` не пишется.
     pub has_wake_word: bool,
     /// POSIX TZ (the default matches what the Yandex firmware showed); updated from HA.
     pub tz: String,
@@ -234,16 +234,22 @@ impl Settings {
         }
     }
 
-    /// Файл в том виде, как его пишет C++ `Settings::save`: все ключи, в его порядке; ключи,
-    /// добавленные после фикстур эталона, перечислены в шапке `settings/tests.rs`.
+    /// Порядок и формат ключей как в C++ `Settings::save`. До выбора фразы не пишем `wake_word`:
+    /// сохранение, например, громкости не должно закрепить незагрузившуюся модель.
     pub fn serialize(&self) -> String {
         let f = |v: f32| g6(f64::from(v));
         let b = |v: bool| u8::from(v);
+        let (wake_key, wake_word, wake_end) = if self.has_wake_word {
+            ("wake_word=", self.wake_word.as_str(), "\n")
+        } else {
+            ("", "", "")
+        };
         format!(
             "volume2={}\nvolume={}\nmuted={}\nmic_muted={}\nclock_on={}\nclock_brightness={}\n\
              clock_scroll_ms={}\nlight_on={}\nlight_brightness={}\nlight_r={}\nlight_g={}\n\
-             light_b={}\nlight_effect={}\nwake_word={}\ntz={}\nauto_update={}\nupdate_attempt={}\n\
-             zigbee_role={}\nzigbee_flash_failed={:x}\nnearest_answers={}\nmusic_viz={}\n\
+             light_b={}\nlight_effect={}\n{wake_key}{wake_word}{wake_end}tz={}\n\
+             auto_update={}\nupdate_attempt={}\nzigbee_role={}\nzigbee_flash_failed={:x}\n\
+             nearest_answers={}\nmusic_viz={}\n\
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
              clock_auto_brightness={}\nfollowup_duration_s={}\nclock_format={}\n\
              command_start_offset_ms={}\nclock_spoken_numbers={}\nmic_gain_db={}\n\
@@ -261,7 +267,6 @@ impl Settings {
             f(self.light.g),
             f(self.light.b),
             self.light.effect,
-            self.wake_word,
             self.tz,
             b(self.auto_update),
             self.update_attempt,

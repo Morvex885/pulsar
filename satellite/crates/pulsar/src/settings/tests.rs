@@ -6,6 +6,7 @@
 // `command_start_offset_ms` (0); `clock_spoken_numbers` (0); `mic_gain_db` (0);
 // `wake_sound` (1); `clock_colon_blink` (1, последним). `wake_preroll` (бывший переключатель)
 // больше не пишется и не читается; в load_odd.in остался как неизвестный ключ.
+// В load_edge.in нет выбранной фразы: в load_edge.out больше нет строки `wake_word=alisa`.
 
 use super::*;
 
@@ -22,6 +23,7 @@ fn f(s: &str) -> f32 {
 
 fn values() -> Settings {
     Settings {
+        has_wake_word: true,
         volume: f("0.30000001"),
         volume_legacy: f("0.123456789"),
         clock_brightness: 0.0001,
@@ -50,12 +52,18 @@ fn values() -> Settings {
 #[test]
 fn save_matches_cxx_byte_for_byte() {
     assert_eq!(
-        Settings::default().serialize().as_bytes(),
+        Settings {
+            has_wake_word: true,
+            ..Settings::default()
+        }
+        .serialize()
+        .as_bytes(),
         golden("save_default.conf")
     );
     assert_eq!(values().serialize().as_bytes(), golden("save_values.conf"));
     let extremes = Settings {
         volume: -1.0,
+        has_wake_word: true,
         volume_legacy: -1.0,
         clock_brightness: 1e-30,
         clock_scroll_ms: 100,
@@ -89,7 +97,6 @@ fn parses_a_file_written_by_cxx() {
     let want = Settings {
         volume: 0.3,
         has_volume: true,
-        has_wake_word: true,
         volume_legacy: 0.123_457,
         light: LightState {
             brightness: 1_234_570.0,
@@ -121,6 +128,16 @@ fn load_then_save_matches_cxx() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn saving_an_unrelated_setting_does_not_choose_a_wake_word() {
+    let mut st = Settings::default();
+    st.parse(b"volume2=0.4\n");
+    let mut restarted = Settings::default();
+    restarted.parse(st.serialize().as_bytes());
+    assert!(!restarted.has_wake_word);
+    assert_eq!(restarted.volume, 0.4);
 }
 
 /// A fresh directory under the system temp dir, removed on drop.

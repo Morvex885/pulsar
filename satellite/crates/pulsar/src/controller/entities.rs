@@ -408,12 +408,9 @@ impl Controller {
     fn on_active_wake_words(&mut self, request: u64, id: String) {
         if self.mic.frame() == 0 {
             // Запоминаем явный выбор для следующего запуска, но активного спотера нет.
-            if self.st.wake_word != id {
-                self.st.wake_word.clone_from(&id);
-                info!("wake word -> {}", self.st.wake_word);
-                self.persist();
-            }
-            self.api.set_active_wake_words(Some(request), Vec::new());
+            self.save_wake_word(&id);
+            self.api
+                .set_active_wake_words(Some(request), Vec::new(), None);
             return;
         }
         info!("wake word requested: {id}");
@@ -421,25 +418,47 @@ impl Controller {
         self.wake_switch.requested(req, request);
     }
 
-    /// Сохранённый выбор меняет только успешный ответ на последний явный запрос HA.
+    /// Без сохранённого выбора запоминаем первую загруженную модель; иначе выбор меняет только HA.
     pub(super) fn on_wake_model(&mut self, req: Option<ModelId>, dir: &Path, ok: bool) {
         let id = dir
             .file_name()
             .and_then(OsStr::to_str)
             .unwrap_or("")
             .to_owned();
-        if !ok {
+        if !ok && (req.is_some() || id.is_empty()) {
             warn!("wake word model did not load; active: {id:?}");
         }
         let request = self.wake_switch.answered(req);
-        if request.is_some() && ok && !id.is_empty() && id != self.st.wake_word {
-            self.st.wake_word.clone_from(&id);
-            info!("wake word -> {}", self.st.wake_word);
-            self.persist();
+        if !id.is_empty()
+            && ((req.is_none() && !self.st.has_wake_word) || (request.is_some() && ok))
+        {
+            self.save_wake_word(&id);
         }
         self.active_wake_word.clone_from(&id);
-        self.api
-            .set_active_wake_words(request, if id.is_empty() { Vec::new() } else { vec![id] });
+        let recovered = if self
+            .unlisted_wake_word
+            .as_ref()
+            .is_some_and(|word| word.id == id)
+        {
+            self.unlisted_wake_word.take()
+        } else {
+            None
+        };
+        self.api.set_active_wake_words(
+            request,
+            if id.is_empty() { Vec::new() } else { vec![id] },
+            recovered,
+        );
+    }
+
+    fn save_wake_word(&mut self, id: &str) {
+        if !self.st.has_wake_word || self.st.wake_word != id {
+            self.st.has_wake_word = true;
+            self.st.wake_word.clear();
+            self.st.wake_word.push_str(id);
+            info!("wake word -> {id}");
+            self.persist();
+        }
     }
 
     // ---------------- buttons, sensors, Zigbee ----------------

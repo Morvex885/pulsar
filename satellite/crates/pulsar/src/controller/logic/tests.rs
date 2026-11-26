@@ -901,11 +901,19 @@ fn wake_word_labels_preserve_legacy_ha_bindings() {
 #[test]
 fn initial_wake_word_never_replaces_a_saved_selection() {
     let all = strings(&["alisa", "yandex", "yasmina"]);
-    assert_eq!(initial_wake_word(Some("yandex"), &all), Some("yandex"));
-    assert_eq!(initial_wake_word(Some("gone"), &all), Some("gone"));
-    assert_eq!(initial_wake_word(Some("yandex"), &[]), Some("yandex"));
-    assert_eq!(initial_wake_word(Some("../bad"), &all), None);
-    assert_eq!(initial_wake_word(None, &all[2..]), Some("yasmina"));
+    for (saved, available, expected) in [
+        (Some("yandex"), all.as_slice(), &["yandex"][..]),
+        (Some("gone"), all.as_slice(), &["gone"][..]),
+        (Some("yandex"), &[][..], &["yandex"][..]),
+        (Some("../bad"), all.as_slice(), &[][..]),
+        (None, all.as_slice(), &["alisa", "yandex", "yasmina"][..]),
+        (None, &all[2..], &["yasmina"][..]),
+    ] {
+        assert_eq!(
+            initial_wake_words(saved, available).collect::<Vec<_>>(),
+            expected
+        );
+    }
 }
 
 #[test]
