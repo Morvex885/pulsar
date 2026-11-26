@@ -295,7 +295,7 @@ pub fn open_playback(model: &Model) -> Result<Pcm, i32> {
     open_playback_with_mode(model, false)
 }
 
-/// Opens the same model output and amplifier gates without blocking on frame I/O.
+/// Открывает тот же выход модели и включает усилитель, не блокируя чтение и запись кадров.
 pub fn open_playback_nonblock(model: &Model) -> Result<Pcm, i32> {
     open_playback_with_mode(model, true)
 }

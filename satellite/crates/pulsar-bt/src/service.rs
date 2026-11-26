@@ -310,6 +310,8 @@ enum PcmFallback {
 
 #[derive(Default)]
 struct FrameActivity {
+    // Порядок уже обслуженного запуска: AVRCP может пережить разрыв самого A2DP.
+    start_floor: u64,
     active: Option<bool>,
     start: Option<u64>,
     // Метка первого PCM-буфера и порядок старта, которому он принадлежит.
@@ -407,7 +409,9 @@ impl FrameActivity {
         let first = self.start.take();
         let continuation = first.and_then(|_| self.enable_continuation.take());
         let (phase, order) = match (avr, first) {
-            (Some((Playback::Playing, Some(order))), _) => {
+            (Some((Playback::Playing, Some(order))), _)
+                if first.is_none() || order > self.start_floor =>
+            {
                 // Первый PCM-буфер ещё относится к AVRCP-фронту. После простоя
                 // тот же Playing уже не должен подменять новый фронт кадров.
                 if self.first.is_some() {
@@ -682,6 +686,7 @@ impl Service {
             if let Some(owner) = self.policy.owner.as_deref()
                 && (!self.policy.permits(owner) || selected(bus, &self.policy).is_none())
             {
+                self.remember_episode();
                 self.policy.release();
                 self.reset_session();
             }
@@ -710,6 +715,7 @@ impl Service {
                 }) {
                     self.frames = frames;
                 }
+                self.frames.start_floor = self.policy.starts;
                 self.policy.select(device.to_owned(), now);
             }
             if let Some(c) = selected(bus, &self.policy) {
@@ -1192,6 +1198,33 @@ mod tests {
         frames.start(next);
         frames.observe(&mut policy, None);
         assert_eq!(policy.ready_start(true, music_start), Some(next));
+    }
+
+    #[test]
+    fn profile_reconnect_accepts_pcm_even_if_avrcp_kept_its_old_playing_order() {
+        let mut policy = selected_policy();
+        let mut frames = FrameActivity::default();
+        let playing = Some((Playback::Playing, Some(10)));
+        frames.observe_snapshot(&mut policy, playing, 1);
+        frames.start(15);
+        frames.observe_snapshot(&mut policy, playing, 1);
+        assert_eq!(policy.ready_start(true, 0), Some(10));
+
+        policy.release();
+        policy.select("phone".into(), Instant::now());
+        let mut frames = FrameActivity {
+            start_floor: policy.starts,
+            ..FrameActivity::default()
+        };
+        frames.observe_snapshot(&mut policy, playing, 1);
+        assert_eq!(policy.ready_start(true, 0), None);
+        frames.start(20);
+        frames.observe_snapshot(&mut policy, playing, 1);
+        assert_eq!(policy.ready_start(true, 0), Some(20));
+        assert_eq!(
+            frames.first_frame_decision(Some(20), Some(20), 0),
+            Some((20, true))
+        );
     }
 
     #[test]

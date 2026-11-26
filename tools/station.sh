@@ -148,6 +148,10 @@ test_lifecycle_child() (
   "$@" 9>&-
   exit $?
 )
+# Поле starttime отличает повторно использованный PID; зомби уже не запустит код.
+test_process_start() {
+  awk '{ sub(/^.*\) /, ""); if ($1 != "Z" && $1 != "X") print $20 }' "/proc/$1/stat" 2>/dev/null
+}
 EOF
 )
 # Не запускать установленный сервис и не удалять стенд, пока не возвращён тестовый BT.
@@ -157,6 +161,10 @@ TEST_BT_RESTORED="$TEST_DIR_OPTIONAL
     [ -e '$T/bt-owner.pending' ] || [ -L '$T/bt-owner.pending' ]; then
     echo 'test Bluetooth not restored: run test-stop' >&2
     exit 1
+  fi
+  if [ -e '$T/test-launch' ] || [ -L '$T/test-launch' ]; then
+    echo 'test launch not cleared: run test-stop' >&2
+    exit 1
   fi"
 TEST_HANDOFF="$TEST_LOCK
   test_lifecycle_lock '$D'
@@ -164,25 +172,32 @@ TEST_HANDOFF="$TEST_LOCK
 # Сначала остановить обоих: работающий pulsar ещё может записать снимок и захватить player.
 PROD_BT_CTL="'$D/ctl.sh' bt-restore --supported >/dev/null 2>&1 ||
   '$D/ctl.sh' bt-restore --check >/dev/null 2>&1"
-PROD_BT_RESTORE="boot=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
-if [ -n \"\$boot\" ] &&
-  { [ -e '$D'/.pulsar-bt-owner.\"\$boot\" ] || [ -L '$D'/.pulsar-bt-owner.\"\$boot\" ] ||
-    [ -e '$D'/.pulsar-bt-owner.\"\$boot\".pending ] || [ -L '$D'/.pulsar-bt-owner.\"\$boot\".pending ]; } &&
-  ! '$D/ctl.sh' bt-restore --owner-path >/dev/null 2>&1; then
-  echo 'installed ctl.sh cannot recover the current Bluetooth snapshot' >&2
-  exit 1
-fi
+PROD_BT_RESTORE="
 if $PROD_BT_CTL; then
   '$D/ctl.sh' reload --stop && test_lifecycle_child '$D/ctl.sh' bt-restore ||
     { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
-else
-  # Старый ctl не может восстановить снимок от ранее установленного бинаря.
-  for marker in '$BT_OWNER' '$BT_OWNER.pending'; do
-    [ -e \"\$marker\" ] || [ -L \"\$marker\" ] || continue
-    owner=\$(stat -c '%u' \"\$marker\") && uid=\$(id -u) && [ \"\$owner\" != \"\$uid\" ] ||
-      { echo 'installed Bluetooth not restored; leaving binaries untouched' >&2; exit 1; }
+fi
+# Старый ctl может сообщить об успехе, не восстановив один из путей снимка.
+reject_bt_marker() {
+  echo \"installed Bluetooth snapshot still present: \$1; use the current ctl.sh to recover it; leaving binaries untouched\" >&2
+  exit 1
+}
+IFS= read -r boot < /proc/sys/kernel/random/boot_id ||
+  { echo 'cannot identify current Bluetooth snapshot; leaving binaries untouched' >&2; exit 1; }
+case \"\$boot\" in ''|*[!0-9a-f-]*)
+  echo 'invalid boot id; leaving binaries untouched' >&2; exit 1 ;;
+esac
+for owner in '$D'/.pulsar-bt-owner.\"\$boot\" \"\${PULSAR_BT_OWNER:-}\"; do
+  [ -n \"\$owner\" ] || continue
+  for marker in \"\$owner\" \"\$owner.pending\"; do
+    if [ -e \"\$marker\" ] || [ -L \"\$marker\" ]; then reject_bt_marker \"\$marker\"; fi
   done
-fi"
+done
+uid=\$(id -u) || exit 1
+for marker in '$BT_OWNER' '$BT_OWNER.pending'; do
+  [ -e \"\$marker\" ] || [ -L \"\$marker\" ] || continue
+  owner=\$(stat -c '%u' \"\$marker\") && [ \"\$owner\" != \"\$uid\" ] || reject_bt_marker \"\$marker\"
+done"
 # Готовим файлы до остановки сервиса. Сохраняем прежний слот отката и защиту
 # по inode, пока не обновлены метаданные и не переименован исполняемый файл.
 PROD_REPLACE="stage_replace() {
@@ -234,7 +249,7 @@ case "$cmd" in
   stop)
     own
     r "[ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
-       $TEST_BT_RESTORED
+       $TEST_HANDOFF
        if $PROD_BT_CTL; then
          '$D/ctl.sh' reload --stop || exit 1
        else
@@ -284,6 +299,8 @@ production_stopped || exit 1
   [ ! -e "$T/bt-owner" ] && [ ! -L "$T/bt-owner" ] &&
   [ ! -e "$T/bt-owner.pending" ] && [ ! -L "$T/bt-owner.pending" ] ||
   { echo 'test Bluetooth not restored: run test-stop' >&2; exit 1; }
+[ ! -e "$T/test-launch" ] && [ ! -L "$T/test-launch" ] ||
+  { echo 'test launch not cleared: run test-stop' >&2; exit 1; }
 [ -x "$T/pulsar" ] || { echo 'push pulsar first' >&2; exit 1; }
 if [ "$bt" = 1 ]; then
   stock_stopped() {
@@ -297,7 +314,7 @@ if [ "$bt" = 1 ]; then
   fi
   # Одним ln публикуем резерв и PID начала запуска. test-stop не снимает
   # резерв, пока этот shell может ещё запустить процесс.
-  started=$(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$$/stat") || exit 1
+  started=$(test_process_start "$$") || exit 1
   [ -n "$started" ] || exit 1
   ln -s "$$:$started" "$T/bt-reserved" ||
     { echo 'test Bluetooth already reserved: run test-stop' >&2; exit 1; }
@@ -321,21 +338,51 @@ cd "$T" || exit 1
 if [ "$station" = mini ]; then
   [ -f "$D/asound.conf" ] || { echo 'Mini needs /data/pulsar/asound.conf (satellite/deploy/asound.conf)' >&2; exit 1; }
 fi
-: > "$T/pid" || exit 1
+rm -f "$T/pid" || exit 1
 # После этой точки резерв снимает только test-stop, даже если запуск оборвётся.
 trap '' HUP
 trap - EXIT
-nohup env PULSAR_PORT_OFFSET=10000 PULSAR_BT_MANAGED="$bt" PULSAR_BT_OWNER="$T/bt-owner" \
-  ./pulsar "$T/state.conf" 9>&- < /dev/null >> "$T/log" 2>&1 &
+launch=$(cat <<'LAUNCH'
+T=$1
+bt=$2
+starter=$3
+# Отдельный shell знает свой PID. Унаследованный fd защищает и промежуток
+# до регистрации, если управляющий shell уже погиб.
+started=$(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$$/stat") || exit 1
+[ -n "$started" ] && ln -s "$$:$started" "$T/test-launch" || exit 1
+i=0
+while ! { IFS= read -r ack < "$T/pid" && [ "$ack" = "$$" ]; } 2>/dev/null; do
+  [ "$i" -lt 5 ] && kill -0 "$starter" 2>/dev/null || exit 1
+  sleep 1
+  i=$((i + 1))
+done
+# Допуск подтверждён. До exec test-stop защищает записанная идентичность,
+# а самому демону блокировка больше не нужна.
+exec 9>&-
+exec env PULSAR_PORT_OFFSET=10000 PULSAR_BT_MANAGED="$bt" PULSAR_BT_OWNER="$T/bt-owner" \
+  ./pulsar "$T/state.conf"
+LAUNCH
+) || exit 1
+sh -c "$launch" pulsar-test-launch "$T" "$bt" "$$" < /dev/null >> "$T/log" 2>&1 &
 p=$!
-if ! printf '%s\n' "$p" > "$T/pid"; then
-  kill "$p" 2>/dev/null
-  echo 'could not record test pid: check test-log and run test-stop' >&2
+i=0
+while [ ! -L "$T/test-launch" ] && kill -0 "$p" 2>/dev/null && [ "$i" -lt 5 ]; do
+  sleep 1 9>&-
+  i=$((i + 1))
+done
+started=$(test_process_start "$p")
+if [ -z "$started" ] || [ "$(readlink "$T/test-launch")" != "$p:$started" ] ||
+   ! { printf '%s\n' "$p" > "$T/.pid-launch" && mv -f "$T/.pid-launch" "$T/pid"; }; then
+  echo 'could not confirm test launch: check test-log and run test-stop' >&2
   exit 1
 fi
-sleep 2
-kill -0 "$p" && echo started ||
-  { echo 'test pulsar exited: check test-log and run test-stop' >&2; exit 1; }
+sleep 2 9>&-
+if [ "$(readlink "/proc/$p/exe" 2>/dev/null)" = "$T/pulsar" ]; then
+  echo started
+else
+  echo 'test pulsar not running: check test-log and run test-stop' >&2
+  exit 1
+fi
 EOF
     } | r sh -s -- "$T" "$D" "$vol" "$station" "$bt"
     ;;
@@ -357,7 +404,7 @@ if [ -L "$T/bt-reserved" ]; then
   starter=$(readlink "$T/bt-reserved") || exit 1
   owner=${starter%%:*}
   case "$owner" in ''|*[!0-9]*) ;; *)
-    if [ "$starter" = "$owner:$(awk '{ sub(/^.*\) /, ""); print $20 }' "/proc/$owner/stat" 2>/dev/null)" ]; then
+    if [ "$starter" = "$owner:$(test_process_start "$owner")" ]; then
       echo 'test-start is still launching the daemon' >&2
       exit 1
     fi ;;
@@ -369,6 +416,16 @@ test_running() {
     *) return 1 ;;
   esac
 }
+if [ -e "$T/test-launch" ] || [ -L "$T/test-launch" ]; then
+  launch=$(readlink "$T/test-launch") || exit 1
+  p=${launch%%:*}
+  case "$p" in ''|*[!0-9]*) ;; *)
+    if [ "$launch" = "$p:$(test_process_start "$p")" ] && ! test_running; then
+      echo 'test-start child has not executed the daemon yet: retry test-stop' >&2
+      exit 1
+    fi ;;
+  esac
+fi
 
 if [ -s "$T/pid" ]; then
   if ! IFS= read -r p < "$T/pid"; then p=; fi
@@ -384,13 +441,13 @@ if [ -s "$T/pid" ]; then
     fi
   fi
 fi
-if [ -e "$T/pid" ] || [ "$reserved" = 1 ] || test_bt_pending; then
+if [ -e "$T/pid" ] || [ -L "$T/test-launch" ] || [ "$reserved" = 1 ] || test_bt_pending; then
   for exe in /proc/[0-9]*/exe; do
     p=${exe%/exe}
     p=${p##*/}
     ! test_running || { echo 'test pulsar still running, Bluetooth not restored' >&2; exit 1; }
   done
-  rm -f "$T/pid" || exit 1
+  rm -f "$T/pid" "$T/.pid-launch" || exit 1
 fi
 if test_bt_pending; then
   if ! test_lifecycle_child "$T/ctl.sh" bt-restore --test; then
@@ -403,7 +460,7 @@ if test_bt_pending; then
   fi
 fi
 EOF
-      printf '%s\n' "$DMIX" '[ "$reserved" = 0 ] || rm -f "$T/bt-reserved"'
+      printf '%s\n' "$DMIX" 'rm -f "$T/test-launch" || exit 1' '[ "$reserved" = 0 ] || rm -f "$T/bt-reserved"'
     } | r sh -s -- "$T" "$D"
     echo stopped ;;
   test-log) r "$TEST_DIR_CHECK; test_dir_check '$T' && tail -n ${1:-50} $T/log" ;;

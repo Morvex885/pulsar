@@ -62,8 +62,15 @@ bt_locked() (
 )
 
 bt_for_owners() {
+  [ "${PULSAR_BT_OWNER:-}" != "$bt_test_owner" ] || return 1
   if command -v flock >/dev/null 2>&1; then
-    bt_locked "$D" bt_for_owners_locked "$@"
+    bt_lock_dir=$D
+    case "${PULSAR_BT_OWNER:-$bt_legacy}" in
+      "$bt_legacy") ;;
+      */*) bt_lock_dir=${PULSAR_BT_OWNER%/*}; bt_lock_dir=${bt_lock_dir:-/} ;;
+      *) bt_lock_dir=. ;;
+    esac
+    bt_locked "$bt_lock_dir" bt_for_owners_locked "$@"
   else
     bt_for_owners_locked bt_no_lock
   fi
@@ -79,7 +86,6 @@ bt_no_lock() {
 }
 
 bt_for_owners_locked() {
-  [ "${PULSAR_BT_OWNER:-}" != "$bt_test_owner" ] || return 1
   bt_test_clear || return 1
   if [ -z "${PULSAR_BT_OWNER:-}" ]; then
     bt_owner=$bt_legacy
@@ -462,6 +468,7 @@ case "$1" in
       2:--hide) bt_for_owners bt_hide ;;
       2:--owner-path) bt_owner_path ;;
       2:--supported) : ;;
+      2:--owner-lock) printf '%s\n' pulsar-bt-owner-lock/1 ;;
       2:--check)
         command -v dbus-send >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 ;;
       *) exit 2 ;;

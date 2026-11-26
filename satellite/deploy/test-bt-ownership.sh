@@ -6,6 +6,7 @@ station=$here/../../tools/station.sh
 BT_FIXTURE=$(mktemp -d /tmp/pulsar-bt-test.XXXXXX)
 cleanup() {
   touch "$BT_FIXTURE/stop-release"
+  touch "$BT_FIXTURE/register-release" "$BT_FIXTURE/exec-release"
   p=${test_pid_for_cleanup:-}
   if [ -s "$BT_FIXTURE/test/pid" ]; then read -r p < "$BT_FIXTURE/test/pid"; fi
   if [ -n "$p" ] && [ "$("$REAL_READLINK" "/proc/$p/exe" 2>/dev/null)" = "$BT_FIXTURE/test/pulsar" ]; then
@@ -23,6 +24,9 @@ REAL_STAT=$(command -v stat)
 REAL_DATE=$(command -v date)
 REAL_PIDOF=$(command -v pidof)
 REAL_MKTEMP=$(command -v mktemp)
+REAL_LN=$(command -v ln)
+REAL_ENV=$(command -v env)
+export REAL_LN REAL_ENV
 export BT_FIXTURE REAL_READLINK REAL_SLEEP REAL_MV REAL_STAT REAL_CP
 export REAL_DATE REAL_PIDOF REAL_MKTEMP
 export PULSAR_DIR=$BT_FIXTURE/data PULSAR_LOG=$BT_FIXTURE/supervise.log PULSAR_Q=$BT_FIXTURE/bin/quasar
@@ -140,6 +144,13 @@ EOF
 cat > "$BT_FIXTURE/bin/killall" <<'EOF'
 #!/bin/sh
 case "$*" in
+  pulsar|supervise.sh)
+    if [ "${CHECK_LEGACY_STOP_LOCK:-0}" = 1 ] &&
+       [ -e "/proc/$$/fd/9" ] && ! flock -n "$PULSAR_DIR/.station-test.lock" true; then
+      printf '%s\n' "$1" >> "$BT_FIXTURE/legacy-stop-lock"
+    fi ;;
+esac
+case "$*" in
   pulsar|'-9 pulsar')
     if [ -n "${LATE_ACQUIRE-}" ] && [ -f "$BT_FIXTURE/pulsar-running" ]; then
       (umask 077; printf '%s\n' "$LATE_ACQUIRE" > "$PULSAR_BT_OWNER") || exit 1
@@ -156,8 +167,45 @@ printf 'quasar:%s\n' "$1" >> "$BT_FIXTURE/events"
 EOF
 cat > "$BT_FIXTURE/bin/sleep" <<'EOF'
 #!/bin/sh
-# A real handshake below, not this delay, proves the test process reached its ready state.
+# Готовность тестового процесса подтверждает сигнал ниже, а не эта задержка.
+if [ "$1" = 2 ] && [ "${HOLD_TEST_EXEC:-0}" = 1 ]; then
+  touch "$BT_FIXTURE/launcher-held"
+  i=0
+  while [ ! -e "$BT_FIXTURE/exec-release" ] && [ "$i" -lt 500 ]; do
+    "$REAL_SLEEP" 0.01
+    i=$((i + 1))
+  done
+fi
+if [ "$1" = 1 ] && [ "${HOLD_TEST_REGISTER:-0}" = 1 ]; then
+  exec "$REAL_SLEEP" 1
+fi
 case "$1" in 60|2) exec "$REAL_SLEEP" 0.15 ;; 1|3|6|12|24|30) exec "$REAL_SLEEP" 0.01 ;; esac
+EOF
+cat > "$BT_FIXTURE/bin/ln" <<'EOF'
+#!/bin/sh
+if [ "${HOLD_TEST_REGISTER:-0}" = 1 ] && [ "$#" = 3 ] && [ "$3" = "$BT_FIXTURE/test/test-launch" ]; then
+  [ -e "/proc/$$/fd/9" ] || exit 1
+  touch "$BT_FIXTURE/register-held"
+  i=0
+  while [ ! -e "$BT_FIXTURE/register-release" ] && [ "$i" -lt 500 ]; do
+    "$REAL_SLEEP" 0.01
+    i=$((i + 1))
+  done
+fi
+exec "$REAL_LN" "$@"
+EOF
+cat > "$BT_FIXTURE/bin/env" <<'EOF'
+#!/bin/sh
+if [ "${HOLD_TEST_EXEC:-0}" = 1 ] && [ "${1:-}" = PULSAR_PORT_OFFSET=10000 ]; then
+  [ ! -e "/proc/$$/fd/9" ] || exit 1
+  touch "$BT_FIXTURE/exec-held"
+  i=0
+  while [ ! -e "$BT_FIXTURE/exec-release" ] && [ "$i" -lt 500 ]; do
+    "$REAL_SLEEP" 0.01
+    i=$((i + 1))
+  done
+fi
+exec "$REAL_ENV" "$@"
 EOF
 cat > "$BT_FIXTURE/bin/ipcs" <<'EOF'
 #!/bin/sh
@@ -239,9 +287,12 @@ if [ "$1" = sh ]; then
     set -- "$@" "$arg"
   done
   if [ "${HOLD_TEST_STOP:-0}" = 1 ]; then printf '%s\n' "$$" > "$BT_FIXTURE/stop-shell"; fi
+  if [ "${HOLD_TEST_REGISTER:-0}" = 1 ] || [ "${HOLD_TEST_EXEC:-0}" = 1 ]; then
+    printf '%s\n' "$$" > "$BT_FIXTURE/launch-shell"
+  fi
   exec "$@"
 fi
-cmd=$(printf '%s\n' "$1" | sed "s|/tmp/pulsar-agent.lock|$BT_FIXTURE/lock|g; s|/tmp/pulsar-test|$BT_FIXTURE/test|g; s|/data/pulsar|$PULSAR_DIR|g; s|/tmp/pulsar-bt-owner|$PULSAR_BT_OWNER|g")
+cmd=$(printf '%s\n' "$1" | sed "s|/tmp/pulsar-agent.lock|$BT_FIXTURE/lock|g; s|/tmp/pulsar-test|$BT_FIXTURE/test|g; s|/data/pulsar|$PULSAR_DIR|g; s|/tmp/pulsar-bt-owner|$BT_FIXTURE/legacy-owner|g")
 exec sh -c "$cmd"
 EOF
 chmod +x "$BT_FIXTURE"/bin/*
@@ -272,6 +323,15 @@ await_test_ready() {
 install_fixture() {
   cp "$1" "$PULSAR_DIR/pulsar.new"
   mv -f "$PULSAR_DIR/pulsar.new" "$PULSAR_DIR/pulsar"
+}
+
+await_test_lock_release() {
+  i=0
+  while ! flock -n "$PULSAR_DIR/.station-test.lock" true; do
+    [ "$i" -lt 100 ] || fail 'test lifecycle lock survived termination'
+    "$REAL_SLEEP" 0.01
+    i=$((i + 1))
+  done
 }
 
 fake_pulsar() {
@@ -342,7 +402,7 @@ marker '0 1 0'
 HOLD_RESTORE=1 ctl bt-restore &
 first=$!
 await_file "$BT_FIXTURE/restore-held"
-if flock -n "$PULSAR_DIR/.pulsar-bt-lock" true; then
+if flock -n "${PULSAR_BT_OWNER%/*}/.pulsar-bt-lock" true; then
   fail 'adapter restore is not holding the ownership lock'
 fi
 ctl bt-restore &
@@ -430,7 +490,7 @@ Discoverable:true
 quasar:start'
 [ ! -e "$PULSAR_BT_OWNER" ] && [ ! -e "$PULSAR_DIR/enabled" ] || fail 'disable left ownership pending'
 
-# A valid-looking marker from a different UID must not block return to stock or be removed.
+# Правдоподобный снимок чужого UID нельзя использовать или удалять при возврате в сток.
 marker '1 0 1'
 trace
 touch "$PULSAR_DIR/enabled" "$BT_FIXTURE/pulsar-running" "$BT_FIXTURE/supervisor-running"
@@ -610,7 +670,7 @@ Discoverable:false
 quasar:start'
 [ ! -e "$PULSAR_BT_OWNER" ] && [ ! -e "$PULSAR_DIR/enabled" ] || fail 'give_back left ownership pending'
 
-# A normal HA-style rename may install a pre-Bluetooth release with no private CLI flags.
+# Обычное переименование при обновлении из HA может установить старый бинарь без служебных флагов Bluetooth.
 cat > "$BT_FIXTURE/replacing" <<'EOF'
 #!/bin/sh
 if [ "${1-}" = --version ]; then echo pulsar-bt-managed/1; exit 0; fi
@@ -664,8 +724,8 @@ stable'
   fi
 done
 
-# A fresh supervisor restores unknown lineage, retries transient failures and
-# waits for the stock player before starting the replacement.
+# Новый supervisor возвращает снимок неизвестного происхождения, повторяет временно
+# неудавшиеся операции и ждёт штатный player перед запуском нового бинаря.
 install_fixture "$BT_FIXTURE/stable"
 "$PULSAR_BT_INIT" stop
 marker '1 0 1'
@@ -679,7 +739,7 @@ Discoverable:false
 init:start
 stable'
 
-# A fresh supervisor around the same executable must not reopen the stock path.
+# Перезапуск supervisor с тем же бинарём не должен возвращать штатный тракт.
 cat > "$BT_FIXTURE/same" <<'EOF'
 #!/bin/sh
 set -eu
@@ -887,6 +947,7 @@ expect_test_lock test-stop
 expect_test_lock test-start --bt
 expect_test_lock cleanup
 expect_test_lock start
+expect_test_lock stop
 expect_test_lock swap "$t/pulsar"
 expect_test_lock restore
 expect_test_lock push "$PULSAR_DIR/ctl.sh"
@@ -895,14 +956,53 @@ kill -KILL "$stop_shell"
 expect_test_lock test-stop
 touch "$BT_FIXTURE/stop-release"
 if wait "$stopping"; then fail 'interrupted test-stop returned success'; fi
-i=0
-while ! flock -n "$PULSAR_DIR/.station-test.lock" true; do
-  [ "$i" -lt 100 ] || fail 'test lifecycle lock survived termination'
-  "$REAL_SLEEP" 0.01
-  i=$((i + 1))
-done
+await_test_lock_release
 sh "$station" lite2 test-stop
 [ ! -L "$t/bt-reserved" ] || fail 'repair did not clear the abandoned reservation'
+# Управляющий shell погиб до регистрации ребёнка. Пока helper держит fd,
+# test-stop не снимает резерв; без подтверждения ребёнок не запускает демона.
+HOLD_TEST_REGISTER=1 sh "$station" lite2 test-start --bt > "$BT_FIXTURE/launching.log" 2>&1 &
+starting=$!
+await_file "$BT_FIXTURE/register-held"
+read -r launch_shell < "$BT_FIXTURE/launch-shell"
+kill -KILL "$launch_shell"
+if wait "$starting"; then fail 'interrupted test-start returned success'; fi
+expect_test_lock test-stop
+expect_test_lock start
+[ -L "$t/bt-reserved" ] && [ ! -L "$t/test-launch" ] && [ ! -e "$t/pid" ] ||
+  fail 'unregistered launch lost its reservation or received approval'
+touch "$BT_FIXTURE/register-release"
+await_test_lock_release
+sh "$station" lite2 test-stop
+[ ! -L "$t/bt-reserved" ] && [ ! -L "$t/test-launch" ] && [ ! -e "$t/bt-owner" ] ||
+  fail 'unapproved launch took ownership or left its registration'
+expect ''
+
+# После подтверждения, но до exec, fd уже закрыт. От преждевременного
+# возврата защищает идентичность ребёнка из /proc/<pid>/stat, даже после SIGKILL shell.
+HOLD_TEST_EXEC=1 sh "$station" lite2 test-start --bt > "$BT_FIXTURE/launching.log" 2>&1 &
+starting=$!
+await_file "$BT_FIXTURE/launcher-held"
+await_file "$BT_FIXTURE/exec-held"
+read -r launch_shell < "$BT_FIXTURE/launch-shell"
+kill -KILL "$launch_shell"
+if wait "$starting"; then fail 'interrupted confirmed test-start returned success'; fi
+msg=$(sh "$station" lite2 test-stop 2>&1) && fail 'test-stop accepted pending exec'
+case "$msg" in *'child has not executed the daemon yet'*) ;; *) fail "$msg" ;; esac
+reject sh "$station" lite2 start
+[ -L "$t/bt-reserved" ] && [ -L "$t/test-launch" ] && [ ! -e "$t/bt-owner" ] ||
+  fail 'test-stop changed the reservation while the child could still exec'
+touch "$BT_FIXTURE/exec-release"
+await_test_ready
+sh "$station" lite2 test-stop
+[ ! -L "$t/bt-reserved" ] && [ ! -L "$t/test-launch" ] && [ ! -e "$t/bt-owner" ] ||
+  fail 'test-stop did not finish confirmed launch recovery'
+expect 'test:1
+init:stop
+Pairable:true
+Discoverable:false
+init:start'
+trace
 # Относительное переименование под тем же lock сохраняет имя и байты файла.
 probe="probe's \$data.bin"
 printf 'abc\000xyz\n' > "$BT_FIXTURE/$probe"
@@ -1059,7 +1159,7 @@ cmp "$PULSAR_DIR/pulsar.prev" "$BT_FIXTURE/before-prev"
 [ ! -e "$PULSAR_BT_OWNER" ] && [ ! -e "$PULSAR_DIR/pulsar.orig" ] ||
   fail 'successful restore left ownership or backup pending'
 
-# With pre-Bluetooth ctl, station handoff still uses the legacy restart.
+# С ctl без поддержки Bluetooth подмена по-прежнему использует старый restart.
 cat > "$PULSAR_DIR/ctl.sh" <<'EOF'
 #!/bin/sh
 [ "$*" = restart ] || exit 1
@@ -1071,6 +1171,53 @@ sh "$station" lite2 restore
 expect 'legacy:restart
 legacy:restart'
 cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-swap"
+
+# Старый stop удерживает lock при killall и до конца очистки ALSA.
+rm -f "$BT_FIXTURE/stop-held" "$BT_FIXTURE/stop-release"
+touch "$BT_FIXTURE/pulsar-running" "$BT_FIXTURE/supervisor-running"
+HOLD_TEST_STOP=1 CHECK_LEGACY_STOP_LOCK=1 sh "$station" lite2 stop > "$BT_FIXTURE/stopping.log" 2>&1 &
+stopping=$!
+await_file "$BT_FIXTURE/stop-held"
+[ "$(cat "$BT_FIXTURE/legacy-stop-lock")" = 'supervise.sh
+pulsar' ] || fail 'legacy killall ran without the lifecycle lock'
+expect_test_lock test-stop
+expect_test_lock test-start --bt
+touch "$BT_FIXTURE/stop-release"
+wait "$stopping"
+
+# Старый ctl говорит об успехе, но оставляет снимок или .pending. Нельзя
+# менять ни рабочий бинарь, ни откат, даже если путь снимка переопределён.
+cat > "$PULSAR_DIR/ctl.sh" <<'EOF'
+#!/bin/sh
+case "$*" in
+  'bt-restore --check'|'reload --stop'|bt-restore|restart) exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+trace
+sh "$station" lite2 swap "$BT_FIXTURE/swap"
+cp "$BT_FIXTURE/swap" "$BT_FIXTURE/swap-next"
+printf '# Другой бинарь для повторной подмены\n' >> "$BT_FIXTURE/swap-next"
+boot=$(cat /proc/sys/kernel/random/boot_id)
+for owner in "$PULSAR_DIR/.pulsar-bt-owner.$boot" "$PULSAR_BT_OWNER" "$BT_FIXTURE/legacy-owner"; do
+  for marker_path in "$owner" "$owner.pending"; do
+    (umask 077; printf '1 0 1\n' > "$marker_path")
+    msg=$(sh "$station" lite2 swap "$BT_FIXTURE/swap-next" 2>&1) && fail "swap accepted $marker_path"
+    case "$msg" in *"snapshot still present: $marker_path"*) ;; *) fail "$msg" ;; esac
+    msg=$(sh "$station" lite2 restore 2>&1) && fail "restore accepted $marker_path"
+    case "$msg" in *"snapshot still present: $marker_path"*) ;; *) fail "$msg" ;; esac
+    [ "$(cat "$marker_path")" = '1 0 1' ] || fail "marker changed: $marker_path"
+    cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/swap"
+    cmp "$PULSAR_DIR/pulsar.prev" "$BT_FIXTURE/before-swap"
+    cmp "$PULSAR_DIR/pulsar.orig" "$BT_FIXTURE/before-swap"
+    cmp "$PULSAR_DIR/pulsar.prev.orig" "$BT_FIXTURE/before-prev"
+    rm "$marker_path"
+  done
+done
+sh "$station" lite2 restore
+cmp "$PULSAR_DIR/pulsar" "$BT_FIXTURE/before-swap"
+cmp "$PULSAR_DIR/pulsar.prev" "$BT_FIXTURE/before-prev"
+expect ''
 
 # Новый путь не зависит от коллизии в /tmp и не применяет снимок от прошлой загрузки.
 (
@@ -1181,8 +1328,18 @@ int main(int argc, char **argv) {
         ? WEXITSTATUS(status) : 2;
 }
 EOF
-  # CC может содержать команду с аргументами; имена файлов передаём отдельно.
-  (set -f; ${CC:-cc} "$BT_FIXTURE/pinned.c" -o "$BT_FIXTURE/pinned")
+  # Если CC целиком обозначает исполняемый файл, сохраняем пробелы в пути.
+  # Иначе разделяем команду с аргументами без glob и без eval (например, zig cc).
+  (
+    compiler=${CC:-cc}
+    if command -v "$compiler" >/dev/null 2>&1; then
+      set -- "$compiler"
+    else
+      set -f
+      set -- $compiler
+    fi
+    "$@" "$BT_FIXTURE/pinned.c" -o "$BT_FIXTURE/pinned"
+  )
   install_fixture "$BT_FIXTURE/pinned"
   ln "$PULSAR_DIR/pulsar" "$BT_FIXTURE/pre-rename"
   cat > "$PULSAR_DIR/state.conf" <<'EOF'

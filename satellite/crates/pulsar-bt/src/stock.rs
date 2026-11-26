@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{self, Read as _, Write as _};
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,6 +10,14 @@ use tokio::process::Command;
 
 const INIT: &str = "/etc/init.d/S53bluealsa-aplay";
 const PLAYER: &str = "/usr/bin/bluealsa-aplay";
+const LEGACY_MARKER: &str = "/tmp/pulsar-bt-owner";
+const TEST_MARKER: &str = "/tmp/pulsar-test/bt-owner";
+
+fn trusted_dir() -> PathBuf {
+    std::env::var_os("PULSAR_DIR")
+        .filter(|path| !path.is_empty())
+        .map_or_else(|| PathBuf::from("/data/pulsar"), PathBuf::from)
+}
 
 #[derive(Clone)]
 pub(crate) struct Stock {
@@ -32,8 +41,34 @@ impl Stock {
         };
         let marker = Arc::from(PathBuf::from(path));
         let stock = Self { marker };
+        // Старый production ctl.sh блокирует только $D; у отдельного
+        // тестового ctl.sh блокировка уже была рядом с тестовым снимком.
+        let path = stock.marker.as_ref();
+        let trusted = trusted_dir();
+        if path != Path::new(LEGACY_MARKER)
+            && path != Path::new(TEST_MARKER)
+            && path.with_file_name(".pulsar-bt-lock") != trusted.join(".pulsar-bt-lock")
+            && !std::process::Command::new(trusted.join("ctl.sh"))
+                .args(["bt-restore", "--owner-lock"])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .is_ok_and(|out| out.status.success() && out.stdout == b"pulsar-bt-owner-lock/1\n")
+        {
+            return Err(io::Error::other(
+                "ctl.sh cannot lock the custom Bluetooth owner",
+            ));
+        }
         let state = stock.ownership()?;
         Ok(Some((stock, state)))
+    }
+
+    fn lock_path(&self) -> PathBuf {
+        if self.marker.as_ref() == Path::new(LEGACY_MARKER) {
+            trusted_dir().join(".pulsar-bt-lock")
+        } else {
+            self.marker.with_file_name(".pulsar-bt-lock")
+        }
     }
 
     fn lock(&self) -> io::Result<fs::File> {
@@ -43,7 +78,7 @@ impl Stock {
             .create(true)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(self.marker.with_file_name(".pulsar-bt-lock"))?;
+            .open(self.lock_path())?;
         let meta = file.metadata()?;
         if !meta.is_file()
             || meta.uid() != fs::metadata("/proc/self")?.uid()
@@ -57,14 +92,15 @@ impl Stock {
 
     pub async fn take(&self, flags: [bool; 2]) -> io::Result<()> {
         let stock = self.clone();
-        let (_lock, exe, running) = tokio::task::spawn_blocking(move || {
+        let (lock, exe, running) = tokio::task::spawn_blocking(move || {
             let lock = stock.lock()?;
             let (exe, running) = Self::player_status()?;
             stock.record(flags, running)?;
             Ok::<_, io::Error>((lock, exe, running))
         })
         .await??;
-        self.confirm_take(Self::stop_if_running(exe, running)).await
+        self.confirm_take(Self::stop_if_running(&lock, exe, running))
+            .await
     }
 
     async fn confirm_take(&self, stopped: impl Future<Output = io::Result<()>>) -> io::Result<()> {
@@ -76,7 +112,7 @@ impl Stock {
 
     pub async fn keep_stopped(&self) -> io::Result<()> {
         let stock = self.clone();
-        let (_lock, exe, running) = tokio::task::spawn_blocking(move || {
+        let (lock, exe, running) = tokio::task::spawn_blocking(move || {
             let lock = stock.lock()?;
             if stock.ownership()? != Ownership::Owned {
                 return Err(io::Error::other("Bluetooth ownership no longer confirmed"));
@@ -85,7 +121,7 @@ impl Stock {
             Ok::<_, io::Error>((lock, exe, running))
         })
         .await??;
-        Self::stop_if_running(exe, running).await
+        Self::stop_if_running(&lock, exe, running).await
     }
 
     fn player_status() -> io::Result<(PathBuf, bool)> {
@@ -100,18 +136,26 @@ impl Stock {
         Ok((exe, running))
     }
 
-    async fn stop_if_running(exe: PathBuf, running: bool) -> io::Result<()> {
+    async fn stop_if_running(lock: &fs::File, exe: PathBuf, running: bool) -> io::Result<()> {
         if !running {
             return Ok(());
         }
-        stop_player(INIT, async move {
+        stop_player(lock, INIT, async move {
             tokio::task::spawn_blocking(move || Self::running(&exe)).await?
         })
         .await
     }
 
     pub async fn restore(&self) -> io::Result<()> {
-        let ctl = self.marker.with_file_name("ctl.sh");
+        let ctl = if self.marker.as_ref() == Path::new(TEST_MARKER) {
+            self.marker.with_file_name("ctl.sh")
+        } else {
+            trusted_dir().join("ctl.sh")
+        };
+        self.restore_with(&ctl).await
+    }
+
+    async fn restore_with(&self, ctl: &Path) -> io::Result<()> {
         let mut cmd = Command::new(ctl);
         cmd.args(["bt-restore", "--self"])
             .env("PULSAR_BT_OWNER", &*self.marker)
@@ -172,6 +216,9 @@ impl Stock {
     }
 
     fn record(&self, [pairable, discoverable]: [bool; 2], running: bool) -> io::Result<()> {
+        if self.marker.as_ref() == Path::new(LEGACY_MARKER) {
+            return Err(io::Error::other("legacy Bluetooth owner is restore-only"));
+        }
         if self.ownership()? != Ownership::Vacant {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -300,12 +347,27 @@ fn plugin_registered(config: &Path, confdir: &Path, etc_alsa: &Path) -> bool {
             })
 }
 
+fn stop_command(lock: &fs::File, path: &str) -> io::Result<std::process::Command> {
+    let mut cmd = std::process::Command::new("/bin/sh");
+    // Stdio переносит flock (тот же open file description) через exec.
+    // Оболочка держит его до конца stop, даже если Pulsar уже завершился.
+    cmd.args([
+        "-c",
+        "exec 8<&0 </dev/null || exit 1; \"$1\" stop; exit $?",
+        "pulsar-bt-stop",
+        path,
+    ])
+    .stdin(Stdio::from(lock.try_clone()?));
+    Ok(cmd)
+}
+
 async fn stop_player(
+    lock: &fs::File,
     path: &str,
     running: impl Future<Output = io::Result<bool>>,
 ) -> io::Result<()> {
-    let mut cmd = Command::new(path);
-    cmd.arg("stop").kill_on_drop(true);
+    // Не убиваем оболочку при отмене/таймауте: stop ещё может менять систему.
+    let mut cmd = Command::from(stop_command(lock, path)?);
     let status = tokio::time::timeout(Duration::from_secs(2), cmd.status())
         .await
         .map_err(|_| io::Error::other("stock player stop timed out"))??;
@@ -353,13 +415,65 @@ mod tests {
 
     #[tokio::test]
     async fn failed_stop_or_surviving_player_denies_takeover() {
+        let dir = test_dir("stop-result");
+        let lock = fs::File::create(dir.join("lock")).unwrap();
+        lock.lock().unwrap();
         assert!(
-            stop_player("/bin/false", async { Ok(false) })
+            stop_player(&lock, "/bin/false", async { Ok(false) })
                 .await
                 .is_err()
         );
-        assert!(stop_player("/bin/true", async { Ok(true) }).await.is_err());
-        assert!(stop_player("/bin/true", async { Ok(false) }).await.is_ok());
+        assert!(
+            stop_player(&lock, "/bin/true", async { Ok(true) })
+                .await
+                .is_err()
+        );
+        assert!(
+            stop_player(&lock, "/bin/true", async { Ok(false) })
+                .await
+                .is_ok()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn in_flight_stop_keeps_restore_locked_after_daemon_descriptors_close() {
+        use std::io::{BufRead as _, BufReader};
+
+        let dir = test_dir("stop-locked");
+        let stock = Stock {
+            marker: Arc::from(dir.join("owner")),
+        };
+        let lock = stock.lock().unwrap();
+        let gate = fs::File::create(dir.join("gate")).unwrap();
+        gate.lock().unwrap();
+        let init = dir.join("init");
+        fs::write(
+            &init,
+            "#!/bin/sh\n[ \"$1\" = stop ] || exit 2\nprintf 'ready\\n'\n\
+             flock -x \"${0%/*}/gate\" touch \"${0%/*}/stopped\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&init, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut child = stop_command(&lock, init.to_str().unwrap())
+            .unwrap()
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "ready\n");
+        drop(lock);
+        let restore_lock = fs::File::open(stock.lock_path()).unwrap();
+        let blocked = restore_lock.try_lock().is_err();
+        drop(gate);
+        assert!(child.wait().unwrap().success());
+        assert!(blocked);
+        restore_lock.try_lock().unwrap();
+        assert!(dir.join("stopped").exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -390,21 +504,23 @@ mod tests {
         }
         stock.record([true, false], true).unwrap();
         assert_eq!(stock.ownership().unwrap(), Ownership::PendingRestore);
+        let lock = stock.lock().unwrap();
         assert!(
             stock
-                .confirm_take(stop_player(init.to_str().unwrap(), async {
+                .confirm_take(stop_player(&lock, init.to_str().unwrap(), async {
                     Ok(player.exists())
                 }))
                 .await
                 .is_err()
         );
+        drop(lock);
         assert!(!player.exists());
-        assert!(stock.restore().await.is_err());
+        assert!(stock.restore_with(&ctl).await.is_err());
         assert_eq!(stock.ownership().unwrap(), Ownership::PendingRestore);
         assert!(stock.snapshot_exists().unwrap());
 
         fs::write(dir.join("adapter"), "").unwrap();
-        assert!(stock.restore().await.is_ok());
+        assert!(stock.restore_with(&ctl).await.is_ok());
         assert!(player.exists());
         assert_eq!(stock.ownership().unwrap(), Ownership::Vacant);
         fs::remove_dir_all(dir).unwrap();
