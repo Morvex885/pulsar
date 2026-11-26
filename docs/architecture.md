@@ -27,7 +27,7 @@
 | `pulsar-hw` | кольцо LED / логотип и кнопки |
 | `pulsar-clock` | часы, их стоковые анимации, шрифт, датчик освещённости |
 | `pulsar-zigbee` | радио Zigbee Миди: роли и прошивка радио; внутренний API — в `//!` `src/lib.rs` |
-| `pulsar-bt` | Bluetooth-режим колонки поверх штатного BlueZ (`dbus-send`); контракт статуса — [bluetooth.md](bluetooth.md) |
+| `pulsar-bt` | Входящий A2DP поверх BlueZ и BlueALSA, управляемый PCM-выход и AVRCP; [контракт Bluetooth](bluetooth.md) |
 | `pulsar-update` | бэкенд сущности обновления «Firmware» в HA |
 
 `third_party/` — только сборка sendspin-cpp.

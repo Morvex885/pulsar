@@ -59,6 +59,11 @@ impl<K: Copy + Eq> Timers<K> {
         self.arm(key, delay_ms, None);
     }
 
+    /// Ставит `key` на заданный монотонный срок без округления до миллисекунд.
+    pub fn set_at(&mut self, key: K, due: Instant) {
+        self.arm_at(key, due, None);
+    }
+
     /// (Re)arms `key` to fire after `delay_ms`, then every `period_ms` (counted from the wake-up
     /// that fired it). `period_ms == 0` is a one-shot, as in the C++ loop.
     pub fn set_repeating(&mut self, key: K, delay_ms: u64, period_ms: u64) {
@@ -90,10 +95,17 @@ impl<K: Copy + Eq> Timers<K> {
     }
 
     fn arm(&mut self, key: K, delay_ms: u64, period: Option<Duration>) {
+        self.arm_at(
+            key,
+            after(Instant::now(), Duration::from_millis(delay_ms)),
+            period,
+        );
+    }
+
+    fn arm_at(&mut self, key: K, due: Instant, period: Option<Duration>) {
         self.cancel(key);
         let seq = self.next_seq;
         self.next_seq += 1;
-        let due = after(Instant::now(), Duration::from_millis(delay_ms));
         self.entries.push(Entry {
             key,
             due,

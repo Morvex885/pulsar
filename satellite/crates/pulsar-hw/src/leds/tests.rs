@@ -127,6 +127,80 @@ fn user(on: bool) -> Cmd {
 }
 
 #[test]
+fn bluetooth_pairing_is_blue_only_in_idle_with_an_open_window() {
+    let mut c = Compositor::new(24, 6, LedLayout::Ring);
+    c.apply(Cmd::BtPairing(true), 0);
+    c.frame(0);
+    c.frame(FADE_MS);
+    assert_eq!(c.active_layer(FADE_MS), Layer::BtPairing);
+    c.frame(BT_PAIRING_TURN_MS);
+    assert_eq!(&c.px[..3], &[0, 0, 204]);
+    assert_eq!(&c.px[12 * 3..13 * 3], &[0, 0, 0]);
+    let quarter = BT_PAIRING_TURN_MS + BT_PAIRING_TURN_MS / 4;
+    assert!(c.frame(quarter));
+    assert_eq!(&c.px[6 * 3..7 * 3], &[0, 0, 204]);
+    assert!(c.px[2] < c.px[6 * 3 + 2]);
+    c.apply(Cmd::BtPairing(false), quarter);
+    c.frame(quarter);
+    assert_eq!(c.active_layer(quarter), Layer::Off);
+    assert!(c.px.iter().all(|&x| x == 0));
+
+    c.apply(Cmd::BtPairing(true), quarter);
+    // На Миди постоянный mute виден на логотипе; кольцо не должно мигать синим.
+    c.apply(Cmd::Muted(true), quarter);
+    assert_eq!(c.active_layer(quarter), Layer::Off);
+
+    let mut c = Compositor::new(3, 0, LedLayout::Ring);
+    c.apply(Cmd::BtPairing(true), 0);
+    c.apply(user(true), 0);
+    assert_eq!(c.active_layer(0), Layer::User);
+    c.apply(user(false), 0);
+    c.apply(Cmd::TimerStarted, 0);
+    assert_eq!(c.active_layer(0), Layer::OneShot);
+    ui(&mut c, UiState::TimerRing, 0);
+    assert_eq!(c.active_layer(0), Layer::Voice);
+    ui(&mut c, UiState::Listening, 0);
+    assert_eq!(c.active_layer(0), Layer::Voice);
+    c.apply(Cmd::Volume(0.4), 0);
+    assert_eq!(c.active_layer(0), Layer::Volume);
+}
+
+#[test]
+fn bluetooth_pairing_stays_visible_between_lite2_leds_in_the_dark() {
+    let mut c = Compositor::new(3, 0, LedLayout::Ring);
+    c.dimmer.update(0.0);
+    c.apply(Cmd::BtPairing(true), 0);
+    c.frame(0);
+    c.frame(BT_PAIRING_TURN_MS / 6);
+    assert!(c.px[2] >= 60);
+    assert!(c.px[5] >= 60);
+    assert_eq!(c.px[8], 0);
+}
+
+#[test]
+fn bluetooth_connection_flashes_after_the_pairing_light_goes_dark() {
+    let mut c = Compositor::new(3, 0, LedLayout::Ring);
+    c.apply(Cmd::BtPairing(true), 0);
+    c.frame(0);
+    c.frame(FADE_MS);
+    let start = FADE_MS + 1;
+    c.apply(Cmd::BtConnected, start);
+    assert!(!c.frame(start));
+    assert_eq!(&c.px[..3], &[0, 0, 0]);
+    assert_eq!(c.next_expiry(start), Some(start + BT_CONNECTED_GAP_MS));
+
+    let blue = start + BT_CONNECTED_GAP_MS;
+    assert!(!c.frame(blue));
+    assert_eq!(&c.px[..3], &[0, 0, 204]);
+    ui(&mut c, UiState::TimerRing, blue + 1);
+    c.frame(blue + 1);
+    assert_eq!(c.active_layer(blue + 1), Layer::Voice);
+    ui(&mut c, UiState::Idle, start + BT_CONNECTED_MS);
+    c.frame(start + BT_CONNECTED_MS);
+    assert_eq!(c.active_layer(start + BT_CONNECTED_MS), Layer::Off);
+}
+
+#[test]
 fn layer_priority() {
     let mut c = Compositor::new(3, 0, LedLayout::Ring);
     assert_eq!(c.active_layer(0), Layer::Off);

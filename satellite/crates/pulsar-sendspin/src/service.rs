@@ -337,7 +337,9 @@ impl Core {
 
     fn stream(&self, changed: Option<bool>) {
         if let Some(active) = changed {
-            self.send(SendspinEvent::Stream(active));
+            self.send(SendspinEvent::Stream(
+                active.then(pulsar_core::audio_start_order),
+            ));
         }
     }
 

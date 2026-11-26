@@ -3,15 +3,38 @@
 # PULSAR_TAG: free-form tag of the work holding the lock (one word, no spaces).
 set -eu
 usage() {
-  echo "usage: PULSAR_TAG=<tag> $0 midi|lite2|mini lock MINUTES|unlock|break-lock|stop|start|push FILE...|test-start|test-stop|test-log [N]|swap BINARY|restore|cleanup|status|log [N]" >&2
+  echo "usage: PULSAR_TAG=<tag> $0 midi|lite2|mini lock MINUTES|unlock|break-lock|stop|start|push FILE...|test-start [--bt]|test-stop|test-log [N]|swap BINARY|restore|cleanup|status|log [N]" >&2
   exit 2
 }
 [ $# -ge 2 ] || usage
 case "$1" in
-  midi) H=${PULSAR_MIDI:?PULSAR_MIDI is not set} ;;
-  lite2) H=${PULSAR_LITE2:?PULSAR_LITE2 is not set} ;;
-  mini) H=${PULSAR_MINI:?PULSAR_MINI is not set} ;;
+  midi) var=PULSAR_MIDI; H=${PULSAR_MIDI-} ;;
+  lite2) var=PULSAR_LITE2; H=${PULSAR_LITE2-} ;;
+  mini) var=PULSAR_MINI; H=${PULSAR_MINI-} ;;
   *) usage ;;
+esac
+if [ -z "$H" ]; then
+  if [ -n "${XDG_CONFIG_HOME:-${HOME:-}}" ]; then
+    file=${XDG_CONFIG_HOME:-$HOME/.config}/pulsar/stations/$1
+    if [ -f "$file" ] && [ -r "$file" ]; then
+      {
+        IFS= read -r H || :
+        if IFS= read -r extra || [ -n "$extra" ]; then
+          echo "заблокирован: в $file ожидается одна строка с SSH-назначением" >&2
+          exit 2
+        fi
+      } < "$file"
+    fi
+  fi
+  if [ -z "$H" ]; then
+    echo "заблокирован: нет $var и локального SSH-назначения для $1" >&2
+    exit 2
+  fi
+fi
+case "$H" in
+  -*|*[[:space:]]*)
+    echo "заблокирован: некорректное SSH-назначение для $1" >&2
+    exit 2 ;;
 esac
 station=$1
 cmd=$2
@@ -63,6 +86,8 @@ done
 if [ -n "$r" ]; then echo "removed stale ALSA dmix lock (${r# })"; fi
 EOF
 )
+# Не запускать установленный сервис и не удалять стенд, пока не возвращён тестовый BT.
+TEST_BT_RESTORED="if [ -e '$T/bt-owner' ] || [ -L '$T/bt-owner' ]; then echo 'test Bluetooth not restored: run test-stop' >&2; exit 1; fi"
 case "$cmd" in
   lock)
     [ $# -eq 1 ] || usage
@@ -89,45 +114,104 @@ case "$cmd" in
        sleep 1
        $DMIX
        ! pidof pulsar supervise.sh >/dev/null && echo stopped" ;;
-  start) own; r "$D/ctl.sh reload" ;;
+  start) own; r "$TEST_BT_RESTORED; $D/ctl.sh reload" ;;
   push)
     [ $# -ge 1 ] || usage
     own; r "mkdir -p $T"
     for f; do b=$(basename "$f"); up "$f" "$T/$b"; done ;;
   test-start)
+    case "$#:${1-}" in
+      0:) bt=0 ;;
+      1:--bt) bt=1 ;;
+      *) usage ;;
+    esac
     own
     # Один уровень для всех моделей: у Мини громкость программная, по той же шкале в дБ.
     vol=0.2
     # A quoted heredoc: no local shell expansion and no nested quotes in the remote command.
-    r sh -s -- "$T" "$D" "$vol" "$station" <<'EOF'
+    r sh -s -- "$T" "$D" "$vol" "$station" "$bt" <<'EOF'
 T=$1
 D=$2
 vol=$3
 station=$4
+bt=$5
 ! pidof supervise.sh >/dev/null || { echo 'run stop first' >&2; exit 1; }
+! pidof pulsar >/dev/null || { echo 'pulsar still running: run stop or test-stop first' >&2; exit 1; }
+[ ! -e "$T/bt-owner" ] && [ ! -L "$T/bt-owner" ] ||
+  { echo 'test Bluetooth not restored: run test-stop' >&2; exit 1; }
 [ -x "$T/pulsar" ] || { echo 'push pulsar first' >&2; exit 1; }
+if [ "$bt" = 1 ] && ! "$T/ctl.sh" bt-restore --check >/dev/null 2>&1; then
+  echo 'Bluetooth test needs a separately pushed satellite/deploy/ctl.sh with bt-restore' >&2
+  exit 1
+fi
 # api_key не копируется: тестовый экземпляр отдаёт plaintext API, ключ клиенту не нужен.
+if [ "$bt" = 1 ]; then set -- -e '^zigbee_role='; else set --; fi
 grep -v -e '^volume=' -e '^volume2=' -e '^volume_curve=' -e '^muted=' -e '^auto_update=' -e '^update_attempt=' \
-  "$D/state.conf" > "$T/state.conf" 2>/dev/null || true
-printf 'volume2=%s\nmuted=0\nauto_update=0\n' "$vol" >> "$T/state.conf"
-for z in "$D"/zigbee-*.ybl; do [ -f "$z" ] && cp "$z" "$T/"; done
+  "$@" "$D/state.conf" > "$T/state.conf" 2>/dev/null || true
+printf 'volume2=%s\nmuted=0\nauto_update=0\n' "$vol" >> "$T/state.conf" || exit 1
+if [ "$bt" = 1 ]; then
+  # Миди не должна открывать радио или применять его образ в Bluetooth-тесте.
+  printf 'zigbee_role=off\n' >> "$T/state.conf" || exit 1
+else
+  for z in "$D"/zigbee-*.ybl; do [ -f "$z" ] && cp "$z" "$T/"; done
+fi
 cd "$T" || exit 1
 if [ "$station" = mini ]; then
   [ -f "$D/asound.conf" ] || { echo 'Mini needs /data/pulsar/asound.conf (satellite/deploy/asound.conf)' >&2; exit 1; }
 fi
-nohup env PULSAR_PORT_OFFSET=10000 ./pulsar "$T/state.conf" < /dev/null >> "$T/log" 2>&1 &
-echo $! > "$T/pid"
+: > "$T/pid" || exit 1
+nohup env PULSAR_PORT_OFFSET=10000 PULSAR_BT_MANAGED="$bt" PULSAR_BT_OWNER="$T/bt-owner" \
+  ./pulsar "$T/state.conf" < /dev/null >> "$T/log" 2>&1 &
+p=$!
+if ! printf '%s\n' "$p" > "$T/pid"; then
+  kill "$p" 2>/dev/null
+  echo 'could not record test pid: check test-log and run test-stop' >&2
+  exit 1
+fi
 sleep 2
-kill -0 "$(cat "$T/pid")" && echo started
+kill -0 "$p" && echo started ||
+  { echo 'test pulsar exited: check test-log and run test-stop' >&2; exit 1; }
 EOF
     ;;
   test-stop)
     own
-    r "p=\$(cat $T/pid) || exit 1; kill \$p 2>/dev/null
-       i=0; while [ \$i -lt 10 ] && kill -0 \$p 2>/dev/null; do sleep 1; i=\$((i+1)); done
-       kill -0 \$p 2>/dev/null && kill -9 \$p; rm -f $T/pid
-       $DMIX
-       echo stopped" ;;
+    r sh -s -- "$T" <<'EOF'
+T=$1
+test_running() {
+  case "$(readlink "/proc/$p/exe" 2>/dev/null)" in
+    "$T/pulsar"|"$T/pulsar (deleted)") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ -f "$T/pid" ]; then
+  IFS= read -r p < "$T/pid" || exit 1
+  case "$p" in
+    ''|*[!0-9]*) echo 'invalid test pid file' >&2; exit 1 ;;
+  esac
+  [ "$p" -gt 1 ] || exit 1
+  if test_running; then
+    kill "$p" 2>/dev/null
+    i=0
+    while [ "$i" -lt 10 ] && test_running; do sleep 1; i=$((i + 1)); done
+    if test_running; then
+      kill -KILL "$p" 2>/dev/null
+      i=0
+      while [ "$i" -lt 5 ] && test_running; do sleep 1; i=$((i + 1)); done
+    fi
+    ! test_running || { echo 'test pulsar still running, Bluetooth not restored' >&2; exit 1; }
+  fi
+  rm -f "$T/pid" || exit 1
+fi
+if [ -e "$T/bt-owner" ] || [ -L "$T/bt-owner" ]; then
+  if ! PULSAR_BT_OWNER="$T/bt-owner" "$T/ctl.sh" bt-restore; then
+    echo 'test Bluetooth not restored: keep the test files, do not start the installed service' >&2
+    exit 1
+  fi
+fi
+EOF
+    r "$DMIX"
+    echo stopped ;;
   test-log) r "tail -n ${1:-50} $T/log" ;;
   swap)
     [ $# -eq 1 ] || usage
@@ -135,7 +219,8 @@ EOF
     # The installed binary is kept as pulsar.orig and serves as .prev meanwhile, so a rollback by
     # supervise.sh lands on it; the owner's .prev waits in pulsar.prev.orig.
     # df -P: busybox `df -k` переносит строку при длинном имени устройства.
-    r "[ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
+    r "$TEST_BT_RESTORED
+       [ -f $D/enabled ] || { echo 'Yandex mode (no $D/enabled): refusing' >&2; exit 1; }
        [ \$(df -Pk $D | awk 'NR==2 {print \$4}') -gt 30000 ] || { echo 'less than 30 MB free in $D' >&2; exit 1; }
        cd $D && { [ -f pulsar.orig ] || cp -p pulsar pulsar.orig; } \
          && { [ ! -f pulsar.prev ] || [ -f pulsar.prev.orig ] || cp -p pulsar.prev pulsar.prev.orig; }"
@@ -145,14 +230,16 @@ EOF
   restore)
     own
     # Если после краш-цикла supervise.sh удалил enabled (give_back), станцию возвращает ctl.sh enable.
-    r "cd $D && [ -f pulsar.orig ] || { echo 'no pulsar.orig' >&2; exit 1; }
+    r "$TEST_BT_RESTORED
+       cd $D && [ -f pulsar.orig ] || { echo 'no pulsar.orig' >&2; exit 1; }
        cd $D && cp -p pulsar.orig pulsar.tmp && mv pulsar.tmp pulsar && rm -f pulsar.orig || exit 1
        if [ -f pulsar.prev.orig ]; then mv pulsar.prev.orig pulsar.prev; fi
        sync
        if [ -f enabled ]; then ./ctl.sh restart; else ./ctl.sh enable; fi" ;;
   cleanup)
     own
-    r "if [ -f $T/pid ] && kill -0 \$(cat $T/pid) 2>/dev/null; then echo 'test instance running: test-stop first' >&2; exit 1; fi
+    r "$TEST_BT_RESTORED
+       if [ -f $T/pid ] && kill -0 \$(cat $T/pid) 2>/dev/null; then echo 'test instance running: test-stop first' >&2; exit 1; fi
        rm -rf $T || exit 1
        $DMIX" ;;
   status) r "$D/ctl.sh status; ls -l $D; df -Pk $D; cat $L/owner 2>/dev/null || echo 'no lock'" ;;

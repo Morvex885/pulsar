@@ -107,9 +107,9 @@ impl Controller {
             api.publish_text_sensor(TextSensorId::Zigbee, &z.status());
         }
         if let Some(bt) = &self.bt {
-            api.publish_switch(SwitchId::Bluetooth, bt.discoverable());
-            // Не через дедуп Changed, как у Zigbee: публикуем ровно то, что видит handle.
-            api.publish_text_sensor(TextSensorId::Bluetooth, &bt.status());
+            let state = bt.state();
+            api.publish_switch(SwitchId::Bluetooth, state.enabled);
+            api.publish_text_sensor(TextSensorId::Bluetooth, &state.status);
         }
         api.publish_light(&self.st.light);
         if self.last_lux_published >= 0.0 {
@@ -200,14 +200,7 @@ impl Controller {
                 self.leds.set_voice_indication(state);
                 self.clock.set_voice_indication(state);
             }
-            SwitchId::Bluetooth => {
-                // Фактическое состояние (и статус) придут с BtEvent::Changed после отклика
-                // dbus; в state.conf не пишется — режим живёт в bluetoothd.
-                if let Some(bt) = &self.bt {
-                    bt.set_discoverable(state);
-                }
-                return;
-            }
+            SwitchId::Bluetooth => return self.set_bluetooth(state),
         }
         self.api.publish_switch(id, state);
         self.persist();
@@ -467,6 +460,8 @@ impl Controller {
 
     pub(super) fn on_input(&mut self, ev: InputEvent) {
         match ev {
+            InputEvent::BluetoothPairing => self.set_bluetooth(true),
+            InputEvent::PlayPause => self.bluetooth_play_pause_button(),
             InputEvent::Mute(m) | InputEvent::MuteSync(m) => {
                 if m {
                     self.cancel_arbitration();
@@ -579,41 +574,54 @@ impl Controller {
         }
     }
 
-    /// Строка статуса и видимость: публикуем при каждом реальном изменении (актор pulsar-bt
-    /// шлёт Changed только тогда).
-    pub(super) fn on_bt(&mut self, ev: BtEvent) {
-        match ev {
-            BtEvent::Changed => {}
-        }
-        let Some(bt) = &self.bt else {
-            return;
-        };
-        let status = bt.status();
-        let discoverable = bt.discoverable();
-        if status == self.bt_status && discoverable == self.bt_discoverable {
-            return;
-        }
-        info!("bluetooth: {status}");
-        self.api.publish_switch(SwitchId::Bluetooth, discoverable);
+    pub(super) fn on_bt(&mut self, BtEvent::Changed: BtEvent) {
+        let Some(bt) = &self.bt else { return };
+        let state = bt.state();
+        self.api.publish_switch(SwitchId::Bluetooth, state.enabled);
         self.api
-            .publish_text_sensor(TextSensorId::Bluetooth, &status);
-        self.bt_status = status;
-        self.bt_discoverable = discoverable;
+            .publish_text_sensor(TextSensorId::Bluetooth, &state.status);
+        if self.bt_connection != state.connection {
+            self.bt_connection = state.connection;
+            if state.connection.is_some() {
+                self.leds.show_bt_connected();
+                self.clock.play(pulsar_core::ClockShot::BluetoothConnected);
+                self.play_bluetooth_cue();
+            }
+        }
+        if self.bt_starts != state.starts {
+            self.bt_starts = state.starts;
+            if state.admitted {
+                if state.starts > self.audio_start {
+                    self.audio_start = state.starts;
+                    self.bluetooth_takes_audio();
+                    bt.admit(state.starts);
+                } else {
+                    bt.preempt_before(self.audio_start);
+                }
+            }
+        }
+        self.update_ui();
+    }
+
+    pub(super) fn set_bluetooth(&mut self, enabled: bool) {
+        let Some(bt) = &self.bt else { return };
+        bt.set_enabled(enabled);
+        if self.st.bluetooth_enabled != enabled {
+            self.st.bluetooth_enabled = enabled;
+            let _ = self.persist_now();
+        }
     }
 
     /// Аргумент "action" действия `bt`: on|off — тот же режим, что switch; остальное — AVRCP
     /// подключённому источнику.
     fn on_bt_action(&mut self, action: &str) {
-        let Some(bt) = &self.bt else {
-            warn!("bluetooth: action '{action}' without an adapter");
-            return;
-        };
         match action {
-            "on" => bt.set_discoverable(true),
-            "off" => bt.set_discoverable(false),
-            _ => match BtAction::parse(action) {
-                Some(a) => bt.avr(a),
-                None => warn!("bluetooth: unknown action '{action}'"),
+            "on" => self.set_bluetooth(true),
+            "off" => self.set_bluetooth(false),
+            _ => match (self.bt.as_ref(), BtAction::parse(action)) {
+                (Some(bt), Some(a)) => bt.avr(a),
+                (_, None) => warn!("bluetooth: unknown action"),
+                (None, _) => {}
             },
         }
     }

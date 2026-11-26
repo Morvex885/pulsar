@@ -1051,14 +1051,14 @@ async fn bluetooth_entities_are_gated_on_the_adapter_and_round_trip() {
             // сливаем начальный дамп закэшированных состояний — ниже проверяем только публикации
             p.sync().await;
             h.publish_switch(SwitchId::Bluetooth, true);
-            h.publish_text_sensor(TextSensorId::Bluetooth, "discoverable");
+            h.publish_text_sensor(TextSensorId::Bluetooth, "ready");
             let got = p.sync().await;
             assert_eq!(got.len(), 2, "{got:?}");
             assert_eq!(got[0].0, msg::SWITCH_STATE);
             assert_eq!(state_key(&got[0].1), Some(key::SW_BLUETOOTH));
             assert!(field(&got[0].1, 2).unwrap().boolean());
             assert_eq!(state_key(&got[1].1), Some(key::TEXT_BLUETOOTH));
-            assert_eq!(field(&got[1].1, 2).unwrap().str(), "discoverable");
+            assert_eq!(field(&got[1].1, 2).unwrap().str(), "ready");
             // Новый подписчик получает закэшированные значения.
             let mut p2 = Peer::connect(port).await;
             p2.hello("HA2").await;
@@ -1074,7 +1074,7 @@ async fn bluetooth_entities_are_gated_on_the_adapter_and_round_trip() {
                 .iter()
                 .find(|(_, m)| state_key(m) == Some(key::TEXT_BLUETOOTH))
                 .unwrap();
-            assert_eq!(field(&tx.1, 2).unwrap().str(), "discoverable");
+            assert_eq!(field(&tx.1, 2).unwrap().str(), "ready");
         })
         .await;
 }

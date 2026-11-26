@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use log::{debug, info, warn};
+use pulsar_bt::{BtAction, BtHandle, Playback};
 use pulsar_core::{ClockShot, UiState, now_ms};
 use pulsar_esphome::{AnnounceRequest, TimerEvent, TimerInfo, VaEvent};
 use pulsar_lan::arbiter::Claim;
@@ -133,20 +134,24 @@ impl Controller {
         if matches!(self.phase, Phase::Listening | Phase::Processing) || self.arbitrating {
             return;
         }
-        // Without the HA pipeline this station could win and stay silent: it does not take part.
-        if !self.arbitration_on() || !self.api.voice_subscribed() {
-            return self.answer_wake(PipelineStart::WakeWord, preroll);
+        let voice = self.api.voice_subscribed();
+        self.bt_voice_until_ms = 0;
+        // Станция, проигравшая прошлый арбитраж, может ответить на новый wake.
+        self.commands_blocked_until_ms = 0;
+        if !self.arbitration_on() || (!voice && self.bt.is_none()) {
+            return self.answer_wake(PipelineStart::WakeWord, preroll, voice);
         }
         self.arbitrating = true;
-        // A station that lost the previous wake word may win this one.
-        self.commands_blocked_until_ms = 0;
         self.arb_phrase.clear();
         self.arb_phrase
             .push_str(logic::wake_word_phrase(&self.active_wake_word));
         self.arb_level = level_db;
-        self.arb_audio = preroll;
+        self.arb_captures_voice = voice;
+        self.arb_audio = if voice { preroll } else { Vec::new() };
         self.arb_command.clear();
-        self.mic.set_streaming(true);
+        if voice {
+            self.mic.set_streaming(true);
+        }
         self.update_ui();
         let busy = self.phase == Phase::Speaking || self.announcing;
         self.arb_claim = Some(
@@ -155,25 +160,39 @@ impl Controller {
         );
     }
 
-    fn answer_wake(&mut self, start: PipelineStart, preroll: Vec<i16>) {
+    fn answer_wake(&mut self, start: PipelineStart, preroll: Vec<i16>, voice: bool) {
+        if self.mic_muted() {
+            return;
+        }
         if self.timer_ringing {
             return self.stop_timer_ring();
         }
         if matches!(self.phase, Phase::Listening | Phase::Processing) {
             return;
         }
-        if self.phase == Phase::Speaking || self.announcing {
-            self.interrupt_speech(); // barge-in: cut the answer short
+        if voice || self.bt.is_none() {
+            if self.phase == Phase::Speaking || self.announcing {
+                self.interrupt_speech(); // barge-in: cut the answer short
+            }
+            self.start_pipeline(start, preroll);
         }
-        self.start_pipeline(start, preroll);
+        self.open_bluetooth_voice_window();
+    }
+
+    fn open_bluetooth_voice_window(&mut self) {
+        if self.bt.is_some() {
+            self.bt_voice_until_ms = now_ms() + COMMAND_AFTER_WAKE_MS;
+        }
     }
 
     pub(super) fn arbitration_done(&mut self, won: bool, best: &Claim, peers: usize) {
         self.arbitrating = false;
         self.arb_claim = None;
+        let voice = std::mem::take(&mut self.arb_captures_voice) && self.api.voice_subscribed();
         let audio = std::mem::take(&mut self.arb_audio);
         let command = std::mem::take(&mut self.arb_command);
         if !won {
+            self.bt_voice_until_ms = 0;
             self.mic.set_streaming(false);
             info!(
                 "wake word: {} answers ({}{:.1} dB, ours {:.1} dB)",
@@ -188,27 +207,37 @@ impl Controller {
             return;
         }
         info!("wake word: this station answers ({peers} other station(s) heard it)");
-        if !command.is_empty() {
-            // "Алиса, громче": handled locally, as right after the wake word.
+        if logic::command_of(&command).is_some() {
+            // Подтверждённый wake допускает локальный Bluetooth даже без голосового клиента.
+            self.open_bluetooth_voice_window();
             self.mic.set_streaming(false);
             self.update_ui();
-            return self.on_command(&command, true);
+            return self.on_command(&command, voice);
         }
         // Capture keeps streaming into the new dialog: switching it off here could drop the
         // chunk between the preroll and live audio.
         let phrase = std::mem::take(&mut self.arb_phrase);
-        self.answer_wake(PipelineStart::Arbitrated(phrase), audio);
+        self.answer_wake(PipelineStart::Arbitrated(phrase), audio, voice);
+        if !command.is_empty() {
+            // Другая фраза уже заняла окно, но осталась запросом к HA.
+            self.bt_voice_until_ms = 0;
+        }
         if self.phase != Phase::Listening {
             self.mic.set_streaming(false); // no dialog started (e.g. HA gone)
+            if self.bt.is_some() && !voice {
+                self.update_ui();
+            }
         }
     }
 
     pub(super) fn cancel_arbitration(&mut self) {
+        self.bt_voice_until_ms = 0;
         if !self.arbitrating {
             return;
         }
         self.arbiter.cancel();
         self.arbitrating = false;
+        self.arb_captures_voice = false;
         self.arb_claim = None;
         self.arb_audio.clear();
         self.arb_command.clear();
@@ -518,7 +547,8 @@ impl Controller {
             self.clear_speech_display();
         }
         self.send_tts_report(false);
-        self.mic.set_streaming(self.arbitrating);
+        self.mic
+            .set_streaming(self.arbitrating && self.arb_captures_voice);
         self.phase = Phase::Idle;
         self.dialog += 1;
         self.tts_played = false;
@@ -612,6 +642,7 @@ impl Controller {
 
     /// The Button's short press.
     pub(super) fn action_button(&mut self) {
+        self.bt_voice_until_ms = 0;
         if self.timer_ringing {
             return self.stop_timer_ring();
         }
@@ -775,9 +806,8 @@ impl Controller {
 
     // ---------------- local commands ----------------
 
-    /// Stock command spotter ("стоп", "хватит", "пауза", "продолжи", "громче", "тише", "дальше",
-    /// "назад"): on unless the microphone is muted, the dialog included; which words act where is
-    /// logic::command_allowed.
+    /// Командный спотер включён и во время диалога, если микрофон не выключен.
+    /// Допуск конкретной команды определяет `logic::command_allowed`.
     pub(super) fn update_commands(&self) {
         self.mic.set_commands(!self.mic_muted());
     }
@@ -791,6 +821,39 @@ impl Controller {
             self.sendspin.as_ref().is_some_and(|ss| ss.connected()),
             self.sendspin_ended_ms,
         )
+    }
+
+    fn bluetooth_playback(&self) -> Option<Playback> {
+        self.bt.as_ref()?.state().playback
+    }
+
+    fn bluetooth_transport_source(&self) -> Option<&BtHandle> {
+        let bt = self.bt.as_ref()?;
+        let state = bt.state();
+        let local_active = matches!(
+            self.player.state(Channel::Music),
+            PlayState::Playing | PlayState::Loading
+        ) || self.sendspin_streaming();
+        (state.connected() && (state.admitted || !local_active)).then_some(bt)
+    }
+
+    pub(super) fn bluetooth_play_pause_button(&self) {
+        if self.timer_ringing
+            || self.phase != Phase::Idle
+            || self.announcing
+            || self.arbitrating
+            || self.sendspin_pairing_prompt
+        {
+            return;
+        }
+        let Some(bt) = self.bluetooth_transport_source() else {
+            return;
+        };
+        match self.bluetooth_playback() {
+            Some(Playback::Playing) => bt.avr(BtAction::Pause),
+            Some(Playback::Paused) => bt.avr(BtAction::Play),
+            None => {}
+        }
     }
 
     /// True when something was playing. Reads the player and Sendspin states before the
@@ -824,37 +887,59 @@ impl Controller {
     /// `held`: the word came during a wake arbitration this station won, right after its wake
     /// word.
     pub(super) fn on_command(&mut self, word: &str, held: bool) {
-        if self.mic_muted() {
+        if self.mic_muted() || word.is_empty() {
             return;
         }
-        let Some(c) = logic::command_of(word) else {
+        let now = now_ms();
+        let command = logic::command_of(word)
+            .filter(|c| !matches!(c, VoiceCommand::Bluetooth(_)) || self.bt.is_some());
+        if command.is_none() && self.bt.is_none() {
             return;
-        };
-        if now_ms() < self.commands_blocked_until_ms {
+        }
+        if now < self.commands_blocked_until_ms {
             info!("voice command '{word}' ignored: another station answers this wake word");
             return;
         }
         if self.arbitrating {
-            self.arb_command = word.to_owned();
-            info!("voice command '{word}' held until the wake arbitration ends");
+            // Первое слово расходует одноразовое окно Bluetooth, даже если это другая команда.
+            if (self.bt.is_some() && self.arb_command.is_empty())
+                || (self.bt.is_none() && command.is_some())
+            {
+                self.arb_command = word.to_owned();
+                info!("voice command '{word}' held until the wake arbitration ends");
+            }
             return;
         }
-        let after_wake = logic::after_wake(
-            self.phase,
-            self.wake_dialog,
-            now_ms(),
-            self.listen_started_ms,
+        let after_wake =
+            logic::after_wake(self.phase, self.wake_dialog, now, self.listen_started_ms);
+        let wake = logic::command_wake(
+            command,
+            held || after_wake,
+            &mut self.bt_voice_until_ms,
+            now,
         );
+        let Some(c) = command else {
+            return;
+        };
+        if self.timer_ringing && matches!(c, VoiceCommand::Bluetooth(_)) {
+            return;
+        }
         // Без wake word или после его окна слова относятся к запросу, кроме «стоп».
         let in_dialog = matches!(self.phase, Phase::Listening | Phase::Processing) && !after_wake;
         let sounding = self.phase == Phase::Speaking || self.announcing || self.timer_ringing;
-        if !logic::command_allowed(
-            c,
-            held || after_wake,
-            in_dialog,
-            sounding,
-            self.owns_music(),
-        ) {
+        let bluetooth_action = match c {
+            VoiceCommand::Pause => Some(BtAction::Pause),
+            VoiceCommand::Resume => Some(BtAction::Play),
+            VoiceCommand::Next => Some(BtAction::Next),
+            VoiceCommand::Prev => Some(BtAction::Previous),
+            _ => None,
+        }
+        .filter(|_| self.bluetooth_transport_source().is_some());
+        let owns_music = self.owns_music()
+            || bluetooth_action.is_some()
+            || (matches!(c, VoiceCommand::Louder | VoiceCommand::Quieter)
+                && self.bluetooth_playback().is_some());
+        if !logic::command_allowed(c, wake, in_dialog, sounding, owns_music) {
             if in_dialog {
                 info!("voice command '{word}' ignored: part of the request");
             } else {
@@ -866,7 +951,7 @@ impl Controller {
             "voice command '{word}'{}",
             if after_wake {
                 " (after wake word, HA pipeline cancelled)"
-            } else if held {
+            } else if wake {
                 " (after wake word)"
             } else if in_dialog {
                 " (in a dialog)"
@@ -880,7 +965,14 @@ impl Controller {
         if after_wake {
             self.finish_interaction();
         }
+        if let Some(action) = bluetooth_action
+            && let Some(bt) = &self.bt
+        {
+            bt.avr(action);
+            return;
+        }
         match c {
+            VoiceCommand::Bluetooth(on) => self.set_bluetooth(on),
             VoiceCommand::Stop => self.stop_word(in_dialog),
             VoiceCommand::Pause => {
                 if self.music_pause() {

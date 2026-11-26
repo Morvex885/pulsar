@@ -61,6 +61,8 @@ fn main() -> ExitCode {
     // Before the runtime, threads and any audio library: ALSA_CONFIG_PATH and libasound.
     pulsar_alsa::init(model);
 
+    pulsar_media::set_ssl_cert_file();
+
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(4)
@@ -74,7 +76,7 @@ fn main() -> ExitCode {
     };
     let local = tokio::task::LocalSet::new();
     let status = local.block_on(&rt, async {
-        let mut ctl = match Controller::start(model, state) {
+        let mut ctl = match Controller::start(model, state).await {
             Ok(c) => c,
             Err(e) => {
                 error!("{e}");

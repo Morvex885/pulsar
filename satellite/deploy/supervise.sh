@@ -43,8 +43,23 @@ rotate() {
 
 say() { echo "=== supervise: $* $(date)" >> "$LOG"; }
 
+# Старая ctl.sh не гарантирует возврат player при disable или откате.
+bt_allowed=${PULSAR_BT_MANAGED:-1}
+bt_owner=${PULSAR_BT_OWNER:-/tmp/pulsar-bt-owner}
+
+restore_bt() {
+  if [ -e "$bt_owner" ] || [ -L "$bt_owner" ]; then
+    if ! "$D/ctl.sh" bt-restore >> "$LOG" 2>&1; then
+      say "Bluetooth restore failed; not starting the previous binary or the Yandex stack"
+      return 1
+    fi
+  fi
+  bt_allowed=0
+}
+
 give_back() { # Yandex stack again, like ctl.sh disable
   rm -f "$D/enabled"
+  restore_bt || exit 1
   say "$1; disabled, starting the Yandex stack"
   pidof quasar_launcher2 >/dev/null 2>&1 || "$Q" start >/dev/null 2>&1
   exit 1
@@ -82,6 +97,7 @@ while [ -f "$D/enabled" ]; do
   if [ ! -x "$BIN" ]; then
     say "$BIN missing or not executable"
     if [ "$swapped" = 0 ] && [ -x "$BIN.prev" ]; then
+      restore_bt || exit 1
       cp -p "$BIN.prev" "$BIN.tmp" && mv "$BIN.tmp" "$BIN" && swapped=1 && fails=0 && say "restored .prev" && continue
     fi
     give_back "no usable binary"
@@ -89,7 +105,11 @@ while [ -f "$D/enabled" ]; do
   clear_dmix
   echo "=== start $(date)" >> "$LOG"
   t0=$(uptime_s)
-  "$BIN" "$D/state.conf" >> "$LOG" 2>&1
+  bt_managed=0
+  if [ "$bt_allowed" = 1 ] && "$D/ctl.sh" bt-restore --check >/dev/null 2>&1; then
+    bt_managed=1
+  fi
+  PULSAR_BT_MANAGED=$bt_managed "$BIN" "$D/state.conf" >> "$LOG" 2>&1
   rc=$?
   up=$(($(uptime_s) - t0))
   echo "=== exit $rc after ${up}s $(date)" >> "$LOG"
@@ -106,6 +126,7 @@ while [ -f "$D/enabled" ]; do
   fails=$((fails + 1))
   if [ $fails -ge $CRASHES ]; then
     if [ "$swapped" = 0 ] && [ -f "$BIN.prev" ] && ! cmp -s "$BIN" "$BIN.prev"; then
+      restore_bt || exit 1
       mv -f "$BIN" "$BIN.bad"
       if cp -p "$BIN.prev" "$BIN.tmp" && mv "$BIN.tmp" "$BIN"; then
         swapped=1 fails=0 backoff=$BACKOFF_MIN
@@ -122,3 +143,4 @@ while [ -f "$D/enabled" ]; do
   backoff=$((backoff * 2))
   [ $backoff -gt $BACKOFF_MAX ] && backoff=$BACKOFF_MAX
 done
+exit 0

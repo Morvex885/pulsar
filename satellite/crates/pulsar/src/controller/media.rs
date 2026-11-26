@@ -4,7 +4,7 @@ use log::debug;
 use pulsar_core::{ClockShot, now_ms};
 use pulsar_esphome::{MediaCommand, MediaCommandRequest};
 use pulsar_media::{Channel, PlayState};
-use pulsar_sendspin::SendspinEvent;
+use pulsar_sendspin::{SendspinEvent, Transport};
 
 use super::logic::{self, cxx_max, cxx_min};
 use super::{Controller, DUCK_GAIN, Pending, SOUNDS};
@@ -39,6 +39,27 @@ impl Controller {
             .set_channel_gain(Channel::Announce, if self.st.muted { 0.0 } else { master });
         if let Some(ss) = &self.sendspin {
             ss.set_duck_gain(music);
+        }
+        if let Some(bt) = &self.bt {
+            bt.set_gain(music);
+        }
+    }
+
+    fn bluetooth_yields_audio(&mut self, order: u64) {
+        self.audio_start = order;
+        if let Some(bt) = &self.bt {
+            bt.preempt_before(order);
+        }
+    }
+
+    pub(super) fn bluetooth_takes_audio(&self) {
+        // Остановить также незавершённый запуск Music: его PLAYING может прийти позже.
+        self.player.stop(Channel::Music);
+        if let Some(ss) = &self.sendspin
+            && ss.streaming()
+            && !ss.transport(Transport::Pause)
+        {
+            ss.yield_to_local();
         }
     }
 
@@ -97,6 +118,24 @@ impl Controller {
         self.player.play(Channel::Announce, vec![sound]);
     }
 
+    pub(super) fn play_bluetooth_cue(&self) {
+        if self.st.muted
+            || self.phase != logic::Phase::Idle
+            || self.arbitrating
+            || self.announcing
+            || self.timer_ringing
+            || self.closing_earcon
+            || self.player.state(Channel::Announce) != PlayState::Idle
+        {
+            return;
+        }
+        // Джингл лежит в прошивке, на части моделей его может не быть.
+        let tone = format!("{SOUNDS}common/bluetooth_turning_on_jingle.opus");
+        if std::path::Path::new(&tone).is_file() {
+            self.player.play(Channel::Announce, vec![tone]);
+        }
+    }
+
     /// Reads the player state as it is now: right after a command to the player it is still the
     /// previous one (as in C++); the change comes as `PlayerEvent::State`, which publishes again.
     pub(super) fn publish_media(&self) {
@@ -135,6 +174,7 @@ impl Controller {
                 let id = self.player.play(Channel::Announce, vec![url]);
                 self.pending.insert(id, Pending::MediaAnnounce { seq });
             } else {
+                self.bluetooth_yields_audio(pulsar_core::audio_start_order());
                 if let Some(ss) = &self.sendspin {
                     ss.yield_to_local(); // HA media takes the speaker from Sendspin
                 }
@@ -146,9 +186,13 @@ impl Controller {
         }
         if let Some(c) = cmd.command {
             let ss_on = self.sendspin_streaming();
-            let music = || self.player.state(Channel::Music);
+            let music_state = self.player.state(Channel::Music);
+            let music = || music_state;
             match c {
                 MediaCommand::Play => {
+                    if music() == PlayState::Paused {
+                        self.bluetooth_yields_audio(pulsar_core::audio_start_order());
+                    }
                     if ss_on
                         && music() == PlayState::Paused
                         && let Some(ss) = &self.sendspin
@@ -181,6 +225,9 @@ impl Controller {
                             ss.yield_to_local();
                         }
                     } else {
+                        if music() == PlayState::Paused {
+                            self.bluetooth_yields_audio(pulsar_core::audio_start_order());
+                        }
                         self.player.resume(Channel::Music);
                     }
                 }
@@ -208,7 +255,14 @@ impl Controller {
 
     pub(super) fn on_sendspin(&mut self, ev: SendspinEvent) {
         match ev {
-            SendspinEvent::Stream(active) => {
+            SendspinEvent::Stream(order) => {
+                let active = order.is_some();
+                if let Some(order) = order {
+                    if order <= self.audio_start || !self.sendspin_streaming() {
+                        return;
+                    }
+                    self.bluetooth_yields_audio(order);
+                }
                 // Music Assistant took over the speaker: the HA media channel yields to it.
                 if active && self.player.state(Channel::Music) != PlayState::Idle {
                     self.player.stop(Channel::Music);

@@ -229,6 +229,7 @@ pub enum VoiceCommand {
     Quieter,
     Next,
     Prev,
+    Bluetooth(bool),
 }
 
 /// None: TV navigation, "включи свет" etc., left to Home Assistant.
@@ -241,6 +242,8 @@ pub fn command_of(word: &str) -> Option<VoiceCommand> {
         "тише" => VoiceCommand::Quieter,
         "дальше" | "следующий" => VoiceCommand::Next,
         "назад" => VoiceCommand::Prev,
+        "включи блютуз" => VoiceCommand::Bluetooth(true),
+        "выключи блютуз" => VoiceCommand::Bluetooth(false),
         _ => return None,
     })
 }
@@ -269,6 +272,21 @@ pub fn after_wake(phase: Phase, wake_dialog: bool, now: i64, listen_started_ms: 
         && now - listen_started_ms < COMMAND_AFTER_WAKE_MS
 }
 
+/// Любая команда расходует окно Bluetooth, но это окно не даёт права на другие команды.
+pub(super) fn command_wake(
+    command: Option<VoiceCommand>,
+    voice_wake: bool,
+    bluetooth_until_ms: &mut i64,
+    now_ms: i64,
+) -> bool {
+    let bluetooth_wake = now_ms < std::mem::take(bluetooth_until_ms);
+    match command {
+        Some(VoiceCommand::Bluetooth(_)) => bluetooth_wake,
+        Some(_) => voice_wake,
+        None => false,
+    }
+}
+
 /// Music of this station: playing or loading on the HA media channel or as a Sendspin stream, or
 /// paused / ended less than PAUSED_MUSIC_MS ago (Sendspin: its server still connected).
 /// `*_since`: when the media channel paused / the Sendspin stream ended; None = not since start.
@@ -295,6 +313,7 @@ pub fn owns_music(
 /// LISTENING / PROCESSING без `after_wake`) проходит только «стоп» и отменяет диалог:
 /// остальные слова — часть запроса. Принятый компромисс: «стоп»-слово внутри запроса
 /// («хватит ли …») тоже отменяет диалог.
+/// Для Bluetooth передаётся только отдельное подтверждённое wake-окно, а не окно диалога HA.
 pub fn command_allowed(
     c: VoiceCommand,
     wake: bool,
@@ -309,6 +328,7 @@ pub fn command_allowed(
         return c == VoiceCommand::Stop;
     }
     match c {
+        VoiceCommand::Bluetooth(_) => false,
         VoiceCommand::Stop => true,
         VoiceCommand::Louder | VoiceCommand::Quieter => sounding || owns_music,
         VoiceCommand::Pause | VoiceCommand::Resume | VoiceCommand::Next | VoiceCommand::Prev => {
@@ -729,8 +749,8 @@ pub fn initial_wake_words<'a>(
 /// См. docs/voice.md, «Голосовой ассистент HA (ESPHome)».
 pub fn wake_word_phrase(id: &str) -> &str {
     match id {
-        "alisa" => "Алиса",
-        "yandex" => "Яндекс",
+        "alisa" => "Alice",
+        "yandex" => "Yandex",
         "yasmina" => "Yasmina",
         other => other,
     }

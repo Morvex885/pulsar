@@ -55,6 +55,9 @@ const PANEL_LUX_GAIN: f32 = 9.5;
 /// Global cap: never drive LEDs above 80 % PWM.
 const MAX_SCALE: f32 = 0.8;
 const VOLUME_SHOW_MS: i64 = 1500;
+const BT_PAIRING_TURN_MS: i64 = 1800;
+const BT_CONNECTED_GAP_MS: i64 = 150;
+const BT_CONNECTED_MS: i64 = 650;
 /// Crossfade between layers.
 const FADE_MS: i64 = 250;
 /// Longest time step of one frame (after an idle stretch).
@@ -285,6 +288,8 @@ fn strtod_prefix(s: &[u8]) -> Option<(f64, usize)> {
 enum Cmd {
     UiState(UiState),
     Muted(bool),
+    BtPairing(bool),
+    BtConnected,
     UserLight {
         on: bool,
         color: Rgb,
@@ -328,6 +333,16 @@ impl LedsHandle {
     /// Mic mute indication; the first call only sets the state (no one-shot).
     pub fn set_muted(&self, muted: bool) {
         self.send(Cmd::Muted(muted));
+    }
+
+    /// Синий фон кольца, пока адаптер открыт для новых пар.
+    pub fn set_bt_pairing(&self, pairing: bool) {
+        self.send(Cmd::BtPairing(pairing));
+    }
+
+    /// Подтверждение подключения, отдельное от постоянного синего фона сопряжения.
+    pub fn show_bt_connected(&self) {
+        self.send(Cmd::BtConnected);
     }
 
     /// User light (HA light entity). Changes fade over transition_ms (0 = cut).
@@ -842,6 +857,8 @@ enum Layer {
     Mute,
     User,
     Music,
+    BtPairing,
+    BtConnected,
     Off,
 }
 
@@ -925,6 +942,8 @@ struct Compositor {
     timer_t0: i64,
     muted: bool,
     mute_known: bool,
+    bt_pairing: bool,
+    bt_connected_at: Option<i64>,
     // led_show
     show_on: bool,
     show_effect: String,
@@ -996,6 +1015,8 @@ impl Compositor {
             timer_t0: 0,
             muted: false,
             mute_known: false,
+            bt_pairing: false,
+            bt_connected_at: None,
             show_on: false,
             show_effect: String::new(),
             show_col: Col::default(),
@@ -1066,6 +1087,16 @@ impl Compositor {
                     // Lite 2 unmute: no sweep, the flash goes with the mute.
                     self.sweep = Sweep::None;
                 }
+            }
+            Cmd::BtPairing(pairing) => {
+                if self.bt_pairing == pairing {
+                    return false;
+                }
+                self.bt_pairing = pairing;
+            }
+            Cmd::BtConnected => {
+                self.bt_pairing = false;
+                self.bt_connected_at = Some(now);
             }
             Cmd::UserLight {
                 on,
@@ -1354,6 +1385,26 @@ impl Compositor {
                 let n = if is_panel { panel::PANEL_LEDS } else { self.n };
                 self.render_music(now, &mut ring[..n]);
             }
+            Layer::BtPairing => {
+                // Непрерывный ход по окружности, в том числе на трёх диодах Лайт 2.
+                let turn = now.rem_euclid(BT_PAIRING_TURN_MS) as f32 / BT_PAIRING_TURN_MS as f32;
+                let blue = fx::rgb(0, 0, 255);
+                let n = ring.len() as f32;
+                for (i, pixel) in ring.iter_mut().enumerate() {
+                    let distance = (turn - i as f32 / n).rem_euclid(1.0);
+                    let distance = distance.min(1.0 - distance);
+                    *pixel = blue * (1.5 - distance * 4.0).clamp(0.0, 1.0);
+                }
+            }
+            Layer::BtConnected => {
+                if self
+                    .bt_connected_at
+                    .is_some_and(|at| now - at >= BT_CONNECTED_GAP_MS)
+                {
+                    ring.fill(fx::rgb(0, 0, 255));
+                }
+                animated = false;
+            }
             Layer::Off | Layer::None => animated = false,
         }
         if !is_panel && self.nlogo > 0 {
@@ -1382,10 +1433,14 @@ impl Compositor {
             Layer::Show
         } else if (self.short_ring || self.nlogo == 0) && self.muted && !self.is_panel() {
             Layer::Mute
+        } else if !self.muted && self.state == UiState::Idle && self.bt_connected_at.is_some() {
+            Layer::BtConnected
         } else if self.user_on && self.user_bri > 0.0 {
             Layer::User
         } else if self.music_shown() {
             Layer::Music
+        } else if self.bt_pairing && !self.muted && self.state == UiState::Idle {
+            Layer::BtPairing
         } else {
             Layer::Off
         }
@@ -1405,6 +1460,12 @@ impl Compositor {
         if self.show_on && now >= self.show_until {
             self.show_on = false;
         }
+        if self
+            .bt_connected_at
+            .is_some_and(|at| now - at >= BT_CONNECTED_MS)
+        {
+            self.bt_connected_at = None;
+        }
     }
 
     /// Earliest pending expiry after now.
@@ -1416,6 +1477,10 @@ impl Compositor {
             }
         };
         take(self.volume_until);
+        if let Some(at) = self.bt_connected_at {
+            take(at + BT_CONNECTED_GAP_MS);
+            take(at + BT_CONNECTED_MS);
+        }
         if self.state == UiState::Error {
             take(self.state_t0 + fx::ERROR_MS);
         }
@@ -1466,6 +1531,13 @@ impl Compositor {
         {
             fade = Some(i64::from(self.user_transition));
         }
+        // Между постоянным синим и вспышкой нужна тёмная пауза, а не плавный переход.
+        if (self.layer == Layer::BtPairing && lay != Layer::BtPairing)
+            || self.layer == Layer::BtConnected
+            || lay == Layer::BtConnected
+        {
+            fade = Some(0);
+        }
         self.user_changed = false;
         self.layer = lay;
         if let Some(f) = fade {
@@ -1496,7 +1568,12 @@ impl Compositor {
         }
         let red = (logo_opacity > 0.0).then(panel::mute_logo);
 
-        let d = self.dim();
+        let d = if lay == Layer::BtPairing {
+            // Иначе в темноте гамма и расстояние между тремя диодами почти гасят огонёк.
+            self.dim().max(0.7)
+        } else {
+            self.dim()
+        };
         let pixels = self.shown.iter().zip(self.px.as_chunks_mut::<3>().0);
         let logo = panel::PANEL_LEDS..panel::PANEL_LEDS + panel::PANEL_LOGO_LEDS;
         // Наложение не попадает в фон, с которого начнётся следующий переход слоя.

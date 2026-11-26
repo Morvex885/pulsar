@@ -974,7 +974,6 @@ fn start(shared: &Arc<Shared>, model: &'static Model) -> Option<GlibThread> {
         return None;
     }
     let api = gst::load()?;
-    gst::set_ssl_cert_file();
     // Process-global: alsa-lib messages go to the debug log.
     pulsar_alsa::quiet_error_handler();
     if !gst::init(api) {

@@ -216,6 +216,19 @@ fn one_shot_ends_and_frame_steps() {
 }
 
 #[test]
+fn bluetooth_connection_briefly_displays_bt_then_restores_the_time() {
+    let mut l = Layers::new();
+    l.play(ClockShot::BluetoothConnected, NOW);
+    let initial = l.compose(NOW, wall).0;
+    assert_eq!(initial.seg[1], [0, 0, 255, 255, 255, 255, 255]);
+    assert_eq!(initial.seg[2], [0; 7]);
+    let complete = l.compose(NOW + 120, wall).0;
+    assert_eq!(complete.seg[2], [0, 0, 0, 255, 255, 255, 255]);
+    assert_eq!(complete.colon, 0);
+    assert_eq!(l.compose(NOW + 1000, wall).0, time_frame());
+}
+
+#[test]
 fn timer_countdown() {
     let mut l = Layers::new();
     l.set_timer(65_000, true, NOW);

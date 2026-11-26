@@ -23,6 +23,7 @@ pub enum Anim {
     Pause,
     Next,
     Previous,
+    BluetoothConnected,
 }
 
 const A: usize = 0;
@@ -188,6 +189,7 @@ pub fn duration_ms(a: Anim) -> i64 {
         Anim::Boot => 4880,
         Anim::Pause => 2200,
         Anim::Next | Anim::Previous => 1500,
+        Anim::BluetoothConnected => 1000,
     }
 }
 
@@ -253,6 +255,17 @@ pub fn render(a: Anim, t: i64) -> Frame {
             let cols = if a == Anim::Next { NEXT } else { PREV };
             for (c, col) in (0..).zip(cols) {
                 bar(&mut f, col, sweep_column(c, t));
+            }
+        }
+        Anim::BluetoothConnected => {
+            // Два символа появляются по очереди: так «bt» читается на семи сегментах.
+            for s in [C, D, E, F, G] {
+                f.seg[1][s] = 255;
+            }
+            if t >= 120 {
+                for s in [D, E, F, G] {
+                    f.seg[2][s] = 255;
+                }
             }
         }
     }

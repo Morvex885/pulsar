@@ -30,6 +30,13 @@ pub fn now_ms() -> i64 {
     sys::monotonic_ms()
 }
 
+/// Порядок фронтов запуска музыки у независимых акторов, не порядок обработки их очередей.
+pub fn audio_start_order() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Music features for the LED ring and the clock, from either source: the speaker reference of
 /// the capture or the Sendspin visualizer role (Music Assistant).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -66,11 +73,12 @@ pub enum UiState {
     TimerRing,
 }
 
-/// One-shot clock animations (stock Lite 2 `ledpatterns/clock`).
+/// Короткие анимации часов, в том числе штатные `ledpatterns/clock` Лайт 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClockShot {
     Boot,
     Pause,
     Next,
     Previous,
+    BluetoothConnected,
 }

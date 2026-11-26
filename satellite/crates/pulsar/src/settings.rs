@@ -39,6 +39,8 @@ pub struct Settings {
     pub muted: bool,
     /// Software microphone mute.
     pub mic_muted: bool,
+    /// Разрешение входящего A2DP; открытое окно сопряжения не сохраняется.
+    pub bluetooth_enabled: bool,
     pub clock_on: bool,
     pub clock_brightness: f32,
     /// Clock level follows the light sensor, with `clock_brightness` as the ceiling.
@@ -99,6 +101,7 @@ impl Default for Settings {
             legacy_on_stock: false,
             muted: false,
             mic_muted: false,
+            bluetooth_enabled: false,
             clock_on: true,
             clock_brightness: 1.0,
             clock_auto_brightness: true,
@@ -171,6 +174,7 @@ impl Settings {
             let fv = parse_f32_prefix(&v);
             let on = v == "1";
             match k {
+                b"bluetooth_enabled" => self.bluetooth_enabled = on,
                 b"volume2" => {
                     self.volume = fv;
                     self.has_volume = true;
@@ -263,7 +267,7 @@ impl Settings {
              led_speed={}\nvoice_indication={}\nled_case_color={}\nclock_music={}\n\
              clock_auto_brightness={}\nfollowup_duration_s={}\nclock_format={}\n\
              command_start_offset_ms={}\nclock_spoken_numbers={}\nmic_gain_db={}\n\
-             wake_sound={}\nclock_colon_blink={}\n",
+             wake_sound={}\nclock_colon_blink={}\nbluetooth_enabled={}\n",
             f(self.volume),
             f(self.volume_legacy),
             b(self.muted),
@@ -296,6 +300,7 @@ impl Settings {
             self.mic_gain_db,
             b(self.wake_sound),
             b(self.clock_colon_blink),
+            b(self.bluetooth_enabled),
         )
     }
 

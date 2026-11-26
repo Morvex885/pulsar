@@ -252,6 +252,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     pulsar_alsa::init(model);
+    pulsar_media::set_ssl_cert_file();
     // Test sounds only with the volume capped: without the control there is no cap.
     let mut mx = Mixer::open(model);
     let software = model.software_volume;

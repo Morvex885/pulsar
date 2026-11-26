@@ -39,6 +39,12 @@ fn ev(type_: u16, code: u16, value: i32) -> RawInputEvent {
     }
 }
 
+fn timed(mut event: RawInputEvent, ms: u32) -> RawInputEvent {
+    event.sec = (ms / 1000).into();
+    event.usec = ((ms % 1000) * 1000).into();
+    event
+}
+
 fn key(code: u16, value: i32) -> [RawInputEvent; 2] {
     [ev(EV_KEY, code, value), ev(EV_SYN, SYN_REPORT, 0)]
 }
@@ -422,6 +428,120 @@ async fn switch_resync_does_not_replay_events_older_than_ioctl() {
         &[ev(EV_SW, SW_MUTE_DEVICE, 0), ev(EV_SYN, SYN_REPORT, 0)],
     );
     assert_eq!(r.events(), [InputEvent::Mute(false)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn bluetooth_mute_gesture_counts_only_press_edges_using_evdev_time() {
+    let mut r = Rig::for_model(mini());
+    r.feed(
+        Dev::Keys,
+        &[
+            timed(ev(EV_KEY, KEY_MUTE, 1), 100),
+            timed(ev(EV_KEY, KEY_MUTE, 2), 140),
+            timed(ev(EV_KEY, KEY_MUTE, 0), 145),
+            timed(ev(EV_KEY, KEY_MUTE, 1), 150),
+            timed(ev(EV_KEY, KEY_MUTE, 0), 151),
+            timed(ev(EV_KEY, KEY_MUTE, 1), 650),
+            timed(ev(EV_KEY, KEY_MUTE, 0), 651),
+            timed(ev(EV_KEY, KEY_MUTE, 1), 700),
+        ],
+    );
+    assert_eq!(
+        r.events(),
+        [
+            InputEvent::MuteToggle,
+            InputEvent::MuteToggle,
+            InputEvent::MuteToggle,
+            InputEvent::MuteToggle,
+            InputEvent::BluetoothPairing,
+        ]
+    );
+    r.feed(Dev::Keys, &[timed(ev(EV_KEY, KEY_MUTE, 1), 800)]);
+    assert_eq!(r.events(), [InputEvent::MuteToggle]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn bluetooth_mute_switch_resync_loss_and_gpio_do_not_count() {
+    let mut r = Rig::new();
+    r.m.read_mute_state(Ok([0; 8]), false).unwrap();
+    let sw = |value, ms| timed(ev(EV_SW, SW_MUTE_DEVICE, value), ms);
+    let mut on = [0u8; 8];
+    on[1] = 0x40;
+    r.sw = Ok(on);
+    r.feed(
+        Dev::Mute,
+        &[
+            sw(1, 50),
+            sw(1, 100),
+            sw(0, 150),
+            ev(EV_SYN, SYN_DROPPED, 0),
+            sw(1, 200),
+            ev(EV_SYN, SYN_REPORT, 0),
+            sw(0, 250),
+        ],
+    );
+    assert_eq!(
+        r.events(),
+        [
+            InputEvent::Mute(true),
+            InputEvent::Mute(false),
+            InputEvent::MuteSync(true)
+        ]
+    );
+    r.feed(Dev::Mute, &[sw(0, 300), sw(1, 400), sw(0, 500)]);
+    assert_eq!(
+        r.events(),
+        [
+            InputEvent::Mute(false),
+            InputEvent::Mute(true),
+            InputEvent::Mute(false)
+        ]
+    );
+
+    let mut devs = Devices::empty(midi(), Rc::new(Cell::new(false)));
+    devs.close(Dev::Mute, &mut r.m);
+    r.m.read_mute_state(Ok([0; 8]), true).unwrap();
+    for muted in [true, false, true, false] {
+        r.m.set_mute_position(Some(muted), true); // имитируем опрос GPIO
+    }
+    assert_eq!(
+        r.events(),
+        [
+            InputEvent::MuteSync(true),
+            InputEvent::MuteSync(false),
+            InputEvent::Mute(true),
+            InputEvent::Mute(false),
+            InputEvent::Mute(true),
+            InputEvent::Mute(false),
+        ]
+    );
+    r.feed(
+        Dev::Mute,
+        &[sw(1, 600), sw(0, 1101), sw(1, 1201), sw(0, 1301)],
+    );
+    assert_eq!(
+        r.events(),
+        [
+            InputEvent::Mute(true),
+            InputEvent::Mute(false),
+            InputEvent::Mute(true),
+            InputEvent::Mute(false),
+        ]
+    );
+    r.feed(Dev::Mute, &[sw(1, 1351)]);
+    assert_eq!(
+        r.events(),
+        [InputEvent::Mute(true), InputEvent::BluetoothPairing]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn bluetooth_play_pause_event_ignores_repeat_and_release() {
+    let mut r = Rig::new();
+    for value in [1, 2, 0] {
+        r.feed(Dev::Keys, &key(KEY_PLAYPAUSE, value));
+    }
+    assert_eq!(r.events(), [InputEvent::PlayPause]);
 }
 
 #[test]

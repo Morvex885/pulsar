@@ -186,6 +186,42 @@ fn command_words() {
 }
 
 #[test]
+fn bluetooth_voice_commands_require_the_exact_phrase_and_wake() {
+    for (phrase, on) in [("включи блютуз", true), ("выключи блютуз", false)]
+    {
+        let command = VoiceCommand::Bluetooth(on);
+        assert_eq!(command_of(phrase), Some(command));
+        assert!(command_allowed(command, true, false, false, false));
+        assert!(!command_allowed(command, false, false, false, false));
+        assert!(!command_allowed(command, false, false, true, true));
+        assert!(!command_allowed(command, false, true, true, true));
+    }
+    for phrase in ["блютуз", "включи bluetooth", "выключи блютуз пожалуйста"]
+    {
+        assert_eq!(command_of(phrase), None);
+    }
+}
+
+#[test]
+fn bluetooth_voice_window_is_single_use_and_separate_from_ha_dialog() {
+    let bt = Some(VoiceCommand::Bluetooth(true));
+    let now = COMMAND_AFTER_WAKE_MS - 1;
+    let mut until = 0;
+    assert!(!command_wake(bt, true, &mut until, now));
+    until = COMMAND_AFTER_WAKE_MS;
+    assert!(command_wake(bt, false, &mut until, now));
+    assert!(!command_wake(bt, false, &mut until, now));
+    until = COMMAND_AFTER_WAKE_MS;
+    assert!(!command_wake(bt, false, &mut until, COMMAND_AFTER_WAKE_MS));
+
+    for other in [Some(VoiceCommand::Resume), None] {
+        until = COMMAND_AFTER_WAKE_MS;
+        assert!(!command_wake(other, false, &mut until, now));
+        assert!(!command_wake(bt, false, &mut until, now));
+    }
+}
+
+#[test]
 fn stt_stop_words() {
     for text in [
         "стоп",
@@ -892,8 +928,8 @@ fn wake_word_names_keeps_the_saved_model_when_listing_fails() {
 
 #[test]
 fn wake_word_labels_preserve_legacy_ha_bindings() {
-    assert_eq!(wake_word_phrase("alisa"), "Алиса");
-    assert_eq!(wake_word_phrase("yandex"), "Яндекс");
+    assert_eq!(wake_word_phrase("alisa"), "Alice");
+    assert_eq!(wake_word_phrase("yandex"), "Yandex");
     assert_eq!(wake_word_phrase("yasmina"), "Yasmina");
     assert_eq!(wake_word_phrase("other_word"), "other_word");
 }

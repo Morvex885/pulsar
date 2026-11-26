@@ -189,6 +189,7 @@ pub struct Controller {
     // Wake arbitration: the window between our claim and the decision. Microphone audio and a
     // command word heard in it are held until the decision.
     arbitrating: bool,
+    arb_captures_voice: bool,
     /// Our claim being decided; forgotten on cancel (a `Decided` already queued then still
     /// arrives and is ignored).
     arb_claim: Option<u64>,
@@ -198,6 +199,7 @@ pub struct Controller {
     arb_command: String,
     /// Another station answers the wake word just heard.
     commands_blocked_until_ms: i64,
+    bt_voice_until_ms: i64,
     run: RunBinding,
     /// voice_request_stop already sent for this dialog's run.
     stop_sent: bool,
@@ -253,9 +255,9 @@ pub struct Controller {
     install_version: String,
     /// Last Zigbee status line published.
     zigbee_status: String,
-    /// Last Bluetooth status line published, and the visibility it reported.
-    bt_status: String,
-    bt_discoverable: bool,
+    bt_starts: u64,
+    bt_connection: Option<u64>,
+    audio_start: u64,
     sendspin_pairing_prompt: bool,
 }
 
@@ -292,7 +294,7 @@ fn light_rgb(l: &pulsar_esphome::LightState) -> Rgb {
 impl Controller {
     /// Loads the settings and starts every service. Err (to be logged by the caller, exit 1):
     /// an invalid `PULSAR_PORT_OFFSET`, or the API server could not bind its port.
-    pub fn start(model: &'static Model, state_path: PathBuf) -> Result<Controller, String> {
+    pub async fn start(model: &'static Model, state_path: PathBuf) -> Result<Controller, String> {
         // Before anything starts: a SIGTERM during the start-up still ends the daemon cleanly.
         let term = signal(SignalKind::terminate()).map_err(|e| format!("signals: {e}"))?;
         let int = signal(SignalKind::interrupt()).map_err(|e| format!("signals: {e}"))?;
@@ -347,9 +349,10 @@ impl Controller {
                 None
             }
         };
-        // Bluetooth-режим колонки: адаптер ищется в sysfs (см. docs/bluetooth.md) — на моделях
-        // без BT-чипа узла нет, и сущностей тоже нет.
-        let bluetooth = pulsar_bt::adapter_present();
+        let (bt, bt_rx) = pulsar_bt::spawn(model, st.bluetooth_enabled)
+            .await
+            .map_or((None, None), |(handle, rx)| (Some(handle), Some(rx)));
+        let bluetooth = bt.is_some();
         let cfg = ApiConfig {
             port: ports.api,
             wake_words: wake_names.into_iter().map(wake_word_info).collect(),
@@ -381,8 +384,6 @@ impl Controller {
         // a failure exits before the hardware starts. Nothing reaches the server before `run`.
         let (api, api_rx) = pulsar_esphome::spawn(id.clone(), cfg)
             .map_err(|_| "ESPHome API server failed to start".to_owned())?;
-        // Before any other thread exists: the player's spawn sets SSL_CERT_FILE (set_var), which
-        // C code on another thread could be reading.
         let (player, player_rx) = pulsar_media::spawn(model);
         let (arbiter, arbiter_rx) = arbiter::spawn(id.name.clone(), ports.arbiter);
 
@@ -564,12 +565,6 @@ impl Controller {
             }
             (Some(h), Some(rx))
         };
-        let (bt, bt_rx) = if bluetooth {
-            let (h, rx) = pulsar_bt::spawn();
-            (Some(h), Some(rx))
-        } else {
-            (None, None)
-        };
 
         let mut c = Controller {
             sendspin,
@@ -615,12 +610,14 @@ impl Controller {
             active_wake_word: String::new(),
             unlisted_wake_word,
             arbitrating: false,
+            arb_captures_voice: false,
             arb_claim: None,
             arb_phrase: String::new(),
             arb_level: -100.0,
             arb_audio: Vec::new(),
             arb_command: String::new(),
             commands_blocked_until_ms: 0,
+            bt_voice_until_ms: 0,
             run: RunBinding::default(),
             stop_sent: false,
             voice_run: 0,
@@ -658,8 +655,9 @@ impl Controller {
             install_id: None,
             install_version: String::new(),
             zigbee_status: String::new(),
-            bt_status: String::new(),
-            bt_discoverable: false,
+            bt_starts: 0,
+            bt_connection: None,
+            audio_start: 0,
             sendspin_pairing_prompt: false,
         };
         // The rest of the C++ start(), in its order: every call below only queues commands to
@@ -675,6 +673,7 @@ impl Controller {
         );
         c.update_detection();
         c.apply_gains(); // a saved mute
+        c.on_bt(BtEvent::Changed);
         c.update_ui();
         c.clock.play(ClockShot::Boot);
         if changed {
@@ -849,7 +848,7 @@ impl Controller {
                 }
                 if self.phase == Phase::Listening {
                     self.api.voice_send_audio(pcm);
-                } else if self.arbitrating {
+                } else if self.arbitrating && self.arb_captures_voice {
                     // The request goes on with what was said right after the wake word.
                     self.arb_audio.extend_from_slice(&pcm);
                 }
@@ -903,6 +902,8 @@ impl Controller {
 
     fn update_ui(&mut self) {
         self.leds.set_muted(self.mic_muted());
+        self.leds
+            .set_bt_pairing(self.bt.as_ref().is_some_and(|b| b.state().pairing));
         self.update_commands();
         let s = if self.timer_ringing {
             UiState::TimerRing
@@ -911,7 +912,7 @@ impl Controller {
                 Phase::Listening => UiState::Listening,
                 Phase::Processing => UiState::Thinking,
                 Phase::Speaking => UiState::Speaking,
-                Phase::Idle if self.arbitrating => UiState::Listening,
+                Phase::Idle if self.arbitrating && self.arb_captures_voice => UiState::Listening,
                 Phase::Idle if self.announcing => UiState::Speaking,
                 Phase::Idle => UiState::Idle,
             }

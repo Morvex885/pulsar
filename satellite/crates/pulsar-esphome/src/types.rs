@@ -58,7 +58,7 @@ pub struct ApiConfig {
     /// Select «Zigbee role» options; empty: no Zigbee entities (no radio).
     pub zigbee_modes: Vec<String>,
     /// false: нет switch «Bluetooth speaker», text_sensor «Bluetooth» и действия `bt`
-    /// (адаптера BT в прошивке нет — pulsar_bt::adapter_present).
+    /// (нет подтверждённого тракта A2DP или безопасного возврата штатного проигрывателя).
     pub bluetooth: bool,
     /// false: нет сущностей Clock display / Clock brightness / Clock auto brightness / Clock spoken
     /// numbers / Clock text speed / Clock text / Clock face / Clock music / Clock format, нет

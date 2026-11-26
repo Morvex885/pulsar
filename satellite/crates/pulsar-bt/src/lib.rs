@@ -1,18 +1,23 @@
-//! Bluetooth-режим колонки поверх штатного стека прошивки: BlueZ (org.bluez) принимает
-//! сопряжение и A2DP-поток, blue-alsa выводит звук на усилитель, всё постоянное делает
-//! `dbus-send` из актора — см. docs/bluetooth.md. Адаптер ищется в sysfs один раз при старте
-//! демона: на моделях без BT-чипа узла нет и сущностей нет. Handle-ы не блокируют
-//! (docs/architecture.md, «Модель исполнения», п. 2).
+//! Входящий A2DP поверх штатных BlueZ и BlueALSA, с управляемым ALSA-выходом.
+//! См. docs/bluetooth.md, «Владение аудиовыходом».
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+mod bus;
+mod pcm;
+mod policy;
 mod service;
+mod stock;
 
-use std::path::Path;
+pub use service::{BtEvent, BtHandle, BtState, spawn};
 
-pub use service::{BtEvent, BtHandle, spawn};
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Playback {
+    Playing,
+    Paused,
+}
 
 /// Команды AVRCP-пульта, которые колонка отправляет подключённому источнику (телефону).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,10 +52,4 @@ impl BtAction {
             Self::Previous => "Previous",
         }
     }
-}
-
-/// Есть ли на станции BT-адаптер прошивки: sysfs-узел hci0 создаёт `hciattach` из init-скриптов
-/// стека, который pulsar не глушит; на моделях без чипа узла нет.
-pub fn adapter_present() -> bool {
-    Path::new("/sys/class/bluetooth/hci0").exists()
 }

@@ -221,7 +221,8 @@ async fn run(args: &Args, model: &'static Model) -> Result<Counts, String> {
             _ = int.recv() => break,
             ev = events.recv() => match ev {
                 None => break,
-                Some(SendspinEvent::Stream(on)) => {
+                Some(SendspinEvent::Stream(order)) => {
+                    let on = order.is_some();
                     if on { c.starts += 1 } else { c.ends += 1 }
                     println!("{} stream {} (streaming={})", stamp(), if on { "start" } else { "end" },
                              handle.streaming());

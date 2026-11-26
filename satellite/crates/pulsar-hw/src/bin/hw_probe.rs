@@ -635,6 +635,8 @@ async fn monitor(
                 Some(InputEvent::Mute(m)) => say(&format!("MUTE {}", if m { "on" } else { "off" })),
                 Some(InputEvent::MuteSync(m)) => say(&format!("MUTE_SYNC {}", if m { "on" } else { "off" })),
                 Some(InputEvent::MuteToggle) => say("MUTE_TOGGLE"),
+                Some(InputEvent::BluetoothPairing) => say("BLUETOOTH_PAIRING"),
+                Some(InputEvent::PlayPause) => say("PLAY_PAUSE"),
                 None => input = None,
             },
             lux = async { light.as_mut()?.recv().await }, if light.is_some() => match lux {

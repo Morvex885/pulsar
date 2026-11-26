@@ -10,5 +10,6 @@ pub mod mixer;
 mod pcm_out;
 mod player;
 
+pub use gst::set_ssl_cert_file;
 pub use mixer::Mixer;
 pub use player::{Channel, PlayId, PlayState, PlayerEvent, PlayerHandle, spawn};

@@ -1,5 +1,5 @@
 #!/bin/sh
-# pulsar control: enable | disable | restart | reload | status | log | api-key
+# pulsar control: enable | disable | restart | reload | status | log | api-key | bt-restore
 #   enable  - stop the Yandex stack, run pulsar now and on every boot
 #   disable - stop pulsar, start the Yandex stack again (also after reboot)
 #   reload  - restart the supervisor and the daemon (after supervise.sh was replaced); never starts
@@ -9,6 +9,7 @@
 #             recent Home Assistant (mid-2026+) provisions a key automatically over the API on first
 #             connect; setting or clearing a different key by hand makes HA ask to re-authenticate.
 #             A corrupt file makes the daemon fail closed, hence the validation below.
+#   bt-restore - вернуть флаги адаптера и штатный player после остановки pulsar.
 D=${PULSAR_DIR:-/data/pulsar}
 Q=${PULSAR_Q:-/system/vendor/quasar/q}
 
@@ -60,7 +61,66 @@ wait_supervisors_gone() {
   i=0
   while [ $i -lt 5 ] && pidof supervise.sh >/dev/null 2>&1; do sleep 1; i=$((i + 1)); done
   pidof supervise.sh >/dev/null 2>&1 && { killall -9 supervise.sh 2>/dev/null; sleep 1; }
-  return 0
+  ! pidof supervise.sh >/dev/null 2>&1
+}
+
+bt_error() { echo "bt-restore: $* (снимок сохранён в $bt_owner)" >&2; return 1; }
+
+bt_player_running() {
+  # Штатный init-скрипт сверяет и exe (-x), и имя процесса (-n), а не только pidfile.
+  for bt_pid in "$bt_proc"/[0-9]*; do
+    { IFS= read -r bt_comm < "$bt_pid/comm"; } 2>/dev/null || continue
+    [ "$bt_comm" = bluealsa-aplay ] &&
+      [ "$(readlink "$bt_pid/exe" 2>/dev/null)" = "$bt_player" ] && return 0
+  done
+  return 1
+}
+
+bt_restore_flag() {
+  bt_value=false
+  [ "$2" = 0 ] || bt_value=true
+  dbus-send --system --print-reply --reply-timeout=2000 --dest=org.bluez /org/bluez/hci0 \
+    org.freedesktop.DBus.Properties.Set string:org.bluez.Adapter1 "string:$1" \
+    "variant:boolean:$bt_value" >/dev/null || bt_error "не удалось вернуть $1"
+}
+
+bt_restore() {
+  bt_owner=${PULSAR_BT_OWNER:-/tmp/pulsar-bt-owner}
+  [ -e "$bt_owner" ] || [ -L "$bt_owner" ] || return 0
+  [ -f "$bt_owner" ] && [ ! -L "$bt_owner" ] ||
+    { bt_error 'некорректный файл снимка'; return 1; }
+  if ! {
+    IFS= read -r bt_flags && ! IFS= read -r bt_extra && [ -z "$bt_extra" ]
+  } < "$bt_owner"; then
+    bt_error 'некорректный формат снимка'; return 1
+  fi
+  case "$bt_flags" in
+    [01]' '[01]' '[01]) ;;
+    *) bt_error 'некорректный формат снимка'; return 1 ;;
+  esac
+  pidof pulsar >/dev/null 2>&1 && { bt_error 'pulsar ещё работает'; return 1; }
+
+  # Пространства путей подменяются только для изолированной проверки протокола.
+  bt_proc=${PULSAR_BT_PROC:-/proc}
+  bt_init=${PULSAR_BT_INIT:-/etc/init.d/S53bluealsa-aplay}
+  if [ "${bt_flags##* }" = 1 ]; then
+    bt_player=$(readlink -f /usr/bin/bluealsa-aplay) &&
+      [ -x "$bt_player" ] && [ -x "$bt_init" ] && [ -d "$bt_proc" ] ||
+      { bt_error 'штатный bluealsa-aplay недоступен'; return 1; }
+  fi
+  bt_discover=${bt_flags#* }
+  bt_restore_flag Pairable "${bt_flags%% *}" &&
+    bt_restore_flag Discoverable "${bt_discover%% *}" || return 1
+  if [ "${bt_flags##* }" = 1 ] && ! bt_player_running; then
+    "$bt_init" start || { bt_error 'init-скрипт не запустил bluealsa-aplay'; return 1; }
+    bt_wait=0
+    while ! bt_player_running; do
+      [ "$bt_wait" -lt 3 ] || { bt_error 'процесс bluealsa-aplay не появился'; return 1; }
+      sleep 1
+      bt_wait=$((bt_wait + 1))
+    done
+  fi
+  rm -f "$bt_owner" || bt_error 'не удалось удалить снимок'
 }
 
 valid_key() { # 44 base64 chars (32 bytes + one '='), and 32 bytes when a decoder exists
@@ -92,8 +152,9 @@ case "$1" in
       echo "pulsar is still running, Yandex stack not started" >&2
       exit 1
     fi
-    wait_supervisors_gone
-    pidof quasar_launcher2 >/dev/null 2>&1 || $Q start >/dev/null 2>&1
+    wait_supervisors_gone || { echo "supervisor is still running, Yandex stack not started" >&2; exit 1; }
+    bt_restore || exit 1
+    pidof quasar_launcher2 >/dev/null 2>&1 || "$Q" start >/dev/null 2>&1 || exit 1
     echo "disabled, Yandex stack started"
     ;;
   restart)
@@ -105,9 +166,11 @@ case "$1" in
     fi
     ;;
   reload)
+    case "$#:${2-}" in 1:|2:--stop) ;; *) exit 2 ;; esac
     stop_supervisors
     stop_daemon || { echo "pulsar did not exit" >&2; exit 1; }
-    wait_supervisors_gone
+    wait_supervisors_gone || { echo "supervisor is still running" >&2; exit 1; }
+    [ "${2-}" = --stop ] && exit 0
     if [ -f "$D/enabled" ] && [ -x "$D/supervise.sh" ]; then
       start_supervisor
       echo "supervisor reloaded"
@@ -144,8 +207,15 @@ case "$1" in
         ;;
     esac
     ;;
+  bt-restore)
+    case "$#:${2-}" in
+      1:) bt_restore ;;
+      2:--check) command -v dbus-send >/dev/null 2>&1 ;;
+      *) exit 2 ;;
+    esac
+    ;;
   *)
-    echo "usage: $0 enable|disable|restart|reload|status|log [lines]|api-key [base64|clear]"
+    echo "usage: $0 enable|disable|restart|reload [--stop]|status|log [lines]|api-key [base64|clear]|bt-restore"
     exit 1
     ;;
 esac
