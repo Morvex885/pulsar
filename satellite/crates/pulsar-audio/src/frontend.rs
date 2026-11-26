@@ -188,15 +188,18 @@ impl FrontendHandle {
 
     /// Whether OpenWakeWord hits become wake words (the Yandex spotter is unaffected).
     pub fn set_oww(&self, on: bool) {
-        self.inner.shared.oww_on.store(on, Relaxed);
-        self.inner.shared.oww_gen.fetch_add(1, Relaxed);
+        // Only a real change invalidates what the detector already heard.
+        if self.inner.shared.oww_on.swap(on, Relaxed) != on {
+            self.inner.shared.oww_gen.fetch_add(1, Relaxed);
+        }
     }
 
     /// Wake word detection on/off (e.g. software mute). On by default.
     pub fn set_detection(&self, on: bool) {
-        self.inner.shared.detect.store(on, Relaxed);
         // Anything the detector heard before this point belongs to the previous state.
-        self.inner.shared.oww_gen.fetch_add(1, Relaxed);
+        if self.inner.shared.detect.swap(on, Relaxed) != on {
+            self.inner.shared.oww_gen.fetch_add(1, Relaxed);
+        }
     }
 
     /// Command spotter on/off (commands without the wake word).
@@ -994,10 +997,15 @@ fn processing(
                         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
                     }
                 }
-                if let Some(slot) = ring.push(d, gain)
-                    && (shared.wake_pending.load(Acquire) > 0 || shared.stream.load(Relaxed))
-                {
-                    let _ = tx.send(FrontendEvent::Audio(slot.to_vec()));
+                if shared.detect.load(Relaxed) {
+                    if let Some(slot) = ring.push(d, gain)
+                        && (shared.wake_pending.load(Acquire) > 0 || shared.stream.load(Relaxed))
+                    {
+                        let _ = tx.send(FrontendEvent::Audio(slot.to_vec()));
+                    }
+                } else {
+                    // Muted: nothing heard now may survive into a pre-roll or an STT stream.
+                    ring.clear();
                 }
             }
             None => ring.clear(),

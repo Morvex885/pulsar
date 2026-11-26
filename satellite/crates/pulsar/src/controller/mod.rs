@@ -313,10 +313,6 @@ impl Controller {
         // Offered only when the models are installed: a confirmed choice that cannot detect is
         // worse than no choice at all, and the saved value must not outlive them.
         let oww_ready = pulsar_audio::oww::available(Path::new(pulsar_audio::oww::DIR));
-        if st.wake_engine == "oww" && !oww_ready {
-            warn!("wake engine oww is not installed here; using yandex");
-            st.wake_engine = "yandex".into();
-        }
         let strings = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         let with_none = |l: Vec<String>| std::iter::once("None".to_owned()).chain(l).collect();
         // Opened before the entity list: the Clock auto brightness switch exists only when the
@@ -418,6 +414,11 @@ impl Controller {
         st.volume = volume;
         // Changes made while starting are written like any other (StateFile, 1 s later).
         let mut changed = false;
+        if st.wake_engine == "oww" && !oww_ready {
+            warn!("wake engine oww is not installed here; using yandex");
+            st.wake_engine = "yandex".into();
+            changed = true;
+        }
         if migrated {
             info!(
                 "volume {:.3} from an earlier build -> {:.3}",
