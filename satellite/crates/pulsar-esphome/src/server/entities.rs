@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 use pulsar_core::model::LedLayout;
 use tokio::time::Instant;
 
-use super::{ESPHOME_VERSION, PROJECT_NAME, Server, msg};
+use super::{Client, ESPHOME_VERSION, PROJECT_NAME, Server, msg};
 use crate::proto::Writer;
 use crate::types::{
     BinarySensorId, EventId, LightState, MediaState, NumberId, SelectId, SensorId, SwitchId,
@@ -223,14 +223,14 @@ fn entity_head(w: &mut Writer, object_id: &str, key: u32, name: &str) {
 type To = Option<u64>;
 
 impl Server {
-    fn states_on(&self) -> bool {
-        self.clients.iter().any(|c| c.hello && c.states)
+    pub(super) fn states_on(&self) -> bool {
+        self.clients.iter().any(Client::subscribes_states)
     }
 
     /// State updates go to every client that subscribed to states.
     pub(super) fn broadcast(&mut self, msg_type: u32, w: &Writer) {
         self.for_each_client(|s, id| {
-            if s.client(id).is_some_and(|c| c.hello && c.states) {
+            if s.client(id).is_some_and(|c| c.subscribes_states()) {
                 s.send_msg(id, msg_type, w);
             }
         });

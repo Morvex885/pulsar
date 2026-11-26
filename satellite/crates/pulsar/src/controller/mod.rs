@@ -35,6 +35,21 @@ const MODELS: &str = "/system/vendor/quasar/spotter_models/activation/";
 const COMMAND_MODEL: &str = "/system/vendor/quasar/spotter_models/command";
 const SOUNDS: &str = "/system/vendor/quasar/sounds/";
 
+fn wake_word_info(id: String) -> WakeWordInfo {
+    WakeWordInfo {
+        phrase: logic::wake_word_phrase(&id),
+        id,
+        languages: vec!["ru".into()],
+    }
+}
+
+fn wake_model_id(dir: &Path) -> String {
+    dir.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
 const DUCK_GAIN: f32 = 0.15;
 const TIMER_RING_MAX_MS: i64 = 15 * 60 * 1000;
 // Longest wait for the next pipeline event before the dialog is given up locally. HA's voice
@@ -166,6 +181,8 @@ pub struct Controller {
     hw_mic_muted: bool,
     error_shown: bool,
     wake_switch: logic::WakeSwitch,
+    active_wake_word: String,
+    unlisted_wake_word: Option<WakeWordInfo>,
     // Wake arbitration: the window between our claim and the decision. Microphone audio and a
     // command word heard in it are held until the decision.
     arbitrating: bool,
@@ -297,17 +314,15 @@ impl Controller {
             VERSION,
             BUILD_TIME,
         );
-        let mut wake_names = logic::wake_word_names(Path::new(MODELS), &st.wake_word);
-        if wake_names.is_empty() {
-            // Каталог не прочитан или пуст: список в HA не должен расходиться с активным словом.
-            wake_names.push("alisa".into());
-        }
-        // Стартовый запасной ID заменит сохранённый только после подтверждения загрузки.
-        let initial_wake_word = logic::resolve_wake_word(&st.wake_word, &wake_names);
-        let wake_dirs = logic::wake_candidates(&initial_wake_word, &wake_names)
-            .iter()
-            .map(|id| model_dir(id))
-            .collect::<Vec<_>>();
+        let wake_names = logic::wake_word_names(Path::new(MODELS), &st.wake_word);
+        let saved = st.has_wake_word.then_some(st.wake_word.as_str());
+        let initial = logic::initial_wake_words(saved, &wake_names);
+        let unlisted_wake_word = initial
+            .clone()
+            .next()
+            .filter(|id| !wake_names.iter().any(|known| known == id))
+            .map(|id| wake_word_info(id.to_owned()));
+        let wake_dirs = initial.map(model_dir).collect();
         let case_colors = pulsar_hw::case_colors();
         let dir = logic::state_dir(state_path.as_os_str());
         let strings = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
@@ -328,15 +343,8 @@ impl Controller {
         };
         let cfg = ApiConfig {
             port: ports.api,
-            wake_words: wake_names
-                .into_iter()
-                .map(|id| WakeWordInfo {
-                    phrase: logic::wake_word_phrase(&id),
-                    id,
-                    languages: vec!["ru".into()],
-                })
-                .collect(),
-            active_wake_words: vec![initial_wake_word],
+            wake_words: wake_names.into_iter().map(wake_word_info).collect(),
+            active_wake_words: Vec::new(),
             light_effects: strings(pulsar_hw::effect_names(model.led_layout)),
             clock_faces: with_none(strings(pulsar_clock::face_names())),
             music_styles: strings(pulsar_hw::music_styles()),
@@ -453,6 +461,7 @@ impl Controller {
             Some(PathBuf::from(COMMAND_MODEL)),
             !st.mic_muted && !hw_mic_muted,
         );
+        let initial_wake_word = wake_model_id(mic.initial_wake_model());
         mic.set_command_offset(st.command_start_offset_ms);
         mic.set_mic_gain(st.mic_gain_db);
 
@@ -585,6 +594,8 @@ impl Controller {
             hw_mic_muted,
             error_shown: false,
             wake_switch: logic::WakeSwitch::default(),
+            active_wake_word: String::new(),
+            unlisted_wake_word,
             arbitrating: false,
             arb_claim: None,
             arb_phrase: String::new(),
@@ -633,6 +644,9 @@ impl Controller {
         };
         // The rest of the C++ start(), in its order: every call below only queues commands to
         // the services, which run once `run` is awaited.
+        // Команды API идут до accept: первый GET должен видеть фактически загруженный спотер.
+        let wake_loaded = !initial_wake_word.is_empty();
+        c.on_wake_model(None, initial_wake_word, wake_loaded);
         c.publish_update();
         c.timers.set_repeating(
             Tk::UpdateCheck,
@@ -820,7 +834,9 @@ impl Controller {
                 self.leds.music_frame(f, false);
                 self.clock.music_frame(f, false);
             }
-            FrontendEvent::WakeModel { id, dir, ok } => self.on_wake_model(id, &dir, ok),
+            FrontendEvent::WakeModel { id, dir, ok } => {
+                self.on_wake_model(id, wake_model_id(&dir), ok);
+            }
         }
     }
 

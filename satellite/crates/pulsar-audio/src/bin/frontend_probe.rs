@@ -6,8 +6,8 @@
 //! Без --commands работает только спотер wake word (демон запускает и командный, если микрофон не
 //! выключен). --record пишет первые <seconds> сырого захвата (все каналы, S16) в WAV для
 //! ww_offline. Звук не воспроизводится.
-//! --wake: id модели активации или путь к каталогу (со `/`); несколько — кандидаты по порядку,
-//! как при старте демона. --switch: смена модели через <seconds> (`set_model`).
+//! --wake: id модели активации или путь к каталогу (со `/`); несколько — кандидаты по порядку.
+//! --switch: смена модели через <seconds> (`set_model`).
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -213,7 +213,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// Ok(false): no VQE chunk was processed.
+/// `Ok(false)`: не загрузилось стартовое wake word или не прошёл тест аудиопотока.
 async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
     out!(
         "frontend_probe: {} ({}), {} s, wake {}, stream {}, music {}, commands {}{}",
@@ -241,6 +241,13 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
         true,
     );
     let frame = h.frame();
+    let initial_wake = h.initial_wake_model();
+    let wake_started = !initial_wake.as_os_str().is_empty();
+    out!(
+        "t={:6.2}s WAKE_MODEL {} ok={wake_started}",
+        0.0,
+        initial_wake.display()
+    );
     h.set_commands(a.commands);
     h.set_streaming(a.stream);
     h.set_music_analysis(a.music);
@@ -369,7 +376,11 @@ async fn run(m: &'static Model, a: Args) -> std::io::Result<bool> {
             );
         }
     }
-    Ok(s.chunks > 0 && audio_samples_ok && (!a.stream || audio > 0) && (!a.music || music > 0))
+    Ok(wake_started
+        && s.chunks > 0
+        && audio_samples_ok
+        && (!a.stream || audio > 0)
+        && (!a.music || music > 0))
 }
 
 fn secs(start: Instant) -> f64 {

@@ -880,48 +880,78 @@ fn wake_word_names_lists_valid_models_alisa_first() {
 
 #[test]
 fn wake_word_names_keeps_the_saved_model_when_listing_fails() {
-    // Каталог без права чтения: read_dir отказывает, но модель внутри доступна по пути (под root
-    // read_dir проходит, ответ тот же).
-    use std::os::unix::fs::PermissionsExt as _;
     let t = TmpDir::new();
     t.model("yasmina");
-    std::fs::set_permissions(&t.0, std::fs::Permissions::from_mode(0o311)).unwrap();
-    let names = wake_word_names(&t.0, "yasmina");
-    std::fs::set_permissions(&t.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let names = wake_word_names_from(
+        &t.0,
+        "yasmina",
+        Err(std::io::ErrorKind::PermissionDenied.into()),
+    );
     assert_eq!(names, strings(&["yasmina"]));
 }
 
 #[test]
-fn wake_word_english_labels() {
-    assert_eq!(wake_word_phrase("alisa"), "Alisa");
-    assert_eq!(wake_word_phrase("yandex"), "Yandex");
+fn wake_word_labels_preserve_legacy_ha_bindings() {
+    assert_eq!(wake_word_phrase("alisa"), "Алиса");
+    assert_eq!(wake_word_phrase("yandex"), "Яндекс");
     assert_eq!(wake_word_phrase("yasmina"), "Yasmina");
     assert_eq!(wake_word_phrase("other_word"), "other_word");
 }
 
 #[test]
-fn wake_word_resolution_and_candidates() {
+fn initial_wake_word_never_replaces_a_saved_selection() {
     let all = strings(&["alisa", "yandex", "yasmina"]);
-    assert_eq!(resolve_wake_word("yandex", &all), "yandex");
-    assert_eq!(resolve_wake_word("gone", &all[1..]), "yandex");
-    assert_eq!(resolve_wake_word("yandex", &[]), "alisa");
-    assert_eq!(
-        wake_candidates("yasmina", &all),
-        strings(&["yasmina", "alisa", "yandex"])
-    );
-    assert_eq!(
-        wake_candidates("gone", &all),
-        strings(&["gone", "alisa", "yandex", "yasmina"])
-    );
+    for (saved, available, expected) in [
+        (Some("yandex"), all.as_slice(), &["yandex"][..]),
+        (Some("gone"), all.as_slice(), &["gone"][..]),
+        (Some("yandex"), &[][..], &["yandex"][..]),
+        (Some("../bad"), all.as_slice(), &[][..]),
+        (None, all.as_slice(), &["alisa", "yandex", "yasmina"][..]),
+        (None, &all[2..], &["yasmina"][..]),
+    ] {
+        assert_eq!(
+            initial_wake_words(saved, available).collect::<Vec<_>>(),
+            expected
+        );
+    }
 }
 
 #[test]
-fn wake_switch_ignores_queued_reply_when_ha_repeats_the_request() {
+fn wake_switch_keeps_last_loaded_word_when_a_newer_selection_fails() {
     let mut w = WakeSwitch::default();
+    let mut st = Settings::default();
+    st.parse(b"wake_word=alisa\n");
     w.requested(ModelId(1), 10);
-    // Ответ первого SET и потеря модели уже в очереди; HA повторяет SET того же слова.
+    // HA успел запросить другую модель до обработки успешной смены на «Яндекс».
     w.requested(ModelId(2), 11);
-    assert_eq!(w.answered(Some(ModelId(1))), None);
-    assert_eq!(w.answered(None), None);
-    assert_eq!(w.answered(Some(ModelId(2))), Some(11));
+    assert_eq!(
+        w.report(&mut st, Some(ModelId(1)), "yandex", true),
+        (None, true)
+    );
+    assert_eq!(w.report(&mut st, None, "", false), (None, false));
+    assert_eq!(
+        w.report(&mut st, Some(ModelId(2)), "yandex", false),
+        (Some(11), false)
+    );
+
+    let mut restarted = Settings::default();
+    restarted.parse(st.serialize().as_bytes());
+    assert!(restarted.has_wake_word);
+    assert_eq!(restarted.wake_word, "yandex");
+}
+
+#[test]
+fn wake_switch_remembers_first_model_restored_after_a_failed_switch() {
+    let mut w = WakeSwitch::default();
+    let mut st = Settings::default();
+    assert_eq!(w.report(&mut st, None, "", false), (None, false));
+    w.requested(ModelId(1), 10);
+    assert_eq!(
+        w.report(&mut st, Some(ModelId(1)), "yandex", false),
+        (Some(10), true)
+    );
+    let mut restarted = Settings::default();
+    restarted.parse(st.serialize().as_bytes());
+    assert!(restarted.has_wake_word);
+    assert_eq!(restarted.wake_word, "yandex");
 }

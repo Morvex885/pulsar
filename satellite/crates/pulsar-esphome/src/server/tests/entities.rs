@@ -616,6 +616,31 @@ async fn expect_wake_config_before_pong(p: &mut Peer, ids: &[&str]) {
 }
 
 #[tokio::test]
+async fn recovered_wake_word_is_advertised_and_selectable() {
+    local()
+        .run_until(async {
+            let (id, mut cfg) = selftest("now");
+            let recovered = cfg.wake_words.pop().unwrap();
+            let (h, mut rx, port) = start_with(id, cfg);
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            event(&mut rx).await;
+
+            h.set_active_wake_words(None, vec![recovered.id.clone()], Some(recovered));
+            p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            let config = p.expect(msg::VA_CONFIG_RESP).await;
+            assert_active_wake_words(&config, &["yandex"]);
+            assert!(fields(&config).iter().filter(|f| f.num == 1).any(|f| {
+                field(f.data, 1).is_some_and(|id| id.str() == "yandex")
+                    && field(f.data, 2).is_some_and(|phrase| phrase.str() == "Яндекс")
+            }));
+            p.send(msg::VA_SET_CONFIG, &wake_selection("yandex")).await;
+            wake_request(&mut rx, "yandex").await;
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn empty_wake_selection_keeps_the_active_model() {
     local()
         .run_until(async {
@@ -654,11 +679,80 @@ async fn wake_config_read_waits_for_actual_selection() {
                 h.set_active_wake_words(
                     Some(request),
                     actual.iter().map(|id| (*id).into()).collect(),
+                    None,
                 );
                 expect_wake_config_before_pong(&mut p, actual).await;
             }
         })
         .await;
+}
+
+// Реальный TCP не должен автоматически двигать виртуальные часы между сообщениями.
+// Если тест зависнет, сторож отпустит часы, и внешний тайм-аут завершит тест с ошибкой.
+async fn without_clock_autoadvance(test: impl Future<Output = ()>) {
+    let (release, guard) = std::sync::mpsc::channel::<()>();
+    let task = tokio::task::spawn_blocking(move || guard.recv_timeout(Duration::from_secs(10)));
+    let result = tokio::time::timeout(Duration::from_secs(30), test).await;
+    drop(release);
+    assert_eq!(
+        task.await.unwrap(),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+    );
+    result.expect("не завершился тест с виртуальными часами");
+}
+
+#[tokio::test(start_paused = true)]
+async fn wake_config_half_close_waits_for_ack_or_timeout() {
+    without_clock_autoadvance(local().run_until(async {
+        for (ack, expected) in [(true, "yandex"), (false, "alisa")] {
+            let (id, cfg) = selftest("now");
+            let (h, mut rx, port) = start_with(id, cfg);
+            let mut next = Peer::connect(port).await;
+            next.hello("backup").await;
+            event(&mut rx).await;
+            next.subscribe_voice(true).await;
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
+            let mut p = Peer::connect(port).await;
+            p.hello("HA").await;
+            event(&mut rx).await;
+            p.subscribe_voice(true).await;
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(false));
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
+            next.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+            next.sync().await;
+            p.send(msg::SUBSCRIBE_STATES_REQ, &Writer::new()).await;
+            p.sync().await;
+
+            let (eof_tx, eof_rx) = oneshot::channel();
+            CLIENT_EOF.with(|slot| *slot.borrow_mut() = Some(eof_tx));
+            p.send(msg::VA_SET_CONFIG, &wake_selection("yandex")).await;
+            p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+            p.send(msg::PING_REQ, &Writer::new()).await;
+            p.s.shutdown().await.unwrap();
+
+            // ACK должен попасть в сервер только после того, как сервер увидел FIN.
+            eof_rx.await.unwrap();
+            let request = wake_request(&mut rx, "yandex").await;
+            p.expect(msg::PING_RESP).await;
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(false));
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
+            h.voice_request_start("Алиса");
+            next.expect(msg::VA_REQUEST).await;
+            h.publish_switch(SwitchId::WakeSound, false);
+            next.expect(msg::SWITCH_STATE).await;
+            if ack {
+                h.set_active_wake_words(Some(request), vec!["yandex".into()], None);
+            } else {
+                tokio::time::advance(Duration::from_millis(3_001)).await;
+            }
+            for _ in 0..2 {
+                expect_wake_config(&mut p, &[expected]).await;
+            }
+            assert!(p.recv().await.is_none());
+        }
+    }))
+    .await;
 }
 
 #[tokio::test]
@@ -686,15 +780,15 @@ async fn wake_config_requires_latest_ack_across_clients() {
             b.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
             assert!(b.sync().await.is_empty());
 
-            h.set_active_wake_words(None, vec!["alisa".into()]);
-            h.set_active_wake_words(Some(first), vec!["yandex".into()]);
+            h.set_active_wake_words(None, vec!["alisa".into()], None);
+            h.set_active_wake_words(Some(first), vec!["yandex".into()], None);
             assert!(a.sync().await.is_empty());
             assert!(b.sync().await.is_empty());
             a.send(msg::DISCONNECT_REQ, &Writer::new()).await;
             a.expect(msg::DISCONNECT_RESP).await;
             assert!(a.recv().await.is_none());
 
-            h.set_active_wake_words(Some(latest), vec!["alisa".into()]);
+            h.set_active_wake_words(Some(latest), vec!["alisa".into()], None);
             for _ in 0..2 {
                 expect_wake_config(&mut b, &["alisa"]).await;
             }
@@ -705,35 +799,29 @@ async fn wake_config_requires_latest_ack_across_clients() {
 
 #[tokio::test(start_paused = true)]
 async fn wake_config_timeout_keeps_the_first_deadline_and_last_confirmed_state() {
-    // Реальный TCP не должен автоматически двигать виртуальные часы между сообщениями.
-    let (_clock_guard, guard) = std::sync::mpsc::channel::<()>();
-    tokio::task::spawn_blocking(move || {
-        let _ = guard.recv_timeout(Duration::from_secs(5));
-    });
-    local()
-        .run_until(async {
-            let (id, cfg) = selftest("now");
-            let (h, mut rx, port) = start_with(id, cfg);
-            let mut p = Peer::connect(port).await;
-            p.hello("HA").await;
-            event(&mut rx).await;
+    without_clock_autoadvance(local().run_until(async {
+        let (id, cfg) = selftest("now");
+        let (h, mut rx, port) = start_with(id, cfg);
+        let mut p = Peer::connect(port).await;
+        p.hello("HA").await;
+        event(&mut rx).await;
 
-            p.send(msg::VA_SET_CONFIG, &wake_selection("yandex")).await;
-            p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
-            assert!(p.sync().await.is_empty());
-            wake_request(&mut rx, "yandex").await;
-            tokio::time::advance(Duration::from_secs(2)).await;
-            p.send(msg::VA_SET_CONFIG, &wake_selection("yandex")).await;
-            let request = wake_request(&mut rx, "yandex").await;
-            assert!(p.sync().await.is_empty());
-            tokio::time::advance(Duration::from_millis(1_001)).await;
-            expect_wake_config_before_pong(&mut p, &["alisa"]).await;
-            h.set_active_wake_words(Some(request), vec!["yandex".into()]);
-            assert!(p.sync().await.is_empty());
-            p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
-            expect_wake_config(&mut p, &["yandex"]).await;
-        })
-        .await;
+        p.send(msg::VA_SET_CONFIG, &wake_selection("yandex")).await;
+        p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+        assert!(p.sync().await.is_empty());
+        wake_request(&mut rx, "yandex").await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        p.send(msg::VA_SET_CONFIG, &wake_selection("yandex")).await;
+        let request = wake_request(&mut rx, "yandex").await;
+        assert!(p.sync().await.is_empty());
+        tokio::time::advance(Duration::from_millis(1_001)).await;
+        expect_wake_config_before_pong(&mut p, &["alisa"]).await;
+        h.set_active_wake_words(Some(request), vec!["yandex".into()], None);
+        assert!(p.sync().await.is_empty());
+        p.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
+        expect_wake_config(&mut p, &["yandex"]).await;
+    }))
+    .await;
 }
 
 #[tokio::test]
@@ -762,7 +850,7 @@ async fn wake_config_read_overflow_closes_only_requesting_client() {
             a.send(msg::VA_CONFIG_REQ, &Writer::new()).await;
             assert!(a.recv().await.is_none());
 
-            h.set_active_wake_words(Some(request), vec!["yandex".into()]);
+            h.set_active_wake_words(Some(request), vec!["yandex".into()], None);
             expect_wake_config(&mut b, &["yandex"]).await;
             assert!(b.sync().await.is_empty());
         })
@@ -1129,13 +1217,19 @@ async fn eof_with_pending_batch_still_answers_everything() {
     local()
         .run_until(async {
             let (id, cfg) = selftest("now");
-            let (_h, _rx, port) = start_with(id, cfg);
+            let (_h, mut rx, port) = start_with(id, cfg);
             let mut p = Peer::connect(port).await;
             p.hello("eof").await;
+            event(&mut rx).await;
+            p.subscribe_voice(true).await;
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
             let mut req = Vec::new();
             for _ in 0..300 {
                 append_plain(&mut req, msg::LIST_ENTITIES_REQ, &[]);
             }
+            let mut ev = Writer::new();
+            ev.u32(1, 5, false);
+            append_plain(&mut req, msg::VA_EVENT_RESP, ev.data());
             p.write(&req).await;
             p.s.shutdown().await.unwrap();
             let mut done = 0;
@@ -1145,8 +1239,110 @@ async fn eof_with_pending_batch_still_answers_everything() {
                 }
             }
             assert_eq!(done, 300);
+            assert!(matches!(
+                event(&mut rx).await,
+                ApiEvent::VoiceEvent {
+                    event: VaEvent::IntentStart,
+                    ..
+                }
+            ));
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(false));
         })
         .await;
+}
+
+#[tokio::test]
+async fn eof_batch_drains_voice_in_order_without_broadcasting_to_closed_peer() {
+    async fn subscribe(server: &mut Server, port: u16, name: &str) -> (u64, Peer) {
+        let mut p = Peer::connect(port).await;
+        let (stream, addr) = server.listener.accept().await.unwrap();
+        stream.writable().await.unwrap();
+        server.on_accept(stream, addr);
+        let id = server.next_client;
+        let mut hello = Writer::new();
+        hello.str(1, name, false);
+        let input = &mut server.client(id).unwrap().rbuf;
+        append_plain(input, msg::HELLO_REQ, hello.data());
+        append_plain(input, msg::SUBSCRIBE_STATES_REQ, &[]);
+        append_plain(input, msg::PING_REQ, &[]);
+        server.process(id, None);
+        while p.recv().await.expect("нет ответа на ping").0 != msg::PING_RESP {}
+        (id, p)
+    }
+
+    for (already_subscribed, unsubscribe) in [(true, false), (true, true), (false, false)] {
+        let (id, cfg) = selftest("now");
+        let (mut s, handle) = bind_server(id, cfg).unwrap();
+        let mut rx = handle.events;
+        let api = ApiHandle {
+            cmds: handle.cmds,
+            shared: handle.shared,
+        };
+        let (owner, mut p) = subscribe(&mut s, handle.port, "owner").await;
+        let (other, mut live) = subscribe(&mut s, handle.port, "other").await;
+        event(&mut rx).await;
+        event(&mut rx).await;
+
+        let mut wants_voice = Writer::new();
+        wants_voice.boolean(1, true, false);
+        if already_subscribed {
+            append_plain(
+                &mut s.client(owner).unwrap().rbuf,
+                msg::SUBSCRIBE_VA_REQ,
+                wants_voice.data(),
+            );
+            s.process(owner, None);
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
+        }
+
+        let input = &mut s.client(owner).unwrap().rbuf;
+        let light = kv(key::LIGHT_RING, |w| {
+            w.boolean(2, true, false);
+            w.boolean(3, true, false);
+        });
+        append_plain(input, msg::LIGHT_CMD, light.data());
+        append_plain(input, msg::PING_REQ, &[]);
+        for _ in 0..300 {
+            append_plain(input, msg::LIST_ENTITIES_REQ, &[]);
+        }
+        if unsubscribe {
+            append_plain(input, msg::SUBSCRIBE_VA_REQ, &[]);
+        } else if !already_subscribed {
+            append_plain(input, msg::SUBSCRIBE_VA_REQ, wants_voice.data());
+        }
+        let mut ev = Writer::new();
+        ev.u32(1, 5, false);
+        append_plain(input, msg::VA_EVENT_RESP, ev.data());
+
+        // Воспроизводим порядок проходов reactor, не полагаясь на порядок готовности TCP.
+        s.process(owner, Some(ReadEnd::Eof));
+        assert!(!api.voice_subscribed());
+        assert!(s.client(owner).unwrap().pending_input);
+        p.expect(msg::PING_RESP).await;
+        live.expect(msg::LIGHT_STATE).await;
+        assert!(matches!(event(&mut rx).await, ApiEvent::Light { .. }));
+        s.close_client(other, "connection closed by peer");
+        while s.client(owner).is_some_and(|c| c.pending_input) {
+            s.process(owner, None);
+        }
+
+        if !already_subscribed {
+            assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(true));
+        }
+        if !unsubscribe {
+            assert!(matches!(
+                event(&mut rx).await,
+                ApiEvent::VoiceEvent {
+                    event: VaEvent::IntentStart,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(event(&mut rx).await, ApiEvent::VoiceSubscribed(false));
+        while let Ok(ev) = rx.try_recv() {
+            assert!(!matches!(ev, ApiEvent::VoiceEvent { .. }));
+        }
+    }
 }
 
 #[tokio::test]

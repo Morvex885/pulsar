@@ -1,9 +1,6 @@
 //! HA connection and entities, buttons, the light sensor, Zigbee and updates (controller.cpp
 //! "HA connection", "entities", "updates").
 
-use std::ffi::OsStr;
-use std::path::Path;
-
 use log::{error, info, warn};
 use pulsar_audio::ModelId;
 use pulsar_core::now_ms;
@@ -407,13 +404,12 @@ impl Controller {
 
     fn on_active_wake_words(&mut self, request: u64, id: String) {
         if self.mic.frame() == 0 {
-            // Фронтенд не запущен: события WakeModel не будет, выбор принимается сразу.
-            if self.st.wake_word != id {
-                self.st.wake_word.clone_from(&id);
-                info!("wake word -> {}", self.st.wake_word);
-                self.persist();
+            // Запоминаем явный выбор для следующего запуска, но активного спотера нет.
+            if self.st.remember_wake_word(&id) {
+                self.wake_word_changed(&id);
             }
-            self.api.set_active_wake_words(Some(request), vec![id]);
+            self.api
+                .set_active_wake_words(Some(request), Vec::new(), None);
             return;
         }
         info!("wake word requested: {id}");
@@ -421,24 +417,35 @@ impl Controller {
         self.wake_switch.requested(req, request);
     }
 
-    /// Не сохраняем пустой выбор: после перезапуска спотер снова попробует прежнюю модель.
-    pub(super) fn on_wake_model(&mut self, req: Option<ModelId>, dir: &Path, ok: bool) {
-        let id = dir
-            .file_name()
-            .and_then(OsStr::to_str)
-            .unwrap_or("")
-            .to_owned();
-        if !ok {
+    /// Запоминаем первую загруженную модель или применённый выбор HA, независимо от ACK.
+    pub(super) fn on_wake_model(&mut self, req: Option<ModelId>, id: String, ok: bool) {
+        if !ok && (req.is_some() || id.is_empty()) {
             warn!("wake word model did not load; active: {id:?}");
         }
-        let request = self.wake_switch.answered(req);
-        if !id.is_empty() && id != self.st.wake_word {
-            self.st.wake_word.clone_from(&id);
-            info!("wake word -> {}", self.st.wake_word);
-            self.persist();
+        let (request, changed) = self.wake_switch.report(&mut self.st, req, &id, ok);
+        if changed {
+            self.wake_word_changed(&id);
         }
-        self.api
-            .set_active_wake_words(request, if id.is_empty() { Vec::new() } else { vec![id] });
+        self.active_wake_word.clone_from(&id);
+        let recovered = if self
+            .unlisted_wake_word
+            .as_ref()
+            .is_some_and(|word| word.id == id)
+        {
+            self.unlisted_wake_word.take()
+        } else {
+            None
+        };
+        self.api.set_active_wake_words(
+            request,
+            if id.is_empty() { Vec::new() } else { vec![id] },
+            recovered,
+        );
+    }
+
+    fn wake_word_changed(&mut self, id: &str) {
+        info!("wake word -> {id}");
+        self.persist();
     }
 
     // ---------------- buttons, sensors, Zigbee ----------------

@@ -305,6 +305,16 @@ async def cmd_set_key(client, args):
 
 
 async def cmd_wake_word(client, args):
+    try:
+        before = await client.get_voice_assistant_configuration(5.0)
+    except TimeoutAPIError:
+        FAILURES.append("wake word: no initial configuration response")
+        return
+    if args.wake_id in before.active_wake_words:
+        FAILURES.append(
+            f"wake word {args.wake_id}: already active; choose a different word to test switching"
+        )
+        return
     await client.set_voice_assistant_configuration([args.wake_id])
     try:
         cfg = await client.get_voice_assistant_configuration(5.0)

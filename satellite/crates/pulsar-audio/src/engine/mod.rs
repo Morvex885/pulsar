@@ -5,11 +5,16 @@
 #[allow(unsafe_code)]
 mod ffi;
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::fs::{self, Metadata};
+use std::io::ErrorKind;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use log::{error, info, warn};
 
+use ffi::ConfReadError;
 pub use ffi::{Lib, LoadError, Spotter, SpotterConf, Vqe, VqeStep, preload_deps};
 
 pub const VQE_MODELS: &str = "/system/vendor/quasar/vqe_models";
@@ -240,14 +245,69 @@ impl EventSource for Logged<'_> {
     }
 }
 
+// Не обязательны для всех моделей, но прошивка может их читать. См. docs/mini2.md, «Звук».
+const AUX_MODEL_FILES: [&str; 2] = ["multiflags.txt", "lda.mat"];
+const TRACKED_MODEL_FILES: usize = MODEL_FILES.len() + AUX_MODEL_FILES.len();
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileVersion {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl From<Metadata> for FileVersion {
+    fn from(m: Metadata) -> Self {
+        Self {
+            dev: m.dev(),
+            ino: m.ino(),
+            size: m.size(),
+            mtime: (m.mtime(), m.mtime_nsec()),
+            ctime: (m.ctime(), m.ctime_nsec()),
+        }
+    }
+}
+
+type ModelVersion = [Option<FileVersion>; TRACKED_MODEL_FILES];
+
+fn model_version(dir: &Path) -> Result<ModelVersion, (&'static str, std::io::Error)> {
+    let mut path = PathBuf::with_capacity(dir.as_os_str().len() + 1 + MODEL_FILES[0].len());
+    path.push(dir);
+    let mut metadata = |file: &str| {
+        path.push(file);
+        let result = fs::metadata(&path);
+        path.pop();
+        result
+    };
+    let mut version = [None; TRACKED_MODEL_FILES];
+    for (stamp, file) in version.iter_mut().zip(MODEL_FILES) {
+        let m = metadata(file).map_err(|e| (file, e))?;
+        if !m.is_file() {
+            return Err((file, ErrorKind::InvalidData.into()));
+        }
+        *stamp = Some(m.into());
+    }
+    for (stamp, file) in version[MODEL_FILES.len()..].iter_mut().zip(AUX_MODEL_FILES) {
+        match metadata(file) {
+            Ok(m) => *stamp = Some(m.into()),
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err((file, e)),
+        }
+    }
+    Ok(version)
+}
+
 /// One spotter of the daemon with its channel layout.
 pub(crate) struct Slot {
     what: &'static str,
     /// Читать якорь хита (только у спотера wake word).
     anchor: bool,
     sp: Option<Spotter>,
-    /// Каталог последней загруженной модели. Нужен и после неудачного пересоздания.
+    /// Путь выбранной модели сохраняется, даже если её пока не удалось загрузить.
     dir: PathBuf,
+    rejected: HashMap<PathBuf, ModelVersion>,
     layout: SpotterLayout,
     legacy: SpotterLayout,
     buf: Vec<i16>,
@@ -261,10 +321,47 @@ impl Slot {
             anchor,
             sp: None,
             dir: PathBuf::new(),
+            rejected: HashMap::new(),
             layout: SpotterLayout::default(),
             legacy: SpotterLayout::default(),
             buf: Vec::new(),
             last_hit_ms: 0,
+        }
+    }
+
+    fn read_model_conf<T>(
+        &mut self,
+        dir: &Path,
+        read: impl FnOnce() -> Result<T, ConfReadError>,
+    ) -> Option<T> {
+        // см. docs/hardware.md, «Библиотеки Яндекса (C API)»
+        let version = match model_version(dir) {
+            Ok(version) => version,
+            Err((file, e)) => {
+                error!("{} spotter: {}: {e}", self.what, dir.join(file).display());
+                return None;
+            }
+        };
+        if self.rejected.get(dir) == Some(&version) {
+            return None;
+        }
+        self.rejected.remove(dir);
+        match read() {
+            Ok(conf) => Some(conf),
+            Err(ConfReadError::Rejected(e)) => {
+                error!("spotter_conf_read {}: {e}", dir.display());
+                // Ошибку прошивки нельзя освободить. Запоминаем отказ только если файлы не
+                // поменялись за время чтения; иначе неизвестно, какую версию отвергла библиотека.
+                if model_version(dir).is_ok_and(|current| current == version) {
+                    self.rejected.insert(dir.to_path_buf(), version);
+                }
+                None
+            }
+            Err(ConfReadError::Path(e)) => {
+                error!("spotter_conf_read: {e}");
+                None
+            }
+            Err(ConfReadError::NoConfig) => None,
         }
     }
 
@@ -273,19 +370,9 @@ impl Slot {
     fn init(&mut self, lib: &Lib, dir: &Path, legacy_main: i32, outputs: u32) -> bool {
         self.sp = None;
         self.dir = PathBuf::new();
-        // см. docs/hardware.md, «Библиотеки Яндекса (C API)»
-        if let Some(f) = MODEL_FILES.iter().find(|f| !dir.join(f).is_file()) {
-            error!("{} spotter: no {f} in {}", self.what, dir.display());
+        let Some(conf) = self.read_model_conf(dir, || SpotterConf::read_for_engine(lib, dir))
+        else {
             return false;
-        }
-        let conf = match SpotterConf::read(lib, dir) {
-            Ok(conf) => conf,
-            Err(e) => {
-                if let Some(e) = e {
-                    error!("spotter_conf_read: {e}");
-                }
-                return false;
-            }
         };
         let mut counts = [0i64; SPOTTER_TYPES];
         for (t, n) in counts.iter_mut().enumerate() {
@@ -327,6 +414,13 @@ impl Slot {
     /// время смены не держим: на станциях с ~238 МиБ это не замерено, поэтому прежняя модель
     /// пересоздаётся только на пути ошибки.
     fn switch(&mut self, dir: &Path, mut load: impl FnMut(&mut Self, &Path) -> bool) -> bool {
+        // При известном отказе не уничтожаем рабочий спотер ради заведомо неудачной смены.
+        if self.sp.is_some()
+            && let Some(version) = self.rejected.get(dir)
+            && model_version(dir).is_ok_and(|current| current == *version)
+        {
+            return false;
+        }
         let prev = std::mem::take(&mut self.dir);
         if load(self, dir) {
             return true;
@@ -413,9 +507,9 @@ pub(crate) struct Engine {
 }
 
 impl Engine {
-    /// dlopen, VQE по пресету модели, спотер wake word (обязателен; модель — первая загрузившаяся
-    /// из `wake_dirs`) и командный спотер (необязателен: без него предупреждение). Ошибки пишутся в
-    /// лог; None — фронтенда нет.
+    /// dlopen, VQE по пресету модели и спотеры. Для wake word берём первую загрузившуюся модель
+    /// из `wake_dirs`; если ни одна не загрузилась, первый путь сохраняется для восстановления.
+    /// None — фронтенда нет (не удалось запустить VQE или загрузить библиотеку).
     pub fn start(
         model: &pulsar_core::model::Model,
         wake_dirs: &[PathBuf],
@@ -508,7 +602,11 @@ impl Engine {
             }
         }
         if !wake_ok {
-            return None;
+            eng.wake.sp = None;
+            if let Some(dir) = wake_dirs.first() {
+                eng.wake.dir.clone_from(dir);
+            }
+            warn!("wake word spotter unavailable");
         }
         if let Some(dir) = command_dir
             && !eng.cmd.init(&lib, dir, VQE_OMNI, outputs)
@@ -626,27 +724,91 @@ fn feed(vqe: &Vqe, frame: usize, s: &mut Slot) -> Vec<Hit> {
 mod tests {
     use super::*;
 
+    struct ModelFixture(PathBuf);
+
+    impl ModelFixture {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("pulsar-audio-{}-{name}", std::process::id()));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn model(&self, name: &str) -> PathBuf {
+            let dir = self.0.join(name);
+            fs::create_dir(&dir).unwrap();
+            for file in MODEL_FILES {
+                fs::write(dir.join(file), b"bad").unwrap();
+            }
+            dir
+        }
+    }
+
+    impl Drop for ModelFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
-    fn unmute_retries_previous_model_after_switch_and_fallback_fail() {
-        let previous = Path::new("/models/alisa");
-        let requested = Path::new("/models/yandex");
+    fn cached_rejections_allow_repaired_previous_model_to_reload() {
+        let fixture = ModelFixture::new("rejected");
+        let previous = fixture.model("alisa");
+        let requested = fixture.model("yandex");
         let mut slot = Slot::new("wake word", true);
-        slot.dir = previous.to_path_buf();
-        let mut failed_loads = [requested, previous].into_iter();
-        assert!(!slot.switch(requested, |slot, path| {
-            assert_eq!(Some(path), failed_loads.next());
+        slot.dir = previous.clone();
+        let mut reads = Vec::new();
+        let mut load = |slot: &mut Slot, path: &Path| {
             slot.dir.clear();
-            false
-        }));
-        assert_eq!(failed_loads.next(), None);
-        let mut retried = false;
-        slot.restart(|slot, path| {
-            retried = true;
-            assert_eq!(path, previous);
-            slot.dir = path.to_path_buf();
-            true
-        });
-        assert!(retried);
+            let conf = slot.read_model_conf(path, || {
+                reads.push(path.to_path_buf());
+                let flags = fs::read(path.join("flags.txt")).unwrap();
+                if flags.as_slice() != b"bad" {
+                    Ok(())
+                } else {
+                    Err(ConfReadError::Rejected("bad model".into()))
+                }
+            });
+            if conf.is_some() {
+                slot.dir = path.to_path_buf();
+            }
+            conf.is_some()
+        };
+
+        assert!(!slot.switch(&requested, &mut load));
+        assert!(!slot.switch(&requested, &mut load));
+        slot.restart(&mut load);
+        assert_eq!(slot.dir, previous);
+
+        // Атомарная замена на файл того же размера должна разрешить повторную попытку.
+        let replacement = fixture.0.join("replacement");
+        fs::write(&replacement, b"new").unwrap();
+        fs::rename(replacement, previous.join("flags.txt")).unwrap();
+        slot.restart(&mut load);
+        assert_eq!(slot.dir, previous);
+
+        fs::write(requested.join("flags.txt"), b"repaired").unwrap();
+        assert!(slot.switch(&requested, &mut load));
+        assert_eq!(slot.dir, requested);
+        assert_eq!(
+            reads,
+            [requested.clone(), previous.clone(), previous, requested]
+        );
+    }
+
+    #[test]
+    fn config_read_waits_until_model_metadata_can_be_checked() {
+        let fixture = ModelFixture::new("invalid-metadata");
+        let dir = fixture.model("alisa");
+        let aux = dir.join("lda.mat");
+        std::os::unix::fs::symlink("lda.mat", &aux).unwrap();
+        let mut slot = Slot::new("wake word", true);
+        assert_eq!(
+            slot.read_model_conf::<()>(&dir, || panic!("версия модели неизвестна")),
+            None
+        );
+        fs::remove_file(aux).unwrap();
+        assert_eq!(slot.read_model_conf(&dir, || Ok(())), Some(()));
     }
 
     #[test]

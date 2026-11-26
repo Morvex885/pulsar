@@ -19,12 +19,14 @@ use socket2::{Domain, SockRef, Socket, TcpKeepalive, Type};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+#[cfg(test)]
+use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use crate::frame::{self, EncryptError, HandshakeError, NOISE_PROTOCOL, Noise, NoiseFrame, Plain};
 use crate::key::{self, Key, SetKey, os_error_text};
 use crate::proto::{Reader, WireType, Writer, zigzag32};
-use crate::types::{ApiConfig, ApiEvent, DeviceIdentity};
+use crate::types::{ApiConfig, ApiEvent, DeviceIdentity, WakeWordInfo};
 
 /// API version announced in HelloResponse. 1.15 = DeviceCapabilitiesRequest/Response supported.
 const API_MAJOR: u32 = 1;
@@ -116,6 +118,8 @@ const MAX_BACKLOG: usize = 8 << 20;
 thread_local! {
     /// Largest `rbuf` seen by `read_into` on this thread.
     static MAX_RBUF: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Позволяет тесту отправить ACK строго после TCP EOF.
+    static CLIENT_EOF: RefCell<Option<oneshot::Sender<()>>> = const { RefCell::new(None) };
 }
 /// Per wake-up and client, so a flooding peer cannot starve the runtime (capture hand-off,
 /// timers) or grow its buffer without bound before it is parsed.
@@ -196,6 +200,7 @@ pub(crate) enum Cmd {
     SetActiveWakeWords {
         request: Option<u64>,
         ids: Vec<String>,
+        recovered: Option<WakeWordInfo>,
     },
     Publish(Publish),
 }
@@ -210,7 +215,13 @@ pub(crate) struct Spawned {
 }
 
 /// Binds the port and starts the actor on the current `LocalSet`.
-pub(crate) fn spawn(id: DeviceIdentity, mut cfg: ApiConfig) -> Result<Spawned, String> {
+pub(crate) fn spawn(id: DeviceIdentity, cfg: ApiConfig) -> Result<Spawned, String> {
+    let (server, handle) = bind_server(id, cfg)?;
+    actors::spawn_actor("api", server.run());
+    Ok(handle)
+}
+
+fn bind_server(id: DeviceIdentity, mut cfg: ApiConfig) -> Result<(Server, Spawned), String> {
     let listener = bind(cfg.port)?;
     let port = listener.local_addr().map_or(cfg.port, |a| a.port());
     info!("api: listening on :{} as '{}'", cfg.port, id.name);
@@ -258,13 +269,15 @@ pub(crate) fn spawn(id: DeviceIdentity, mut cfg: ApiConfig) -> Result<Spawned, S
     };
     // Diagnostics for the first SubscribeStates; the Diag timer keeps them fresh.
     server.refresh_diagnostics(false);
-    actors::spawn_actor("api", server.run());
-    Ok(Spawned {
-        cmds: cmd_tx,
-        shared,
-        events: ev_rx,
-        port,
-    })
+    Ok((
+        server,
+        Spawned {
+            cmds: cmd_tx,
+            shared,
+            events: ev_rx,
+            port,
+        },
+    ))
 }
 
 fn bind(port: u16) -> Result<TcpListener, String> {
@@ -411,6 +424,7 @@ struct Standing {
     id: u64,
     hello: bool,
     voice: bool,
+    drained: bool,
     voice_wanted: u64,
     last_rx: Instant,
 }
@@ -428,18 +442,19 @@ fn voice_choice(clients: impl Iterator<Item = Standing>) -> Option<u64> {
     want.map(|w| w.id)
 }
 
-/// A client completing hello at the cap replaces an established client: preferably one without
-/// interest in the voice pipeline, never its owner, otherwise the one heard from least recently
-/// (a reconnecting HA whose old socket has not timed out yet gets in, and the old one goes).
-/// Returns the candidate and the number of established clients.
+/// При заполнении лимита сначала вытесняем клиента с разобранным вводом после EOF, затем
+/// без подписки на голос, затем подписчика, затем владельца. При равном ранге — самый давний
+/// по последнему входу. Возвращает кандидата и число клиентов с завершённым Hello.
 fn eviction_victim(clients: impl Iterator<Item = Standing>) -> (Option<u64>, usize) {
     let rank = |c: &Standing| {
-        if c.voice {
-            2
-        } else if c.voice_wanted != 0 {
-            1
-        } else {
+        if c.drained {
             0
+        } else if c.voice {
+            3
+        } else if c.voice_wanted != 0 {
+            2
+        } else {
+            1
         }
     };
     let mut victim: Option<Standing> = None;
@@ -453,6 +468,11 @@ fn eviction_victim(clients: impl Iterator<Item = Standing>) -> (Option<u64>, usi
         }
     }
     (victim.map(|v| v.id), established)
+}
+
+enum ReadEnd {
+    Eof,
+    Error,
 }
 
 struct Client {
@@ -470,8 +490,8 @@ struct Client {
     states: bool,
     /// Input left in `rbuf` by a batch that yielded (BATCH_YIELD).
     pending_input: bool,
-    /// EOF arrived while input was still pending; closed once it is parsed.
-    peer_closed: bool,
+    /// Ввод закончен; осталось разобрать уже прочитанные фреймы.
+    read_end: Option<ReadEnd>,
     /// Owns the voice pipeline.
     voice: bool,
     /// Order of its SubscribeVoiceAssistant(true), 0 = not subscribed.
@@ -494,9 +514,18 @@ impl Client {
             id: self.id,
             hello: self.hello,
             voice: self.voice,
-            voice_wanted: self.voice_wanted,
+            drained: matches!(self.read_end, Some(ReadEnd::Eof)) && !self.pending_input,
+            voice_wanted: if self.read_end.is_none() {
+                self.voice_wanted
+            } else {
+                0
+            },
             last_rx: self.last_rx,
         }
+    }
+
+    fn subscribes_states(&self) -> bool {
+        self.hello && self.states && self.read_end.is_none()
     }
 
     fn backlog(&self) -> usize {
@@ -546,7 +575,7 @@ fn poll_clients(
         let i = (*rr + k) % n;
         let c = &clients[i];
         let writable = c.want_out && c.stream.poll_write_ready(cx).is_ready();
-        let readable = c.stream.poll_read_ready(cx).is_ready();
+        let readable = c.read_end.is_none() && c.stream.poll_read_ready(cx).is_ready();
         // Input left over from a batch that yielded counts as readable.
         if readable || writable || c.pending_input {
             *rr = i + 1;
@@ -655,8 +684,8 @@ impl Server {
                         // Buffered input from a yielded batch is parsed first; the socket
                         // is read again only once rbuf is drained (TCP backpressure).
                         let pending = self.client(id).is_some_and(|c| c.pending_input);
-                        let eof = !pending && self.read_into(id);
-                        self.process(id, eof);
+                        let end = if pending { None } else { self.read_into(id) };
+                        self.process(id, end);
                     }
                 }
             }
@@ -674,10 +703,13 @@ impl Server {
         self.clients.iter().any(|c| c.hello)
     }
 
+    fn voice_owner(&self) -> Option<&Client> {
+        self.clients.iter().find(|c| c.hello && c.voice)
+    }
+
     fn voice_client(&self) -> Option<u64> {
-        self.clients
-            .iter()
-            .find(|c| c.hello && c.voice)
+        self.voice_owner()
+            .filter(|c| c.read_end.is_none())
             .map(|c| c.id)
     }
 
@@ -768,7 +800,7 @@ impl Server {
             wake_config_reads: 0,
             states: false,
             pending_input: false,
-            peer_closed: false,
+            read_end: None,
             voice: false,
             voice_wanted: 0,
             close_after_flush: false,
@@ -816,8 +848,15 @@ impl Server {
     /// Hands the pipeline to `voice_choice`'s client; events see false before true on every
     /// hand-over.
     fn update_voice_owner(&mut self) {
-        let want = voice_choice(self.clients.iter().map(Client::standing));
-        let cur = self.voice_client();
+        let cur = self.voice_owner().map(|c| c.id);
+        let want = voice_choice(self.clients.iter().map(|c| {
+            let mut standing = c.standing();
+            // FIN не меняет порядок уже принятых событий. Отписка, напротив, действует сразу.
+            if self.batch == Some(c.id) || (c.voice && c.pending_input) {
+                standing.voice_wanted = c.voice_wanted;
+            }
+            standing
+        }));
         if cur == want {
             return;
         }
@@ -851,19 +890,22 @@ impl Server {
 
     // ------------------------------------------------------------ input
 
-    /// Reads up to READ_PER_WAKEUP bytes into the client's buffer; true on EOF / error. The
-    /// socket stays ready when more is pending, so the rest is read on the next wake-up.
-    fn read_into(&mut self, id: u64) -> bool {
-        let Some(c) = self.client(id) else {
-            return true;
-        };
+    /// Читает до READ_PER_WAKEUP байт; EOF и ошибки прекращают дальнейшее чтение.
+    fn read_into(&mut self, id: u64) -> Option<ReadEnd> {
+        let c = self.client(id)?;
         let mut buf = [0u8; 16384];
         let mut got = 0;
-        let mut eof = false;
+        let mut end = None;
         while got < READ_PER_WAKEUP {
             match c.stream.try_read(&mut buf) {
                 Ok(0) => {
-                    eof = true;
+                    #[cfg(test)]
+                    CLIENT_EOF.with(|slot| {
+                        if let Some(tx) = slot.borrow_mut().take() {
+                            let _ = tx.send(());
+                        }
+                    });
+                    end = Some(ReadEnd::Eof);
                     break;
                 }
                 Ok(n) => {
@@ -876,7 +918,7 @@ impl Server {
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => {
                     warn!("api: recv: {}", os_error_text(&e));
-                    eof = true;
+                    end = Some(ReadEnd::Error);
                     break;
                 }
             }
@@ -885,21 +927,40 @@ impl Server {
             c.last_rx = Instant::now();
             c.ping_outstanding = false;
         }
-        eof
+        end
     }
 
     /// Handles what `read_into` collected. Replies collect in the client's buffer and leave in
     /// one flush at the end, or earlier once BATCH_FLUSH bytes are pending (so the backlog
     /// limits in flush still bound memory); parsing stops when the client is closed.
-    fn process(&mut self, id: u64, eof: bool) {
+    fn process(&mut self, id: u64, end: Option<ReadEnd>) {
+        let Some(c) = self.client(id) else { return };
+        let lost_logs = end.is_some() && c.log_level != 0;
+        let lost_voice = end.is_some() && c.voice;
+        if end.is_some() {
+            c.read_end = end;
+        }
+        if lost_voice {
+            self.shared.voice_subscribed.set(false);
+        }
+        if lost_logs {
+            self.update_log_sink();
+        }
         self.batch = Some(id);
         self.batch_out = 0;
         self.parse_input(id);
         self.batch = None;
-        self.flush(id);
         let Some(c) = self.client(id) else { return };
-        c.peer_closed |= eof;
-        if c.peer_closed && !c.pending_input {
+        let drained = c.read_end.is_some() && !c.pending_input;
+        let read_error = drained && matches!(c.read_end, Some(ReadEnd::Error));
+        if drained {
+            c.rbuf = Vec::new();
+            if c.voice {
+                self.update_voice_owner();
+            }
+        }
+        self.flush(id);
+        if read_error {
             self.close_client(id, "connection closed by peer");
         }
     }
@@ -1115,6 +1176,7 @@ impl Server {
     }
 
     fn flush(&mut self, id: u64) {
+        let parsing = self.batch == Some(id);
         let Some(c) = self.client(id) else { return };
         while c.woff < c.wbuf.len() {
             match c.stream.try_write(&c.wbuf[c.woff..]) {
@@ -1152,6 +1214,12 @@ impl Server {
         c.want_out = false;
         if c.close_after_flush {
             self.close_client(id, "disconnect requested");
+        } else if matches!(c.read_end, Some(ReadEnd::Eof))
+            && !parsing
+            && !c.pending_input
+            && c.wake_config_reads == 0
+        {
+            self.close_client(id, "connection closed by peer");
         }
     }
 
@@ -1170,6 +1238,9 @@ impl Server {
             let idle = now.saturating_duration_since(c.last_rx);
             if idle > IDLE_DROP {
                 s.close_client(id, "keepalive timeout");
+                return;
+            }
+            if c.read_end.is_some() {
                 return;
             }
             if idle > IDLE_PING && !c.ping_outstanding {
@@ -1227,7 +1298,7 @@ impl Server {
         let want = self
             .clients
             .iter()
-            .filter(|c| c.hello)
+            .filter(|c| c.hello && c.read_end.is_none())
             .map(|c| c.log_level)
             .max()
             .unwrap_or(0);
@@ -1249,7 +1320,7 @@ impl Server {
             w.str(3, &line.text, true);
             self.for_each_client(|s, id| {
                 if s.client(id)
-                    .is_some_and(|c| c.hello && c.log_level >= level)
+                    .is_some_and(|c| c.hello && c.read_end.is_none() && c.log_level >= level)
                 {
                     s.send_msg(id, msg::SUBSCRIBE_LOGS_RESP, &w);
                 }
@@ -1434,7 +1505,16 @@ impl Server {
             Cmd::VoiceAnnounceFinished(success) | Cmd::VoiceAnswerFinished(success) => {
                 self.voice_announce_finished(success);
             }
-            Cmd::SetActiveWakeWords { request, ids } => {
+            Cmd::SetActiveWakeWords {
+                request,
+                ids,
+                recovered,
+            } => {
+                if let Some(word) = recovered
+                    && !self.cfg.wake_words.iter().any(|known| known.id == word.id)
+                {
+                    self.cfg.wake_words.push(word);
+                }
                 self.cfg.active_wake_words = ids;
                 if request.is_some() && request == self.pending_wake_request {
                     self.timers.cancel(Timer::WakeConfig);

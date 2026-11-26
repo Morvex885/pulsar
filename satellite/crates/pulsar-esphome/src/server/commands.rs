@@ -505,7 +505,7 @@ impl Server {
             transition_ms,
         });
         self.cache.light = st;
-        if self.clients.iter().any(|c| c.hello && c.states) {
+        if self.states_on() {
             self.send_light(None);
         }
     }
@@ -579,10 +579,13 @@ impl Server {
     pub(super) fn finish_wake_config(&mut self) {
         self.pending_wake_request = None;
         self.for_each_client(|s, id| {
-            if let Some(c) = s.client(id) {
-                for _ in 0..std::mem::take(&mut c.wake_config_reads) {
-                    s.send_va_config(id);
+            // После последнего ответа flush может закрыть клиента с EOF.
+            while let Some(c) = s.client(id) {
+                if c.wake_config_reads == 0 {
+                    break;
                 }
+                c.wake_config_reads -= 1;
+                s.send_va_config(id);
             }
         });
     }

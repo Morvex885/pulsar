@@ -221,15 +221,12 @@ impl Lib {
         Some(msg)
     }
 
-    /// Текст ошибки `spotter_conf_read` без `spotter_error_free`: освобождение такой ошибки роняет
-    /// процесс, поэтому она остаётся в памяти (одна на неудачную загрузку модели).
+    /// `spotter_conf_read` возвращает ошибку, текст которой можно прочитать, но
+    /// `spotter_error_free` на ней роняет процесс.
     // см. docs/hardware.md, «Библиотеки Яндекса (C API)»
-    fn sp_conf_error(&self, err: P) -> Option<String> {
-        if err.is_null() {
-            return None;
-        }
-        // SAFETY: `err` — живая spotter_error, выставленная библиотекой; читается только текст.
-        Some(unsafe { text((self.sp_errmsg)(err)) })
+    fn sp_conf_error(&self, err: NonNull<c_void>) -> String {
+        // SAFETY: `err` — живая spotter_error от spotter_conf_read; читается только текст.
+        unsafe { text((self.sp_errmsg)(err.as_ptr())) }
     }
 }
 
@@ -427,6 +424,12 @@ impl Drop for Vqe {
     }
 }
 
+pub(super) enum ConfReadError {
+    Path(String),
+    Rejected(String),
+    NoConfig,
+}
+
 /// A spotter model config (spotter_conf_read); freed on drop.
 pub struct SpotterConf {
     lib: Lib,
@@ -439,18 +442,25 @@ unsafe impl Send for SpotterConf {}
 impl SpotterConf {
     /// spotter_conf_read(dir). Err(None): no config and no error message.
     pub fn read(lib: &Lib, dir: &Path) -> Result<SpotterConf, Option<String>> {
-        let dir = path_cstr(dir).map_err(Some)?;
+        Self::read_for_engine(lib, dir).map_err(|e| match e {
+            ConfReadError::Path(e) | ConfReadError::Rejected(e) => Some(e),
+            ConfReadError::NoConfig => None,
+        })
+    }
+
+    pub(super) fn read_for_engine(lib: &Lib, dir: &Path) -> Result<Self, ConfReadError> {
+        let dir = path_cstr(dir).map_err(ConfReadError::Path)?;
         let mut err = ptr::null_mut();
         // SAFETY: NUL-terminated directory, out-pointer to a local.
         let conf = unsafe { (lib.sp_conf_read)(dir.as_ptr(), &mut err) };
-        if let Some(e) = lib.sp_conf_error(err) {
-            // A config returned together with an error is not trusted (nor freed: the C++
-            // daemon did not touch it either).
-            return Err(Some(e));
+        if let Some(err) = NonNull::new(err) {
+            // Конфиг, возвращённый вместе с ошибкой, недостоверен: C++-демон тоже не вызывал
+            // для него spotter_conf_free.
+            return Err(ConfReadError::Rejected(lib.sp_conf_error(err)));
         }
         NonNull::new(conf)
             .map(|conf| SpotterConf { lib: *lib, conf })
-            .ok_or(None)
+            .ok_or(ConfReadError::NoConfig)
     }
 
     /// spotter_conf_get_required_channel_count(conf, ty).
