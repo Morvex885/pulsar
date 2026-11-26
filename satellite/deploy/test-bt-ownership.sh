@@ -4,8 +4,36 @@ set -eu
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 station=$here/../../tools/station.sh
 BT_FIXTURE=$(mktemp -d /tmp/pulsar-bt-test.XXXXXX)
+fixture_process_start() (
+  case "$1" in ''|*[!0-9]*) exit 1 ;; esac
+  IFS= read -r fields < "/proc/$1/stat" || exit 1
+  set -- ${fields##*) }
+  [ "${1-}" != Z ] && [ "${1-}" != X ] && printf '%s\n' "${20-}"
+)
 cleanup() {
   touch "$BT_FIXTURE/stop-release" "$BT_FIXTURE/restore-release"
+  if [ -s "$BT_FIXTURE/launch-shell" ]; then
+    read -r p < "$BT_FIXTURE/launch-shell"
+    if [ "$("$REAL_READLINK" "/proc/$p/fd/9" 2>/dev/null)" = "$BT_FIXTURE/data/.station-test.lock" ]; then
+      kill -KILL "$p" 2>/dev/null || :
+    fi
+  fi
+  if [ -L "$BT_FIXTURE/test/test-launch" ]; then
+    identity=$("$REAL_READLINK" "$BT_FIXTURE/test/test-launch")
+    p=${identity%%:*}
+    case "$identity" in
+      "$p:"?*)
+        if [ "$identity" = "$p:$(fixture_process_start "$p" 2>/dev/null)" ]; then
+          kill -KILL "$p" 2>/dev/null || :
+          i=0
+          while [ "$identity" = "$p:$(fixture_process_start "$p" 2>/dev/null)" ]; do
+            [ "$i" -lt 100 ] || { echo "fixture child still running: $BT_FIXTURE" >&2; return 1; }
+            "$REAL_SLEEP" 0.01
+            i=$((i + 1))
+          done
+        fi ;;
+    esac
+  fi
   touch "$BT_FIXTURE/register-release" "$BT_FIXTURE/exec-release"
   p=${test_pid_for_cleanup:-}
   if [ -s "$BT_FIXTURE/test/pid" ]; then read -r p < "$BT_FIXTURE/test/pid"; fi
@@ -263,7 +291,7 @@ cat > "$BT_FIXTURE/bin/mv" <<'EOF'
 #!/bin/sh
 if [ "${FAIL_REPLACE:-0}" = 1 ] && [ "$*" = '-f pulsar.rb pulsar' ]; then exit 1; fi
 if [ "${FAIL_STATION_REPLACE:-0}" = 1 ]; then
-  case "$*" in '-f pulsar.new pulsar'|'-f .station-replace.'*'/pulsar pulsar') exit 1 ;; esac
+  case "$*" in '-f .station-upload.'*' pulsar'|'-f .station-replace.'*'/pulsar pulsar') exit 1 ;; esac
 fi
 if [ "${CHECK_PUSH_LOCK:-0}" = 1 ]; then
   case "$2" in ./.upload.*)

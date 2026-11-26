@@ -158,27 +158,24 @@ pub async fn spawn(
         }
     }
     if !owned {
-        let flags = if probe.as_ref().is_some_and(PcmProbe::ready) {
-            match bus.as_mut() {
-                Some(bus) => stock_flags(bus, deadline).await,
-                None => None,
-            }
-        } else {
-            None
+        let taken = match bus
+            .as_mut()
+            .filter(|_| probe.as_ref().is_some_and(PcmProbe::ready))
+        {
+            Some(bus) => stock.take(deadline, stock_flags(bus, deadline)).await,
+            None => Ok(false),
         };
-        let Some(flags) = flags else {
+        if !matches!(taken, Ok(true)) {
+            if let Err(e) = taken {
+                warn!("bluetooth: cannot take stock player: {e}");
+                if e.kind() != std::io::ErrorKind::WouldBlock {
+                    // Init-скрипт мог остановить player прежде, чем вернуть ошибку.
+                    actors::spawn_actor("bluetooth stock restore", retry_stock_restore(stock));
+                }
+            }
             if let Some(probe) = probe {
                 probe.retire(&pcm);
             }
-            return None;
-        };
-        if let Err(e) = stock.take(flags).await {
-            warn!("bluetooth: cannot take stock player: {e}");
-            if let Some(probe) = probe {
-                probe.retire(&pcm);
-            }
-            // Init-скрипт мог остановить player прежде, чем вернуть ошибку.
-            actors::spawn_actor("bluetooth stock restore", retry_stock_restore(stock));
             return None;
         }
     }
@@ -567,7 +564,7 @@ impl Service {
     }
 
     async fn pause_if_still_displaced(&mut self) {
-        let generation = self.policy.generation;
+        let mut generation = self.policy.generation;
         // Пока актор ждал D-Bus, в очереди мог появиться новый Playing.
         // Читаем только уже ожидающие сигналы, не задерживая другие команды.
         let queued = self.bus.as_ref().map_or(0, Bus::queued);
@@ -584,7 +581,9 @@ impl Service {
                 self.lost_bus().await;
                 return;
             }
-            self.reconcile();
+            if self.reconcile() {
+                generation = self.policy.generation;
+            }
         }
         if self.policy.generation == generation && !self.policy.admitted {
             self.avr(BtAction::Pause).await;

@@ -498,14 +498,18 @@ EOF
          if [ -f \"\$stage/prev.old\" ]; then ln \"\$stage/prev.old\" pulsar.prev.orig || exit 1; fi
          mv \"\$stage/orig\" pulsar.orig
        fi"
-    up "$1" "$D" pulsar.new
+    upload=$(r "cd '$D' && umask 077 && mktemp .station-upload.XXXXXX") || exit 1
+    upload_arg=$(shell_quote "$upload")
+    discard_upload() { r "cd '$D' && rm -f -- $upload_arg"; }
+    trap discard_upload EXIT
+    up "$1" "$D" "$upload"
     r "$TEST_HANDOFF
-       cd $D && ./pulsar.new --version || exit 1
+       cd $D && ./$upload_arg --version || exit 1
        $PROD_REPLACE
        stage_replace
        cp -p pulsar.orig \"\$stage/prev\" || exit 1
        $PROD_BT_RESTORE
-       replace_pulsar pulsar.new
+       replace_pulsar $upload_arg
        sync && test_lifecycle_child ./ctl.sh restart" ;;
   restore)
     own

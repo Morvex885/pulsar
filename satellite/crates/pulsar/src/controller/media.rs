@@ -224,11 +224,8 @@ impl Controller {
                     if music() == PlayState::Playing {
                         self.clock.play(ClockShot::Pause);
                         self.player.pause(Channel::Music);
-                    } else if ss_on {
+                    } else if self.sendspin.as_ref().is_some_and(|ss| ss.yield_to_local()) {
                         self.clock.play(ClockShot::Pause);
-                        if let Some(ss) = &self.sendspin {
-                            ss.yield_to_local();
-                        }
                     } else {
                         self.resume_local_music();
                     }

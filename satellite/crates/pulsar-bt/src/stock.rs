@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::process::Command;
+use tokio::time::{Instant, sleep, timeout_at};
 
 const INIT: &str = "/etc/init.d/S53bluealsa-aplay";
 const PLAYER: &str = "/usr/bin/bluealsa-aplay";
@@ -98,22 +99,49 @@ impl Stock {
         {
             return Err(io::Error::other("invalid Bluetooth ownership lock"));
         }
-        file.lock()?;
+        file.try_lock()?;
         Ok(file)
     }
 
-    pub async fn take(&self, flags: [bool; 2]) -> io::Result<()> {
+    pub async fn take(
+        &self,
+        deadline: Instant,
+        flags: impl Future<Output = Option<[bool; 2]>>,
+    ) -> io::Result<bool> {
+        let lock = timeout_at(deadline, async {
+            loop {
+                let stock = self.clone();
+                match tokio::task::spawn_blocking(move || {
+                    let lock = stock.lock()?;
+                    stock.require_ctl(&stock.ctl_path())?;
+                    Ok::<_, io::Error>(lock)
+                })
+                .await?
+                {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                    result => return result,
+                }
+            }
+        })
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))??;
+
+        // Возврат мог изменить BlueZ, пока захват ждал flock.
+        let Some(flags) = flags.await else {
+            return Ok(false);
+        };
         let stock = self.clone();
         let (lock, exe, running) = tokio::task::spawn_blocking(move || {
-            let lock = stock.lock()?;
-            stock.require_ctl(&stock.ctl_path())?;
             let (exe, running) = Self::player_status()?;
             stock.record(flags, running)?;
             Ok::<_, io::Error>((lock, exe, running))
         })
         .await??;
         self.confirm_take(&lock, Self::stop_if_running(&lock, exe, running))
-            .await
+            .await?;
+        Ok(true)
     }
 
     async fn confirm_take(
@@ -457,6 +485,24 @@ mod tests {
                 .await
                 .is_ok()
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn contended_take_expires_without_sampling_flags_or_creating_a_snapshot() {
+        let dir = test_dir("take-deadline");
+        let stock = Stock {
+            marker: Arc::from(dir.join("owner")),
+        };
+        let lock = stock.lock().unwrap();
+        let result = stock
+            .take(Instant::now() + Duration::from_millis(20), async {
+                panic!("adapter flags must only be sampled after taking the lock")
+            })
+            .await;
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(stock.ownership().unwrap(), Ownership::Vacant);
+        drop(lock);
         fs::remove_dir_all(dir).unwrap();
     }
 

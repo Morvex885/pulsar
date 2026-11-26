@@ -41,7 +41,7 @@ impl SendspinHandle {
         match self.never {}
     }
 
-    pub fn yield_to_local(&self) {
+    pub fn yield_to_local(&self) -> bool {
         match self.never {}
     }
 

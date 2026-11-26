@@ -235,10 +235,12 @@ impl SendspinHandle {
 
     /// Явная команда HA освобождает локальный выход и выводит колонку из группы, не
     /// останавливая остальные колонки. Отменяет даже ещё не начавшуюся запись.
-    pub fn yield_to_local(&self) {
-        if self.ctx.cancel_local(&self.streaming) {
+    pub fn yield_to_local(&self) -> bool {
+        let cancelled = self.ctx.cancel_local(&self.streaming);
+        if cancelled {
             self.leave_group();
         }
+        cancelled
     }
 
     /// Передаёт выход более свежему запуску Music, не ставя остальные плееры группы на паузу.
