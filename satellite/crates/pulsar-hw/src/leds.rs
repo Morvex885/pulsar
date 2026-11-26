@@ -24,6 +24,9 @@
 //! Listening / Thinking / Speaking with voice indication on) > one-shots (timer started, mute) >
 //! led_show > mute (Lite 2: steady dim red) > user light > music visualization > off. The Midi
 //! logo shows the voice state, else red while muted, else the ring's average colour.
+//!
+//! На панели Станции 2 постоянный красный логотип не участвует в выборе слоя: его непрозрачность
+//! меняется независимо от переходов между фоновыми слоями.
 
 use std::fs::File;
 use std::io;
@@ -36,10 +39,19 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::Instant;
 
 use crate::led_fx::{self as fx, Col};
+use crate::led_panel as panel;
 use crate::sys::{Framebuffer, I2c};
 
 /// ~30 fps while animating (stock 20 ms frames resampled by time).
 const FRAME_MS: u64 = 33;
+/// Панель Станции 2: на 30 кадрах/с перетекание яркости между соседними светодиодами видно
+/// рывками.
+/// см. docs/station2.md, «Светодиоды и часы»
+const PANEL_FRAME_MS: u64 = 20;
+/// Множитель только для автояркости панели, по одному сравнению. Без него переходы даже
+/// в светлой комнате идут заметными шагами на низкой яркости. Показания в HA не меняются.
+/// см. docs/station2.md, «Светодиоды и часы»
+const PANEL_LUX_GAIN: f32 = 9.5;
 /// Global cap: never drive LEDs above 80 % PWM.
 const MAX_SCALE: f32 = 0.8;
 const VOLUME_SHOW_MS: i64 = 1500;
@@ -490,7 +502,8 @@ fn frame(comp: &mut Compositor, out: &mut Output, timers: &mut Timers<TimerKey>,
         timers.cancel(TimerKey::Expiry);
         timers.cancel(TimerKey::Retry);
         if !timers.is_set(TimerKey::Frame) {
-            timers.set_repeating(TimerKey::Frame, FRAME_MS, FRAME_MS);
+            let ms = comp.frame_ms();
+            timers.set_repeating(TimerKey::Frame, ms, ms);
         }
         return;
     }
@@ -959,6 +972,9 @@ struct Compositor {
     fade_t0: i64,
     fade_ms: i64,
     dimmer: AmbientDimmer,
+    /// Непрозрачность mute-логотипа меняется независимо от переходов фоновых слоёв.
+    logo_mute_from: f32,
+    logo_mute_t0: Option<i64>,
     px: Vec<u8>,
 }
 
@@ -1015,6 +1031,8 @@ impl Compositor {
             fade_t0: 0,
             fade_ms: 0,
             dimmer: AmbientDimmer::new(),
+            logo_mute_from: 0.0,
+            logo_mute_t0: None,
             px: vec![0; all * 3],
         }
     }
@@ -1040,8 +1058,7 @@ impl Compositor {
                     return false;
                 }
                 let first = !self.mute_known;
-                self.mute_known = true;
-                self.muted = muted;
+                self.update_mute_state(muted, now);
                 if !first && (muted || !self.short_ring) {
                     self.sweep = if muted { Sweep::MuteOn } else { Sweep::MuteOff };
                     self.sweep_t0 = now;
@@ -1068,7 +1085,10 @@ impl Compositor {
                 self.volume = fx::clamp01(v);
                 self.volume_until = now + VOLUME_SHOW_MS;
             }
-            Cmd::AmbientLux(lux) => return self.dimmer.update(lux),
+            Cmd::AmbientLux(lux) => {
+                let gain = if self.is_panel() { PANEL_LUX_GAIN } else { 1.0 };
+                return self.dimmer.update(lux * gain);
+            }
             Cmd::TimerStarted => {
                 self.timer_shot = true;
                 self.timer_t0 = now;
@@ -1157,6 +1177,26 @@ impl Compositor {
         true
     }
 
+    fn update_mute_state(&mut self, muted: bool, now: i64) {
+        if self.mute_known && self.is_panel() {
+            self.logo_mute_from = self.panel_mute_opacity(now);
+            self.logo_mute_t0 = Some(now);
+        }
+        self.mute_known = true;
+        self.muted = muted;
+    }
+
+    fn panel_mute_opacity(&self, now: i64) -> f32 {
+        let target = if self.muted { 1.0 } else { 0.0 };
+        match self.logo_mute_t0 {
+            Some(t0) if now - t0 < FADE_MS => {
+                let f = fx::smoothstep(0.0, 1.0, (now - t0) as f32 / FADE_MS as f32);
+                self.logo_mute_from + (target - self.logo_mute_from) * f
+            }
+            _ => target,
+        }
+    }
+
     fn set_state(&mut self, s: UiState, now: i64) {
         self.state = s;
         self.state_t0 = now;
@@ -1195,7 +1235,25 @@ impl Compositor {
     }
 
     fn render_style(&self, s: fx::Style, out: &mut [Col]) {
-        fx::music(s, &self.mus_st, &self.mus_shown, self.phase, out);
+        if self.is_panel() {
+            panel::music(s, &self.mus_st, &self.mus_shown, self.phase, out);
+        } else {
+            fx::music(s, &self.mus_st, &self.mus_shown, self.phase, out);
+        }
+    }
+
+    /// Станция 2: четыре светодиода логотипа входят в основной срез панели.
+    fn is_panel(&self) -> bool {
+        matches!(self.layout, LedLayout::Station2Panel)
+            && self.n >= panel::PANEL_LEDS + panel::PANEL_LOGO_LEDS
+    }
+
+    fn frame_ms(&self) -> u64 {
+        if self.is_panel() {
+            PANEL_FRAME_MS
+        } else {
+            FRAME_MS
+        }
     }
 
     fn render_music(&mut self, now: i64, out: &mut [Col]) {
@@ -1224,22 +1282,46 @@ impl Compositor {
         self.alt = alt;
     }
 
-    /// Draws `lay` into `target` (ring + logo); returns true if it moves.
+    /// Рисует фон выбранного слоя и отдельный физический логотип кольцевых моделей.
     fn render(&mut self, now: i64, dt: f64, lay: Layer, target: &mut [Col]) -> bool {
+        let is_panel = self.is_panel();
         target.fill(Col::default());
         let (ring, logo) = target.split_at_mut(self.n);
         let mut animated = true;
         match lay {
             Layer::Volume => {
-                fx::volume(self.volume, ring);
+                if is_panel {
+                    panel::volume(self.volume, ring);
+                } else {
+                    fx::volume(self.volume, ring);
+                }
                 animated = false;
             }
-            Layer::Voice => fx::voice(to_voice(self.state), now - self.state_t0, ring),
+            Layer::Voice => {
+                let voice = to_voice(self.state);
+                let t = now - self.state_t0;
+                if is_panel {
+                    panel::voice(voice, t, ring);
+                } else {
+                    fx::voice(voice, t, ring);
+                }
+            }
             Layer::OneShot => {
                 if self.sweep == Sweep::None {
-                    fx::timer_started(now - self.timer_t0, ring);
+                    let t = now - self.timer_t0;
+                    if is_panel {
+                        panel::timer_started(t, ring);
+                    } else {
+                        fx::timer_started(t, ring);
+                    }
                 } else {
-                    fx::mute_sweep(self.sweep == Sweep::MuteOn, now - self.sweep_t0, ring);
+                    let on = self.sweep == Sweep::MuteOn;
+                    let t = now - self.sweep_t0;
+                    if is_panel {
+                        panel::mute_sweep(on, t, ring);
+                    } else {
+                        fx::mute_sweep(on, t, ring);
+                    }
                 }
             }
             Layer::Show => {
@@ -1268,10 +1350,13 @@ impl Compositor {
                     ring,
                 );
             }
-            Layer::Music => self.render_music(now, ring),
+            Layer::Music => {
+                let n = if is_panel { panel::PANEL_LEDS } else { self.n };
+                self.render_music(now, &mut ring[..n]);
+            }
             Layer::Off | Layer::None => animated = false,
         }
-        if self.nlogo > 0 {
+        if !is_panel && self.nlogo > 0 {
             if self.voice_shown() {
                 fx::voice_logo(to_voice(self.state), now - self.state_t0, logo);
                 animated = true;
@@ -1295,7 +1380,7 @@ impl Compositor {
             Layer::OneShot
         } else if self.show_on {
             Layer::Show
-        } else if (self.short_ring || self.nlogo == 0) && self.muted {
+        } else if (self.short_ring || self.nlogo == 0) && self.muted && !self.is_panel() {
             Layer::Mute
         } else if self.user_on && self.user_bri > 0.0 {
             Layer::User
@@ -1398,10 +1483,35 @@ impl Compositor {
             self.fade_ms = 0;
             self.shown.copy_from_slice(&self.target);
         }
+        let mut logo_opacity = 0.0;
+        if self.is_panel() {
+            logo_opacity = self.panel_mute_opacity(now);
+            if let Some(t0) = self.logo_mute_t0 {
+                if now - t0 < FADE_MS {
+                    animated = true;
+                } else {
+                    self.logo_mute_t0 = None;
+                }
+            }
+        }
+        let red = (logo_opacity > 0.0).then(panel::mute_logo);
 
         let d = self.dim();
-        for (c, px) in self.shown.iter().zip(self.px.as_chunks_mut::<3>().0) {
-            *px = to_px(*c, d, self.matrix.as_ref());
+        let pixels = self.shown.iter().zip(self.px.as_chunks_mut::<3>().0);
+        let logo = panel::PANEL_LEDS..panel::PANEL_LEDS + panel::PANEL_LOGO_LEDS;
+        // Наложение не попадает в фон, с которого начнётся следующий переход слоя.
+        for (i, (&background, px)) in pixels.enumerate() {
+            let c = match red {
+                Some(red) if logo.contains(&i) => {
+                    if logo_opacity == 1.0 {
+                        red
+                    } else {
+                        fx::lerp(background, red, logo_opacity)
+                    }
+                }
+                _ => background,
+            };
+            *px = to_px(c, d, self.matrix.as_ref());
         }
         animated
     }

@@ -6,6 +6,7 @@
 
 mod input;
 mod led_fx;
+mod led_panel;
 mod leds;
 #[allow(unsafe_code)]
 mod sys;
