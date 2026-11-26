@@ -43,8 +43,6 @@ const SAMPLES_PER_MS: usize = SPOTTER_RATE as usize / 1000;
 /// Конец речи для строки лога "wake anchor": самый новый блок окна уровня в пределах 20 дБ
 /// (по мощности) от самого громкого.
 const SPEECH_END_RATIO: f32 = 0.01;
-/// Where the OpenWakeWord models live when that engine is installed.
-const OWW_DIR: &str = "/data/pulsar/oww";
 
 /// ALSA buffer in VQE chunks: 256 ms with 32 ms chunks, 128 ms on the Mini 3 and Mini (16 ms);
 /// the device may grant less (Lite 2: 2048 frames).
@@ -134,7 +132,7 @@ pub fn spawn(
     // cancellation) and the command spotter stay Yandex. The Yandex wake spotter is still
     // started — an empty model path crashes its C wrapper — but it is never fed while
     // OpenWakeWord runs.
-    let oww = match oww::Oww::load(std::path::Path::new(OWW_DIR)) {
+    let oww = match oww::Oww::load(std::path::Path::new(oww::DIR)) {
         Ok(o) => {
             info!("wake engine: openWakeWord '{}' (yandex spotter off)", o.name);
             Some(o)
@@ -885,7 +883,14 @@ fn processing(
             .name("oww".into())
             .spawn(move || {
                 let mut o = owwm;
+                let mut last_seq: Option<u32> = None;
                 while let Ok((seq, chunk)) = rxq.recv() {
+                    // A generation change means mute or an engine switch: the buffer still holds
+                    // audio from before it, and scoring that would fire on the wrong phrase.
+                    if last_seq != Some(seq) {
+                        o.reset();
+                        last_seq = Some(seq);
+                    }
                     if o.push(&chunk).is_some() {
                         let mut g = lock(&slot);
                         if g.is_none() {
@@ -981,7 +986,9 @@ fn processing(
                     let seq = shared.oww_gen.load(Relaxed);
                     // try_send, never block: a full queue means the detector is behind, and the
                     // audio path matters more than the discarded 80 ms.
-                    match q.try_send((seq, d.to_vec())) {
+                    // The mel graph wants PCM16-scale samples, not the VQE's [-1, 1].
+                    let pcm: Vec<f32> = d.iter().map(|&v| f32::from(to_s16(v))).collect();
+                    match q.try_send((seq, pcm)) {
                         Ok(()) => {}
                         Err(std::sync::mpsc::TrySendError::Full(_)) => oww_dropped += 1,
                         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}

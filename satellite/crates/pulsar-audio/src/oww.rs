@@ -15,6 +15,10 @@ use std::path::Path;
 use tract_onnx::prelude::*;
 
 /// openWakeWord's frame: 80 ms of 16 kHz audio.
+/// Where the models live: the frontend loads from here, and the engine is offered to the user
+/// only when this folder holds what the loader opens.
+pub const DIR: &str = "/data/pulsar/oww";
+
 const CHUNK: usize = 1280;
 /// Mel windows overlap the chunk boundary, as in the reference streaming implementation.
 const MEL_LOOKBACK: usize = 160 * 3;
@@ -56,6 +60,20 @@ pub struct Oww {
     pub max_score: f32,
     /// One utterance crosses the threshold on several 80 ms frames; suppress the repeats.
     last_fire: Option<std::time::Instant>,
+}
+
+/// True when the folder holds the graphs `load` opens: the engine can then be offered in HA.
+/// shortcut: presence, not a successful load — a corrupt graph shows up as a failed start in the
+/// log instead.
+pub fn available(dir: &Path) -> bool {
+    let has = |n: &str| dir.join(n).is_file();
+    let classifier = std::fs::read_dir(dir).is_ok_and(|rd| {
+        rd.flatten().any(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.ends_with(".onnx") && !n.starts_with("melspectrogram") && !n.starts_with("embedding")
+        })
+    });
+    has("melspectrogram.onnx") && has("embedding_model.onnx") && classifier
 }
 
 impl Oww {
@@ -114,16 +132,27 @@ impl Oww {
             max_score: 0.0,
             last_fire: None,
         };
+        oww.reset();
+        Ok(oww)
+    }
+
+    /// Drops the rolling state and re-warms it with silence: nothing heard before a mute or an
+    /// engine switch may be scored against what arrives after it.
+    pub fn reset(&mut self) {
+        self.pending.clear();
+        self.lookback.fill(0.0);
+        self.mels.clear();
+        self.feats.clear();
+        self.last_fire = None;
         // Warm the queues so the first frames are not scored against silence padding.
         for _ in 0..MEL_FRAMES {
             // One mel frame is 32 values; a wider vector would make the embedding window the
             // wrong size and `push` would return no score until it aged out.
-            oww.mels.push_back(vec![0.0; 32]);
+            self.mels.push_back(vec![0.0; 32]);
         }
         for _ in 0..FEATURES {
-            oww.feats.extend(std::iter::repeat_n(0.0, EMB_DIM));
+            self.feats.extend(std::iter::repeat_n(0.0, EMB_DIM));
         }
-        Ok(oww)
     }
 
     /// Push 16 kHz mono audio; returns the score when the word fires.
@@ -241,5 +270,29 @@ impl Oww {
             .into_owned()
             .into_plain_array::<f32>()?;
         Ok(plain.iter().copied().next().unwrap_or(0.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn available_needs_all_three_graphs() {
+        let dir = std::env::temp_dir().join(format!("oww-avail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!available(&dir), "empty folder must not offer the engine");
+        for n in [
+            "melspectrogram.onnx",
+            "embedding_model.onnx",
+            "hey_jarvis_v0.1.onnx",
+        ] {
+            fs::write(dir.join(n), b"x").unwrap();
+        }
+        assert!(available(&dir));
+        fs::remove_file(dir.join("embedding_model.onnx")).unwrap();
+        assert!(!available(&dir), "a missing shared graph must not offer the engine");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
